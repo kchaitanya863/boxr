@@ -595,6 +595,13 @@ mod tests {
         std::os::unix::fs::symlink("busybox", bin_dir.join("sh")).unwrap();
 
         let store = ImageStore::with_home(home.path().to_path_buf());
+        // Use the host architecture so ImageStore::find (which filters by
+        // platform) matches on any CI runner (amd64 or arm64).
+        let host_arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
         let record = ImageRecord {
             id: "aaa111bbb222".to_string(),
             reference: "library/testimg".to_string(),
@@ -606,7 +613,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             rootfs_path: img_dir.to_string_lossy().to_string(),
             config: ImageConfig {
-                architecture: "amd64".to_string(),
+                architecture: host_arch.to_string(),
                 os: "linux".to_string(),
                 config: None,
                 rootfs: None,
