@@ -70,7 +70,7 @@ impl ImageReference {
         // ":latest" and "alpine:" must not parse.
         if name_part.is_empty() {
             return Err(anyhow!(
-                "Invalid image reference '{}': empty repository name",
+                "Invalid image reference '{}': repository name cannot be empty",
                 input
             ));
         }
