@@ -1039,6 +1039,35 @@ pub async fn pull_image(image_str: &str) -> Result<ImageRecord> {
     pull_image_with_platform(image_str, None).await
 }
 
+/// Returns the locally stored image record when `query` already resolves to
+/// an image whose manifest digest matches `manifest_digest` and whose local
+/// data is intact, i.e. a pull would download nothing new (issue #403).
+/// Returns `None` when the image is absent, the registry reports a different
+/// manifest, or the local record is damaged (so the pull re-downloads).
+fn find_up_to_date_image(
+    store: &ImageStore,
+    query: &str,
+    target_platform: Option<&str>,
+    manifest_digest: &str,
+) -> Option<ImageRecord> {
+    let existing = store.find_with_platform(query, target_platform)?;
+    if existing.manifest_digest == manifest_digest && validate_image_record(&existing) {
+        Some(existing)
+    } else {
+        None
+    }
+}
+
+/// True when at least one remaining image record still references the same
+/// underlying image data (rootfs or manifest) as `removed`. Mirrors the
+/// sharing check in `ImageStore::remove` so `rmi` only prints `Deleted`
+/// when the image data was actually deleted (issue #404).
+fn image_data_still_referenced(store: &ImageStore, removed: &ImageRecord) -> bool {
+    store.list().iter().any(|img| {
+        img.manifest_digest == removed.manifest_digest || img.rootfs_path == removed.rootfs_path
+    })
+}
+
 pub async fn pull_image_with_platform(
     image_str: &str,
     target_platform: Option<&str>,
@@ -1065,6 +1094,21 @@ pub async fn pull_image_with_platform(
         &manifest_digest
     };
     println!("Manifest: {}", short_digest);
+
+    // If this exact image (same manifest digest) is already present locally,
+    // there is nothing to download (issue #403).
+    {
+        let store = ImageStore::new();
+        if let Some(existing) =
+            find_up_to_date_image(&store, image_str, target_platform, &manifest_digest)
+        {
+            println!(
+                "Status: Image is up to date for {}",
+                reference.display_name()
+            );
+            return Ok(existing);
+        }
+    }
 
     let config = client.fetch_config(&reference, &manifest.config).await?;
 
@@ -3941,7 +3985,12 @@ pub fn remove_image(image: &str, force: bool, no_prune: bool) -> Result<()> {
         img_store.remove(image)?
     };
     println!("Untagged: {}:{}", removed.reference, removed.tag);
-    println!("Deleted: {}", removed.id);
+    // Only report "Deleted" when the image data was actually removed: if
+    // another tag still references the same rootfs/manifest, the data stays
+    // (issue #404). Metadata-only removal (--no-prune) never deletes data.
+    if !no_prune && !image_data_still_referenced(&img_store, &removed) {
+        println!("Deleted: {}", removed.id);
+    }
     Ok(())
 }
 
@@ -6715,4 +6764,105 @@ pub async fn handle_manifest(args: cli::ManifestSubcommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci::image::ImageConfig;
+
+    fn test_image_record(tag: &str, manifest_digest: &str, rootfs_path: &str) -> ImageRecord {
+        ImageRecord {
+            id: "abc123def456".to_string(),
+            reference: "library/alpine".to_string(),
+            tag: tag.to_string(),
+            registry: "registry-1.docker.io".to_string(),
+            manifest_digest: manifest_digest.to_string(),
+            config_digest: "sha256:configdigest".to_string(),
+            size_bytes: 1024,
+            created_at: Utc::now(),
+            rootfs_path: rootfs_path.to_string(),
+            config: ImageConfig {
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
+                config: None,
+                rootfs: None,
+                history: Vec::new(),
+            },
+        }
+    }
+
+    // Issue #403: pull must recognize an already-present image as up to date
+    // instead of downloading it again.
+    #[test]
+    fn test_issue_403_find_up_to_date_image() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ImageStore::with_home(home.path().to_path_buf());
+        let rootfs = home.path().join("images").join("sha256_aaa").join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        store
+            .add(test_image_record(
+                "latest",
+                "sha256:aaa",
+                &rootfs.to_string_lossy(),
+            ))
+            .unwrap();
+
+        // Same manifest digest: up to date, no download needed.
+        let found =
+            find_up_to_date_image(&store, "alpine:latest", Some("linux/amd64"), "sha256:aaa");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().manifest_digest, "sha256:aaa");
+
+        // Registry reports a new digest: must re-pull.
+        assert!(
+            find_up_to_date_image(&store, "alpine:latest", Some("linux/amd64"), "sha256:bbb")
+                .is_none()
+        );
+        // Image not present locally: must pull.
+        assert!(
+            find_up_to_date_image(&store, "busybox:latest", Some("linux/amd64"), "sha256:aaa")
+                .is_none()
+        );
+
+        // Damaged local data (rootfs missing) must not be treated as up to
+        // date, even when the manifest digest matches: the pull must
+        // re-download instead of returning the broken record.
+        std::fs::remove_dir_all(&rootfs).unwrap();
+        assert!(
+            find_up_to_date_image(&store, "alpine:latest", Some("linux/amd64"), "sha256:aaa")
+                .is_none()
+        );
+    }
+
+    // Issue #404: rmi must only report "Deleted" when no other tag still
+    // references the image data.
+    #[test]
+    fn test_issue_404_deleted_only_when_unreferenced() {
+        let home = tempfile::tempdir().unwrap();
+        let store = ImageStore::with_home(home.path().to_path_buf());
+        let rootfs = home.path().join("images").join("sha256_aaa").join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+
+        // Two tags sharing one image (same manifest digest and rootfs).
+        store
+            .add(test_image_record(
+                "latest",
+                "sha256:aaa",
+                &rootfs.to_string_lossy(),
+            ))
+            .unwrap();
+        let mut second = test_image_record("3.19", "sha256:aaa", &rootfs.to_string_lossy());
+        second.id = "def456abc123".to_string();
+        store.add(second).unwrap();
+
+        // Removing one tag leaves the image data referenced by the other.
+        let removed = store.remove("alpine:3.19").unwrap();
+        assert_eq!(removed.tag, "3.19");
+        assert!(image_data_still_referenced(&store, &removed));
+
+        // Removing the last tag leaves the data unreferenced.
+        let removed = store.remove("alpine:latest").unwrap();
+        assert!(!image_data_still_referenced(&store, &removed));
+    }
 }
