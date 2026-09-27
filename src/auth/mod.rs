@@ -191,12 +191,33 @@ struct TarManifestItem {
     layers: Vec<String>,
 }
 
+/// boxr-specific metadata stored alongside the standard manifest.json so a
+/// save/load roundtrip restores the original image identity (id, digests,
+/// size) instead of inventing a new one (issue #407). Foreign tarballs
+/// (e.g. from docker save) simply lack this file and fall back to the
+/// legacy behavior.
+#[derive(Serialize, Deserialize)]
+struct BoxrImageMeta {
+    id: String,
+    reference: String,
+    tag: String,
+    registry: String,
+    manifest_digest: String,
+    config_digest: String,
+    size_bytes: i64,
+}
+
 pub struct ImageArchiver;
 
 impl ImageArchiver {
     /// Export an image to a standard tar archive (boxr save)
     pub fn save(image_query: &str, dest_path: Option<&Path>) -> Result<()> {
-        let store = ImageStore::new();
+        Self::save_with_home(image_query, dest_path, &boxr_home())
+    }
+
+    /// Export an image to a tar archive, using `home` as the boxr home.
+    pub fn save_with_home(image_query: &str, dest_path: Option<&Path>, home: &Path) -> Result<()> {
+        let store = ImageStore::with_home(home.to_path_buf());
         let image = store
             .find(image_query)
             .ok_or_else(|| anyhow!("Image '{}' not found", image_query))?;
@@ -265,12 +286,35 @@ impl ImageArchiver {
         manifest_header.set_cksum();
         builder.append_data(&mut manifest_header, "manifest.json", &manifest_bytes[..])?;
 
+        // 4. Pack boxr metadata so load can restore the original identity.
+        let meta = BoxrImageMeta {
+            id: image.id.clone(),
+            reference: image.reference.clone(),
+            tag: image.tag.clone(),
+            registry: image.registry.clone(),
+            manifest_digest: image.manifest_digest.clone(),
+            config_digest: image.config_digest.clone(),
+            size_bytes: image.size_bytes,
+        };
+        let meta_bytes = serde_json::to_vec_pretty(&meta)?;
+
+        let mut meta_header = Header::new_gnu();
+        meta_header.set_size(meta_bytes.len() as u64);
+        meta_header.set_mode(0o644);
+        meta_header.set_cksum();
+        builder.append_data(&mut meta_header, "boxr-meta.json", &meta_bytes[..])?;
+
         builder.finish()?;
         Ok(())
     }
 
     /// Import an image from a standard tar archive (boxr load)
     pub fn load(src_path: Option<&Path>) -> Result<Vec<ImageRecord>> {
+        Self::load_from(src_path, &boxr_home())
+    }
+
+    /// Import an image from a tar archive, using `home` as the boxr home.
+    pub fn load_from(src_path: Option<&Path>, home: &Path) -> Result<Vec<ImageRecord>> {
         let temp_dir = tempfile::tempdir()?;
         if let Some(path) = src_path {
             let file = File::open(path)
@@ -291,8 +335,20 @@ impl ImageArchiver {
         let manifest_content = fs::read_to_string(&manifest_path)?;
         let manifest_items: Vec<TarManifestItem> = serde_json::from_str(&manifest_content)?;
 
-        let store = ImageStore::new();
-        let home = boxr_home();
+        // Tarballs written by boxr save carry the original image identity in
+        // boxr-meta.json; foreign tarballs fall back to minting an identity.
+        let boxr_meta: Option<BoxrImageMeta> = {
+            let meta_path = temp_dir.path().join("boxr-meta.json");
+            if meta_path.exists() {
+                fs::read_to_string(&meta_path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str(&content).ok())
+            } else {
+                None
+            }
+        };
+
+        let store = ImageStore::with_home(home.to_path_buf());
         let mut loaded = Vec::new();
 
         for item in manifest_items {
@@ -310,8 +366,27 @@ impl ImageArchiver {
                 }
             };
 
-            let random_id = hex::encode(crate::storage::container_store::rand_id());
-            let image_id = format!("sha256:{}", random_id);
+            // Restore the original image identity when the tarball carries
+            // boxr metadata; otherwise mint a fresh one (issue #407).
+            let (short_id, manifest_digest, config_digest, size_bytes) = match &boxr_meta {
+                Some(m) => (
+                    m.id.clone(),
+                    m.manifest_digest.clone(),
+                    m.config_digest.clone(),
+                    m.size_bytes,
+                ),
+                None => {
+                    let random_id = hex::encode(crate::storage::container_store::rand_id());
+                    let full_id = format!("sha256:{}", random_id);
+                    (
+                        random_id[..12].to_string(),
+                        full_id.clone(),
+                        full_id,
+                        1024 * 1024,
+                    )
+                }
+            };
+            let image_id = manifest_digest.clone();
             let dest_rootfs = home
                 .join("images")
                 .join(image_id.replace(':', "_"))
@@ -340,13 +415,13 @@ impl ImageArchiver {
                 );
 
                 let record = ImageRecord {
-                    id: random_id[..12].to_string(),
+                    id: short_id.clone(),
                     reference: parsed.repository,
                     tag: parsed.tag,
                     registry: parsed.registry,
-                    manifest_digest: image_id.clone(),
-                    config_digest: image_id.clone(),
-                    size_bytes: 1024 * 1024,
+                    manifest_digest: manifest_digest.clone(),
+                    config_digest: config_digest.clone(),
+                    size_bytes,
                     created_at: chrono::Utc::now(),
                     rootfs_path: dest_rootfs.to_string_lossy().to_string(),
                     config: config.clone(),
@@ -406,6 +481,31 @@ impl ImageArchiver {
                         header.set_cksum();
                         let _ = builder.append_data(&mut header, &entry_rel, &mut f);
                     }
+                }
+            } else if ft.is_symlink() {
+                // Archive symlinks explicitly so the restored rootfs keeps
+                // them (e.g. /bin/sh -> busybox). Without this, loaded images
+                // silently lose executables and fail to run (issue #407).
+                if let Ok(target) = fs::read_link(&path) {
+                    let mut header = Header::new_gnu();
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    header.set_size(0);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        if let Ok(meta) = fs::symlink_metadata(&path) {
+                            header.set_mode(meta.mode());
+                            header.set_uid(meta.uid() as u64);
+                            header.set_gid(meta.gid() as u64);
+                            header.set_mtime(meta.mtime() as u64);
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        header.set_mode(0o777);
+                    }
+                    header.set_cksum();
+                    let _ = builder.append_link(&mut header, &entry_rel, &target);
                 }
             } else {
                 let _ = builder.append_path_with_name(&path, &entry_rel);
@@ -473,5 +573,75 @@ mod tests {
         let creds2 = store.get_credentials("registry-1.docker.io").unwrap();
         assert_eq!(creds2.0, "hubuser");
         assert_eq!(creds2.1, "token999");
+    }
+
+    // Issue #407: save/load roundtrip must preserve the image identity and
+    // produce a runnable rootfs (symlinks intact). Previously load minted a
+    // random id, hardcoded size_bytes to 1MB, and save silently dropped
+    // symlinks, leaving an unrunnable image.
+    #[cfg(unix)]
+    #[test]
+    fn test_issue_407_save_load_roundtrip() {
+        use crate::oci::image::ImageConfig;
+
+        let home = tempdir().unwrap();
+
+        // Build a fake image whose rootfs contains a file and a symlink,
+        // mirroring the alpine layout that exposed this bug.
+        let img_dir = home.path().join("images").join("sha256_aaa").join("rootfs");
+        let bin_dir = img_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("busybox"), b"fake-busybox").unwrap();
+        std::os::unix::fs::symlink("busybox", bin_dir.join("sh")).unwrap();
+
+        let store = ImageStore::with_home(home.path().to_path_buf());
+        let record = ImageRecord {
+            id: "aaa111bbb222".to_string(),
+            reference: "library/testimg".to_string(),
+            tag: "latest".to_string(),
+            registry: "registry-1.docker.io".to_string(),
+            manifest_digest: "sha256:aaa".to_string(),
+            config_digest: "sha256:cfg".to_string(),
+            size_bytes: 4242,
+            created_at: chrono::Utc::now(),
+            rootfs_path: img_dir.to_string_lossy().to_string(),
+            config: ImageConfig {
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
+                config: None,
+                rootfs: None,
+                history: Vec::new(),
+            },
+        };
+        store.add(record).unwrap();
+
+        // Save, wipe the original, then load.
+        let tar_path = home.path().join("testimg.tar");
+        ImageArchiver::save_with_home("testimg:latest", Some(&tar_path), home.path()).unwrap();
+        store.remove("testimg:latest").unwrap();
+        assert!(store.find("testimg:latest").is_none());
+
+        let loaded = ImageArchiver::load_from(Some(&tar_path), home.path()).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let rec = &loaded[0];
+
+        // Identity preserved.
+        assert_eq!(rec.id, "aaa111bbb222");
+        assert_eq!(rec.manifest_digest, "sha256:aaa");
+        assert_eq!(rec.config_digest, "sha256:cfg");
+        assert_eq!(rec.size_bytes, 4242);
+        assert_eq!(rec.reference, "library/testimg");
+        assert_eq!(rec.tag, "latest");
+
+        // Rootfs restored with the symlink intact.
+        let link_target =
+            std::fs::read_link(Path::new(&rec.rootfs_path).join("bin").join("sh")).unwrap();
+        assert_eq!(link_target, PathBuf::from("busybox"));
+        assert!(
+            Path::new(&rec.rootfs_path)
+                .join("bin")
+                .join("busybox")
+                .exists()
+        );
     }
 }
