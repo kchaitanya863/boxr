@@ -600,9 +600,7 @@ mod tests {
         header.set_mode(0o777);
         let _ = header.set_link_name("/bin/busybox");
         header.set_cksum();
-        builder
-            .append_data(&mut header, "bin/sh", &[][..])
-            .unwrap();
+        builder.append_data(&mut header, "bin/sh", &[][..]).unwrap();
         let tar_bytes = builder.into_inner().unwrap();
 
         let mut archive = tar::Archive::new(&tar_bytes[..]);
