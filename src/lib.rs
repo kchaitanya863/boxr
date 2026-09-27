@@ -1040,9 +1040,10 @@ pub async fn pull_image(image_str: &str) -> Result<ImageRecord> {
 }
 
 /// Returns the locally stored image record when `query` already resolves to
-/// an image whose manifest digest matches `manifest_digest`, i.e. a pull
-/// would download nothing new (issue #403). Returns `None` when the image
-/// is absent or the registry reports a different manifest.
+/// an image whose manifest digest matches `manifest_digest` and whose local
+/// data is intact, i.e. a pull would download nothing new (issue #403).
+/// Returns `None` when the image is absent, the registry reports a different
+/// manifest, or the local record is damaged (so the pull re-downloads).
 fn find_up_to_date_image(
     store: &ImageStore,
     query: &str,
@@ -1050,7 +1051,7 @@ fn find_up_to_date_image(
     manifest_digest: &str,
 ) -> Option<ImageRecord> {
     let existing = store.find_with_platform(query, target_platform)?;
-    if existing.manifest_digest == manifest_digest {
+    if existing.manifest_digest == manifest_digest && validate_image_record(&existing) {
         Some(existing)
     } else {
         None
@@ -6821,6 +6822,15 @@ mod tests {
         // Image not present locally: must pull.
         assert!(
             find_up_to_date_image(&store, "busybox:latest", Some("linux/amd64"), "sha256:aaa")
+                .is_none()
+        );
+
+        // Damaged local data (rootfs missing) must not be treated as up to
+        // date, even when the manifest digest matches: the pull must
+        // re-download instead of returning the broken record.
+        std::fs::remove_dir_all(&rootfs).unwrap();
+        assert!(
+            find_up_to_date_image(&store, "alpine:latest", Some("linux/amd64"), "sha256:aaa")
                 .is_none()
         );
     }
