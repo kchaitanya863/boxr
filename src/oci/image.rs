@@ -360,34 +360,49 @@ pub fn unpack_archive_safely<R: Read>(
         if entry.header().entry_type().is_symlink() {
             if let Ok(Some(link_target)) = entry.link_name() {
                 let target_path = link_target.as_ref();
-                // Reject absolute symlink targets
-                if target_path.is_absolute() {
-                    return Err(anyhow!(
-                        "Tar-slip symlink escape rejected: absolute symlink target {:?}",
-                        target_path
-                    ));
-                }
-                // Resolve symlink target relative to entry parent
-                let parent_dir = if let Some(parent) = entry_path.parent() {
-                    canon_target.join(parent)
-                } else {
-                    canon_target.clone()
-                };
-                let mut resolved = parent_dir;
-                for comp in target_path.components() {
-                    match comp {
-                        std::path::Component::Normal(c) => resolved.push(c),
-                        std::path::Component::ParentDir => {
-                            if !resolved.pop() || !resolved.starts_with(&canon_target) {
-                                return Err(anyhow!(
-                                    "Tar-slip symlink escape rejected: target {:?} escapes {:?}",
-                                    target_path,
-                                    target_dir
-                                ));
-                            }
+                // Absolute symlink targets (e.g. /bin/sh -> /bin/busybox) are
+                // common in container images. Resolve them relative to the
+                // container rootfs (canon_target), not the host root.
+                let resolved = if target_path.is_absolute() {
+                    let mut r = canon_target.clone();
+                    for comp in target_path.components() {
+                        if let std::path::Component::Normal(c) = comp {
+                            r.push(c);
                         }
-                        _ => {}
                     }
+                    r
+                } else {
+                    // Resolve symlink target relative to entry parent
+                    let parent_dir = if let Some(parent) = entry_path.parent() {
+                        canon_target.join(parent)
+                    } else {
+                        canon_target.clone()
+                    };
+                    let mut r = parent_dir;
+                    for comp in target_path.components() {
+                        match comp {
+                            std::path::Component::Normal(c) => r.push(c),
+                            std::path::Component::ParentDir => {
+                                if !r.pop() || !r.starts_with(&canon_target) {
+                                    return Err(anyhow!(
+                                        "Tar-slip symlink escape rejected: target {:?} escapes {:?}",
+                                        target_path,
+                                        target_dir
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    r
+                };
+                // Final check: resolved target must stay within the container rootfs.
+                if !resolved.starts_with(&canon_target) {
+                    return Err(anyhow!(
+                        "Tar-slip symlink escape rejected: target {:?} escapes {:?}",
+                        target_path,
+                        target_dir
+                    ));
                 }
             }
         }
@@ -414,7 +429,12 @@ pub fn unpack_archive_safely<R: Read>(
 
         entry.unpack_in(target_dir)?;
 
-        if dest.exists() {
+        // For symlinks, skip the canonicalize check: the target was already
+        // validated above to stay within the container rootfs. Following the
+        // symlink here would resolve against the host filesystem (e.g.
+        // /etc/ssl/certs), incorrectly flagging legitimate container
+        // absolute symlinks (issue #407).
+        if !entry.header().entry_type().is_symlink() && dest.exists() {
             let canon_dest = dest.canonicalize()?;
             if !canon_dest.starts_with(&canon_target) {
                 let _ = fs::remove_file(&dest);
@@ -540,16 +560,17 @@ mod tests {
         let target_dir = temp.path().join("target");
         fs::create_dir_all(&target_dir).unwrap();
 
-        // Create an archive containing a symlink pointing to an absolute path outside target
+        // Create an archive containing a symlink with relative path escaping outside target
         let mut builder = tar::Builder::new(Vec::new());
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Symlink);
         header.set_size(0);
         header.set_mode(0o777);
-        let _ = header.set_link_name("/etc");
+        // Relative symlink that escapes the target dir via ..
+        let _ = header.set_link_name("../../etc");
         header.set_cksum();
         builder
-            .append_data(&mut header, "evil_link", &[][..])
+            .append_data(&mut header, "a/evil_link", &[][..])
             .unwrap();
         let tar_bytes = builder.into_inner().unwrap();
 
@@ -561,6 +582,30 @@ mod tests {
                 .to_string()
                 .contains("Tar-slip symlink escape rejected")
         );
+    }
+
+    #[test]
+    fn test_unpack_archive_safely_absolute_symlink_allowed() {
+        // Absolute symlink targets (e.g. /bin/sh -> /bin/busybox) are common
+        // in container images. They resolve within the container rootfs and
+        // must be allowed (issue #407).
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        let _ = header.set_link_name("/bin/busybox");
+        header.set_cksum();
+        builder.append_data(&mut header, "bin/sh", &[][..]).unwrap();
+        let tar_bytes = builder.into_inner().unwrap();
+
+        let mut archive = tar::Archive::new(&tar_bytes[..]);
+        let res = unpack_archive_safely(&mut archive, &target_dir);
+        assert!(res.is_ok());
     }
 
     #[test]
