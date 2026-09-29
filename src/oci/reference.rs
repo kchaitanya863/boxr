@@ -116,6 +116,16 @@ impl ImageReference {
             repository
         };
 
+        // Reject empty path components (issue #406 follow-up):
+        // "ghcr.io/:latest", "ghcr.io//repo:latest" and "org//repo:tag"
+        // must not parse.
+        if repository.split('/').any(|component| component.is_empty()) {
+            return Err(anyhow!(
+                "Invalid image reference '{}': repository path contains an empty component",
+                input
+            ));
+        }
+
         Ok(Self {
             registry,
             repository,
@@ -230,6 +240,21 @@ mod tests {
         // Sanity: valid references still parse.
         assert!(ImageReference::parse("alpine:latest").is_ok());
         assert!(ImageReference::parse("alpine@sha256:abcdef").is_ok());
+    }
+
+    // Issue #406 follow-up: empty path components must be rejected.
+    #[test]
+    fn test_issue_406_rejects_empty_path_components() {
+        assert!(ImageReference::parse("ghcr.io/:latest").is_err());
+        assert!(ImageReference::parse("ghcr.io//repo:latest").is_err());
+        assert!(ImageReference::parse("ghcr.io/org//repo:latest").is_err());
+        assert!(ImageReference::parse("docker.io//alpine:latest").is_err());
+        assert!(ImageReference::parse("localhost:5000/:latest").is_err());
+        assert!(ImageReference::parse("myuser//myimage:latest").is_err());
+        // Sanity: valid references still parse.
+        assert!(ImageReference::parse("ghcr.io/org/repo:latest").is_ok());
+        assert!(ImageReference::parse("localhost:5000/my-image:v1").is_ok());
+        assert!(ImageReference::parse("myuser/myimage:latest").is_ok());
     }
 
     // Issue #405: digest-pinned pulls must keep the digest in display output.
