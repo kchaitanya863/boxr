@@ -68,11 +68,44 @@ CMD ["/app/server"]
         );
     }
 
+    fn seed_local_alpine_base(rootfs: &Path) {
+        use crate::oci::image::ImageConfig;
+        use crate::storage::image_store::{ImageRecord, ImageStore};
+        use chrono::Utc;
+
+        fs::create_dir_all(rootfs).unwrap();
+        let store = ImageStore::new();
+        if store.find("alpine").is_some() {
+            return;
+        }
+        store
+            .add(ImageRecord {
+                id: "deadbeef0001".to_string(),
+                reference: "alpine".to_string(),
+                tag: "latest".to_string(),
+                manifest_digest: "sha256:deadbeef".to_string(),
+                config_digest: "sha256:deadbeef".to_string(),
+                size_bytes: 0,
+                created_at: Utc::now(),
+                rootfs_path: rootfs.to_string_lossy().into_owned(),
+                config: ImageConfig {
+                    architecture: "amd64".to_string(),
+                    os: "linux".to_string(),
+                    config: None,
+                    rootfs: None,
+                },
+            })
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn test_builder_path_traversal_rejection() {
         let temp = tempfile::tempdir().unwrap();
         let context_dir = temp.path().join("ctx");
         fs::create_dir_all(&context_dir).unwrap();
+
+        // Avoid network pulls so traversal validation is always exercised.
+        seed_local_alpine_base(&temp.path().join("alpine-rootfs"));
 
         let builder = ImageBuilder::new();
 
