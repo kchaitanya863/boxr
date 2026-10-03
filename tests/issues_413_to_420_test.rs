@@ -260,10 +260,26 @@ services:
 
     assert_eq!(run_args.hostname, Some("web".to_string()));
     assert_eq!(run_args.network, "testdiscovery_default");
-    assert!(run_args.add_host.contains(&format!("api:{}", ep_api.ipv4_address)));
-    assert!(run_args.add_host.contains(&format!("web:{}", ep_web.ipv4_address)));
-    assert!(run_args.add_host.contains(&format!("testdiscovery_api_1:{}", ep_api.ipv4_address)));
-    assert!(run_args.add_host.contains(&format!("testdiscovery_web_1:{}", ep_web.ipv4_address)));
+    assert!(
+        run_args
+            .add_host
+            .contains(&format!("api:{}", ep_api.ipv4_address))
+    );
+    assert!(
+        run_args
+            .add_host
+            .contains(&format!("web:{}", ep_web.ipv4_address))
+    );
+    assert!(
+        run_args
+            .add_host
+            .contains(&format!("testdiscovery_api_1:{}", ep_api.ipv4_address))
+    );
+    assert!(
+        run_args
+            .add_host
+            .contains(&format!("testdiscovery_web_1:{}", ep_web.ipv4_address))
+    );
 
     let _ = net_store.remove_with_force(net_name, true);
 }

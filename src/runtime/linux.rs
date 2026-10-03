@@ -917,7 +917,11 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
         }
     }
     // Synthesize /etc/hosts entries for containers in the same network
-    if let Some(net_name) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network")) {
+    if let Some(net_name) = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network"))
+    {
         let net_store = crate::network::NetworkStore::new();
         if let Some(net) = net_store.find(net_name) {
             for (_, ep) in &net.containers {

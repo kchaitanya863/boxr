@@ -969,7 +969,10 @@ services:
         proj.down(false).unwrap();
 
         // Project network must be removed and not left behind
-        assert!(net_store.find(net_name).is_none(), "Project network must be removed by compose down");
+        assert!(
+            net_store.find(net_name).is_none(),
+            "Project network must be removed by compose down"
+        );
     }
 
     #[test]
@@ -987,26 +990,48 @@ services:
         let net_name = "servicedisc_default";
 
         let _ = net_store.create(net_name, None, None);
-        let ep_web = net_store.connect_container(net_name, "servicedisc_web_1", "web").unwrap();
-        let ep_api = net_store.connect_container(net_name, "servicedisc_api_1", "api").unwrap();
+        let ep_web = net_store
+            .connect_container(net_name, "servicedisc_web_1", "web")
+            .unwrap();
+        let ep_api = net_store
+            .connect_container(net_name, "servicedisc_api_1", "api")
+            .unwrap();
 
-        let run_args = proj.build_service_run_args(
-            "web",
-            &proj.compose.services["web"],
-            "servicedisc_web_1",
-            "alpine:latest",
-            true,
-        ).unwrap();
+        let run_args = proj
+            .build_service_run_args(
+                "web",
+                &proj.compose.services["web"],
+                "servicedisc_web_1",
+                "alpine:latest",
+                true,
+            )
+            .unwrap();
 
         // Verify hostname is set to service name
         assert_eq!(run_args.hostname, Some("web".to_string()));
         // Verify network is set to project network
         assert_eq!(run_args.network, "servicedisc_default");
         // Verify service discovery mappings are present in add_host
-        assert!(run_args.add_host.contains(&format!("api:{}", ep_api.ipv4_address)));
-        assert!(run_args.add_host.contains(&format!("servicedisc_api_1:{}", ep_api.ipv4_address)));
-        assert!(run_args.add_host.contains(&format!("web:{}", ep_web.ipv4_address)));
-        assert!(run_args.add_host.contains(&format!("servicedisc_web_1:{}", ep_web.ipv4_address)));
+        assert!(
+            run_args
+                .add_host
+                .contains(&format!("api:{}", ep_api.ipv4_address))
+        );
+        assert!(
+            run_args
+                .add_host
+                .contains(&format!("servicedisc_api_1:{}", ep_api.ipv4_address))
+        );
+        assert!(
+            run_args
+                .add_host
+                .contains(&format!("web:{}", ep_web.ipv4_address))
+        );
+        assert!(
+            run_args
+                .add_host
+                .contains(&format!("servicedisc_web_1:{}", ep_web.ipv4_address))
+        );
 
         // Clean up
         let _ = net_store.remove_with_force(net_name, true);

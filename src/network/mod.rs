@@ -526,7 +526,11 @@ impl NetworkStore {
     }
 
     /// Disconnect container from all networks (by ID or name) when container is removed
-    pub fn cleanup_container_endpoints(&self, container_id: &str, container_name: &str) -> Result<()> {
+    pub fn cleanup_container_endpoints(
+        &self,
+        container_id: &str,
+        container_name: &str,
+    ) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             let mut modified = false;
@@ -583,9 +587,7 @@ impl NetworkStore {
                     } else {
                         lines.push(format!(
                             "{}\t{}\t{}",
-                            ep.ipv4_address,
-                            ep.container_name,
-                            cid
+                            ep.ipv4_address, ep.container_name, cid
                         ));
                     }
                 }
@@ -803,7 +805,10 @@ mod tests {
         };
 
         let result = wait_for_published_ports(&[mapping], Duration::from_secs(3));
-        assert!(result.is_ok(), "Non-HTTP TCP service should be probed successfully without requiring HTTP");
+        assert!(
+            result.is_ok(),
+            "Non-HTTP TCP service should be probed successfully without requiring HTTP"
+        );
         let _ = handle.join();
     }
 

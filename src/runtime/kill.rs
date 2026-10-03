@@ -133,10 +133,7 @@ mod tests {
         use tempfile::tempdir;
 
         // Spawn a child process with its own process group
-        let mut child = Command::new("sleep")
-            .arg("10")
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("sleep").arg("10").spawn().unwrap();
 
         let pid = child.id() as i32;
         let dir = tempdir().unwrap();

@@ -228,7 +228,10 @@ mod tests {
         std::fs::write(bundle_path.join("ports.json"), ports_json).unwrap();
 
         // Spawn mock target PID
-        let mut mock_child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let mut mock_child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
         let pid = mock_child.id() as i32;
         std::fs::write(bundle_path.join("vm.pid"), pid.to_string()).unwrap();
 
@@ -243,7 +246,10 @@ mod tests {
 
         // Connect to published host port
         let connect_res = tokio::net::TcpStream::connect(format!("127.0.0.1:{}", host_port)).await;
-        assert!(connect_res.is_ok(), "Forwarder should be listening on host port");
+        assert!(
+            connect_res.is_ok(),
+            "Forwarder should be listening on host port"
+        );
 
         // Terminate mock child
         let _ = mock_child.kill();
