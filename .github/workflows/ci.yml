@@ -139,7 +139,7 @@ jobs:
     name: Build & Publish Release (${{ matrix.name }})
     needs: [test, bump-and-tag]
     if: always() && needs.test.result == 'success' && (needs.bump-and-tag.result == 'success' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: [self-hosted, macOS]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -148,18 +148,21 @@ jobs:
       matrix:
         include:
           - name: macOS (Apple Silicon arm64)
+            os: macos-15
             target: aarch64-apple-darwin
             artifact_name: boxr-macos-arm64.tar.gz
             use_zig: false
             build_pkg: false
             is_windows: false
           - name: macOS (Intel x86_64)
+            os: macos-15
             target: x86_64-apple-darwin
             artifact_name: boxr-macos-x86_64.tar.gz
             use_zig: false
             build_pkg: false
             is_windows: false
           - name: Linux (musl arm64)
+            os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             artifact_name: boxr-linux-arm64.tar.gz
             use_zig: true
@@ -168,6 +171,7 @@ jobs:
             rpm_arch: aarch64
             is_windows: false
           - name: Linux (musl x86_64)
+            os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             artifact_name: boxr-linux-x86_64.tar.gz
             use_zig: true
@@ -176,6 +180,7 @@ jobs:
             rpm_arch: x86_64
             is_windows: false
           - name: Windows (x86_64)
+            os: macos-15
             target: x86_64-pc-windows-gnu
             artifact_name: boxr-windows-x86_64.zip
             use_zig: true
@@ -195,17 +200,34 @@ jobs:
 
       - name: Ensure Cross-Compilation Dependencies
         run: |
+          OS="$(uname -s)"
           if ! command -v zig >/dev/null 2>&1; then
-            brew install zig
+            if [ "$OS" = "Darwin" ]; then
+              brew install zig
+            else
+              python3 -m pip install --quiet --break-system-packages ziglang
+              echo "$HOME/.local/bin" >> $GITHUB_PATH
+              export PATH="$HOME/.local/bin:$PATH"
+            fi
           fi
           if ! cargo zigbuild --version >/dev/null 2>&1; then
             cargo install cargo-zigbuild
           fi
           if ! command -v dpkg-deb >/dev/null 2>&1; then
-            brew install dpkg
+            if [ "$OS" = "Darwin" ]; then
+              brew install dpkg
+            else
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq dpkg-dev
+            fi
           fi
           if ! command -v rpmbuild >/dev/null 2>&1; then
-            brew install rpm
+            if [ "$OS" = "Darwin" ]; then
+              brew install rpm
+            else
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq rpm
+            fi
           fi
 
       - name: Set up Rust toolchain
@@ -298,7 +320,7 @@ jobs:
     name: Publish Release & Update Homebrew Tap
     needs: [bump-and-tag, release]
     if: always() && needs.release.result == 'success'
-    runs-on: [self-hosted, macOS]
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
