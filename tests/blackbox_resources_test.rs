@@ -57,6 +57,10 @@ fn test_g5_pids_limit_accepts_flag() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
+)]
 fn test_g6_shm_size_with_memory() {
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
