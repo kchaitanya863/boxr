@@ -442,7 +442,33 @@ pub fn execute_bundle(
             }
         }
     }
-    let _ = fs::write(&hosts_path, hosts_content);
+    // Synthesize /etc/hosts entries for containers in the same network
+    if let Some(net_name) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network")) {
+        let net_store = crate::network::NetworkStore::new();
+        if let Some(net) = net_store.find(net_name) {
+            for (_, ep) in &net.containers {
+                let mut aliases = vec![ep.container_name.as_str()];
+                if ep.container_id != ep.container_name {
+                    aliases.push(&ep.container_id);
+                }
+                aliases.sort();
+                aliases.dedup();
+                for alias in aliases {
+                    let entry = format!("{} {}\n", ep.ipv4_address, alias);
+                    if !hosts_content.contains(&entry) {
+                        hosts_content.push_str(&entry);
+                    }
+                }
+            }
+        }
+    }
+    let _ = fs::write(&hosts_path, &hosts_content);
+    let upper_hosts = bundle_path.join("upper/etc/hosts");
+    if let Some(parent) = upper_hosts.parent() {
+        if parent.exists() {
+            let _ = fs::write(&upper_hosts, &hosts_content);
+        }
+    }
 
     if detach {
         run_script.push_str(&format!("{} 2>&1 | tee /logs.txt &\n", final_cmd));

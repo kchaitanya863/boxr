@@ -78,7 +78,8 @@ fn test_network_mode_parsing_variants() {
     assert_eq!(NetworkMode::parse("bridge"), NetworkMode::Bridge);
     assert_eq!(NetworkMode::parse("auto"), NetworkMode::Auto);
     assert_eq!(NetworkMode::parse(""), NetworkMode::Auto);
-    assert_eq!(NetworkMode::parse("anything-else"), NetworkMode::Auto);
+    assert_eq!(NetworkMode::parse("boxr0"), NetworkMode::Bridge);
+    assert_eq!(NetworkMode::parse("custom-net"), NetworkMode::Bridge);
 }
 
 #[test]
@@ -86,7 +87,9 @@ fn test_network_mode_netns_requirements() {
     assert!(NetworkMode::Pasta.requires_new_netns());
     assert!(NetworkMode::None.requires_new_netns());
     assert!(!NetworkMode::Host.requires_new_netns());
-    assert!(!NetworkMode::Bridge.requires_new_netns());
+    assert!(NetworkMode::Bridge.requires_new_netns());
+    assert!(NetworkMode::Auto.requires_new_netns());
+    assert!(NetworkMode::UserNet.requires_new_netns());
 
     assert!(NetworkMode::Pasta.should_use_pasta());
     assert!(!NetworkMode::None.should_use_pasta());

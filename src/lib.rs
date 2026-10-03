@@ -1834,10 +1834,6 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
 
     if args.detach {
         println!("{}", container_id);
-        #[cfg(not(target_os = "macos"))]
-        if !parsed_ports.is_empty() {
-            let _ = network::rootless::PortForwardManager::start_forwarding(&parsed_ports).await;
-        }
     }
 
     EventManager::record(ContainerEvent::new(
@@ -1963,6 +1959,48 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     Ok(exit_code)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn get_process_tree_pids(root_pids: &[i32]) -> Vec<i32> {
+    let mut all_pids = std::collections::HashSet::new();
+    for &p in root_pids {
+        if p > 1 {
+            all_pids.insert(p);
+        }
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(fname) = entry.file_name().into_string() {
+                    if let Ok(pid) = fname.parse::<i32>() {
+                        if all_pids.contains(&pid) {
+                            continue;
+                        }
+                        let stat_file = entry.path().join("stat");
+                        if let Ok(content) = std::fs::read_to_string(&stat_file) {
+                            if let Some(idx) = content.rfind(')') {
+                                let rest = content[idx + 1..].trim_start();
+                                let mut parts = rest.split_whitespace();
+                                let _state = parts.next();
+                                if let Some(ppid_str) = parts.next() {
+                                    if let Ok(ppid) = ppid_str.parse::<i32>() {
+                                        if all_pids.contains(&ppid) {
+                                            all_pids.insert(pid);
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    all_pids.into_iter().collect()
+}
+
 pub fn stop_container(container: &str, signal: Option<&str>) -> Result<()> {
     stop_container_with_home(container, signal, None)
 }
@@ -2009,6 +2047,14 @@ pub fn stop_container_with_home_and_timeout(
                 pids.push(pid);
             }
         }
+        if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("forwarder.pid")) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                pids.push(pid);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        let pids = get_process_tree_pids(&pids);
+
         let grace_ms = timeout_secs.unwrap_or(3) * 1000;
         let iters = (grace_ms / 50).max(1);
         for pid in pids {
@@ -2030,8 +2076,26 @@ pub fn stop_container_with_home_and_timeout(
                 }
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            let cgroup_dir = std::path::PathBuf::from("/sys/fs/cgroup/boxr").join(&c.id);
+            let procs_file = cgroup_dir.join("cgroup.procs");
+            if procs_file.exists() {
+                if let Ok(content) = std::fs::read_to_string(procs_file) {
+                    for line in content.lines() {
+                        if let Ok(pid) = line.trim().parse::<i32>() {
+                            unsafe {
+                                libc::kill(pid, libc::SIGKILL);
+                                let _ = libc::kill(-pid, libc::SIGKILL);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let _ = std::fs::remove_file(bundle_path.join("vm.pid"));
         let _ = std::fs::remove_file(bundle_path.join("container.pid"));
+        let _ = std::fs::remove_file(bundle_path.join("forwarder.pid"));
     }
     #[cfg(target_os = "windows")]
     {
@@ -2068,12 +2132,6 @@ pub async fn start_container_with_home(container: &str, home_opt: Option<&Path>)
     let config_file = bundle_path.join("config.json");
     let content = fs::read_to_string(&config_file)?;
     let spec: Spec = serde_json::from_str(&content)?;
-
-    // Restore port forwarding for restarted container
-    #[cfg(not(target_os = "macos"))]
-    if !rec.ports.is_empty() {
-        let _ = network::rootless::PortForwardManager::start_forwarding(&rec.ports).await;
-    }
 
     store.update_status(&rec.id, ContainerStatus::Running)?;
     let _ = execute_bundle(&bundle_path, &spec, &[], &rec.ports, true)?;
@@ -3946,6 +4004,8 @@ pub fn remove_container_opts(container: &str, force: bool, remove_volumes: bool)
     }
 
     let removed = store.remove(container)?;
+    let net_store = network::NetworkStore::new();
+    let _ = net_store.cleanup_container_endpoints(&removed.id, &removed.name);
     let _ = guardrails::ProcessReaper::reap_stale_containers();
     println!("{}", removed.id);
     Ok(())

@@ -38,6 +38,22 @@ fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        if args[1] == "__internal-port-forward" {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let code = rt.block_on(async {
+                let path = std::path::Path::new(&args[2]);
+                boxr::network::rootless::run_port_forward_daemon(path).await
+            });
+            match code {
+                Ok(_) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Port forward daemon error: {:?}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()

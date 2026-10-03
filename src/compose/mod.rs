@@ -186,6 +186,16 @@ impl ComposeProject {
             let _ = net_store.create(&project_net_name, None, None);
         }
 
+        // Pre-allocate IPAM endpoints for all services so service discovery knows all service IPs
+        for svc_name in &order {
+            let svc = self.compose.services.get(svc_name).unwrap();
+            let container_name = svc
+                .container_name
+                .clone()
+                .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
+            let _ = net_store.connect_container(&project_net_name, &container_name, svc_name);
+        }
+
         // Ensure project volumes
         let vol_store = VolumeStore::new();
         for vol_name in self.compose.volumes.keys() {
@@ -297,6 +307,19 @@ impl ComposeProject {
             // Attach to network
             let _ = net_store.connect_container(&project_net_name, &container_name, &svc_name);
 
+            // Build service discovery hosts mappings from project network
+            let mut add_host = Vec::new();
+            if let Some(net) = net_store.find(&project_net_name) {
+                for (_, ep) in &net.containers {
+                    add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
+                    if ep.container_id != ep.container_name {
+                        add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+                    }
+                }
+            }
+            add_host.sort();
+            add_host.dedup();
+
             let run_args = RunArgs {
                 interactive: false,
                 tty: false,
@@ -317,14 +340,14 @@ impl ComposeProject {
                 health_cmd: None,
                 platform: None,
                 privileged: false,
-                network: "bridge".to_string(),
+                network: project_net_name.clone(),
                 disable_content_trust: false,
                 gpus: None,
                 entrypoint: None,
                 env_file: None,
                 user: None,
-                hostname: None,
-                add_host: Vec::new(),
+                hostname: Some(svc_name.clone()),
+                add_host,
                 shm_size: None,
                 cap_add: Vec::new(),
                 cap_drop: Vec::new(),
@@ -478,7 +501,16 @@ impl ComposeProject {
 
         let net_store = NetworkStore::new();
         let project_net_name = format!("{}_default", self.name);
-        let _ = net_store.remove(&project_net_name);
+        for (svc_name, svc) in &self.compose.services {
+            let container_name = svc
+                .container_name
+                .clone()
+                .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
+            let _ = net_store.disconnect_container(&project_net_name, &container_name);
+            let _ = net_store.disconnect_container(&project_net_name, svc_name);
+            let _ = net_store.cleanup_container_endpoints(&container_name, svc_name);
+        }
+        let _ = net_store.remove_with_force(&project_net_name, true);
 
         println!("Project '{}' stopped and removed.", self.name);
         Ok(())
@@ -601,7 +633,7 @@ impl ComposeProject {
         Ok(())
     }
 
-    fn build_service_run_args(
+    pub fn build_service_run_args(
         &self,
         _svc_name: &str,
         svc: &ServiceConfig,
@@ -643,6 +675,20 @@ impl ComposeProject {
                 }
             }
         }
+        let net_store = NetworkStore::new();
+        let project_net_name = format!("{}_default", self.name);
+        let mut add_host = Vec::new();
+        if let Some(net) = net_store.find(&project_net_name) {
+            for (_, ep) in &net.containers {
+                add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
+                if ep.container_id != ep.container_name {
+                    add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+                }
+            }
+        }
+        add_host.sort();
+        add_host.dedup();
+
         Ok(RunArgs {
             interactive: false,
             tty: false,
@@ -663,14 +709,14 @@ impl ComposeProject {
             health_cmd: None,
             platform: None,
             privileged: false,
-            network: "bridge".to_string(),
+            network: project_net_name,
             disable_content_trust: false,
             gpus: None,
             entrypoint: None,
             env_file: None,
             user: None,
-            hostname: None,
-            add_host: Vec::new(),
+            hostname: Some(_svc_name.to_string()),
+            add_host,
             shm_size: None,
             cap_add: Vec::new(),
             cap_drop: Vec::new(),
@@ -895,5 +941,74 @@ services:
             !matches_other,
             "Compose down for 'app' must not match 'app_backend_web_1'"
         );
+    }
+
+    #[test]
+    fn test_issue_420_compose_down_cleans_project_network() {
+        let yaml = r#"
+version: '3.8'
+services:
+  web:
+    image: alpine:latest
+  api:
+    image: alpine:latest
+"#;
+        let proj = ComposeProject::from_str(yaml, "myproj").unwrap();
+        let net_store = NetworkStore::new();
+        let net_name = "myproj_default";
+
+        // Create the network and register containers like compose up does
+        let _ = net_store.create(net_name, None, None);
+        let _ = net_store.connect_container(net_name, "myproj_web_1", "web");
+        let _ = net_store.connect_container(net_name, "myproj_api_1", "api");
+
+        assert!(net_store.find(net_name).is_some());
+        assert_eq!(net_store.find(net_name).unwrap().containers.len(), 2);
+
+        // Run compose down
+        proj.down(false).unwrap();
+
+        // Project network must be removed and not left behind
+        assert!(net_store.find(net_name).is_none(), "Project network must be removed by compose down");
+    }
+
+    #[test]
+    fn test_issue_419_compose_service_discovery_hosts() {
+        let yaml = r#"
+version: '3.8'
+services:
+  web:
+    image: alpine:latest
+  api:
+    image: alpine:latest
+"#;
+        let proj = ComposeProject::from_str(yaml, "servicedisc").unwrap();
+        let net_store = NetworkStore::new();
+        let net_name = "servicedisc_default";
+
+        let _ = net_store.create(net_name, None, None);
+        let ep_web = net_store.connect_container(net_name, "servicedisc_web_1", "web").unwrap();
+        let ep_api = net_store.connect_container(net_name, "servicedisc_api_1", "api").unwrap();
+
+        let run_args = proj.build_service_run_args(
+            "web",
+            &proj.compose.services["web"],
+            "servicedisc_web_1",
+            "alpine:latest",
+            true,
+        ).unwrap();
+
+        // Verify hostname is set to service name
+        assert_eq!(run_args.hostname, Some("web".to_string()));
+        // Verify network is set to project network
+        assert_eq!(run_args.network, "servicedisc_default");
+        // Verify service discovery mappings are present in add_host
+        assert!(run_args.add_host.contains(&format!("api:{}", ep_api.ipv4_address)));
+        assert!(run_args.add_host.contains(&format!("servicedisc_api_1:{}", ep_api.ipv4_address)));
+        assert!(run_args.add_host.contains(&format!("web:{}", ep_web.ipv4_address)));
+        assert!(run_args.add_host.contains(&format!("servicedisc_web_1:{}", ep_web.ipv4_address)));
+
+        // Clean up
+        let _ = net_store.remove_with_force(net_name, true);
     }
 }

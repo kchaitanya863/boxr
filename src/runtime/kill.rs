@@ -51,16 +51,24 @@ impl ContainerKiller {
         #[cfg(unix)]
         {
             let bundle_path = std::path::PathBuf::from(&container.bundle_path);
-            for pid_filename in &["vm.pid", "container.pid"] {
+            let mut pids = Vec::new();
+            for pid_filename in &["vm.pid", "container.pid", "forwarder.pid"] {
                 let pid_file = bundle_path.join(pid_filename);
                 if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
                     if let Ok(pid) = pid_str.trim().parse::<i32>() {
                         if pid > 1 {
-                            unsafe {
-                                libc::kill(pid, sig);
-                            }
+                            pids.push(pid);
                         }
                     }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            let pids = crate::get_process_tree_pids(&pids);
+
+            for pid in pids {
+                unsafe {
+                    libc::kill(pid, sig);
+                    let _ = libc::kill(-pid, sig);
                 }
             }
         }
@@ -75,6 +83,7 @@ impl ContainerKiller {
                         if let Ok(pid) = line.trim().parse::<i32>() {
                             unsafe {
                                 libc::kill(pid, sig);
+                                let _ = libc::kill(-pid, sig);
                             }
                         }
                     }
@@ -116,5 +125,44 @@ mod tests {
         assert_eq!(ContainerKiller::parse_signal("SIGTERM").unwrap(), 15);
         assert_eq!(ContainerKiller::parse_signal("TERM").unwrap(), 15);
         assert_eq!(ContainerKiller::parse_signal("SIGHUP").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_issue_417_process_group_termination() {
+        use std::process::Command;
+        use tempfile::tempdir;
+
+        // Spawn a child process with its own process group
+        let mut child = Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+
+        let pid = child.id() as i32;
+        let dir = tempdir().unwrap();
+        let bundle_path = dir.path().to_path_buf();
+        std::fs::write(bundle_path.join("vm.pid"), pid.to_string()).unwrap();
+
+        let cont = ContainerRecord {
+            id: "testcont417".to_string(),
+            name: "testcont417".to_string(),
+            image: "test:latest".to_string(),
+            command: vec!["sleep".to_string(), "10".to_string()],
+            created_at: chrono::Utc::now(),
+            status: ContainerStatus::Running,
+            bundle_path: bundle_path.to_string_lossy().to_string(),
+            restart_policy: crate::health::RestartPolicy::No,
+            health_status: crate::health::HealthStatus::None,
+            restart_count: 0,
+            ports: Vec::new(),
+            exposed_ports: Vec::new(),
+        };
+
+        // Terminate container
+        ContainerKiller::kill(&cont, Some("SIGKILL")).unwrap();
+
+        // Wait for child to exit
+        let status = child.wait().unwrap();
+        assert!(!status.success());
     }
 }

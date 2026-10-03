@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -526,8 +525,40 @@ impl NetworkStore {
         })
     }
 
+    /// Disconnect container from all networks (by ID or name) when container is removed
+    pub fn cleanup_container_endpoints(&self, container_id: &str, container_name: &str) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            let mut modified = false;
+            for net in &mut data.networks {
+                if net.containers.remove(container_id).is_some() {
+                    modified = true;
+                }
+                let to_remove: Vec<String> = net
+                    .containers
+                    .iter()
+                    .filter(|(k, ep)| {
+                        *k == container_name
+                            || ep.container_name == container_id
+                            || ep.container_name == container_name
+                            || ep.container_id == container_id
+                            || ep.container_id == container_name
+                    })
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for k in to_remove {
+                    net.containers.remove(&k);
+                    modified = true;
+                }
+            }
+            if modified {
+                self.save_unlocked(&data)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Generate an /etc/hosts content for a container, mapping all other containers in this network
-    #[allow(dead_code)]
     pub fn generate_hosts_file(
         &self,
         network_name: &str,
@@ -546,12 +577,17 @@ impl NetworkStore {
                 .find(|n| n.name == network_name || n.id.starts_with(network_name))
             {
                 for (cid, ep) in &net.containers {
-                    lines.push(format!(
-                        "{}\t{}\t{}",
-                        ep.ipv4_address,
-                        ep.container_name,
-                        &cid[..12.min(cid.len())]
-                    ));
+                    let short_id = if cid.len() >= 12 { &cid[..12] } else { cid };
+                    if ep.container_name == *cid || ep.container_name == short_id {
+                        lines.push(format!("{}\t{}", ep.ipv4_address, ep.container_name));
+                    } else {
+                        lines.push(format!(
+                            "{}\t{}\t{}",
+                            ep.ipv4_address,
+                            ep.container_name,
+                            cid
+                        ));
+                    }
                 }
             }
 
@@ -653,34 +689,17 @@ fn allocate_ip_in_subnet(
 
 fn probe_published_port(mapping: &PortMapping) -> bool {
     let host = mapping.host_ip.as_deref().unwrap_or("127.0.0.1");
-    let addr: SocketAddr = match format!("{}:{}", host, mapping.host_port).parse() {
+    let connect_host = match host {
+        "0.0.0.0" | "" => "127.0.0.1",
+        "::" => "::1",
+        other => other,
+    };
+    let addr: SocketAddr = match format!("{}:{}", connect_host, mapping.host_port).parse() {
         Ok(a) => a,
         Err(_) => return false,
     };
 
-    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-
-    if matches!(mapping.container_port, 80 | 443 | 8080 | 8443) {
-        let request = format!(
-            "GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n",
-            host = host
-        );
-        if stream.write_all(request.as_bytes()).is_err() {
-            return false;
-        }
-        let mut buf = [0u8; 16];
-        match stream.read(&mut buf) {
-            Ok(n) => n >= 12 && buf.starts_with(b"HTTP/"),
-            Err(_) => false,
-        }
-    } else {
-        true
-    }
+    TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok()
 }
 
 /// Wait until all published TCP ports accept connections on the host.
@@ -758,5 +777,72 @@ mod tests {
         // Remove
         store.remove("custom-net").unwrap();
         assert!(store.find("custom-net").is_none());
+    }
+
+    #[test]
+    fn test_issue_416_readiness_probe_non_http_tcp() {
+        use std::net::TcpListener;
+        // Bind an ephemeral TCP listener representing a non-HTTP service on host
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Spawn a thread that accepts TCP connections and immediately closes or sends raw non-HTTP bytes
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::Write;
+                let _ = stream.write_all(b"SSH-2.0-OpenSSH\r\n");
+            }
+        });
+
+        // Even if container_port is 80 (previously forced HTTP), probe must succeed with raw TCP
+        let mapping = PortMapping {
+            host_ip: Some("127.0.0.1".to_string()),
+            host_port: port,
+            container_port: 80,
+            protocol: "tcp".to_string(),
+        };
+
+        let result = wait_for_published_ports(&[mapping], Duration::from_secs(3));
+        assert!(result.is_ok(), "Non-HTTP TCP service should be probed successfully without requiring HTTP");
+        let _ = handle.join();
+    }
+
+    #[test]
+    fn test_issue_420_cleanup_container_endpoints() {
+        let dir = tempdir().unwrap();
+        let store = NetworkStore::with_home(dir.path().to_path_buf());
+        store.create("test-proj_default", None, None).unwrap();
+
+        // Connect two containers like compose does
+        store
+            .connect_container("test-proj_default", "test-proj_web_1", "web")
+            .unwrap();
+        store
+            .connect_container("test-proj_default", "test-proj_api_1", "api")
+            .unwrap();
+
+        let net = store.find("test-proj_default").unwrap();
+        assert_eq!(net.containers.len(), 2);
+
+        // Before cleanup, remove without force fails
+        assert!(store.remove("test-proj_default").is_err());
+
+        // Cleanup first container by name/id
+        store
+            .cleanup_container_endpoints("test-proj_web_1", "web")
+            .unwrap();
+        let net = store.find("test-proj_default").unwrap();
+        assert_eq!(net.containers.len(), 1);
+
+        // Cleanup second container
+        store
+            .cleanup_container_endpoints("test-proj_api_1", "api")
+            .unwrap();
+        let net = store.find("test-proj_default").unwrap();
+        assert_eq!(net.containers.len(), 0);
+
+        // Now remove succeeds without force
+        assert!(store.remove("test-proj_default").is_ok());
+        assert!(store.find("test-proj_default").is_none());
     }
 }

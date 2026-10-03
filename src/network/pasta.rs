@@ -52,7 +52,11 @@ impl NetworkMode {
             "host" => Self::Host,
             "none" => Self::None,
             "bridge" => Self::Bridge,
-            _ => Self::Auto,
+            "auto" | "default" | "" => Self::Auto,
+            _ => {
+                // Named networks (e.g. "boxr0", "compose_default") act as user-defined bridge networks
+                Self::Bridge
+            }
         }
     }
 
@@ -76,8 +80,8 @@ impl NetworkMode {
     /// Determines whether native pure-Rust usernet should be activated
     pub fn should_use_native_usernet(&self) -> bool {
         match self {
-            Self::UserNet => true,
-            Self::Auto => false,
+            Self::UserNet | Self::Bridge => true,
+            Self::Auto => !PastaDriver::is_available(),
             _ => false,
         }
     }
@@ -85,9 +89,8 @@ impl NetworkMode {
     /// Whether a private network namespace (CLONE_NEWNET) should be unshared
     pub fn requires_new_netns(&self) -> bool {
         match self {
-            Self::Pasta | Self::UserNet | Self::None => true,
-            Self::Auto => PastaDriver::is_available(),
-            Self::Host | Self::Bridge | Self::Container(_) => false,
+            Self::Pasta | Self::UserNet | Self::None | Self::Auto | Self::Bridge => true,
+            Self::Host | Self::Container(_) => false,
         }
     }
 }
@@ -270,7 +273,8 @@ mod tests {
         assert_eq!(NetworkMode::parse("none"), NetworkMode::None);
         assert_eq!(NetworkMode::parse("bridge"), NetworkMode::Bridge);
         assert_eq!(NetworkMode::parse("auto"), NetworkMode::Auto);
-        assert_eq!(NetworkMode::parse("unknown-mode"), NetworkMode::Auto);
+        assert_eq!(NetworkMode::parse("boxr0"), NetworkMode::Bridge);
+        assert_eq!(NetworkMode::parse("unknown-net"), NetworkMode::Bridge);
     }
 
     #[test]
@@ -281,6 +285,15 @@ mod tests {
         assert!(!NetworkMode::None.should_use_pasta());
         assert!(!NetworkMode::Host.requires_new_netns());
         assert!(!NetworkMode::Host.should_use_pasta());
+
+        // Issue #413: bridge and auto must isolate netns
+        assert!(NetworkMode::Bridge.requires_new_netns());
+        assert!(NetworkMode::Auto.requires_new_netns());
+        assert!(NetworkMode::UserNet.requires_new_netns());
+
+        // Issue #414: usernet & bridge activate native usernet
+        assert!(NetworkMode::UserNet.should_use_native_usernet());
+        assert!(NetworkMode::Bridge.should_use_native_usernet());
     }
 
     #[test]

@@ -25,6 +25,24 @@ pub fn execute_bundle(
     if !_ports.is_empty() {
         let ports_json = serde_json::to_string(_ports)?;
         let _ = fs::write(bundle_path.join("ports.json"), ports_json);
+
+        // Spawn persistent port forwarder daemon for published ports
+        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
+        let mut fwd_cmd = std::process::Command::new(&exe);
+        fwd_cmd
+            .arg("__internal-port-forward")
+            .arg(bundle_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            fwd_cmd.process_group(0);
+        }
+
+        let _ = fwd_cmd.spawn();
     }
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
@@ -32,12 +50,20 @@ pub fn execute_bundle(
     if detach {
         let log_file = fs::File::create(bundle_path.join("logs.txt"))?;
         let err_file = log_file.try_clone()?;
-        let child = std::process::Command::new(&exe)
-            .arg("__internal-trampoline")
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("__internal-trampoline")
             .arg(bundle_path)
             .stdin(std::process::Stdio::null())
             .stdout(log_file)
-            .stderr(err_file)
+            .stderr(err_file);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
+        let child = cmd
             .spawn()
             .context("Failed to spawn container trampoline process")?;
 
@@ -67,6 +93,11 @@ pub fn execute_bundle(
 /// Single-threaded trampoline entry point invoked before Tokio runtime initialization.
 /// Solves Linux kernel EINVAL when calling unshare(CLONE_NEWUSER) in multi-threaded processes.
 pub fn run_trampoline(args: &[String]) -> Result<i32> {
+    #[cfg(unix)]
+    unsafe {
+        libc::setsid();
+    }
+
     if args.is_empty() {
         return Err(anyhow!("No bundle path specified for trampoline"));
     }
@@ -329,25 +360,70 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             }
         }
     } else {
+        // Unshare network namespace first if required
+        let mut tap_worker_pid = None;
+        if network_mode.requires_new_netns() {
+            unshare(CloneFlags::CLONE_NEWNET)
+                .context("Failed to unshare network namespace (requires CAP_NET_ADMIN or root)")?;
+
+            // Bring loopback interface up
+            let _ = std::process::Command::new("ip")
+                .args(["link", "set", "lo", "up"])
+                .status();
+
+            // If using native pure-Rust user-mode networking or bridge:
+            if network_mode.should_use_native_usernet() {
+                use crate::network::usernet::engine::platform;
+                use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
+                if let Ok(tap_file) = platform::create_tap_device("eth0") {
+                    let _ = platform::configure_container_netns(
+                        "eth0",
+                        DEFAULT_CONTAINER_IP,
+                        DEFAULT_GATEWAY_IP,
+                    );
+                    // Fork background TAP engine worker before unsharing PID namespace
+                    match unsafe { fork() } {
+                        Ok(ForkResult::Child) => {
+                            platform::run_tap_network_loop(tap_file, &ports);
+                            std::process::exit(0);
+                        }
+                        Ok(ForkResult::Parent { child: tap_child }) => {
+                            tap_worker_pid = Some(tap_child);
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+
         // Unshare remaining namespaces: PID, Mount, UTS, IPC
         let mut flags = CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWNS
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWIPC;
 
-        if network_mode.requires_new_netns() {
-            flags |= CloneFlags::CLONE_NEWNET;
-        }
-
         unshare(flags).context("Failed to unshare namespaces (requires root or CAP_SYS_ADMIN)")?;
 
         // Fork: child will become PID 1 inside the new PID namespace
         match unsafe { fork() }? {
-            ForkResult::Parent { child } => match waitpid(child, None)? {
-                WaitStatus::Exited(_, code) => Ok(code),
-                WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
-                _ => Ok(1),
-            },
+            ForkResult::Parent { child } => {
+                let _ = fs::write(
+                    bundle_path.join("container.pid"),
+                    child.as_raw().to_string(),
+                );
+                let status = match waitpid(child, None)? {
+                    WaitStatus::Exited(_, code) => Ok(code),
+                    WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
+                    _ => Ok(1),
+                };
+
+                if let Some(tap_pid) = tap_worker_pid {
+                    let _ = nix::sys::signal::kill(tap_pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = waitpid(tap_pid, None);
+                }
+
+                status
+            }
             ForkResult::Child => {
                 if let Err(err) = run_container_child(&abs_rootfs, &spec, &mounts) {
                     eprintln!("Container child failed: {:?}", err);
@@ -840,7 +916,33 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
             }
         }
     }
-    let _ = fs::write(&hosts_path, hosts_content);
+    // Synthesize /etc/hosts entries for containers in the same network
+    if let Some(net_name) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network")) {
+        let net_store = crate::network::NetworkStore::new();
+        if let Some(net) = net_store.find(net_name) {
+            for (_, ep) in &net.containers {
+                let mut aliases = vec![ep.container_name.as_str()];
+                if ep.container_id != ep.container_name {
+                    aliases.push(&ep.container_id);
+                }
+                aliases.sort();
+                aliases.dedup();
+                for alias in aliases {
+                    let entry = format!("{} {}\n", ep.ipv4_address, alias);
+                    if !hosts_content.contains(&entry) {
+                        hosts_content.push_str(&entry);
+                    }
+                }
+            }
+        }
+    }
+    let _ = fs::write(&hosts_path, &hosts_content);
+    let upper_hosts = bundle_dir.join("upper/etc/hosts");
+    if let Some(parent) = upper_hosts.parent() {
+        if parent.exists() {
+            let _ = fs::write(&upper_hosts, &hosts_content);
+        }
+    }
 
     // Setup pivot_root
     let oldroot_path = rootfs.join(".oldroot");
