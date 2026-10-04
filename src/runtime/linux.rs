@@ -262,6 +262,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
                 // If using native pure-Rust user-mode networking stack:
                 let mut tap_worker_pid = None;
+                let mut fwd_helper_pid = None;
                 if network_mode.should_use_native_usernet() {
                     use crate::network::usernet::engine::platform;
                     use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
@@ -279,6 +280,24 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             }
                             Ok(ForkResult::Parent { child: tap_child }) => {
                                 tap_worker_pid = Some(tap_child);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    // Fork port-forward helper inside the container netns: it bridges
+                    // the host forwarder's Unix sockets to the container's localhost.
+                    // (The host-side daemon cannot reach the container netns directly.)
+                    if !ports.is_empty() {
+                        match unsafe { fork() } {
+                            Ok(ForkResult::Child) => {
+                                let _ = crate::network::rootless::run_forward_helper(
+                                    bundle_path,
+                                    &ports,
+                                );
+                                std::process::exit(0);
+                            }
+                            Ok(ForkResult::Parent { child: fwd_child }) => {
+                                fwd_helper_pid = Some(fwd_child);
                             }
                             Err(_) => {}
                         }
@@ -338,6 +357,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                                 nix::sys::signal::kill(tap_pid, nix::sys::signal::Signal::SIGKILL);
                             let _ = waitpid(tap_pid, None);
                         }
+                        if let Some(fwd_pid) = fwd_helper_pid {
+                            let _ =
+                                nix::sys::signal::kill(fwd_pid, nix::sys::signal::Signal::SIGKILL);
+                            let _ = waitpid(fwd_pid, None);
+                        }
 
                         let _ = fs::write(bundle_path.join("boxr-exitcode"), status.to_string());
                         std::process::exit(status);
@@ -362,6 +386,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
     } else {
         // Unshare network namespace first if required
         let mut tap_worker_pid = None;
+        let mut fwd_helper_pid = None;
         if network_mode.requires_new_netns() {
             unshare(CloneFlags::CLONE_NEWNET)
                 .context("Failed to unshare network namespace (requires CAP_NET_ADMIN or root)")?;
@@ -393,6 +418,21 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         Err(_) => {}
                     }
                 }
+                // Fork port-forward helper inside the container netns: it bridges
+                // the host forwarder's Unix sockets to the container's localhost.
+                if !ports.is_empty() {
+                    match unsafe { fork() } {
+                        Ok(ForkResult::Child) => {
+                            let _ =
+                                crate::network::rootless::run_forward_helper(bundle_path, &ports);
+                            std::process::exit(0);
+                        }
+                        Ok(ForkResult::Parent { child: fwd_child }) => {
+                            fwd_helper_pid = Some(fwd_child);
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
         }
 
@@ -420,6 +460,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if let Some(tap_pid) = tap_worker_pid {
                     let _ = nix::sys::signal::kill(tap_pid, nix::sys::signal::Signal::SIGKILL);
                     let _ = waitpid(tap_pid, None);
+                }
+                if let Some(fwd_pid) = fwd_helper_pid {
+                    let _ = nix::sys::signal::kill(fwd_pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = waitpid(fwd_pid, None);
                 }
 
                 status
