@@ -1,3 +1,6 @@
+#[path = "common/blackbox.rs"]
+mod blackbox;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -28,6 +31,10 @@ fn boxr_bin() -> PathBuf {
 
 #[test]
 fn test_qa_cli_negative_inspect_nonexistent() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -46,6 +53,10 @@ fn test_qa_cli_negative_inspect_nonexistent() {
 
 #[test]
 fn test_qa_cli_negative_rm_nonexistent() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -64,6 +75,10 @@ fn test_qa_cli_negative_rm_nonexistent() {
 
 #[test]
 fn test_qa_cli_negative_stop_nonexistent() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -82,6 +97,10 @@ fn test_qa_cli_negative_stop_nonexistent() {
 
 #[test]
 fn test_qa_cli_negative_rename_nonexistent() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -100,6 +119,10 @@ fn test_qa_cli_negative_rename_nonexistent() {
 
 #[test]
 fn test_qa_cli_negative_invalid_flag() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -118,6 +141,10 @@ fn test_qa_cli_negative_invalid_flag() {
 
 #[test]
 fn test_qa_cli_negative_copy_invalid_syntax() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;

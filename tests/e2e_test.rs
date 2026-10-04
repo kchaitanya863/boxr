@@ -69,6 +69,10 @@ fn boxr_cmd(bin: &PathBuf) -> Command {
 
 #[test]
 fn test_e2e_cli_version_and_help() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -87,6 +91,10 @@ fn test_e2e_cli_version_and_help() {
 
 #[test]
 fn test_e2e_volume_lifecycle() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -123,6 +131,10 @@ fn test_e2e_volume_lifecycle() {
 
 #[test]
 fn test_e2e_network_lifecycle() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -159,6 +171,10 @@ fn test_e2e_network_lifecycle() {
 
 #[test]
 fn test_e2e_system_df_and_completions() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -185,6 +201,10 @@ fn test_e2e_system_df_and_completions() {
 
 #[test]
 fn test_e2e_dockerfile_multi_stage_build() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;
@@ -221,6 +241,10 @@ CMD ["/bin/cat", "/app/app.bin"]
 
 #[test]
 fn test_e2e_container_lifecycle_pause_unpause_rename_commit_wait() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;
@@ -280,6 +304,10 @@ fn test_e2e_container_lifecycle_pause_unpause_rename_commit_wait() {
 
 #[test]
 fn test_e2e_filesystem_diff_and_copy() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;
@@ -352,6 +380,10 @@ fn test_e2e_filesystem_diff_and_copy() {
 
 #[test]
 fn test_e2e_defensive_security_and_kill() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;
@@ -401,6 +433,10 @@ fn test_e2e_defensive_security_and_kill() {
 
 #[test]
 fn test_e2e_concurrent_load_test() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;
@@ -450,6 +486,10 @@ fn test_e2e_concurrent_load_test() {
 
 #[test]
 fn test_e2e_real_service_workload_redis() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;
@@ -515,6 +555,10 @@ fn test_e2e_real_service_workload_redis() {
 
 #[test]
 fn test_e2e_fullstack_compose_orchestration() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;
@@ -556,6 +600,10 @@ fn test_e2e_fullstack_compose_orchestration() {
 
 #[test]
 fn test_e2e_platform_and_gpu_sharing() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() || !has_container_runtime() {
         return;

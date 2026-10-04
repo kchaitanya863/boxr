@@ -1,3 +1,6 @@
+#[path = "common/blackbox.rs"]
+mod blackbox;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -99,6 +102,10 @@ pub fn generate_vagrantfile(vms: &[VagrantVmSpec], work_dir: &Path) -> std::io::
 #[test]
 #[ignore = "Slow multi-OS Vagrant matrix for local manual verification; CI tests natively on each target OS"]
 fn test_vagrant_matrix_multi_os_verification() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     if !has_vagrant() {
         eprintln!("Vagrant not available on this host. Skipping Vagrant test suite.");
         return;
@@ -216,6 +223,10 @@ fn test_vagrant_matrix_multi_os_verification() {
 #[test]
 #[ignore = "Requires local Windows image"]
 fn test_windows_container_image_and_runtime_guard() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = release_bin(None);
     if !bin.exists() {
         return;

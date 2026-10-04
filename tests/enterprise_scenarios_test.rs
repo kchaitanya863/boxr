@@ -49,6 +49,10 @@ fn boxr_cmd(bin: &PathBuf) -> Command {
 /// can write and create temporary files in /tmp and /var/tmp without EACCES.
 #[test]
 fn test_enterprise_unprivileged_tmp_and_var_tmp_write() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -92,6 +96,10 @@ fn test_enterprise_unprivileged_tmp_and_var_tmp_write() {
 /// AI/ML frameworks (PyTorch, TensorFlow) and Chromium/Postgres require /dev/shm tmpfs.
 #[test]
 fn test_enterprise_posix_shared_memory_dev_shm() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -122,6 +130,10 @@ fn test_enterprise_posix_shared_memory_dev_shm() {
     ignore = "urandom device probe is slow/flaky in micro-VM under cargo test"
 )]
 fn test_enterprise_device_nodes_permissions() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -150,6 +162,10 @@ fn test_enterprise_device_nodes_permissions() {
 /// Verifies package managers or daemons dropping privileges don't fail signature verification.
 #[test]
 fn test_enterprise_package_manager_priv_drop() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -170,6 +186,10 @@ fn test_enterprise_package_manager_priv_drop() {
 /// Multi-process microservices spawning child processes require PID 1 zombie reaping.
 #[test]
 fn test_enterprise_process_init_zombie_reaping() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -198,6 +218,10 @@ fn test_enterprise_process_init_zombie_reaping() {
 /// Memory constraints (--memory) and CPU limits (--cpus) must be reported accurately.
 #[test]
 fn test_enterprise_resource_limits_enforcement() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -227,6 +251,10 @@ fn test_enterprise_resource_limits_enforcement() {
 /// Enterprise production deployments enforce immutable read-only rootfs (--read-only).
 #[test]
 fn test_enterprise_readonly_rootfs_with_tmpfs() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -259,6 +287,10 @@ fn test_enterprise_readonly_rootfs_with_tmpfs() {
 /// Confidential corporate configs and tokens passed via -e or --env-file must be cleanly isolated.
 #[test]
 fn test_enterprise_env_hygiene() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -290,6 +322,10 @@ fn test_enterprise_env_hygiene() {
 /// can manage directories, execute chmod 0700, chown, and write within mounted persistent volumes without EPERM.
 #[test]
 fn test_enterprise_stateful_volume_privilege_drop_and_permissions() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -327,6 +363,10 @@ fn test_enterprise_stateful_volume_privilege_drop_and_permissions() {
 /// volume persistence, and database readiness.
 #[test]
 fn test_enterprise_stateful_postgres_initdb_with_volume() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
