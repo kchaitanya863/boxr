@@ -18,8 +18,8 @@ env:
 
 jobs:
   test:
-    name: Test & Lint (macOS)
-    runs-on: macos-15
+    name: Test & Lint (Linux)
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
