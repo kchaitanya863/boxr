@@ -6,6 +6,10 @@ use std::fs;
 
 #[test]
 fn test_c1_volume_crud_lifecycle() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     let vol = format!("bb-vol-{}", rand_suffix());
     run_boxr_ok(&home, &["volume", "create", &vol]);
@@ -17,6 +21,10 @@ fn test_c1_volume_crud_lifecycle() {
 
 #[test]
 fn test_c2_bind_mount_rw() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let dir = tempfile::tempdir().unwrap();
@@ -43,6 +51,10 @@ fn test_c2_bind_mount_rw() {
 
 #[test]
 fn test_c3_bind_mount_ro_rejects_write() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let dir = tempfile::tempdir().unwrap();
@@ -66,6 +78,10 @@ fn test_c3_bind_mount_ro_rejects_write() {
 
 #[test]
 fn test_c4_mount_readonly_flag() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let dir = tempfile::tempdir().unwrap();
@@ -91,6 +107,10 @@ fn test_c4_mount_readonly_flag() {
 
 #[test]
 fn test_c6_chown_chmod_on_volume() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let dir = tempfile::tempdir().unwrap();
@@ -113,6 +133,10 @@ fn test_c6_chown_chmod_on_volume() {
 
 #[test]
 fn test_c8_volume_persistence_across_recreate() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let vol = format!("bb-persist-{}", rand_suffix());
@@ -154,6 +178,10 @@ fn test_c8_volume_persistence_across_recreate() {
 
 #[test]
 fn test_c11_duplicate_volume_name_fails() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     let vol = format!("bb-dup-{}", rand_suffix());
     run_boxr_ok(&home, &["volume", "create", &vol]);
@@ -163,6 +191,10 @@ fn test_c11_duplicate_volume_name_fails() {
 
 #[test]
 fn test_c15_cp_host_container_roundtrip() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
@@ -199,6 +231,10 @@ fn test_c15_cp_host_container_roundtrip() {
 
 #[test]
 fn test_h8_executable_on_volume() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let dir = tempfile::tempdir().unwrap();

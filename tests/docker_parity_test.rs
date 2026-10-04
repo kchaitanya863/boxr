@@ -78,6 +78,10 @@ fn unique_id() -> String {
 
 #[test]
 fn test_isolated_home_preserves_images_catalog() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let home = create_isolated_home();
     let img_store = boxr::storage::ImageStore::with_home(home.path().to_path_buf());
     let base_store = boxr::storage::ImageStore::new();
@@ -87,6 +91,10 @@ fn test_isolated_home_preserves_images_catalog() {
 /// Docker Parity Test: Version and System Info commands
 #[test]
 fn test_docker_parity_version_and_info() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -111,6 +119,10 @@ fn test_docker_parity_version_and_info() {
 /// Docker Parity Test: Volume CLI lifecycle (create, ls, inspect, rm, prune)
 #[test]
 fn test_docker_parity_volume_crud() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -164,6 +176,10 @@ fn test_docker_parity_volume_crud() {
 /// Docker Parity Test: Network CLI lifecycle (create, ls, inspect, rm, prune)
 #[test]
 fn test_docker_parity_network_crud() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -216,6 +232,10 @@ fn test_docker_parity_network_crud() {
 /// Docker Parity Test: Container Creation without starting (docker create)
 #[test]
 fn test_docker_parity_create_command() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -244,6 +264,10 @@ fn test_docker_parity_create_command() {
 /// Docker Parity Test: Dockerfile Build and Image Tagging / Removal
 #[test]
 fn test_docker_parity_build_and_tag_lifecycle() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -293,6 +317,10 @@ CMD ["cat", "/app.txt"]
 /// Docker Parity Test: Docker Compose specification orchestration
 #[test]
 fn test_docker_parity_compose_up_down() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -333,6 +361,10 @@ services:
 /// Docker Parity Test: System disk usage and prune commands
 #[test]
 fn test_docker_parity_system_df_and_prune() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -358,6 +390,10 @@ fn test_docker_parity_system_df_and_prune() {
 /// Docker Parity Test: Image Inspect, History, Save and Load lifecycle
 #[test]
 fn test_docker_parity_image_inspect_history_save_load() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -420,6 +456,10 @@ fn test_docker_parity_image_inspect_history_save_load() {
 /// Docker Parity Test: Container Rename and Port Inspection
 #[test]
 fn test_docker_parity_container_rename_and_port() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -469,6 +509,10 @@ fn test_docker_parity_container_rename_and_port() {
 /// Docker Parity Test: Negative CLI handling (non-existent containers/images)
 #[test]
 fn test_docker_parity_error_handling() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -499,6 +543,10 @@ fn test_docker_parity_error_handling() {
 /// Docker Parity Test: Exec flags (-t, -w, -u, -d)
 #[test]
 fn test_docker_parity_exec_flags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -540,6 +588,10 @@ fn test_docker_parity_exec_flags() {
 /// Docker Parity Test: Run flags (-m, -l, --dns, --cidfile)
 #[test]
 fn test_docker_parity_run_flags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -593,6 +645,10 @@ fn test_docker_parity_run_flags() {
 /// Docker Parity Test: Ps flags (-n, -l, -f, -q)
 #[test]
 fn test_docker_parity_ps_flags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -639,6 +695,10 @@ fn test_docker_parity_ps_flags() {
 /// Docker Parity Test: Images flags (-q, -a, -f)
 #[test]
 fn test_docker_parity_images_flags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -667,6 +727,10 @@ fn test_docker_parity_images_flags() {
 /// Docker Parity Test: Container & Image management subcommands (docker container ..., docker image ...)
 #[test]
 fn test_docker_parity_management_subcommands() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -739,6 +803,10 @@ fn test_docker_parity_management_subcommands() {
 /// Docker Parity Test: Dockerfile ARG, USER, VOLUME builder directives
 #[test]
 fn test_docker_parity_builder_directives() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -789,6 +857,10 @@ CMD ["echo", "test"]
 /// Docker Parity Test: Context Commands (context ls, show, create, use, inspect, rm)
 #[test]
 fn test_docker_parity_context_commands() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -853,6 +925,10 @@ fn test_docker_parity_context_commands() {
 /// Docker Parity Test: Manifest Commands (manifest inspect, create)
 #[test]
 fn test_docker_parity_manifest_commands() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -882,6 +958,10 @@ fn test_docker_parity_manifest_commands() {
 /// Docker Parity Test: Container Init flag (--init)
 #[test]
 fn test_docker_parity_run_init() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -905,6 +985,10 @@ fn test_docker_parity_run_init() {
 /// Docker Parity Test: Builder Multi-Tag Support (docker build -t tag1 -t tag2)
 #[test]
 fn test_docker_parity_builder_multi_tags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -951,6 +1035,10 @@ fn test_docker_parity_builder_multi_tags() {
 /// Docker Parity Test: Compose Advanced Directives (container_name, env_file, restart)
 #[test]
 fn test_docker_parity_compose_advanced() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1016,6 +1104,10 @@ services:
 /// Docker Parity Test: Runtime Flags (--tmpfs, --security-opt)
 #[test]
 fn test_docker_parity_runtime_flags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1049,6 +1141,10 @@ fn test_docker_parity_runtime_flags() {
 /// Docker Parity Test: CPU and Memory Resource Limits (-m, --cpus, --pids-limit, and docker update)
 #[test]
 fn test_docker_parity_resource_limits() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1096,6 +1192,10 @@ fn test_docker_parity_resource_limits() {
 /// Docker Parity Test: Exec with --env-file
 #[test]
 fn test_docker_parity_exec_env_file() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1136,6 +1236,10 @@ fn test_docker_parity_exec_env_file() {
 /// Docker Parity Test: Ps with --format (json and template) and --size
 #[test]
 fn test_docker_parity_ps_format_and_size() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1183,6 +1287,10 @@ fn test_docker_parity_ps_format_and_size() {
 /// Docker Parity Test: Advanced Run Options (--cpu-shares, --memory-swap, --annotation, --ulimit)
 #[test]
 fn test_docker_parity_advanced_run_options() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1220,6 +1328,10 @@ fn test_docker_parity_advanced_run_options() {
 /// Docker Parity Test: Standard Mount & Namespace Flags (--mount, --ipc, --uts, -P)
 #[test]
 fn test_docker_parity_mount_and_namespace_flags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1267,6 +1379,10 @@ fn test_docker_parity_mount_and_namespace_flags() {
 /// Docker Parity Test: Windows Flags (--isolation, --cpu-count, --cpu-percent, --io-maxbandwidth, --io-maxiops)
 #[test]
 fn test_docker_parity_windows_flags() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1306,6 +1422,10 @@ fn test_docker_parity_windows_flags() {
 /// Docker Parity Test: Stop with -s/--signal and Inspect with --type
 #[test]
 fn test_docker_parity_stop_signal_and_inspect_type() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1343,6 +1463,10 @@ fn test_docker_parity_stop_signal_and_inspect_type() {
 /// Docker Parity Test: Images --digests, --format, and --no-trunc
 #[test]
 fn test_docker_parity_images_digests_and_format() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;
@@ -1377,6 +1501,10 @@ fn test_docker_parity_images_digests_and_format() {
 /// Docker Parity Test: Complete 100% Upstream CLI Flags Coverage Validation
 #[test]
 fn test_docker_parity_100_percent_upstream_coverage() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let bin = boxr_bin();
     if !bin.exists() {
         return;

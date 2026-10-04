@@ -7,6 +7,10 @@ use std::time::Duration;
 #[test]
 #[ignore]
 fn test_j_concurrent_runs() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let mut children = Vec::new();
@@ -29,6 +33,10 @@ fn test_j_concurrent_runs() {
 #[test]
 #[ignore]
 fn test_j_rapid_restart_nginx() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "nginx:alpine");
     let ctr = format!("bb-rapid-{}", rand_suffix());

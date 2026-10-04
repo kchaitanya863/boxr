@@ -6,6 +6,10 @@ use std::time::Duration;
 
 #[test]
 fn test_a1_smoke_version_and_run() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     let version = run_boxr_ok(&home, &["version"]);
     assert!(version.contains("Client:"));
@@ -16,6 +20,10 @@ fn test_a1_smoke_version_and_run() {
 
 #[test]
 fn test_a2_tmp_sticky_and_nonroot_write() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let mode = run_boxr_ok(
@@ -45,6 +53,10 @@ fn test_a2_tmp_sticky_and_nonroot_write() {
 
 #[test]
 fn test_a3_dev_shm_and_shm_size() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -81,6 +93,10 @@ fn test_a3_dev_shm_and_shm_size() {
     ignore = "urandom device probe is slow/flaky in micro-VM under cargo test"
 )]
 fn test_a4_device_nodes_nonroot() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -101,6 +117,10 @@ fn test_a4_device_nodes_nonroot() {
 
 #[test]
 fn test_a5_apt_priv_drop() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "ubuntu:24.04");
     let out = run_boxr(
@@ -126,6 +146,10 @@ fn test_a5_apt_priv_drop() {
 
 #[test]
 fn test_a6_postgres_named_volume() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "postgres:16-alpine");
     let suffix = rand_suffix();
@@ -165,6 +189,10 @@ fn test_a6_postgres_named_volume() {
     ignore = "micro-VM port forwarding is flaky under cargo test on macOS"
 )]
 fn test_a7_nginx_publish() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "nginx:alpine");
     let suffix = rand_suffix();
@@ -199,6 +227,10 @@ fn test_a7_nginx_publish() {
 
 #[test]
 fn test_a8_readonly_rootfs_writable_volume() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let dir = tempfile::tempdir().unwrap();
@@ -222,6 +254,10 @@ fn test_a8_readonly_rootfs_writable_volume() {
 
 #[test]
 fn test_a9_init_zombie_reaping() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -243,6 +279,10 @@ fn test_a9_init_zombie_reaping() {
 
 #[test]
 fn test_a10_daemon_ping() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     let sock = home.join("bb-daemon.sock");
     let _ = std::fs::remove_file(&sock);

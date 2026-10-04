@@ -6,6 +6,10 @@ use std::fs;
 
 #[test]
 fn test_f1_rootless_id() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(&home, &["run", "--rm", "alpine", "id"]);
@@ -14,6 +18,10 @@ fn test_f1_rootless_id() {
 
 #[test]
 fn test_f2_nonroot_user() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -25,6 +33,10 @@ fn test_f2_nonroot_user() {
 
 #[test]
 fn test_f3_readonly_rootfs_ero_fs() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr(
@@ -44,6 +56,10 @@ fn test_f3_readonly_rootfs_ero_fs() {
 
 #[test]
 fn test_f4_privileged_flag_behavior() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -56,6 +72,10 @@ fn test_f4_privileged_flag_behavior() {
 
 #[test]
 fn test_f8_env_isolation_between_containers() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
@@ -92,6 +112,10 @@ fn test_f8_env_isolation_between_containers() {
 
 #[test]
 fn test_f9_bind_mount_dotdot_rejected_or_safe() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let base = tempfile::tempdir().unwrap();
@@ -107,6 +131,10 @@ fn test_f9_bind_mount_dotdot_rejected_or_safe() {
 
 #[test]
 fn test_f11_dangerous_root_mount() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr(

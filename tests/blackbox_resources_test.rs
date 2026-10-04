@@ -9,6 +9,10 @@ use blackbox::*;
     ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
 )]
 fn test_g1_memory_limit_accepts_flag() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -24,6 +28,10 @@ fn test_g1_memory_limit_accepts_flag() {
     ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
 )]
 fn test_g4_cpus_limit_accepts_flag() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -39,6 +47,10 @@ fn test_g4_cpus_limit_accepts_flag() {
     ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
 )]
 fn test_g5_pids_limit_accepts_flag() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -62,6 +74,10 @@ fn test_g5_pids_limit_accepts_flag() {
     ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
 )]
 fn test_g6_shm_size_with_memory() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr(
@@ -98,6 +114,10 @@ fn test_g7_invalid_memory_rejected() {
     ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
 )]
 fn test_g8_valid_memory_units() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     for unit in ["10k", "256m", "1g"] {
