@@ -218,7 +218,8 @@ pub fn run_detached_until_http(
     url: &str,
     timeout: Duration,
 ) -> bool {
-    let attempts = if cfg!(target_os = "macos") { 3 } else { 1 };
+    // Micro-VM boot and port-forward helper startup can be slow on CI; retry.
+    let attempts = 3;
     for attempt in 0..attempts {
         if attempt > 0 {
             if let Some(name) = run_args
