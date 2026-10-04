@@ -407,6 +407,7 @@ fn image_rootfs_valid(home: &Path, image: &str) -> bool {
 /// Forks a child to probe unshare(CLONE_NEWNET) so the test process's own
 /// network namespace is unaffected. GitHub hosted runners block this with
 /// EPERM, so netns-dependent tests skip gracefully there.
+#[cfg(target_os = "linux")]
 pub fn netns_available() -> bool {
     unsafe {
         let pid = libc::fork();
@@ -421,4 +422,10 @@ pub fn netns_available() -> bool {
         }
     }
     false
+}
+
+/// macOS micro-VM networking does not use Linux network namespaces.
+#[cfg(not(target_os = "linux"))]
+pub fn netns_available() -> bool {
+    true
 }

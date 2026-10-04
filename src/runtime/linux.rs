@@ -228,6 +228,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     eprintln!("Failed to unshare user namespace: {:?}", e);
                     std::process::exit(1);
                 }
+                // Required before parent writes gid_map (newuidmap path skips write_proc_mappings).
+                let _ = fs::write("/proc/self/setgroups", "deny");
 
                 // 2. Notify parent that user namespace has been created
                 if let Err(e) = child_sock.write_all(b"ready") {
@@ -284,23 +286,20 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             Err(_) => {}
                         }
                     }
-                    // Fork port-forward helper inside the container netns: it bridges
-                    // the host forwarder's Unix sockets to the container's localhost.
-                    // (The host-side daemon cannot reach the container netns directly.)
-                    if !ports.is_empty() {
-                        match unsafe { fork() } {
-                            Ok(ForkResult::Child) => {
-                                let _ = crate::network::rootless::run_forward_helper(
-                                    bundle_path,
-                                    &ports,
-                                );
-                                std::process::exit(0);
-                            }
-                            Ok(ForkResult::Parent { child: fwd_child }) => {
-                                fwd_helper_pid = Some(fwd_child);
-                            }
-                            Err(_) => {}
+                }
+                // Fork port-forward helper inside the container netns for any published
+                // ports when pasta is not handling forwarding.
+                if !ports.is_empty() && !use_pasta {
+                    match unsafe { fork() } {
+                        Ok(ForkResult::Child) => {
+                            let _ =
+                                crate::network::rootless::run_forward_helper(bundle_path, &ports);
+                            std::process::exit(0);
                         }
+                        Ok(ForkResult::Parent { child: fwd_child }) => {
+                            fwd_helper_pid = Some(fwd_child);
+                        }
+                        Err(_) => {}
                     }
                 }
 
@@ -418,20 +417,18 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         Err(_) => {}
                     }
                 }
-                // Fork port-forward helper inside the container netns: it bridges
-                // the host forwarder's Unix sockets to the container's localhost.
-                if !ports.is_empty() {
-                    match unsafe { fork() } {
-                        Ok(ForkResult::Child) => {
-                            let _ =
-                                crate::network::rootless::run_forward_helper(bundle_path, &ports);
-                            std::process::exit(0);
-                        }
-                        Ok(ForkResult::Parent { child: fwd_child }) => {
-                            fwd_helper_pid = Some(fwd_child);
-                        }
-                        Err(_) => {}
+            }
+            if !ports.is_empty() {
+                match unsafe { fork() } {
+                    Ok(ForkResult::Child) => {
+                        let _ =
+                            crate::network::rootless::run_forward_helper(bundle_path, &ports);
+                        std::process::exit(0);
                     }
+                    Ok(ForkResult::Parent { child: fwd_child }) => {
+                        fwd_helper_pid = Some(fwd_child);
+                    }
+                    Err(_) => {}
                 }
             }
         }

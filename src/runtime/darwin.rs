@@ -231,11 +231,39 @@ pub fn execute_bundle(
     let runner_bin = ensure_vz_runner()?;
     let (kernel_path, initrd_path) = ensure_vm_assets()?;
 
+    if !ports.is_empty() {
+        let ports_json = serde_json::to_string(ports)?;
+        fs::write(bundle_path.join("ports.json"), ports_json)?;
+
+        // Host-side persistent forwarder (same as Linux): binds published ports and
+        // relays through Unix sockets in the bundle dir.
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("boxr"));
+        let mut fwd_cmd = Command::new(&exe);
+        fwd_cmd
+            .arg("__internal-port-forward")
+            .arg(bundle_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            fwd_cmd.process_group(0);
+        }
+        let _ = fwd_cmd.spawn();
+    }
+
+    let abs_bundle = bundle_path
+        .canonicalize()
+        .context("Failed to canonicalize bundle path")?;
+
     let mut cmd = Command::new(&runner_bin);
     cmd.arg("--bundle").arg(bundle_path);
     cmd.arg("--rootfs").arg(&abs_rootfs);
     cmd.arg("--kernel").arg(&kernel_path);
     cmd.arg("--initrd").arg(&initrd_path);
+    cmd.arg("--mount")
+        .arg(format!("boxr_bundle={}", abs_bundle.display()));
 
     for p in ports {
         let host_ip_str = p.host_ip.as_deref().unwrap_or("0.0.0.0");
@@ -258,6 +286,14 @@ pub fn execute_bundle(
     run_script.push_str("ln -s /proc/self/fd/1 /dev/stdout 2>/dev/null || true\n");
     run_script.push_str("ln -s /proc/self/fd/2 /dev/stderr 2>/dev/null || true\n");
     run_script.push_str("ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true\n");
+    run_script.push_str("mkdir -p /boxr-bundle 2>/dev/null || true\n");
+    run_script.push_str("mount -t virtiofs boxr_bundle /boxr-bundle 2>/dev/null || true\n");
+    run_script.push_str("ip link set eth0 up 2>/dev/null || true\n");
+    run_script.push_str(
+        "udhcpc -i eth0 -q -n -t 5 2>/dev/null || (ip addr add 192.168.64.2/24 dev eth0 2>/dev/null; ip route add default via 192.168.64.1 dev eth0 2>/dev/null) || true\n",
+    );
+    // Published ports are relayed by the host __internal-port-forward daemon dialing
+    // the guest NAT address (192.168.64.2) once eth0 is configured below.
     let mut dns_str = String::new();
     let dns_file = bundle_path.join("dns.json");
     if dns_file.exists() {

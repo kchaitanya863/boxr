@@ -1337,6 +1337,8 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     }
 
     let parsed_ports = parse_ports(&args.ports)?;
+    validate_network_name(&args.network, None)?;
+    guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
     guardrails::PortCollisionGuard::ensure_no_conflicts(&parsed_ports)?;
 
     // Resolve volume mounts
@@ -1830,6 +1832,16 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     if let Some(pod_name) = &args.pod {
         let pod_store = pod::PodStore::new();
         let _ = pod_store.add_container_to_pod(pod_name, &container_id);
+    }
+
+    // Register bridge network endpoint (same as compose up) so inspect/disconnect work.
+    if network::resolved_bridge_network_name(&args.network).is_some() {
+        let _ = network::connect_container_to_bridge_network(
+            &args.network,
+            &container_id,
+            &container_name,
+            None,
+        );
     }
 
     if args.detach {
@@ -3205,15 +3217,15 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                 .find(|c| c.name.contains(&opts.service))
                 .ok_or_else(|| anyhow!("Service '{}' not running", opts.service))?;
             let exec_args = cli::ExecArgs {
-                detach: false,
-                interactive: true,
-                tty: true,
-                privileged: false,
-                env_file: None,
+                detach: opts.detach,
+                interactive: !opts.detach && (opts.interactive || !opts.no_tty),
+                tty: !opts.detach && !opts.no_tty,
+                privileged: opts.privileged,
+                env_file: opts.env_file.clone(),
                 detach_keys: None,
-                user: None,
-                workdir: None,
-                env: Vec::new(),
+                user: opts.user.clone(),
+                workdir: opts.workdir.clone(),
+                env: opts.env.clone(),
                 container: c.name.clone(),
                 command: opts.command,
             };
@@ -4160,6 +4172,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     validate_network_name(&args.network, home_opt)?;
 
     let parsed_ports = parse_ports(&args.ports)?;
+    guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
 
     let vol_store = match home_opt {
         Some(h) => VolumeStore::with_home(h.to_path_buf()),
@@ -4732,6 +4745,16 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     ));
 
     container_store.add(record)?;
+
+    if network::resolved_bridge_network_name(&args.network).is_some() {
+        let _ = network::connect_container_to_bridge_network(
+            &args.network,
+            &container_id,
+            &container_name,
+            home_opt,
+        );
+    }
+
     Ok(container_id)
 }
 

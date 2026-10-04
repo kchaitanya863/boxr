@@ -20,6 +20,39 @@ pub struct PortMapping {
     pub protocol: String, // "tcp" or "udp"
 }
 
+/// Resolve a user-facing network flag to a NetworkStore name for bridge attachment.
+pub fn resolved_bridge_network_name(network: &str) -> Option<String> {
+    let mode = pasta::NetworkMode::parse(network);
+    if mode != pasta::NetworkMode::Bridge {
+        return None;
+    }
+    let name = match network {
+        "bridge" | "default" | "auto" | "" => NetworkStore::DEFAULT_NETWORK,
+        other => other,
+    };
+    Some(name.to_string())
+}
+
+/// Register a running container on its bridge network (if applicable).
+pub fn connect_container_to_bridge_network(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    home: Option<&std::path::Path>,
+) -> Result<()> {
+    let net_name = resolved_bridge_network_name(network)
+        .ok_or_else(|| anyhow!("network {} is not a bridge network", network))?;
+    let store = match home {
+        Some(h) => NetworkStore::with_home(h.to_path_buf()),
+        None => NetworkStore::new(),
+    };
+    if store.find(&net_name).is_none() {
+        return Err(anyhow!("network {} not found", net_name));
+    }
+    let _ = store.connect_container(&net_name, container_id, container_name)?;
+    Ok(())
+}
+
 impl PortMapping {
     fn parse_port_or_range(s: &str) -> Result<Vec<u16>> {
         if let Some((start, end)) = s.split_once('-') {
