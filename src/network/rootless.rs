@@ -9,22 +9,37 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 /// A user-space TCP port forwarder proxy running in rootless user mode without requiring root/sudo privileges.
-/// The forwarder listens on the host and relays each connection through a Unix
+/// On Unix, the forwarder listens on the host and relays each connection through a Unix
 /// socket into the container's network namespace (see `run_forward_helper`).
 /// Unix sockets are filesystem-scoped, so this works across network namespaces
 /// without setns and without any host route into the container.
+/// On Windows (no network namespaces), it dials the target TCP address directly.
 pub struct RootlessPortForwarder {
     host_addr: SocketAddr,
+    #[cfg(unix)]
     target_sock: PathBuf,
+    #[cfg(windows)]
+    target_addr: SocketAddr,
     stop_notify: Arc<Notify>,
     is_stopped: Arc<AtomicBool>,
 }
 
 impl RootlessPortForwarder {
+    #[cfg(unix)]
     pub fn new(host_addr: SocketAddr, target_sock: PathBuf) -> Self {
         Self {
             host_addr,
             target_sock,
+            stop_notify: Arc::new(Notify::new()),
+            is_stopped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(windows)]
+    pub fn new(host_addr: SocketAddr, target_addr: SocketAddr) -> Self {
+        Self {
+            host_addr,
+            target_addr,
             stop_notify: Arc::new(Notify::new()),
             is_stopped: Arc::new(AtomicBool::new(false)),
         }
@@ -41,7 +56,10 @@ impl RootlessPortForwarder {
 
         let stop_notify = self.stop_notify.clone();
         let is_stopped = self.is_stopped.clone();
+        #[cfg(unix)]
         let target_sock = self.target_sock.clone();
+        #[cfg(windows)]
+        let target_addr = self.target_addr;
 
         tokio::spawn(async move {
             loop {
@@ -55,17 +73,31 @@ impl RootlessPortForwarder {
                         }
                         match accept_res {
                             Ok((mut inbound, _)) => {
-                                let sock_path = target_sock.clone();
-                                tokio::spawn(async move {
-                                    // Relay through the in-netns forward helper's Unix socket.
-                                    // If the helper is not (yet) running, drop the connection;
-                                    // the client will retry.
-                                    if let Ok(mut outbound) =
-                                        tokio::net::UnixStream::connect(&sock_path).await
-                                    {
-                                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
-                                    }
-                                });
+                                #[cfg(unix)]
+                                {
+                                    let sock_path = target_sock.clone();
+                                    tokio::spawn(async move {
+                                        // Relay through the in-netns forward helper's Unix socket.
+                                        // If the helper is not (yet) running, drop the connection;
+                                        // the client will retry.
+                                        if let Ok(mut outbound) =
+                                            tokio::net::UnixStream::connect(&sock_path).await
+                                        {
+                                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                                        }
+                                    });
+                                }
+                                #[cfg(windows)]
+                                {
+                                    tokio::spawn(async move {
+                                        // No network namespaces on Windows; dial directly.
+                                        if let Ok(mut outbound) =
+                                            TcpStream::connect(target_addr).await
+                                        {
+                                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                                        }
+                                    });
+                                }
                             }
                             Err(_) => break,
                         }
@@ -91,8 +123,9 @@ pub struct PortForwardManager;
 
 impl PortForwardManager {
     /// Start forwarding for all requested port mappings.
-    /// Each mapping is relayed through the in-netns forward helper's Unix
+    /// On Unix, each mapping is relayed through the in-netns forward helper's Unix
     /// socket (`forward_sock_name`), which bridges to the container's localhost.
+    /// On Windows (no netns), the forwarder dials the target TCP address directly.
     pub async fn start_forwarding(
         bundle_path: &Path,
         ports: &[crate::network::PortMapping],
@@ -104,8 +137,18 @@ impl PortForwardManager {
                 .parse()
                 .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], p.host_port)));
 
-            let sock_path = bundle_path.join(forward_sock_name(p.container_port));
-            let forwarder = Arc::new(RootlessPortForwarder::new(host_addr, sock_path));
+            #[cfg(unix)]
+            let forwarder = {
+                let sock_path = bundle_path.join(forward_sock_name(p.container_port));
+                Arc::new(RootlessPortForwarder::new(host_addr, sock_path))
+            };
+            #[cfg(windows)]
+            let forwarder = {
+                let target_addr: SocketAddr = format!("127.0.0.1:{}", p.container_port)
+                    .parse()
+                    .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], p.container_port)));
+                Arc::new(RootlessPortForwarder::new(host_addr, target_addr))
+            };
             let _ = forwarder.start().await;
             forwarders.push(forwarder);
         }
@@ -116,6 +159,8 @@ impl PortForwardManager {
 /// Unix socket name (inside the container bundle dir) for a published container
 /// port. The in-netns forward helper listens here; the host-side forwarder
 /// daemon connects here to relay inbound connections into the container.
+/// Unix only; Windows has no network namespaces and dials TCP directly.
+#[cfg(unix)]
 pub fn forward_sock_name(container_port: u16) -> String {
     format!("forward-{}.sock", container_port)
 }
@@ -124,6 +169,8 @@ pub fn forward_sock_name(container_port: u16) -> String {
 /// CLONE_NEWNET). For each published port, listens on a Unix socket in the
 /// bundle dir and bridges connections to the container's localhost.
 /// Returns when all listeners fail; normally killed with the container.
+/// Unix only; Windows has no network namespaces.
+#[cfg(unix)]
 pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMapping]) -> Result<()> {
     use std::os::unix::net::UnixListener;
 
@@ -260,6 +307,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_rootless_port_forwarder_lifecycle() {
         let host: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let target = std::path::PathBuf::from("/tmp/boxr-test-nonexistent.sock"); // dummy target
@@ -270,6 +318,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_rootless_port_forwarder_unblocks_on_stop() {
         let host: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let target = std::path::PathBuf::from("/tmp/boxr-test-nonexistent.sock");
@@ -341,6 +390,7 @@ mod tests {
     /// The helper runs in the same netns as the test here, so the dummy TCP
     /// echo server on 127.0.0.1 plays the role of the container's localhost.
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_forward_helper_bridges_into_container_netns() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();
