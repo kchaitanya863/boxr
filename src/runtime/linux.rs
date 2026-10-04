@@ -593,7 +593,9 @@ pub fn exec_in_bundle(
     }
     cmd.args(["-m", "-p", "-u", "--preserve-credentials"]);
     if let Some(wd) = workdir {
-        cmd.arg(format!("--wd={}", wd));
+        // --wdns sets the working directory inside the target namespaces; --wd only
+        // applies on the host and breaks commands like `pwd` after entering mnt ns.
+        cmd.arg(format!("--wdns={}", wd));
     }
     if let Some(u) = user {
         if let Ok(uid) = u.parse::<u32>() {
@@ -628,11 +630,33 @@ pub fn exec_in_bundle(
                 ("pid", CloneFlags::CLONE_NEWPID),
                 ("mnt", CloneFlags::CLONE_NEWNS),
             ];
+            let mut entered_mount_ns = false;
             for (name, flag) in ns_types {
                 let ns_path = format!("/proc/{}/ns/{}", pid, name);
                 if let Ok(f) = std::fs::File::open(&ns_path) {
-                    let _ = setns(&f, flag);
+                    if let Err(e) = setns(&f, flag) {
+                        if name == "mnt" {
+                            return Err(anyhow!(
+                                "Failed to enter container mount namespace via setns: {}",
+                                e
+                            ));
+                        }
+                        eprintln!("Warning: failed to enter {} namespace: {}", name, e);
+                    } else if name == "mnt" {
+                        entered_mount_ns = true;
+                    }
+                } else if name == "mnt" {
+                    return Err(anyhow!(
+                        "Failed to open mount namespace for container pid {}",
+                        pid
+                    ));
                 }
+            }
+            if !entered_mount_ns {
+                return Err(anyhow!(
+                    "Failed to enter container mount namespace for pid {}",
+                    pid
+                ));
             }
 
             match unsafe { fork() }? {
@@ -642,10 +666,13 @@ pub fn exec_in_bundle(
                     _ => Ok(1),
                 },
                 ForkResult::Child => {
-                    if let Some(wd) = workdir {
-                        let _ = chdir(Path::new(wd));
-                    } else {
-                        let _ = chdir(Path::new("/"));
+                    let target_wd = workdir.unwrap_or("/");
+                    if let Err(e) = chdir(Path::new(target_wd)) {
+                        eprintln!(
+                            "Failed to change directory to '{}' in container: {}",
+                            target_wd, e
+                        );
+                        std::process::exit(127);
                     }
                     for e in env {
                         if let Some((k, v)) = e.split_once('=') {
