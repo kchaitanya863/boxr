@@ -551,9 +551,40 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Points $HOME at a temp dir for the duration of a test, then restores it.
+    /// Needed because `get_credentials` falls back to ~/.docker/config.json for
+    /// Docker compatibility, which would otherwise leak whatever credentials
+    /// happen to exist on the machine running the tests.
+    struct HomeGuard {
+        orig: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn isolate_to(path: &std::path::Path) -> Self {
+            let orig = std::env::var_os("HOME");
+            // SAFETY: the test suite runs single-threaded (--test-threads=1) and
+            // no other test in this binary reads or writes HOME concurrently.
+            unsafe { std::env::set_var("HOME", path) };
+            Self { orig }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: same as above; the guard restores the previous value.
+            unsafe {
+                match self.orig.take() {
+                    Some(h) => std::env::set_var("HOME", h),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_credential_store_login_logout() {
         let temp = tempdir().unwrap();
+        let _home_guard = HomeGuard::isolate_to(temp.path());
         let store = CredentialStore {
             config_file: temp.path().join("config.json"),
         };
