@@ -196,6 +196,13 @@ impl ComposeProject {
             let _ = net_store.connect_container(&project_net_name, &container_name, svc_name);
         }
 
+        #[cfg(target_os = "macos")]
+        let mesh_ports: std::collections::HashMap<String, u16> = order
+            .iter()
+            .enumerate()
+            .map(|(idx, svc)| (svc.clone(), 28000 + idx as u16))
+            .collect();
+
         // Ensure project volumes
         let vol_store = VolumeStore::new();
         for vol_name in self.compose.volumes.keys() {
@@ -319,6 +326,18 @@ impl ComposeProject {
             }
             add_host.sort();
             add_host.dedup();
+
+            #[cfg(target_os = "macos")]
+            for (peer_svc, relay_port) in &mesh_ports {
+                if *peer_svc != *svc_name {
+                    env_vec.push(format!(
+                        "BOXR_MESH_{}={}:{}",
+                        peer_svc.to_uppercase(),
+                        "192.168.64.1",
+                        relay_port
+                    ));
+                }
+            }
 
             let run_args = RunArgs {
                 interactive: false,
@@ -449,6 +468,14 @@ impl ComposeProject {
                 }
                 _ => {}
             }
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Err(e) = crate::network::macos_compose::start_compose_mesh(&project_net_name).await {
+            eprintln!(
+                "Warning: compose inter-service mesh relays unavailable: {:?}",
+                e
+            );
         }
 
         println!("Project '{}' started successfully.", self.name);

@@ -22,28 +22,8 @@ pub fn execute_bundle(
         let mounts_json = serde_json::to_string(mounts)?;
         let _ = fs::write(bundle_path.join("mounts.json"), mounts_json);
     }
-    if !_ports.is_empty() {
-        let ports_json = serde_json::to_string(_ports)?;
-        let _ = fs::write(bundle_path.join("ports.json"), ports_json);
-
-        // Spawn persistent port forwarder daemon for published ports
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
-        let mut fwd_cmd = std::process::Command::new(&exe);
-        fwd_cmd
-            .arg("__internal-port-forward")
-            .arg(bundle_path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            fwd_cmd.process_group(0);
-        }
-
-        let _ = fwd_cmd.spawn();
-    }
+    let ports = crate::network::resolve_bundle_ports(bundle_path, _ports);
+    let _ = crate::network::spawn_port_forward_daemon(bundle_path, &ports);
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
 

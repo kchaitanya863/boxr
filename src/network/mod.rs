@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+pub mod macos_compose;
 pub mod pasta;
 pub mod rootless;
 pub mod usernet;
@@ -9,8 +11,69 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Load published port mappings from a container bundle directory.
+/// Prefers the in-memory list when non-empty; otherwise reads `ports.json`.
+pub fn resolve_bundle_ports(bundle_path: &Path, from_record: &[PortMapping]) -> Vec<PortMapping> {
+    if !from_record.is_empty() {
+        return from_record.to_vec();
+    }
+    let ports_path = bundle_path.join("ports.json");
+    if !ports_path.exists() {
+        return Vec::new();
+    }
+    match fs::read_to_string(&ports_path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Spawn the host-side `__internal-port-forward` daemon for a bundle (no-op when ports empty).
+pub fn spawn_port_forward_daemon(bundle_path: &Path, ports: &[PortMapping]) -> Result<()> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    let ports_json = serde_json::to_string(ports)?;
+    fs::write(bundle_path.join("ports.json"), ports_json)?;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("boxr"));
+    let mut fwd_cmd = std::process::Command::new(&exe);
+    fwd_cmd
+        .arg("__internal-port-forward")
+        .arg(bundle_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        fwd_cmd.process_group(0);
+    }
+    fwd_cmd.spawn().with_context(|| {
+        format!(
+            "failed to spawn port forward daemon for {}",
+            bundle_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Wait until the host forwarder daemon writes `forwarder.pid`.
+pub fn wait_for_forwarder_pid(bundle_path: &Path, timeout: Duration) -> Result<()> {
+    let pid_path = bundle_path.join("forwarder.pid");
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if pid_path.exists() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(anyhow!(
+        "timed out waiting for port forward daemon on {}",
+        bundle_path.display()
+    ))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMapping {

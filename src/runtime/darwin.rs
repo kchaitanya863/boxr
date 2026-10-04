@@ -181,6 +181,80 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Guest init script: wait for virtio-net, bring up eth0, and verify IPv4 before DNS/app start.
+fn macos_guest_network_init_script() -> &'static str {
+    r#"# Wait for virtio-net (up to ~10s)
+i=0
+while [ $i -lt 50 ] && ! ip link show eth0 >/dev/null 2>&1; do
+  sleep 0.2
+  i=$((i + 1))
+done
+# Bring up eth0 with retries; verify IPv4 before continuing
+i=0
+while [ $i -lt 10 ]; do
+  ip link set eth0 up 2>/dev/null || true
+  udhcpc -i eth0 -q -n -t 3 2>/dev/null || true
+  ip -4 addr show dev eth0 2>/dev/null | grep -q 'inet ' && break
+  ip addr add 192.168.64.2/24 dev eth0 2>/dev/null || true
+  ip route add default via 192.168.64.1 dev eth0 2>/dev/null || true
+  ip -4 addr show dev eth0 2>/dev/null | grep -q 'inet ' && break
+  sleep 0.5
+  i=$((i + 1))
+done
+# Compose bridge IP (secondary) + route peers via host gateway when configured
+if [ -f /boxr-bundle/compose_net.json ]; then
+  COMPOSE_IP=$(grep -o '"self_ip":"[^"]*"' /boxr-bundle/compose_net.json | cut -d'"' -f4)
+  COMPOSE_GW=$(grep -o '"gateway":"[^"]*"' /boxr-bundle/compose_net.json | cut -d'"' -f4)
+  COMPOSE_SUBNET=$(grep -o '"subnet":"[^"]*"' /boxr-bundle/compose_net.json | cut -d'"' -f4)
+  if [ -n "$COMPOSE_IP" ]; then
+    ip addr add ${COMPOSE_IP}/24 dev eth0 2>/dev/null || true
+  fi
+  if [ -n "$COMPOSE_SUBNET" ] && [ -n "$COMPOSE_GW" ]; then
+    ip route add ${COMPOSE_SUBNET} via ${COMPOSE_GW} dev eth0 2>/dev/null || true
+  fi
+fi
+"#
+}
+
+/// Write compose network metadata for guest routing when on a compose project network.
+fn write_compose_net_metadata(bundle_path: &Path, spec: &Spec) {
+    let net_name = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network"));
+    let hostname = spec.hostname.as_deref();
+    if net_name.is_none() || hostname.is_none() {
+        return;
+    }
+    let net_name = net_name.unwrap();
+    if !net_name.ends_with("_default") {
+        return;
+    }
+    let net_store = crate::network::NetworkStore::new();
+    let net = match net_store.find(net_name) {
+        Some(n) => n,
+        None => return,
+    };
+    let self_ep = net
+        .containers
+        .values()
+        .find(|ep| ep.container_name == hostname.unwrap() || ep.container_id == hostname.unwrap());
+    let self_ep = match self_ep {
+        Some(ep) => ep,
+        None => return,
+    };
+    let meta = serde_json::json!({
+        "self_ip": self_ep.ipv4_address,
+        "gateway": net.gateway,
+        "subnet": net.subnet,
+        "network": net_name,
+    });
+    let _ = fs::write(
+        bundle_path.join("compose_net.json"),
+        serde_json::to_string(&meta).unwrap_or_default(),
+    );
+}
+
 /// Execute an OCI container bundle on macOS using Apple's native Virtualization.framework.
 pub fn execute_bundle(
     bundle_path: &Path,
@@ -231,27 +305,9 @@ pub fn execute_bundle(
     let runner_bin = ensure_vz_runner()?;
     let (kernel_path, initrd_path) = ensure_vm_assets()?;
 
-    if !ports.is_empty() {
-        let ports_json = serde_json::to_string(ports)?;
-        fs::write(bundle_path.join("ports.json"), ports_json)?;
-
-        // Host-side persistent forwarder (same as Linux): binds published ports and
-        // relays through Unix sockets in the bundle dir.
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("boxr"));
-        let mut fwd_cmd = Command::new(&exe);
-        fwd_cmd
-            .arg("__internal-port-forward")
-            .arg(bundle_path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            fwd_cmd.process_group(0);
-        }
-        let _ = fwd_cmd.spawn();
-    }
+    let resolved_ports = crate::network::resolve_bundle_ports(bundle_path, ports);
+    write_compose_net_metadata(bundle_path, spec);
+    let _ = crate::network::spawn_port_forward_daemon(bundle_path, &resolved_ports);
 
     let abs_bundle = bundle_path
         .canonicalize()
@@ -288,10 +344,7 @@ pub fn execute_bundle(
     run_script.push_str("ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || true\n");
     run_script.push_str("mkdir -p /boxr-bundle 2>/dev/null || true\n");
     run_script.push_str("mount -t virtiofs boxr_bundle /boxr-bundle 2>/dev/null || true\n");
-    run_script.push_str("ip link set eth0 up 2>/dev/null || true\n");
-    run_script.push_str(
-        "udhcpc -i eth0 -q -n -t 5 2>/dev/null || (ip addr add 192.168.64.2/24 dev eth0 2>/dev/null; ip route add default via 192.168.64.1 dev eth0 2>/dev/null) || true\n",
-    );
+    run_script.push_str(macos_guest_network_init_script());
     // Published ports are relayed by the host __internal-port-forward daemon dialing
     // the guest NAT address (192.168.64.2) once eth0 is configured below.
     let mut dns_str = String::new();

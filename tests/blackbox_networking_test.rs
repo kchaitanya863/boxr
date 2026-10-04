@@ -112,6 +112,80 @@ fn test_d5_network_connect() {
 }
 
 #[test]
+fn test_d6_stop_start_restores_port_forward() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
+    let (_guard, home) = isolated_home();
+    pull_if_needed(&home, "nginx:alpine");
+    let suffix = rand_suffix();
+    let ctr = format!("bb-stop-start-{}", suffix);
+    let port = 19700 + suffix.len() as u16;
+    let url = format!("http://127.0.0.1:{}/", port);
+    run_boxr_ok(
+        &home,
+        &[
+            "run",
+            "-d",
+            "--name",
+            &ctr,
+            "-p",
+            &format!("127.0.0.1:{}:80", port),
+            "nginx:alpine",
+        ],
+    );
+    assert!(
+        wait_http_ok(&url, Duration::from_secs(60)),
+        "port {} reachable before stop",
+        port
+    );
+    run_boxr_ok(&home, &["stop", &ctr]);
+    run_boxr_ok(&home, &["start", &ctr]);
+    assert!(
+        wait_http_ok(&url, Duration::from_secs(120)),
+        "port {} not restored after stop/start",
+        port
+    );
+    cleanup_container(&home, &ctr);
+}
+
+#[test]
+fn test_d6b_rapid_restart_survives() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
+    let (_guard, home) = isolated_home();
+    pull_if_needed(&home, "nginx:alpine");
+    let suffix = rand_suffix();
+    let ctr = format!("bb-rapid-restart-{}", suffix);
+    let port = 19800 + suffix.len() as u16;
+    let url = format!("http://127.0.0.1:{}/", port);
+    run_boxr_ok(
+        &home,
+        &[
+            "run",
+            "-d",
+            "--name",
+            &ctr,
+            "-p",
+            &format!("127.0.0.1:{}:80", port),
+            "nginx:alpine",
+        ],
+    );
+    for _ in 0..3 {
+        run_boxr_ok(&home, &["restart", &ctr]);
+    }
+    assert!(
+        wait_http_ok(&url, Duration::from_secs(120)),
+        "container did not survive three rapid restarts with port {}",
+        port
+    );
+    cleanup_container(&home, &ctr);
+}
+
+#[test]
 #[cfg_attr(
     target_os = "macos",
     ignore = "micro-VM port forwarding is flaky under cargo test on macOS"

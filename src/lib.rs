@@ -2105,6 +2105,7 @@ pub fn stop_container_with_home_and_timeout(
                 }
             }
         }
+        let _ = wait_for_container_stopped(&bundle_path, std::time::Duration::from_secs(30));
         let _ = std::fs::remove_file(bundle_path.join("vm.pid"));
         let _ = std::fs::remove_file(bundle_path.join("container.pid"));
         let _ = std::fs::remove_file(bundle_path.join("forwarder.pid"));
@@ -2145,13 +2146,46 @@ pub async fn start_container_with_home(container: &str, home_opt: Option<&Path>)
     let content = fs::read_to_string(&config_file)?;
     let spec: Spec = serde_json::from_str(&content)?;
 
+    let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
     store.update_status(&rec.id, ContainerStatus::Running)?;
-    let _ = execute_bundle(&bundle_path, &spec, &[], &rec.ports, true)?;
-    #[cfg(target_os = "linux")]
-    if !rec.ports.is_empty() {
-        network::wait_for_published_ports(&rec.ports, std::time::Duration::from_secs(90))?;
+    execute_bundle(&bundle_path, &spec, &[], &ports, true)?;
+    if !ports.is_empty() {
+        network::wait_for_forwarder_pid(&bundle_path, std::time::Duration::from_secs(15))?;
+        network::wait_for_published_ports(&ports, std::time::Duration::from_secs(120))?;
     }
     println!("{}", container);
+    Ok(())
+}
+
+/// Wait until container trampoline/VM processes have fully exited.
+#[cfg(unix)]
+fn wait_for_container_stopped(bundle_path: &Path, timeout: std::time::Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        let mut any_alive = false;
+        for name in ["vm.pid", "container.pid"] {
+            let path = bundle_path.join(name);
+            if let Ok(pid_str) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    if unsafe { libc::kill(pid, 0) == 0 } {
+                        any_alive = true;
+                    }
+                }
+            }
+        }
+        if !any_alive {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(anyhow!(
+        "timed out waiting for container at {} to stop",
+        bundle_path.display()
+    ))
+}
+
+#[cfg(not(unix))]
+fn wait_for_container_stopped(_bundle_path: &Path, _timeout: std::time::Duration) -> Result<()> {
     Ok(())
 }
 
@@ -4759,8 +4793,14 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
 }
 
 pub async fn restart_container(args: &cli::RestartArgs) -> Result<()> {
-    let _ = stop_container(&args.container, None);
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    let store = ContainerStore::new();
+    let rec = store
+        .find(&args.container)
+        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+    let bundle_path = PathBuf::from(&rec.bundle_path);
+
+    stop_container(&args.container, None)?;
+    wait_for_container_stopped(&bundle_path, std::time::Duration::from_secs(30))?;
     start_container(&args.container).await?;
     println!("{}", args.container);
     Ok(())
