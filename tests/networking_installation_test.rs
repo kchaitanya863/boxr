@@ -29,6 +29,10 @@ fn is_root_installation() -> bool {
 /// Published TCP port must be reachable in both root and non-root installs.
 #[test]
 fn test_installation_tcp_port_publish() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let label = installation_label();
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "nginx:alpine");
