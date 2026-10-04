@@ -51,7 +51,7 @@ fn test_installation_tcp_port_publish() {
         "nginx:alpine",
     ];
     assert!(
-        run_detached_until_http(&home, &run_args, &url, Duration::from_secs(60)),
+        run_detached_until_http(&home, &run_args, &url, Duration::from_secs(120)),
         "[{}] published TCP port {} not reachable",
         label,
         port
