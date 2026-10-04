@@ -402,3 +402,23 @@ fn image_rootfs_valid(home: &Path, image: &str) -> bool {
     }
     true
 }
+
+/// Returns true if the current environment can create network namespaces.
+/// Forks a child to probe unshare(CLONE_NEWNET) so the test process's own
+/// network namespace is unaffected. GitHub hosted runners block this with
+/// EPERM, so netns-dependent tests skip gracefully there.
+pub fn netns_available() -> bool {
+    unsafe {
+        let pid = libc::fork();
+        if pid == 0 {
+            // Child: probe unshare, exit 0 on success, 1 on failure.
+            let ret = libc::unshare(libc::CLONE_NEWNET);
+            libc::_exit(if ret == 0 { 0 } else { 1 });
+        } else if pid > 0 {
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+            return libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+        }
+    }
+    false
+}

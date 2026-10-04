@@ -10,6 +10,10 @@ use std::time::Duration;
     ignore = "micro-VM port forwarding is flaky under cargo test on macOS"
 )]
 fn test_d1_tcp_publish_and_curl() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "nginx:alpine");
     let suffix = rand_suffix();
@@ -113,6 +117,10 @@ fn test_d5_network_connect() {
     ignore = "micro-VM port forwarding is flaky under cargo test on macOS"
 )]
 fn test_d7_restart_preserves_port_forward() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "nginx:alpine");
     let suffix = rand_suffix();
@@ -147,6 +155,10 @@ fn test_d7_restart_preserves_port_forward() {
     ignore = "micro-VM outbound networking is slow/flaky under cargo test on macOS"
 )]
 fn test_d10_outbound_connectivity() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr(
@@ -209,6 +221,10 @@ fn test_d_network_none_blocks_external() {
     ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
 )]
 fn test_e1_dns_resolution() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr(
@@ -236,6 +252,10 @@ fn test_e1_dns_resolution() {
     ignore = "micro-VM run --rm is slow/flaky under cargo test on macOS"
 )]
 fn test_e2_custom_dns_server() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr_ok(
@@ -278,6 +298,10 @@ fn test_e7_bridge_hosts_name_resolution() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_d_linux_usernet_mode() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = run_boxr(
