@@ -4,7 +4,9 @@
 use boxr::guardrails::validate_network_port_compatibility;
 use boxr::network::pasta::NetworkMode;
 use boxr::network::rootless::{forward_sock_name, forward_udp_sock_name};
-use boxr::network::{NetworkStore, PortMapping, connect_container_to_bridge_network, resolved_bridge_network_name};
+use boxr::network::{
+    NetworkStore, PortMapping, connect_container_to_bridge_network, resolved_bridge_network_name,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -17,13 +19,15 @@ fn test_issue_423_none_and_host_reject_published_ports() {
     }];
     let err = validate_network_port_compatibility("none", &ports).unwrap_err();
     assert!(
-        err.to_string().contains("published ports are not supported"),
+        err.to_string()
+            .contains("published ports are not supported"),
         "expected none+p rejection, got: {}",
         err
     );
     let err = validate_network_port_compatibility("host", &ports).unwrap_err();
     assert!(
-        err.to_string().contains("published ports are not supported"),
+        err.to_string()
+            .contains("published ports are not supported"),
         "expected host+p rejection, got: {}",
         err
     );
@@ -111,17 +115,14 @@ fn test_issue_432_run_registers_custom_bridge_network_endpoint() {
     assert!(resolved_bridge_network_name("none").is_none());
     assert!(resolved_bridge_network_name("host").is_none());
 
-    connect_container_to_bridge_network(
-        net_name,
-        "cid432",
-        "ctr432",
-        Some(home),
-    )
-    .unwrap();
+    connect_container_to_bridge_network(net_name, "cid432", "ctr432", Some(home)).unwrap();
 
     let net = store.find(net_name).unwrap();
     assert_eq!(net.containers.len(), 1);
-    let ep = net.containers.get("cid432").expect("endpoint keyed by container id");
+    let ep = net
+        .containers
+        .get("cid432")
+        .expect("endpoint keyed by container id");
     assert_eq!(ep.container_id, "cid432");
     assert_eq!(ep.container_name, "ctr432");
 }

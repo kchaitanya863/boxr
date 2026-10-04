@@ -421,8 +421,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             if !ports.is_empty() {
                 match unsafe { fork() } {
                     Ok(ForkResult::Child) => {
-                        let _ =
-                            crate::network::rootless::run_forward_helper(bundle_path, &ports);
+                        let _ = crate::network::rootless::run_forward_helper(bundle_path, &ports);
                         std::process::exit(0);
                     }
                     Ok(ForkResult::Parent { child: fwd_child }) => {

@@ -191,7 +191,8 @@ fn test_installation_udp_port_bind() {
     );
     let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     assert!(
-        udp.send_to(b"probe", format!("127.0.0.1:{}", host_port)).is_ok(),
+        udp.send_to(b"probe", format!("127.0.0.1:{}", host_port))
+            .is_ok(),
         "[{}] host UDP port {} must accept datagrams",
         label,
         host_port

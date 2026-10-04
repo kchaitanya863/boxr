@@ -160,12 +160,9 @@ impl RootlessUdpPortForwarder {
     }
 
     pub async fn start(&self) -> Result<()> {
-        let socket = UdpSocket::bind(self.host_addr).await.with_context(|| {
-            format!(
-                "Failed to bind UDP port forwarder on {}",
-                self.host_addr
-            )
-        })?;
+        let socket = UdpSocket::bind(self.host_addr)
+            .await
+            .with_context(|| format!("Failed to bind UDP port forwarder on {}", self.host_addr))?;
         let stop_notify = self.stop_notify.clone();
         let is_stopped = self.is_stopped.clone();
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -308,7 +305,8 @@ impl PortForwardManager {
                     let _ = forwarder.start().await;
                     forwarders.push(ActiveForwarder::Udp(forwarder));
                 } else {
-                    let forwarder = Arc::new(RootlessPortForwarder::new_tcp(host_addr, target_addr));
+                    let forwarder =
+                        Arc::new(RootlessPortForwarder::new_tcp(host_addr, target_addr));
                     let _ = forwarder.start().await;
                     forwarders.push(ActiveForwarder::Tcp(forwarder));
                 }
@@ -432,12 +430,7 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                         Ok(n) if n >= 8 => n,
                         _ => return,
                     };
-                    let _peer_ip = std::net::Ipv4Addr::new(
-                        frame[0],
-                        frame[1],
-                        frame[2],
-                        frame[3],
-                    );
+                    let _peer_ip = std::net::Ipv4Addr::new(frame[0], frame[1], frame[2], frame[3]);
                     let _peer_port = u16::from_be_bytes([frame[4], frame[5]]);
                     let payload_len = u16::from_be_bytes([frame[6], frame[7]]) as usize;
                     if 8 + payload_len > n {
@@ -448,10 +441,7 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                         Err(_) => return,
                     };
                     let _ = udp.connect(target);
-                    if udp
-                        .send(&frame[8..8 + payload_len])
-                        .is_err()
-                    {
+                    if udp.send(&frame[8..8 + payload_len]).is_err() {
                         return;
                     }
                     let mut resp = [0u8; 65507];
@@ -581,7 +571,10 @@ mod tests {
         assert!(udp.send_to(b"ping", host_addr).await.is_ok());
         use tokio::net::TcpStream;
         let tcp = TcpStream::connect(host_addr).await;
-        assert!(tcp.is_err(), "UDP forwarder must not accept TCP connections");
+        assert!(
+            tcp.is_err(),
+            "UDP forwarder must not accept TCP connections"
+        );
         forwarder.stop();
     }
 
