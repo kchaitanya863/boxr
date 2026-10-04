@@ -303,6 +303,38 @@ pub struct ComposeRestartArgs {
 #[derive(Args, Debug, Default)]
 pub struct ComposeExecArgs {
     pub service: String,
+
+    /// Detached mode: run command in the background
+    #[arg(short = 'd', long = "detach")]
+    pub detach: bool,
+
+    /// Disable pseudo-TTY allocation (Docker `-T` parity)
+    #[arg(short = 'T', long = "no-TTY")]
+    pub no_tty: bool,
+
+    /// Keep STDIN open even if not attached
+    #[arg(short = 'i', long = "interactive")]
+    pub interactive: bool,
+
+    /// Give extended privileges to the command
+    #[arg(long = "privileged")]
+    pub privileged: bool,
+
+    /// Read in a file of environment variables
+    #[arg(long = "env-file")]
+    pub env_file: Option<String>,
+
+    /// Username or UID
+    #[arg(short = 'u', long = "user")]
+    pub user: Option<String>,
+
+    /// Working directory inside the container
+    #[arg(short = 'w', long = "workdir")]
+    pub workdir: Option<String>,
+
+    #[arg(short = 'e', long = "env")]
+    pub env: Vec<String>,
+
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
 }

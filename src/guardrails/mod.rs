@@ -148,6 +148,27 @@ impl DiskGuard {
 /// Host Port Collision Guard
 pub struct PortCollisionGuard;
 
+/// Reject published ports on network modes where forwarding is meaningless.
+pub fn validate_network_port_compatibility(
+    network: &str,
+    ports: &[crate::network::PortMapping],
+) -> Result<()> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    let mode = crate::network::pasta::NetworkMode::parse(network);
+    if matches!(
+        mode,
+        crate::network::pasta::NetworkMode::None | crate::network::pasta::NetworkMode::Host
+    ) {
+        return Err(anyhow!(
+            "published ports are not supported with --network {}",
+            network
+        ));
+    }
+    Ok(())
+}
+
 impl PortCollisionGuard {
     /// Ensure none of the requested host ports are already bound by other running containers
     pub fn ensure_no_conflicts(requested_ports: &[crate::network::PortMapping]) -> Result<()> {

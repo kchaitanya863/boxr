@@ -218,7 +218,8 @@ pub fn run_detached_until_http(
     url: &str,
     timeout: Duration,
 ) -> bool {
-    let attempts = if cfg!(target_os = "macos") { 3 } else { 1 };
+    // Micro-VM boot and port-forward helper startup can be slow on CI; retry.
+    let attempts = 3;
     for attempt in 0..attempts {
         if attempt > 0 {
             if let Some(name) = run_args
@@ -407,6 +408,7 @@ fn image_rootfs_valid(home: &Path, image: &str) -> bool {
 /// Forks a child to probe unshare(CLONE_NEWNET) so the test process's own
 /// network namespace is unaffected. GitHub hosted runners block this with
 /// EPERM, so netns-dependent tests skip gracefully there.
+#[cfg(target_os = "linux")]
 pub fn netns_available() -> bool {
     unsafe {
         let pid = libc::fork();
@@ -421,4 +423,10 @@ pub fn netns_available() -> bool {
         }
     }
     false
+}
+
+/// macOS micro-VM networking does not use Linux network namespaces.
+#[cfg(not(target_os = "linux"))]
+pub fn netns_available() -> bool {
+    true
 }

@@ -2,30 +2,29 @@
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::Notify;
 
 /// A user-space TCP port forwarder proxy running in rootless user mode without requiring root/sudo privileges.
-/// On Unix, the forwarder listens on the host and relays each connection through a Unix
-/// socket into the container's network namespace (see `run_forward_helper`).
-/// Unix sockets are filesystem-scoped, so this works across network namespaces
-/// without setns and without any host route into the container.
-/// On Windows (no network namespaces), it dials the target TCP address directly.
+/// On Linux, the forwarder relays through a Unix socket into the container netns (`run_forward_helper`).
+/// On macOS micro-VMs and Windows, it dials the guest/container TCP address directly.
 pub struct RootlessPortForwarder {
     host_addr: SocketAddr,
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     target_sock: PathBuf,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     target_addr: SocketAddr,
     stop_notify: Arc<Notify>,
     is_stopped: Arc<AtomicBool>,
 }
 
 impl RootlessPortForwarder {
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     pub fn new(host_addr: SocketAddr, target_sock: PathBuf) -> Self {
         Self {
             host_addr,
@@ -35,14 +34,26 @@ impl RootlessPortForwarder {
         }
     }
 
-    #[cfg(windows)]
-    pub fn new(host_addr: SocketAddr, target_addr: SocketAddr) -> Self {
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn new_tcp(host_addr: SocketAddr, target_addr: SocketAddr) -> Self {
         Self {
             host_addr,
             target_addr,
             stop_notify: Arc::new(Notify::new()),
             is_stopped: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    async fn connect_target(target_addr: SocketAddr) -> Option<TcpStream> {
+        let attempts = if cfg!(target_os = "macos") { 100 } else { 1 };
+        for _ in 0..attempts {
+            if let Ok(stream) = TcpStream::connect(target_addr).await {
+                return Some(stream);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        None
     }
 
     /// Start the user-space TCP proxy forwarding traffic between host and container target
@@ -56,9 +67,9 @@ impl RootlessPortForwarder {
 
         let stop_notify = self.stop_notify.clone();
         let is_stopped = self.is_stopped.clone();
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         let target_sock = self.target_sock.clone();
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         let target_addr = self.target_addr;
 
         tokio::spawn(async move {
@@ -73,13 +84,10 @@ impl RootlessPortForwarder {
                         }
                         match accept_res {
                             Ok((mut inbound, _)) => {
-                                #[cfg(unix)]
+                                #[cfg(all(unix, not(target_os = "macos")))]
                                 {
                                     let sock_path = target_sock.clone();
                                     tokio::spawn(async move {
-                                        // Relay through the in-netns forward helper's Unix socket.
-                                        // If the helper is not (yet) running, drop the connection;
-                                        // the client will retry.
                                         if let Ok(mut outbound) =
                                             tokio::net::UnixStream::connect(&sock_path).await
                                         {
@@ -87,12 +95,11 @@ impl RootlessPortForwarder {
                                         }
                                     });
                                 }
-                                #[cfg(windows)]
+                                #[cfg(any(windows, target_os = "macos"))]
                                 {
                                     tokio::spawn(async move {
-                                        // No network namespaces on Windows; dial directly.
-                                        if let Ok(mut outbound) =
-                                            TcpStream::connect(target_addr).await
+                                        if let Some(mut outbound) =
+                                            RootlessPortForwarder::connect_target(target_addr).await
                                         {
                                             let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
                                         }
@@ -119,6 +126,137 @@ impl RootlessPortForwarder {
     }
 }
 
+/// UDP published-port forwarder: binds a UDP socket on the host and relays
+/// datagrams into the container (Unix helper on Linux, direct dial on macOS).
+pub struct RootlessUdpPortForwarder {
+    host_addr: SocketAddr,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    target_sock: PathBuf,
+    #[cfg(any(windows, target_os = "macos"))]
+    target_addr: SocketAddr,
+    stop_notify: Arc<Notify>,
+    is_stopped: Arc<AtomicBool>,
+}
+
+impl RootlessUdpPortForwarder {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn new(host_addr: SocketAddr, target_sock: PathBuf) -> Self {
+        Self {
+            host_addr,
+            target_sock,
+            stop_notify: Arc::new(Notify::new()),
+            is_stopped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    pub fn new_direct(host_addr: SocketAddr, target_addr: SocketAddr) -> Self {
+        Self {
+            host_addr,
+            target_addr,
+            stop_notify: Arc::new(Notify::new()),
+            is_stopped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub async fn start(&self) -> Result<()> {
+        let socket = UdpSocket::bind(self.host_addr)
+            .await
+            .with_context(|| format!("Failed to bind UDP port forwarder on {}", self.host_addr))?;
+        let stop_notify = self.stop_notify.clone();
+        let is_stopped = self.is_stopped.clone();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let target_sock = self.target_sock.clone();
+        #[cfg(any(windows, target_os = "macos"))]
+        let target_addr = self.target_addr;
+        tokio::spawn(async move {
+            let mut buf = [0u8; 65507];
+            loop {
+                tokio::select! {
+                    _ = stop_notify.notified() => break,
+                    recv = socket.recv_from(&mut buf) => {
+                        if is_stopped.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        match recv {
+                            Ok((n, peer)) => {
+                                #[cfg(all(unix, not(target_os = "macos")))]
+                                {
+                                    if let Ok(mut unix) =
+                                        tokio::net::UnixStream::connect(&target_sock).await
+                                    {
+                                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                        let peer_ip = match peer.ip() {
+                                            std::net::IpAddr::V4(v4) => v4.octets(),
+                                            _ => continue,
+                                        };
+                                        let peer_port = peer.port();
+                                        let mut frame = Vec::with_capacity(8 + n);
+                                        frame.extend_from_slice(&peer_ip);
+                                        frame.extend_from_slice(&peer_port.to_be_bytes());
+                                        frame.extend_from_slice(&(n as u16).to_be_bytes());
+                                        frame.extend_from_slice(&buf[..n]);
+                                        if unix.write_all(&frame).await.is_err() {
+                                            continue;
+                                        }
+                                        let mut resp_len = [0u8; 2];
+                                        if unix.read_exact(&mut resp_len).await.is_err() {
+                                            continue;
+                                        }
+                                        let resp_n = u16::from_be_bytes(resp_len) as usize;
+                                        if resp_n > buf.len() {
+                                            continue;
+                                        }
+                                        if unix.read_exact(&mut buf[..resp_n]).await.is_err() {
+                                            continue;
+                                        }
+                                        let _ = socket.send_to(&buf[..resp_n], peer).await;
+                                    }
+                                }
+                                #[cfg(any(windows, target_os = "macos"))]
+                                {
+                                    if let Ok(guest) = UdpSocket::bind("0.0.0.0:0").await {
+                                        if guest.send_to(&buf[..n], target_addr).await.is_ok() {
+                                            if let Ok((resp_n, _)) = guest.recv_from(&mut buf).await {
+                                                let _ = socket.send_to(&buf[..resp_n], peer).await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    pub fn stop(&self) {
+        self.is_stopped.store(true, Ordering::SeqCst);
+        self.stop_notify.notify_waiters();
+    }
+
+    pub fn is_running(&self) -> bool {
+        !self.is_stopped.load(Ordering::SeqCst)
+    }
+}
+
+pub enum ActiveForwarder {
+    Tcp(Arc<RootlessPortForwarder>),
+    Udp(Arc<RootlessUdpPortForwarder>),
+}
+
+impl ActiveForwarder {
+    fn stop(&self) {
+        match self {
+            Self::Tcp(f) => f.stop(),
+            Self::Udp(f) => f.stop(),
+        }
+    }
+}
+
 pub struct PortForwardManager;
 
 impl PortForwardManager {
@@ -129,7 +267,9 @@ impl PortForwardManager {
     pub async fn start_forwarding(
         bundle_path: &Path,
         ports: &[crate::network::PortMapping],
-    ) -> Result<Vec<Arc<RootlessPortForwarder>>> {
+    ) -> Result<Vec<ActiveForwarder>> {
+        #[cfg(target_os = "macos")]
+        let _ = bundle_path;
         let mut forwarders = Vec::new();
         for p in ports {
             let host_ip_str = p.host_ip.as_deref().unwrap_or("0.0.0.0");
@@ -137,20 +277,49 @@ impl PortForwardManager {
                 .parse()
                 .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], p.host_port)));
 
-            #[cfg(unix)]
-            let forwarder = {
-                let sock_path = bundle_path.join(forward_sock_name(p.container_port));
-                Arc::new(RootlessPortForwarder::new(host_addr, sock_path))
-            };
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let sock_path = if p.protocol.eq_ignore_ascii_case("udp") {
+                    bundle_path.join(forward_udp_sock_name(p.container_port))
+                } else {
+                    bundle_path.join(forward_sock_name(p.container_port))
+                };
+                if p.protocol.eq_ignore_ascii_case("udp") {
+                    let forwarder = Arc::new(RootlessUdpPortForwarder::new(host_addr, sock_path));
+                    let _ = forwarder.start().await;
+                    forwarders.push(ActiveForwarder::Udp(forwarder));
+                } else {
+                    let forwarder = Arc::new(RootlessPortForwarder::new(host_addr, sock_path));
+                    let _ = forwarder.start().await;
+                    forwarders.push(ActiveForwarder::Tcp(forwarder));
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let target_addr: SocketAddr = format!("192.168.64.2:{}", p.container_port)
+                    .parse()
+                    .unwrap_or_else(|_| SocketAddr::from(([192, 168, 64, 2], p.container_port)));
+                if p.protocol.eq_ignore_ascii_case("udp") {
+                    let forwarder =
+                        Arc::new(RootlessUdpPortForwarder::new_direct(host_addr, target_addr));
+                    let _ = forwarder.start().await;
+                    forwarders.push(ActiveForwarder::Udp(forwarder));
+                } else {
+                    let forwarder =
+                        Arc::new(RootlessPortForwarder::new_tcp(host_addr, target_addr));
+                    let _ = forwarder.start().await;
+                    forwarders.push(ActiveForwarder::Tcp(forwarder));
+                }
+            }
             #[cfg(windows)]
-            let forwarder = {
+            {
                 let target_addr: SocketAddr = format!("127.0.0.1:{}", p.container_port)
                     .parse()
                     .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], p.container_port)));
-                Arc::new(RootlessPortForwarder::new(host_addr, target_addr))
-            };
-            let _ = forwarder.start().await;
-            forwarders.push(forwarder);
+                let forwarder = Arc::new(RootlessPortForwarder::new_tcp(host_addr, target_addr));
+                let _ = forwarder.start().await;
+                forwarders.push(ActiveForwarder::Tcp(forwarder));
+            }
         }
         Ok(forwarders)
     }
@@ -165,6 +334,12 @@ pub fn forward_sock_name(container_port: u16) -> String {
     format!("forward-{}.sock", container_port)
 }
 
+/// Unix socket for UDP published-port relay (framed datagram bridge).
+#[cfg(unix)]
+pub fn forward_udp_sock_name(container_port: u16) -> String {
+    format!("forward-udp-{}.sock", container_port)
+}
+
 /// Runs INSIDE the container's network namespace (call after unsharing
 /// CLONE_NEWNET). For each published port, listens on a Unix socket in the
 /// bundle dir and bridges connections to the container's localhost.
@@ -172,27 +347,43 @@ pub fn forward_sock_name(container_port: u16) -> String {
 /// Unix only; Windows has no network namespaces.
 #[cfg(unix)]
 pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMapping]) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
     use std::os::unix::net::UnixListener;
 
-    let mut listeners = Vec::new();
+    let mut tcp_listeners = Vec::new();
+    let mut udp_listeners = Vec::new();
     for p in ports {
-        let sock_path = bundle_path.join(forward_sock_name(p.container_port));
-        let _ = std::fs::remove_file(&sock_path); // stale socket from an earlier run
-        match UnixListener::bind(&sock_path) {
-            Ok(l) => listeners.push((p.container_port, l)),
-            Err(e) => eprintln!(
-                "forward helper: cannot bind {}: {:?}",
-                sock_path.display(),
-                e
-            ),
+        if p.protocol.eq_ignore_ascii_case("udp") {
+            let sock_path = bundle_path.join(forward_udp_sock_name(p.container_port));
+            let _ = std::fs::remove_file(&sock_path);
+            match UnixListener::bind(&sock_path) {
+                Ok(l) => udp_listeners.push((p.container_port, l)),
+                Err(e) => eprintln!(
+                    "forward helper: cannot bind {}: {:?}",
+                    sock_path.display(),
+                    e
+                ),
+            }
+        } else {
+            let sock_path = bundle_path.join(forward_sock_name(p.container_port));
+            let _ = std::fs::remove_file(&sock_path);
+            match UnixListener::bind(&sock_path) {
+                Ok(l) => tcp_listeners.push((p.container_port, l)),
+                Err(e) => eprintln!(
+                    "forward helper: cannot bind {}: {:?}",
+                    sock_path.display(),
+                    e
+                ),
+            }
         }
     }
-    if listeners.is_empty() {
+    if tcp_listeners.is_empty() && udp_listeners.is_empty() {
         return Ok(());
     }
 
     let mut handles = Vec::new();
-    for (container_port, listener) in listeners {
+    for (container_port, listener) in tcp_listeners {
         handles.push(std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let unix_stream = match conn {
@@ -222,6 +413,52 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
             }
         }));
     }
+
+    for (container_port, listener) in udp_listeners {
+        handles.push(std::thread::spawn(move || {
+            let target: SocketAddr = format!("127.0.0.1:{}", container_port)
+                .parse()
+                .unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], container_port)));
+            for conn in listener.incoming() {
+                let mut unix_stream = match conn {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                std::thread::spawn(move || {
+                    let mut frame = [0u8; 8 + 65507];
+                    let n = match unix_stream.read(&mut frame) {
+                        Ok(n) if n >= 8 => n,
+                        _ => return,
+                    };
+                    let _peer_ip = std::net::Ipv4Addr::new(frame[0], frame[1], frame[2], frame[3]);
+                    let _peer_port = u16::from_be_bytes([frame[4], frame[5]]);
+                    let payload_len = u16::from_be_bytes([frame[6], frame[7]]) as usize;
+                    if 8 + payload_len > n {
+                        return;
+                    }
+                    let udp = match StdUdpSocket::bind("0.0.0.0:0") {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                    let _ = udp.connect(target);
+                    if udp.send(&frame[8..8 + payload_len]).is_err() {
+                        return;
+                    }
+                    let mut resp = [0u8; 65507];
+                    let resp_n = match udp.recv(&mut resp) {
+                        Ok(n) => n,
+                        Err(_) => return,
+                    };
+                    let len_bytes = (resp_n as u16).to_be_bytes();
+                    if unix_stream.write_all(&len_bytes).is_err() {
+                        return;
+                    }
+                    let _ = unix_stream.write_all(&resp[..resp_n]);
+                });
+            }
+        }));
+    }
+
     for h in handles {
         let _ = h.join();
     }
@@ -307,7 +544,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     async fn test_rootless_port_forwarder_lifecycle() {
         let host: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let target = std::path::PathBuf::from("/tmp/boxr-test-nonexistent.sock"); // dummy target
@@ -318,7 +555,31 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    async fn test_udp_forwarder_binds_udp_not_tcp() {
+        let host_port = {
+            let l = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let host_addr: SocketAddr = format!("127.0.0.1:{}", host_port).parse().unwrap();
+        let target = std::path::PathBuf::from("/tmp/boxr-udp-test-nonexistent.sock");
+        let forwarder = RootlessUdpPortForwarder::new(host_addr, target);
+        forwarder.start().await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        // UDP port must accept datagrams; TCP connect should fail.
+        let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        assert!(udp.send_to(b"ping", host_addr).await.is_ok());
+        use tokio::net::TcpStream;
+        let tcp = TcpStream::connect(host_addr).await;
+        assert!(
+            tcp.is_err(),
+            "UDP forwarder must not accept TCP connections"
+        );
+        forwarder.stop();
+    }
+
+    #[tokio::test]
+    #[cfg(all(unix, not(target_os = "macos")))]
     async fn test_rootless_port_forwarder_unblocks_on_stop() {
         let host: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let target = std::path::PathBuf::from("/tmp/boxr-test-nonexistent.sock");
@@ -390,7 +651,7 @@ mod tests {
     /// The helper runs in the same netns as the test here, so the dummy TCP
     /// echo server on 127.0.0.1 plays the role of the container's localhost.
     #[tokio::test]
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "macos")))]
     async fn test_forward_helper_bridges_into_container_netns() {
         use tempfile::tempdir;
         let dir = tempdir().unwrap();

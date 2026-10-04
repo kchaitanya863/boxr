@@ -7,156 +7,9 @@
 #import <Virtualization/Virtualization.h>
 #include <signal.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <poll.h>
-#include <pthread.h>
 
 static VZVirtualMachine *g_vm = nil;
 static NSString *g_bundlePath = nil;
-
-struct PortForwardSpec {
-    int host_port;
-    int vm_port;
-    char host_ip[64];
-    char vm_ip[64];
-};
-
-static void *proxy_stream_worker(void *arg) {
-    int *fds = (int *)arg;
-    int client_fd = fds[0];
-    int target_fd = fds[1];
-    free(fds);
-
-    struct pollfd pfd[2];
-    pfd[0].fd = client_fd;
-    pfd[0].events = POLLIN;
-    pfd[1].fd = target_fd;
-    pfd[1].events = POLLIN;
-
-    char buf[16384];
-    while (1) {
-        int ret = poll(pfd, 2, 300000); // 5 min timeout
-        if (ret <= 0) break;
-
-        if (pfd[0].revents & POLLIN) {
-            ssize_t n = read(client_fd, buf, sizeof(buf));
-            if (n <= 0) break;
-            ssize_t written = 0;
-            while (written < n) {
-                ssize_t w = write(target_fd, buf + written, n - written);
-                if (w <= 0) break;
-                written += w;
-            }
-            if (written < n) break;
-        }
-        if (pfd[1].revents & POLLIN) {
-            ssize_t n = read(target_fd, buf, sizeof(buf));
-            if (n <= 0) break;
-            ssize_t written = 0;
-            while (written < n) {
-                ssize_t w = write(client_fd, buf + written, n - written);
-                if (w <= 0) break;
-                written += w;
-            }
-            if (written < n) break;
-        }
-        if ((pfd[0].revents & (POLLERR | POLLHUP | POLLNVAL)) ||
-            (pfd[1].revents & (POLLERR | POLLHUP | POLLNVAL))) {
-            break;
-        }
-    }
-
-    close(client_fd);
-    close(target_fd);
-    return NULL;
-}
-
-static void *port_forward_listener_thread(void *arg) {
-    struct PortForwardSpec *spec = (struct PortForwardSpec *)arg;
-    int server_fd = -1;
-
-    for (int attempt = 0; attempt < 50; attempt++) {
-        server_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (server_fd < 0) break;
-
-        int opt = 1;
-        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        setsockopt(server_fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-
-        struct sockaddr_in saddr;
-        memset(&saddr, 0, sizeof(saddr));
-        saddr.sin_family = AF_INET;
-        saddr.sin_port = htons(spec->host_port);
-        inet_pton(AF_INET, spec->host_ip, &saddr.sin_addr);
-
-        if (bind(server_fd, (struct sockaddr *)&saddr, sizeof(saddr)) == 0) {
-            break;
-        }
-        close(server_fd);
-        server_fd = -1;
-        usleep(100000); // 100ms
-    }
-
-    if (server_fd < 0) {
-        free(spec);
-        return NULL;
-    }
-
-    if (listen(server_fd, 128) < 0) {
-        close(server_fd);
-        free(spec);
-        return NULL;
-    }
-
-    while (1) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) break;
-
-        // Connect to container target inside micro-VM (retry while guest is booting)
-        int target_fd = -1;
-        for (int attempt = 0; attempt < 100; attempt++) {
-            target_fd = socket(AF_INET, SOCK_STREAM, 0);
-            if (target_fd < 0) break;
-
-            struct sockaddr_in taddr;
-            memset(&taddr, 0, sizeof(taddr));
-            taddr.sin_family = AF_INET;
-            taddr.sin_port = htons(spec->vm_port);
-            inet_pton(AF_INET, spec->vm_ip, &taddr.sin_addr);
-
-            if (connect(target_fd, (struct sockaddr *)&taddr, sizeof(taddr)) == 0) {
-                break;
-            }
-            close(target_fd);
-            target_fd = -1;
-            usleep(100000); // 100ms
-        }
-
-        if (target_fd < 0) {
-            close(client_fd);
-            continue;
-        }
-
-        int *fds = malloc(sizeof(int) * 2);
-        fds[0] = client_fd;
-        fds[1] = target_fd;
-
-        pthread_t t;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        pthread_create(&t, &attr, proxy_stream_worker, fds);
-        pthread_attr_destroy(&attr);
-    }
-
-    close(server_fd);
-    free(spec);
-    return NULL;
-}
 
 static void clean_exit_handler(void) {
     if (g_vm && [g_vm canStop]) {
@@ -380,37 +233,9 @@ int main(int argc, const char *argv[]) {
             return 1;
         }
 
-        // Start TCP port forwarders for any mapped container ports
-        for (NSString *pSpec in portSpecs) {
-            NSArray *parts = [pSpec componentsSeparatedByString:@":"];
-            NSString *hostIp = @"0.0.0.0";
-            int hostPort = 0;
-            int vmPort = 0;
-            if ([parts count] == 2) {
-                hostPort = [parts[0] intValue];
-                vmPort = [parts[1] intValue];
-            } else if ([parts count] == 3) {
-                hostIp = parts[0];
-                hostPort = [parts[1] intValue];
-                vmPort = [parts[2] intValue];
-            }
-            if (hostPort > 0 && vmPort > 0) {
-                struct PortForwardSpec *spec = malloc(sizeof(struct PortForwardSpec));
-                spec->host_port = hostPort;
-                spec->vm_port = vmPort;
-                memset(spec->host_ip, 0, sizeof(spec->host_ip));
-                memset(spec->vm_ip, 0, sizeof(spec->vm_ip));
-                strncpy(spec->host_ip, [hostIp UTF8String], sizeof(spec->host_ip) - 1);
-                strncpy(spec->vm_ip, "192.168.64.2", sizeof(spec->vm_ip) - 1);
-
-                pthread_t lt;
-                pthread_attr_t attr;
-                pthread_attr_init(&attr);
-                pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-                pthread_create(&lt, &attr, port_forward_listener_thread, spec);
-                pthread_attr_destroy(&attr);
-            }
-        }
+        // Published ports are forwarded by the host-side `__internal-port-forward`
+        // daemon via Unix sockets in the virtio-fs shared bundle directory.
+        // Guest relays are started in boxr-run.sh.
 
         // Run until guest powers down
         CFRunLoopRun();
