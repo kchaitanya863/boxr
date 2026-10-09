@@ -129,11 +129,11 @@ impl RootlessPortForwarder {
 /// UDP published-port forwarder: binds a UDP socket on the host and relays
 /// datagrams into the container (Unix helper on Linux, direct dial on macOS).
 pub struct RootlessUdpPortForwarder {
-    host_addr: SocketAddr,
+    pub host_addr: SocketAddr,
     #[cfg(all(unix, not(target_os = "macos")))]
-    target_sock: PathBuf,
+    pub target_sock: PathBuf,
     #[cfg(any(windows, target_os = "macos"))]
-    target_addr: SocketAddr,
+    pub target_addr: SocketAddr,
     stop_notify: Arc<Notify>,
     is_stopped: Arc<AtomicBool>,
 }
@@ -160,9 +160,11 @@ impl RootlessUdpPortForwarder {
     }
 
     pub async fn start(&self) -> Result<()> {
-        let socket = UdpSocket::bind(self.host_addr)
-            .await
-            .with_context(|| format!("Failed to bind UDP port forwarder on {}", self.host_addr))?;
+        let socket = Arc::new(
+            UdpSocket::bind(self.host_addr)
+                .await
+                .with_context(|| format!("Failed to bind UDP port forwarder on {}", self.host_addr))?,
+        );
         let stop_notify = self.stop_notify.clone();
         let is_stopped = self.is_stopped.clone();
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -182,46 +184,65 @@ impl RootlessUdpPortForwarder {
                             Ok((n, peer)) => {
                                 #[cfg(all(unix, not(target_os = "macos")))]
                                 {
-                                    if let Ok(mut unix) =
-                                        tokio::net::UnixStream::connect(&target_sock).await
-                                    {
-                                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                                        let peer_ip = match peer.ip() {
-                                            std::net::IpAddr::V4(v4) => v4.octets(),
-                                            _ => continue,
-                                        };
-                                        let peer_port = peer.port();
-                                        let mut frame = Vec::with_capacity(8 + n);
-                                        frame.extend_from_slice(&peer_ip);
-                                        frame.extend_from_slice(&peer_port.to_be_bytes());
-                                        frame.extend_from_slice(&(n as u16).to_be_bytes());
-                                        frame.extend_from_slice(&buf[..n]);
-                                        if unix.write_all(&frame).await.is_err() {
-                                            continue;
+                                    let target_sock = target_sock.clone();
+                                    let socket = socket.clone();
+                                    tokio::spawn(async move {
+                                        if let Ok(mut unix) =
+                                            tokio::net::UnixStream::connect(&target_sock).await
+                                        {
+                                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                                            let peer_ip = match peer.ip() {
+                                                std::net::IpAddr::V4(v4) => v4.octets(),
+                                                _ => return,
+                                            };
+                                            let peer_port = peer.port();
+                                            let mut frame = Vec::with_capacity(8 + n);
+                                            frame.extend_from_slice(&peer_ip);
+                                            frame.extend_from_slice(&peer_port.to_be_bytes());
+                                            frame.extend_from_slice(&(n as u16).to_be_bytes());
+                                            frame.extend_from_slice(&buf[..n]);
+                                            if unix.write_all(&frame).await.is_err() {
+                                                return;
+                                            }
+                                            let mut resp_len = [0u8; 2];
+                                            let read_res = tokio::time::timeout(
+                                                std::time::Duration::from_millis(500),
+                                                unix.read_exact(&mut resp_len),
+                                            )
+                                            .await;
+                                            if let Ok(Ok(_)) = read_res {
+                                                let resp_n = u16::from_be_bytes(resp_len) as usize;
+                                                let mut resp_buf = vec![0u8; resp_n];
+                                                if let Ok(Ok(_)) = tokio::time::timeout(
+                                                    std::time::Duration::from_millis(500),
+                                                    unix.read_exact(&mut resp_buf),
+                                                )
+                                                .await
+                                                {
+                                                    let _ = socket.send_to(&resp_buf, peer).await;
+                                                }
+                                            }
                                         }
-                                        let mut resp_len = [0u8; 2];
-                                        if unix.read_exact(&mut resp_len).await.is_err() {
-                                            continue;
-                                        }
-                                        let resp_n = u16::from_be_bytes(resp_len) as usize;
-                                        if resp_n > buf.len() {
-                                            continue;
-                                        }
-                                        if unix.read_exact(&mut buf[..resp_n]).await.is_err() {
-                                            continue;
-                                        }
-                                        let _ = socket.send_to(&buf[..resp_n], peer).await;
-                                    }
+                                    });
                                 }
                                 #[cfg(any(windows, target_os = "macos"))]
                                 {
-                                    if let Ok(guest) = UdpSocket::bind("0.0.0.0:0").await {
-                                        if guest.send_to(&buf[..n], target_addr).await.is_ok() {
-                                            if let Ok((resp_n, _)) = guest.recv_from(&mut buf).await {
-                                                let _ = socket.send_to(&buf[..resp_n], peer).await;
+                                    let socket = socket.clone();
+                                    tokio::spawn(async move {
+                                        if let Ok(guest) = UdpSocket::bind("0.0.0.0:0").await {
+                                            if guest.send_to(&buf[..n], target_addr).await.is_ok() {
+                                                let mut resp_buf = [0u8; 65507];
+                                                if let Ok(Ok((resp_n, _))) = tokio::time::timeout(
+                                                    std::time::Duration::from_millis(500),
+                                                    guest.recv_from(&mut resp_buf),
+                                                )
+                                                .await
+                                                {
+                                                    let _ = socket.send_to(&resp_buf[..resp_n], peer).await;
+                                                }
                                             }
                                         }
-                                    }
+                                    });
                                 }
                             }
                             Err(_) => break,
@@ -440,6 +461,7 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                         Ok(s) => s,
                         Err(_) => return,
                     };
+                    let _ = udp.set_read_timeout(Some(std::time::Duration::from_millis(500)));
                     let _ = udp.connect(target);
                     if udp.send(&frame[8..8 + payload_len]).is_err() {
                         return;

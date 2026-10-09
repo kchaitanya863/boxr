@@ -232,6 +232,22 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
                         std::process::exit(1);
                     }
+                } else if let Some(target_cont) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network_container")) {
+                    // Attach to existing container's network namespace (container:<target>)
+                    let store = crate::storage::ContainerStore::new();
+                    if let Some(target_rec) = store.find(target_cont) {
+                        let target_pid = target_rec.pid.or_else(|| {
+                            let p = std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
+                            fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<i32>().ok())
+                        });
+                        if let Some(t_pid) = target_pid {
+                            let netns_path = format!("/proc/{}/ns/net", t_pid);
+                            if let Ok(netns_file) = std::fs::File::open(&netns_path) {
+                                use std::os::unix::io::AsRawFd;
+                                let _ = nix::sched::setns(netns_file.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                            }
+                        }
+                    }
                 }
 
                 // If using pasta, notify parent that netns has been unshared so pasta can attach
@@ -388,6 +404,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     // Fork background TAP engine worker before unsharing PID namespace
                     match unsafe { fork() } {
                         Ok(ForkResult::Child) => {
+                            unsafe {
+                                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                            }
                             platform::run_tap_network_loop(tap_file, &ports);
                             std::process::exit(0);
                         }
@@ -401,6 +420,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             if !ports.is_empty() {
                 match unsafe { fork() } {
                     Ok(ForkResult::Child) => {
+                        unsafe {
+                            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                        }
                         let _ = crate::network::rootless::run_forward_helper(bundle_path, &ports);
                         std::process::exit(0);
                     }
@@ -408,6 +430,22 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         fwd_helper_pid = Some(fwd_child);
                     }
                     Err(_) => {}
+                }
+            }
+        } else if let Some(target_cont) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network_container")) {
+            // Root mode: attach to existing container's network namespace (container:<target>)
+            let store = crate::storage::ContainerStore::new();
+            if let Some(target_rec) = store.find(target_cont) {
+                let target_pid = target_rec.pid.or_else(|| {
+                    let p = std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
+                    fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<i32>().ok())
+                });
+                if let Some(t_pid) = target_pid {
+                    let netns_path = format!("/proc/{}/ns/net", t_pid);
+                    if let Ok(netns_file) = std::fs::File::open(&netns_path) {
+                        use std::os::unix::io::AsRawFd;
+                        let _ = nix::sched::setns(netns_file.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                    }
                 }
             }
         }

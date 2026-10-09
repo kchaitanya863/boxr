@@ -177,13 +177,13 @@ impl UserNetEngine {
                 std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, tcp.dst_port));
             if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
                 &target_addr,
-                std::time::Duration::from_millis(2000),
+                std::time::Duration::from_millis(500),
             ) {
                 use std::io::{Read, Write};
                 let _ = stream.write_all(tcp_data);
                 let _ = stream.flush();
                 let mut resp_buf = [0u8; 16384];
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(2000)));
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
                 if let Ok(n) = stream.read(&mut resp_buf) {
                     if n > 0 {
                         let response_data = &resp_buf[..n];
@@ -345,7 +345,7 @@ fn forward_dns_query(query: &[u8]) -> Result<Vec<u8>> {
 
     let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket for DNS")?;
     socket
-        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .set_read_timeout(Some(Duration::from_millis(600)))
         .context("Failed to set DNS read timeout")?;
 
     // Try multiple standard upstream resolvers: local host resolver, Cloudflare, Google
@@ -456,6 +456,21 @@ pub mod platform {
         let mut buf = [0u8; 65536];
 
         loop {
+            // Wait for readability using poll() to eliminate busy polling
+            let mut pollfd = libc::pollfd {
+                fd: tap_file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let poll_ret = unsafe { libc::poll(&mut pollfd, 1, 100) };
+            if poll_ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+
             match tap_file.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -464,7 +479,8 @@ pub mod platform {
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    // Handled by poll above; short yield
+                    std::thread::yield_now();
                 }
                 Err(_) => break,
             }
@@ -482,6 +498,20 @@ pub mod platform {
             let mut buf = [0u8; 65536];
 
             while flag.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut pollfd = libc::pollfd {
+                    fd: tap_file.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let poll_ret = unsafe { libc::poll(&mut pollfd, 1, 100) };
+                if poll_ret < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+
                 match tap_file.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -490,7 +520,7 @@ pub mod platform {
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        std::thread::yield_now();
                     }
                     Err(_) => break,
                 }

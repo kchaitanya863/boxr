@@ -48,8 +48,65 @@ pub async fn remove_network(
     let store = NetworkStore::with_home(state.home.clone());
     match store.remove(&id) {
         Ok(_) => StatusCode::NO_CONTENT,
-        Err(_) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("active endpoints") || msg.contains("default bridge") || msg.contains("in use") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        }
     }
+}
+
+#[derive(Deserialize)]
+pub struct ConnectNetworkRequest {
+    #[serde(rename = "Container")]
+    pub container: String,
+}
+
+pub async fn connect_network(
+    State(state): State<DaemonState>,
+    Path(id): Path<String>,
+    Json(payload): Json<ConnectNetworkRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let store = NetworkStore::with_home(state.home.clone());
+    let c_store = crate::storage::ContainerStore::with_home(state.home.clone());
+    let c = c_store.find(&payload.container).ok_or(StatusCode::NOT_FOUND)?;
+    store.connect_container(&id, &c.id, &c.name).map_err(|e| {
+        let msg = e.to_string().to_lowercase();
+        if msg.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        }
+    })?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub struct DisconnectNetworkRequest {
+    #[serde(rename = "Container")]
+    pub container: String,
+    #[serde(rename = "Force", default)]
+    pub force: bool,
+}
+
+pub async fn disconnect_network(
+    State(state): State<DaemonState>,
+    Path(id): Path<String>,
+    Json(payload): Json<DisconnectNetworkRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let store = NetworkStore::with_home(state.home.clone());
+    store.disconnect_container(&id, &payload.container).map_err(|e| {
+        let msg = e.to_string().to_lowercase();
+        if msg.contains("not found") || msg.contains("not connected") {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::BAD_REQUEST
+        }
+    })?;
+    Ok(StatusCode::OK)
 }
 
 pub async fn list_volumes(State(state): State<DaemonState>) -> Json<serde_json::Value> {

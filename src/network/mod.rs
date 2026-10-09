@@ -423,10 +423,10 @@ impl NetworkStore {
         if name_trimmed.is_empty()
             || !name_trimmed
                 .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
         {
             return Err(anyhow!(
-                "Invalid network name '{}': must be alphanumeric, '_', or '-'",
+                "Invalid network name '{}': must be alphanumeric, '_', '-', or '.'",
                 name
             ));
         }
@@ -438,11 +438,48 @@ impl NetworkStore {
             }
 
             let network_count = data.networks.len();
-            let default_subnet = format!("172.{}.0.0/16", 29 + network_count);
-            let default_gw = format!("172.{}.0.1", 29 + network_count);
+            let mut chosen_subnet = subnet.map(|s| s.to_string());
+            let mut chosen_gw = gateway.map(|g| g.to_string());
 
-            let chosen_subnet = subnet.unwrap_or(&default_subnet).to_string();
-            let chosen_gw = gateway.unwrap_or(&default_gw).to_string();
+            if chosen_subnet.is_none() {
+                for offset in 0..200 {
+                    let octet = 29 + (network_count + offset) % 200;
+                    let cand_subnet = format!("172.{}.0.0/16", octet);
+                    let cand_gw = format!("172.{}.0.1", octet);
+                    let overlaps = data.networks.iter().any(|n| {
+                        subnets_overlap(&n.subnet, &cand_subnet).unwrap_or(false)
+                    });
+                    if !overlaps {
+                        chosen_subnet = Some(cand_subnet);
+                        chosen_gw = Some(cand_gw);
+                        break;
+                    }
+                }
+            }
+
+            let chosen_subnet = chosen_subnet.ok_or_else(|| anyhow!("No available subnet addresses found"))?;
+            let chosen_gw = chosen_gw.unwrap_or_else(|| {
+                // If user supplied subnet without gateway, default to .1
+                if let Some((ip_str, _)) = chosen_subnet.split_once('/') {
+                    if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                        let octets = ip.octets();
+                        return format!("{}.{}.{}.1", octets[0], octets[1], octets[2]);
+                    }
+                }
+                "172.29.0.1".to_string()
+            });
+
+            // Check if chosen subnet overlaps with any existing network subnet
+            for existing_net in &data.networks {
+                if subnets_overlap(&existing_net.subnet, &chosen_subnet)? {
+                    return Err(anyhow!(
+                        "Pool overlaps with other one on this address space: subnet '{}' overlaps with network '{}' subnet '{}'",
+                        chosen_subnet,
+                        existing_net.name,
+                        existing_net.subnet
+                    ));
+                }
+            }
 
             let id = hex::encode(crate::storage::container_store::rand_id());
 
@@ -738,20 +775,15 @@ impl NetworkConnector for NetworkStore {
     }
 }
 
-fn allocate_ip_in_subnet(
-    subnet_str: &str,
-    gateway_str: &str,
-    existing: &HashMap<String, NetworkEndpoint>,
-) -> Result<Ipv4Addr> {
+pub fn parse_cidr_range(subnet_str: &str) -> Result<(u32, u32)> {
     let (ip_part, mask_part) = subnet_str
         .split_once('/')
         .ok_or_else(|| anyhow!("Invalid CIDR subnet {}", subnet_str))?;
 
     let base_ip: Ipv4Addr = ip_part.parse()?;
     let prefix_len: u32 = mask_part.parse().context("Invalid CIDR prefix length")?;
-    let gateway: Ipv4Addr = gateway_str.parse()?;
 
-    if prefix_len > 30 || prefix_len < 8 {
+    if prefix_len > 32 {
         return Err(anyhow!("Unsupported subnet prefix length /{}", prefix_len));
     }
 
@@ -762,6 +794,22 @@ fn allocate_ip_in_subnet(
     };
     let base_u32 = u32::from(base_ip) & mask_u32;
     let bcast_u32 = base_u32 | (!mask_u32);
+    Ok((base_u32, bcast_u32))
+}
+
+pub fn subnets_overlap(sub1: &str, sub2: &str) -> Result<bool> {
+    let (start1, end1) = parse_cidr_range(sub1)?;
+    let (start2, end2) = parse_cidr_range(sub2)?;
+    Ok(start1 <= end2 && start2 <= end1)
+}
+
+fn allocate_ip_in_subnet(
+    subnet_str: &str,
+    gateway_str: &str,
+    existing: &HashMap<String, NetworkEndpoint>,
+) -> Result<Ipv4Addr> {
+    let (base_u32, bcast_u32) = parse_cidr_range(subnet_str)?;
+    let gateway: Ipv4Addr = gateway_str.parse()?;
 
     let used_ips: Vec<Ipv4Addr> = existing
         .values()

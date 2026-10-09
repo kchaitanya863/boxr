@@ -189,6 +189,36 @@ impl PortCollisionGuard {
         requested_ports: &[crate::network::PortMapping],
         containers: &[crate::storage::ContainerRecord],
     ) -> Result<()> {
+        // 1. Intra-request collision check: ensure no duplicates within requested_ports itself
+        for i in 0..requested_ports.len() {
+            let req_a = &requested_ports[i];
+            if req_a.host_port == 0 {
+                continue;
+            }
+            let ip_a = req_a.host_ip.as_deref().unwrap_or("0.0.0.0");
+            for j in (i + 1)..requested_ports.len() {
+                let req_b = &requested_ports[j];
+                if req_b.host_port == 0 {
+                    continue;
+                }
+                let ip_b = req_b.host_ip.as_deref().unwrap_or("0.0.0.0");
+                if req_a.protocol.eq_ignore_ascii_case(&req_b.protocol)
+                    && req_a.host_port == req_b.host_port
+                {
+                    let ips_overlap = ip_a == "0.0.0.0" || ip_b == "0.0.0.0" || ip_a == ip_b;
+                    if ips_overlap {
+                        return Err(anyhow!(
+                            "Port conflict: duplicate host port binding {}:{}/{} requested multiple times",
+                            ip_a,
+                            req_a.host_port,
+                            req_a.protocol
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 2. Inter-container collision check: ensure no overlap with already running containers
         for req in requested_ports {
             if req.host_port == 0 {
                 continue;
@@ -201,7 +231,7 @@ impl PortCollisionGuard {
                 }
 
                 for p in &c.ports {
-                    if p.protocol == req.protocol && p.host_port == req.host_port {
+                    if p.protocol.eq_ignore_ascii_case(&req.protocol) && p.host_port == req.host_port {
                         let running_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
                         let ips_overlap =
                             req_ip == "0.0.0.0" || running_ip == "0.0.0.0" || req_ip == running_ip;

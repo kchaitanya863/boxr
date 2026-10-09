@@ -255,6 +255,50 @@ fn write_compose_net_metadata(bundle_path: &Path, spec: &Spec) {
     );
 }
 
+pub fn generate_guest_resolv_conf(bundle_path: &Path, domainname: Option<&str>) -> String {
+    let mut nameservers_str = String::new();
+    let dns_file = bundle_path.join("dns.json");
+    if dns_file.exists() {
+        if let Ok(content) = fs::read_to_string(&dns_file) {
+            if let Ok(dns_servers) = serde_json::from_str::<Vec<String>>(&content) {
+                for server in dns_servers {
+                    nameservers_str.push_str(&format!("nameserver {}\\n", server.trim()));
+                }
+            }
+        }
+    }
+    if nameservers_str.is_empty() {
+        nameservers_str =
+            "nameserver 192.168.64.1\\nnameserver 1.1.1.1\\nnameserver 8.8.8.8\\n".to_string();
+    }
+
+    let mut dns_str = nameservers_str;
+    let dns_search_file = bundle_path.join("dns_search.json");
+    if dns_search_file.exists() {
+        if let Ok(content) = fs::read_to_string(&dns_search_file) {
+            if let Ok(domains) = serde_json::from_str::<Vec<String>>(&content) {
+                if !domains.is_empty() {
+                    dns_str.push_str(&format!("search {}\\n", domains.join(" ")));
+                }
+            }
+        }
+    }
+    let dns_opt_file = bundle_path.join("dns_option.json");
+    if dns_opt_file.exists() {
+        if let Ok(content) = fs::read_to_string(&dns_opt_file) {
+            if let Ok(opts) = serde_json::from_str::<Vec<String>>(&content) {
+                if !opts.is_empty() {
+                    dns_str.push_str(&format!("options {}\\n", opts.join(" ")));
+                }
+            }
+        }
+    }
+    if let Some(domain) = domainname {
+        dns_str.push_str(&format!("domain {}\\n", domain));
+    }
+    dns_str
+}
+
 /// Execute an OCI container bundle on macOS using Apple's native Virtualization.framework.
 pub fn execute_bundle(
     bundle_path: &Path,
@@ -347,44 +391,8 @@ pub fn execute_bundle(
     run_script.push_str(macos_guest_network_init_script());
     // Published ports are relayed by the host __internal-port-forward daemon dialing
     // the guest NAT address (192.168.64.2) once eth0 is configured below.
-    let mut dns_str = String::new();
-    let dns_file = bundle_path.join("dns.json");
-    if dns_file.exists() {
-        if let Ok(content) = fs::read_to_string(&dns_file) {
-            if let Ok(dns_servers) = serde_json::from_str::<Vec<String>>(&content) {
-                for server in dns_servers {
-                    dns_str.push_str(&format!("nameserver {}\\n", server.trim()));
-                }
-            }
-        }
-    }
-    let dns_search_file = bundle_path.join("dns_search.json");
-    if dns_search_file.exists() {
-        if let Ok(content) = fs::read_to_string(&dns_search_file) {
-            if let Ok(domains) = serde_json::from_str::<Vec<String>>(&content) {
-                if !domains.is_empty() {
-                    dns_str.push_str(&format!("search {}\\n", domains.join(" ")));
-                }
-            }
-        }
-    }
-    let dns_opt_file = bundle_path.join("dns_option.json");
-    if dns_opt_file.exists() {
-        if let Ok(content) = fs::read_to_string(&dns_opt_file) {
-            if let Ok(opts) = serde_json::from_str::<Vec<String>>(&content) {
-                if !opts.is_empty() {
-                    dns_str.push_str(&format!("options {}\\n", opts.join(" ")));
-                }
-            }
-        }
-    }
-    if let Some(domain) = &spec.domainname {
-        dns_str.push_str(&format!("domain {}\\n", domain));
-    }
-    if dns_str.is_empty() {
-        dns_str =
-            "nameserver 192.168.64.1\\nnameserver 1.1.1.1\\nnameserver 8.8.8.8\\n".to_string();
-    }
+
+    let dns_str = generate_guest_resolv_conf(bundle_path, spec.domainname.as_deref());
     run_script.push_str(&format!(
         "printf '{}' > /etc/resolv.conf 2>/dev/null || true\n",
         dns_str
