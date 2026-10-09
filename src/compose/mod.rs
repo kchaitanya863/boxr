@@ -172,6 +172,27 @@ impl ComposeProject {
         Ok(())
     }
 
+    /// Ensure project networks exist in NetworkStore (custom networks + default network)
+    pub fn ensure_networks(&self) -> Result<Vec<String>> {
+        let net_store = NetworkStore::new();
+        let default_net_name = format!("{}_default", self.name);
+        let mut created = Vec::new();
+
+        if net_store.find(&default_net_name).is_none() {
+            let _ = net_store.create(&default_net_name, None, None)?;
+        }
+        created.push(default_net_name);
+
+        for net_name in self.compose.networks.keys() {
+            let scoped_net = format!("{}_{}", self.name, net_name);
+            if net_store.find(&scoped_net).is_none() {
+                let _ = net_store.create(&scoped_net, None, None)?;
+            }
+            created.push(scoped_net);
+        }
+        Ok(created)
+    }
+
     pub async fn up(&self, detach: bool, build: bool) -> Result<()> {
         let order = self.dependency_order()?;
         println!(
@@ -179,12 +200,20 @@ impl ComposeProject {
             self.name, order
         );
 
-        // Ensure default project network
+        // Ensure project networks (custom networks declared in compose file, plus default network)
+        let _ = self.ensure_networks()?;
         let net_store = NetworkStore::new();
-        let project_net_name = format!("{}_default", self.name);
-        if net_store.find(&project_net_name).is_none() {
-            let _ = net_store.create(&project_net_name, None, None);
-        }
+        let default_net_name = format!("{}_default", self.name);
+
+        // Helper to resolve the primary network name for a service
+        let service_primary_network = |svc: &ServiceConfig| -> String {
+            if let Some(nets) = &svc.networks {
+                if let Some(first) = nets.first() {
+                    return format!("{}_{}", self.name, first);
+                }
+            }
+            default_net_name.clone()
+        };
 
         // Pre-allocate IPAM endpoints for all services so service discovery knows all service IPs
         for svc_name in &order {
@@ -193,8 +222,22 @@ impl ComposeProject {
                 .container_name
                 .clone()
                 .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
-            let _ = net_store.connect_container(&project_net_name, &container_name, svc_name);
+            let primary_net = service_primary_network(svc);
+            let _ = net_store.connect_container(&primary_net, &container_name, svc_name);
+            if let Some(nets) = &svc.networks {
+                for net_name in nets {
+                    let scoped_net = format!("{}_{}", self.name, net_name);
+                    let _ = net_store.connect_container(&scoped_net, &container_name, svc_name);
+                }
+            }
         }
+
+        #[cfg(target_os = "macos")]
+        let mesh_ports: std::collections::HashMap<String, u16> = order
+            .iter()
+            .enumerate()
+            .map(|(idx, svc)| (svc.clone(), 28000 + idx as u16))
+            .collect();
 
         // Ensure project volumes
         let vol_store = VolumeStore::new();
@@ -304,21 +347,52 @@ impl ComposeProject {
                 svc_name, container_name
             );
 
-            // Attach to network
-            let _ = net_store.connect_container(&project_net_name, &container_name, &svc_name);
+            let svc_net = service_primary_network(svc);
 
-            // Build service discovery hosts mappings from project network
+            // Attach to network
+            let _ = net_store.connect_container(&svc_net, &container_name, &svc_name);
+            if let Some(nets) = &svc.networks {
+                for net_name in nets {
+                    let scoped_net = format!("{}_{}", self.name, net_name);
+                    let _ = net_store.connect_container(&scoped_net, &container_name, &svc_name);
+                }
+            }
+
+            // Build service discovery hosts mappings from all networks this service belongs to
             let mut add_host = Vec::new();
-            if let Some(net) = net_store.find(&project_net_name) {
-                for (_, ep) in &net.containers {
-                    add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
-                    if ep.container_id != ep.container_name {
-                        add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+            let mut attached_nets = vec![svc_net.clone()];
+            if let Some(nets) = &svc.networks {
+                for net_name in nets {
+                    attached_nets.push(format!("{}_{}", self.name, net_name));
+                }
+            }
+            attached_nets.sort();
+            attached_nets.dedup();
+
+            for anet in &attached_nets {
+                if let Some(net) = net_store.find(anet) {
+                    for (_, ep) in &net.containers {
+                        add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
+                        if ep.container_id != ep.container_name {
+                            add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+                        }
                     }
                 }
             }
             add_host.sort();
             add_host.dedup();
+
+            #[cfg(target_os = "macos")]
+            for (peer_svc, relay_port) in &mesh_ports {
+                if *peer_svc != *svc_name {
+                    env_vec.push(format!(
+                        "BOXR_MESH_{}={}:{}",
+                        peer_svc.to_uppercase(),
+                        "192.168.64.1",
+                        relay_port
+                    ));
+                }
+            }
 
             let run_args = RunArgs {
                 interactive: false,
@@ -340,7 +414,7 @@ impl ComposeProject {
                 health_cmd: None,
                 platform: None,
                 privileged: false,
-                network: project_net_name.clone(),
+                network: svc_net.clone(),
                 disable_content_trust: false,
                 gpus: None,
                 entrypoint: None,
@@ -451,6 +525,14 @@ impl ComposeProject {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        if let Err(e) = crate::network::macos_compose::start_compose_mesh(&default_net_name).await {
+            eprintln!(
+                "Warning: compose inter-service mesh relays unavailable: {:?}",
+                e
+            );
+        }
+
         println!("Project '{}' started successfully.", self.name);
         Ok(())
     }
@@ -500,17 +582,26 @@ impl ComposeProject {
         }
 
         let net_store = NetworkStore::new();
-        let project_net_name = format!("{}_default", self.name);
+        let default_net_name = format!("{}_default", self.name);
+        let mut all_project_nets = vec![default_net_name.clone()];
+        for net_name in self.compose.networks.keys() {
+            all_project_nets.push(format!("{}_{}", self.name, net_name));
+        }
+
         for (svc_name, svc) in &self.compose.services {
             let container_name = svc
                 .container_name
                 .clone()
                 .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
-            let _ = net_store.disconnect_container(&project_net_name, &container_name);
-            let _ = net_store.disconnect_container(&project_net_name, svc_name);
+            for pnet in &all_project_nets {
+                let _ = net_store.disconnect_container(pnet, &container_name);
+                let _ = net_store.disconnect_container(pnet, svc_name);
+            }
             let _ = net_store.cleanup_container_endpoints(&container_name, svc_name);
         }
-        let _ = net_store.remove_with_force(&project_net_name, true);
+        for pnet in all_project_nets {
+            let _ = net_store.remove_with_force(&pnet, true);
+        }
 
         println!("Project '{}' stopped and removed.", self.name);
         Ok(())
@@ -676,13 +767,34 @@ impl ComposeProject {
             }
         }
         let net_store = NetworkStore::new();
-        let project_net_name = format!("{}_default", self.name);
+        let svc_net = svc
+            .networks
+            .as_ref()
+            .and_then(|nets| nets.first())
+            .map(|n| format!("{}_{}", self.name, n))
+            .unwrap_or_else(|| format!("{}_default", self.name));
+
+        let mut attached_nets = vec![svc_net.clone()];
+        if let Some(nets) = &svc.networks {
+            for net_name in nets {
+                attached_nets.push(format!("{}_{}", self.name, net_name));
+            }
+        }
+        let default_net = format!("{}_default", self.name);
+        if !attached_nets.contains(&default_net) {
+            attached_nets.push(default_net);
+        }
+        attached_nets.sort();
+        attached_nets.dedup();
+
         let mut add_host = Vec::new();
-        if let Some(net) = net_store.find(&project_net_name) {
-            for (_, ep) in &net.containers {
-                add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
-                if ep.container_id != ep.container_name {
-                    add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+        for anet in &attached_nets {
+            if let Some(net) = net_store.find(anet) {
+                for (_, ep) in &net.containers {
+                    add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
+                    if ep.container_id != ep.container_name {
+                        add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+                    }
                 }
             }
         }
@@ -709,7 +821,7 @@ impl ComposeProject {
             health_cmd: None,
             platform: None,
             privileged: false,
-            network: project_net_name,
+            network: svc_net,
             disable_content_trust: false,
             gpus: None,
             entrypoint: None,

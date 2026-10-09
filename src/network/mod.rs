@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+pub mod macos_compose;
 pub mod pasta;
 pub mod rootless;
 pub mod usernet;
@@ -9,8 +11,69 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Load published port mappings from a container bundle directory.
+/// Prefers the in-memory list when non-empty; otherwise reads `ports.json`.
+pub fn resolve_bundle_ports(bundle_path: &Path, from_record: &[PortMapping]) -> Vec<PortMapping> {
+    if !from_record.is_empty() {
+        return from_record.to_vec();
+    }
+    let ports_path = bundle_path.join("ports.json");
+    if !ports_path.exists() {
+        return Vec::new();
+    }
+    match fs::read_to_string(&ports_path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Spawn the host-side `__internal-port-forward` daemon for a bundle (no-op when ports empty).
+pub fn spawn_port_forward_daemon(bundle_path: &Path, ports: &[PortMapping]) -> Result<()> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    let ports_json = serde_json::to_string(ports)?;
+    fs::write(bundle_path.join("ports.json"), ports_json)?;
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("boxr"));
+    let mut fwd_cmd = std::process::Command::new(&exe);
+    fwd_cmd
+        .arg("__internal-port-forward")
+        .arg(bundle_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        fwd_cmd.process_group(0);
+    }
+    fwd_cmd.spawn().with_context(|| {
+        format!(
+            "failed to spawn port forward daemon for {}",
+            bundle_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Wait until the host forwarder daemon writes `forwarder.pid`.
+pub fn wait_for_forwarder_pid(bundle_path: &Path, timeout: Duration) -> Result<()> {
+    let pid_path = bundle_path.join("forwarder.pid");
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if pid_path.exists() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(anyhow!(
+        "timed out waiting for port forward daemon on {}",
+        bundle_path.display()
+    ))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortMapping {
@@ -360,10 +423,10 @@ impl NetworkStore {
         if name_trimmed.is_empty()
             || !name_trimmed
                 .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
         {
             return Err(anyhow!(
-                "Invalid network name '{}': must be alphanumeric, '_', or '-'",
+                "Invalid network name '{}': must be alphanumeric, '_', '-', or '.'",
                 name
             ));
         }
@@ -375,11 +438,48 @@ impl NetworkStore {
             }
 
             let network_count = data.networks.len();
-            let default_subnet = format!("172.{}.0.0/16", 29 + network_count);
-            let default_gw = format!("172.{}.0.1", 29 + network_count);
+            let mut chosen_subnet = subnet.map(|s| s.to_string());
+            let mut chosen_gw = gateway.map(|g| g.to_string());
 
-            let chosen_subnet = subnet.unwrap_or(&default_subnet).to_string();
-            let chosen_gw = gateway.unwrap_or(&default_gw).to_string();
+            if chosen_subnet.is_none() {
+                for offset in 0..200 {
+                    let octet = 29 + (network_count + offset) % 200;
+                    let cand_subnet = format!("172.{}.0.0/16", octet);
+                    let cand_gw = format!("172.{}.0.1", octet);
+                    let overlaps = data.networks.iter().any(|n| {
+                        subnets_overlap(&n.subnet, &cand_subnet).unwrap_or(false)
+                    });
+                    if !overlaps {
+                        chosen_subnet = Some(cand_subnet);
+                        chosen_gw = Some(cand_gw);
+                        break;
+                    }
+                }
+            }
+
+            let chosen_subnet = chosen_subnet.ok_or_else(|| anyhow!("No available subnet addresses found"))?;
+            let chosen_gw = chosen_gw.unwrap_or_else(|| {
+                // If user supplied subnet without gateway, default to .1
+                if let Some((ip_str, _)) = chosen_subnet.split_once('/') {
+                    if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                        let octets = ip.octets();
+                        return format!("{}.{}.{}.1", octets[0], octets[1], octets[2]);
+                    }
+                }
+                "172.29.0.1".to_string()
+            });
+
+            // Check if chosen subnet overlaps with any existing network subnet
+            for existing_net in &data.networks {
+                if subnets_overlap(&existing_net.subnet, &chosen_subnet)? {
+                    return Err(anyhow!(
+                        "Pool overlaps with other one on this address space: subnet '{}' overlaps with network '{}' subnet '{}'",
+                        chosen_subnet,
+                        existing_net.name,
+                        existing_net.subnet
+                    ));
+                }
+            }
 
             let id = hex::encode(crate::storage::container_store::rand_id());
 
@@ -675,20 +775,15 @@ impl NetworkConnector for NetworkStore {
     }
 }
 
-fn allocate_ip_in_subnet(
-    subnet_str: &str,
-    gateway_str: &str,
-    existing: &HashMap<String, NetworkEndpoint>,
-) -> Result<Ipv4Addr> {
+pub fn parse_cidr_range(subnet_str: &str) -> Result<(u32, u32)> {
     let (ip_part, mask_part) = subnet_str
         .split_once('/')
         .ok_or_else(|| anyhow!("Invalid CIDR subnet {}", subnet_str))?;
 
     let base_ip: Ipv4Addr = ip_part.parse()?;
     let prefix_len: u32 = mask_part.parse().context("Invalid CIDR prefix length")?;
-    let gateway: Ipv4Addr = gateway_str.parse()?;
 
-    if prefix_len > 30 || prefix_len < 8 {
+    if prefix_len > 32 {
         return Err(anyhow!("Unsupported subnet prefix length /{}", prefix_len));
     }
 
@@ -699,6 +794,22 @@ fn allocate_ip_in_subnet(
     };
     let base_u32 = u32::from(base_ip) & mask_u32;
     let bcast_u32 = base_u32 | (!mask_u32);
+    Ok((base_u32, bcast_u32))
+}
+
+pub fn subnets_overlap(sub1: &str, sub2: &str) -> Result<bool> {
+    let (start1, end1) = parse_cidr_range(sub1)?;
+    let (start2, end2) = parse_cidr_range(sub2)?;
+    Ok(start1 <= end2 && start2 <= end1)
+}
+
+fn allocate_ip_in_subnet(
+    subnet_str: &str,
+    gateway_str: &str,
+    existing: &HashMap<String, NetworkEndpoint>,
+) -> Result<Ipv4Addr> {
+    let (base_u32, bcast_u32) = parse_cidr_range(subnet_str)?;
+    let gateway: Ipv4Addr = gateway_str.parse()?;
 
     let used_ips: Vec<Ipv4Addr> = existing
         .values()

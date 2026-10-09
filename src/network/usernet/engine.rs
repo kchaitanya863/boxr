@@ -177,13 +177,13 @@ impl UserNetEngine {
                 std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, tcp.dst_port));
             if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
                 &target_addr,
-                std::time::Duration::from_millis(2000),
+                std::time::Duration::from_millis(500),
             ) {
                 use std::io::{Read, Write};
                 let _ = stream.write_all(tcp_data);
                 let _ = stream.flush();
                 let mut resp_buf = [0u8; 16384];
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(2000)));
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
                 if let Ok(n) = stream.read(&mut resp_buf) {
                     if n > 0 {
                         let response_data = &resp_buf[..n];
@@ -299,42 +299,66 @@ impl UserNetEngine {
         if (ip.dst_ip == self.gateway_ip || ip.dst_ip == self.dns_ip) && udp.dst_port == 53 {
             // Forward DNS query to host resolver
             if let Ok(dns_reply) = forward_dns_query(udp_payload) {
-                let reply_udp = UdpHeader {
-                    src_port: 53,
-                    dst_port: udp.src_port,
-                    length: (8 + dns_reply.len()) as u16,
-                    checksum: 0,
-                };
+                return self.build_udp_reply(eth, ip, &udp, &dns_reply);
+            }
+        }
 
-                let reply_ip = Ipv4Header {
-                    ihl: 5,
-                    tos: 0,
-                    total_length: (20 + 8 + dns_reply.len()) as u16,
-                    id: ip.id.wrapping_add(1),
-                    flags_and_frag: 0,
-                    ttl: 64,
-                    protocol: IP_PROTO_UDP,
-                    checksum: 0,
-                    src_ip: ip.dst_ip,
-                    dst_ip: ip.src_ip,
-                };
-
-                let reply_eth = EthernetHeader {
-                    dst_mac: eth.src_mac,
-                    src_mac: VIRTUAL_GATEWAY_MAC,
-                    ethertype: ETHERTYPE_IPV4,
-                };
-
-                let mut out = Vec::with_capacity(14 + 20 + 8 + dns_reply.len());
-                reply_eth.write_to(&mut out);
-                reply_ip.write_to(&mut out);
-                reply_udp.write_to(&mut out);
-                out.extend_from_slice(&dns_reply);
-                return Some(out);
+        // Generic UDP outbound forwarding to host network
+        if ip.dst_ip != self.gateway_ip && ip.dst_ip != self.container_ip {
+            if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+                let target = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, udp.dst_port));
+                if socket.send_to(udp_payload, target).is_ok() {
+                    let mut buf = [0u8; 65507];
+                    if let Ok((len, _)) = socket.recv_from(&mut buf) {
+                        return self.build_udp_reply(eth, ip, &udp, &buf[..len]);
+                    }
+                }
             }
         }
 
         None
+    }
+
+    fn build_udp_reply(
+        &self,
+        eth: &EthernetHeader,
+        ip: &Ipv4Header,
+        udp: &UdpHeader,
+        reply_payload: &[u8],
+    ) -> Option<Vec<u8>> {
+        let reply_udp = UdpHeader {
+            src_port: udp.dst_port,
+            dst_port: udp.src_port,
+            length: (8 + reply_payload.len()) as u16,
+            checksum: 0,
+        };
+
+        let reply_ip = Ipv4Header {
+            ihl: 5,
+            tos: 0,
+            total_length: (20 + 8 + reply_payload.len()) as u16,
+            id: ip.id.wrapping_add(1),
+            flags_and_frag: 0,
+            ttl: 64,
+            protocol: IP_PROTO_UDP,
+            checksum: 0,
+            src_ip: ip.dst_ip,
+            dst_ip: ip.src_ip,
+        };
+
+        let reply_eth = EthernetHeader {
+            dst_mac: eth.src_mac,
+            src_mac: VIRTUAL_GATEWAY_MAC,
+            ethertype: ETHERTYPE_IPV4,
+        };
+
+        let mut out = Vec::with_capacity(14 + 20 + 8 + reply_payload.len());
+        reply_eth.write_to(&mut out);
+        reply_ip.write_to(&mut out);
+        reply_udp.write_to(&mut out);
+        out.extend_from_slice(reply_payload);
+        Some(out)
     }
 }
 
@@ -345,7 +369,7 @@ fn forward_dns_query(query: &[u8]) -> Result<Vec<u8>> {
 
     let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket for DNS")?;
     socket
-        .set_read_timeout(Some(Duration::from_millis(1500)))
+        .set_read_timeout(Some(Duration::from_millis(600)))
         .context("Failed to set DNS read timeout")?;
 
     // Try multiple standard upstream resolvers: local host resolver, Cloudflare, Google
@@ -456,6 +480,21 @@ pub mod platform {
         let mut buf = [0u8; 65536];
 
         loop {
+            // Wait for readability using poll() to eliminate busy polling
+            let mut pollfd = libc::pollfd {
+                fd: tap_file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let poll_ret = unsafe { libc::poll(&mut pollfd, 1, 100) };
+            if poll_ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+
             match tap_file.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -464,7 +503,8 @@ pub mod platform {
                     }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    // Handled by poll above; short yield
+                    std::thread::yield_now();
                 }
                 Err(_) => break,
             }
@@ -482,6 +522,20 @@ pub mod platform {
             let mut buf = [0u8; 65536];
 
             while flag.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut pollfd = libc::pollfd {
+                    fd: tap_file.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let poll_ret = unsafe { libc::poll(&mut pollfd, 1, 100) };
+                if poll_ret < 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+
                 match tap_file.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
@@ -490,7 +544,7 @@ pub mod platform {
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        std::thread::yield_now();
                     }
                     Err(_) => break,
                 }
