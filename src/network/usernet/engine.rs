@@ -299,42 +299,66 @@ impl UserNetEngine {
         if (ip.dst_ip == self.gateway_ip || ip.dst_ip == self.dns_ip) && udp.dst_port == 53 {
             // Forward DNS query to host resolver
             if let Ok(dns_reply) = forward_dns_query(udp_payload) {
-                let reply_udp = UdpHeader {
-                    src_port: 53,
-                    dst_port: udp.src_port,
-                    length: (8 + dns_reply.len()) as u16,
-                    checksum: 0,
-                };
+                return self.build_udp_reply(eth, ip, &udp, &dns_reply);
+            }
+        }
 
-                let reply_ip = Ipv4Header {
-                    ihl: 5,
-                    tos: 0,
-                    total_length: (20 + 8 + dns_reply.len()) as u16,
-                    id: ip.id.wrapping_add(1),
-                    flags_and_frag: 0,
-                    ttl: 64,
-                    protocol: IP_PROTO_UDP,
-                    checksum: 0,
-                    src_ip: ip.dst_ip,
-                    dst_ip: ip.src_ip,
-                };
-
-                let reply_eth = EthernetHeader {
-                    dst_mac: eth.src_mac,
-                    src_mac: VIRTUAL_GATEWAY_MAC,
-                    ethertype: ETHERTYPE_IPV4,
-                };
-
-                let mut out = Vec::with_capacity(14 + 20 + 8 + dns_reply.len());
-                reply_eth.write_to(&mut out);
-                reply_ip.write_to(&mut out);
-                reply_udp.write_to(&mut out);
-                out.extend_from_slice(&dns_reply);
-                return Some(out);
+        // Generic UDP outbound forwarding to host network
+        if ip.dst_ip != self.gateway_ip && ip.dst_ip != self.container_ip {
+            if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+                let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+                let target = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, udp.dst_port));
+                if socket.send_to(udp_payload, target).is_ok() {
+                    let mut buf = [0u8; 65507];
+                    if let Ok((len, _)) = socket.recv_from(&mut buf) {
+                        return self.build_udp_reply(eth, ip, &udp, &buf[..len]);
+                    }
+                }
             }
         }
 
         None
+    }
+
+    fn build_udp_reply(
+        &self,
+        eth: &EthernetHeader,
+        ip: &Ipv4Header,
+        udp: &UdpHeader,
+        reply_payload: &[u8],
+    ) -> Option<Vec<u8>> {
+        let reply_udp = UdpHeader {
+            src_port: udp.dst_port,
+            dst_port: udp.src_port,
+            length: (8 + reply_payload.len()) as u16,
+            checksum: 0,
+        };
+
+        let reply_ip = Ipv4Header {
+            ihl: 5,
+            tos: 0,
+            total_length: (20 + 8 + reply_payload.len()) as u16,
+            id: ip.id.wrapping_add(1),
+            flags_and_frag: 0,
+            ttl: 64,
+            protocol: IP_PROTO_UDP,
+            checksum: 0,
+            src_ip: ip.dst_ip,
+            dst_ip: ip.src_ip,
+        };
+
+        let reply_eth = EthernetHeader {
+            dst_mac: eth.src_mac,
+            src_mac: VIRTUAL_GATEWAY_MAC,
+            ethertype: ETHERTYPE_IPV4,
+        };
+
+        let mut out = Vec::with_capacity(14 + 20 + 8 + reply_payload.len());
+        reply_eth.write_to(&mut out);
+        reply_ip.write_to(&mut out);
+        reply_udp.write_to(&mut out);
+        out.extend_from_slice(reply_payload);
+        Some(out)
     }
 }
 

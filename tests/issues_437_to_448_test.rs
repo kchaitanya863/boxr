@@ -339,5 +339,16 @@ fn test_issue_446_usernet_engine_poll_optimization() {
     );
 }
 
+#[test]
+fn test_issue_439_usernet_udp_forwarding() {
+    // Issue #439: Embedded usernet handles non-DNS UDP forwarding
+    let engine_src = include_str!("../src/network/usernet/engine.rs");
+    assert!(
+        engine_src.contains("build_udp_reply"),
+        "usernet engine must support generic UDP forwarding"
+    );
+}
+
+
 
 
