@@ -1910,10 +1910,8 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
         #[cfg(target_os = "linux")]
         if !parsed_ports.is_empty() {
             // Rootless forward helper may write forwarder.pid; passt/pasta does not.
-            let _ = network::wait_for_forwarder_pid(
-                &bundle_dir,
-                std::time::Duration::from_secs(15),
-            );
+            let _ =
+                network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
             // Detached starts must not block on in-container listeners (Docker/Podman parity).
         }
         if !health_cfg.test.is_empty() {
