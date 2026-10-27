@@ -5905,9 +5905,10 @@ pub fn reload_container_networks(containers: &[String]) -> Result<()> {
             .ok_or_else(|| anyhow!("Container '{}' not found", query))?;
         let mut refreshed = std::collections::HashSet::new();
         for net in net_store.list() {
-            let attached = net.containers.values().any(|ep| {
-                ep.container_id == container.id || ep.container_name == container.name
-            });
+            let attached = net
+                .containers
+                .values()
+                .any(|ep| ep.container_id == container.id || ep.container_name == container.name);
             if attached && refreshed.insert(net.name.clone()) {
                 network::refresh_bridge_hosts_for_network(&net.name, None)?;
             }
@@ -6031,7 +6032,13 @@ fn handle_machine_macos(args: cli::MachineSubcommands) -> Result<()> {
             let status = std::process::Command::new(&command[0])
                 .args(&command[1..])
                 .status()
-                .map_err(|e| anyhow!("failed to run remote command for machine '{}': {}", mname, e))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "failed to run remote command for machine '{}': {}",
+                        mname,
+                        e
+                    )
+                })?;
             if !status.success() {
                 return Err(anyhow!(
                     "machine '{}' command failed with exit code {:?}",

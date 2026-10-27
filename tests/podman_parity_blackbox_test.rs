@@ -9,7 +9,9 @@ use std::process::Command;
 use tempfile::tempdir;
 
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/podman").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/podman")
+        .join(name)
 }
 
 fn compose_replacement_stack() -> PathBuf {
@@ -52,7 +54,15 @@ fn test_exists_exit_codes() {
     let name = format!("exists-{}", blackbox::rand_suffix());
     let run = blackbox::run_boxr(
         &home,
-        &["run", "-d", "--name", &name, "alpine:latest", "sleep", "120"],
+        &[
+            "run",
+            "-d",
+            "--name",
+            &name,
+            "alpine:latest",
+            "sleep",
+            "120",
+        ],
     );
     assert!(run.status.success());
 
@@ -78,7 +88,11 @@ fn test_volume_exists_and_network_exists() {
     }
     let (_guard, home) = blackbox::isolated_home();
     let vol = format!("vol-{}", blackbox::rand_suffix());
-    assert!(blackbox::run_boxr(&home, &["volume", "create", &vol]).status.success());
+    assert!(
+        blackbox::run_boxr(&home, &["volume", "create", &vol])
+            .status
+            .success()
+    );
     assert!(
         Command::new(&bin)
             .env("BOXR_HOME", home.as_path())
@@ -139,15 +153,13 @@ fn test_play_kube_minimal_pod() {
     let (_guard, home) = blackbox::isolated_home();
     blackbox::pull_if_needed(&home, "alpine:3.20");
     let yaml = fixture("minimal-pod.yaml");
-    let up = blackbox::run_boxr(
-        &home,
-        &["play", "kube", yaml.to_str().unwrap()],
+    let up = blackbox::run_boxr(&home, &["play", "kube", yaml.to_str().unwrap()]);
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
     );
-    assert!(up.status.success(), "{}", String::from_utf8_lossy(&up.stderr));
-    let down = blackbox::run_boxr(
-        &home,
-        &["play", "kube", "--down", yaml.to_str().unwrap()],
-    );
+    let down = blackbox::run_boxr(&home, &["play", "kube", "--down", yaml.to_str().unwrap()]);
     assert!(down.status.success());
 }
 
@@ -192,10 +204,7 @@ fn test_quadlet_install_and_print() {
     }
     let (_guard, home) = blackbox::isolated_home();
     let sample = fixture("sample.container");
-    let install = blackbox::run_boxr(
-        &home,
-        &["quadlet", "install", sample.to_str().unwrap()],
-    );
+    let install = blackbox::run_boxr(&home, &["quadlet", "install", sample.to_str().unwrap()]);
     assert!(install.status.success());
     let print = blackbox::run_boxr(&home, &["quadlet", "print", "sample.container"]);
     assert!(print.status.success());
@@ -219,16 +228,32 @@ fn test_checkpoint_restore_metadata_roundtrip() {
     assert!(
         blackbox::run_boxr(
             &home,
-            &["run", "-d", "--name", &name, "alpine:latest", "sleep", "300"],
+            &[
+                "run",
+                "-d",
+                "--name",
+                &name,
+                "alpine:latest",
+                "sleep",
+                "300"
+            ],
         )
         .status
         .success()
     );
     let cp = blackbox::run_boxr(&home, &["container", "checkpoint", &name]);
-    assert!(cp.status.success(), "{}", String::from_utf8_lossy(&cp.stderr));
+    assert!(
+        cp.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cp.stderr)
+    );
     let _ = blackbox::run_boxr(&home, &["stop", &name]);
     let restore = blackbox::run_boxr(&home, &["container", "restore", &name]);
-    assert!(restore.status.success(), "{}", String::from_utf8_lossy(&restore.stderr));
+    assert!(
+        restore.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
     let _ = blackbox::run_boxr(&home, &["rm", "-f", &name]);
 }
 
@@ -245,30 +270,31 @@ fn test_volume_export_import_roundtrip() {
     let (_guard, home) = blackbox::isolated_home();
     let vol = format!("vex-{}", blackbox::rand_suffix());
     let vol2 = format!("vim-{}", blackbox::rand_suffix());
-    assert!(blackbox::run_boxr(&home, &["volume", "create", &vol]).status.success());
+    assert!(
+        blackbox::run_boxr(&home, &["volume", "create", &vol])
+            .status
+            .success()
+    );
     let temp = tempdir().unwrap();
     let archive = temp.path().join("vol.tar");
     let export = blackbox::run_boxr(
         &home,
-        &[
-            "volume",
-            "export",
-            &vol,
-            "-o",
-            archive.to_str().unwrap(),
-        ],
+        &["volume", "export", &vol, "-o", archive.to_str().unwrap()],
     );
-    assert!(export.status.success(), "{}", String::from_utf8_lossy(&export.stderr));
+    assert!(
+        export.status.success(),
+        "{}",
+        String::from_utf8_lossy(&export.stderr)
+    );
     let import = blackbox::run_boxr(
         &home,
-        &[
-            "volume",
-            "import",
-            &vol2,
-            archive.to_str().unwrap(),
-        ],
+        &["volume", "import", &vol2, archive.to_str().unwrap()],
     );
-    assert!(import.status.success(), "{}", String::from_utf8_lossy(&import.stderr));
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
     let _ = blackbox::run_boxr(&home, &["volume", "rm", &vol]);
     let _ = blackbox::run_boxr(&home, &["volume", "rm", &vol2]);
 }
@@ -299,7 +325,11 @@ fn test_artifact_add_ls_rm() {
             "application/octet-stream",
         ],
     );
-    assert!(add.status.success(), "{}", String::from_utf8_lossy(&add.stderr));
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let ls = blackbox::run_boxr(&home, &["artifact", "ls"]);
     assert!(ls.status.success());
     assert!(String::from_utf8_lossy(&ls.stdout).contains(&name));
@@ -387,11 +417,12 @@ fn test_farm_create_list_remove() {
     }
     let (_guard, home) = blackbox::isolated_home();
     let farm = format!("farm-{}", blackbox::rand_suffix());
-    let create = blackbox::run_boxr(
-        &home,
-        &["farm", "create", &farm, "node-a", "node-b"],
+    let create = blackbox::run_boxr(&home, &["farm", "create", &farm, "node-a", "node-b"]);
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
     );
-    assert!(create.status.success(), "{}", String::from_utf8_lossy(&create.stderr));
     let ls = blackbox::run_boxr(&home, &["farm", "ls"]);
     assert!(ls.status.success());
     let out = String::from_utf8_lossy(&ls.stdout);
@@ -410,7 +441,11 @@ fn test_auto_update_dry_run_exits_zero() {
         .args(["auto-update", "--dry-run"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -423,7 +458,11 @@ fn test_system_connection_list() {
         .args(["system", "connection", "ls"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -446,11 +485,23 @@ fn test_network_reload_after_connect() {
     blackbox::pull_if_needed(&home, "alpine:latest");
     let net = format!("net-{}", blackbox::rand_suffix());
     let cname = format!("c-{}", blackbox::rand_suffix());
-    assert!(blackbox::run_boxr(&home, &["network", "create", &net]).status.success());
+    assert!(
+        blackbox::run_boxr(&home, &["network", "create", &net])
+            .status
+            .success()
+    );
     assert!(
         blackbox::run_boxr(
             &home,
-            &["run", "-d", "--name", &cname, "alpine:latest", "sleep", "120"],
+            &[
+                "run",
+                "-d",
+                "--name",
+                &cname,
+                "alpine:latest",
+                "sleep",
+                "120"
+            ],
         )
         .status
         .success()
@@ -458,7 +509,11 @@ fn test_network_reload_after_connect() {
     let connect = blackbox::run_boxr(&home, &["network", "connect", &net, &cname]);
     assert!(connect.status.success());
     let reload = blackbox::run_boxr(&home, &["network", "reload", &cname]);
-    assert!(reload.status.success(), "{}", String::from_utf8_lossy(&reload.stderr));
+    assert!(
+        reload.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reload.stderr)
+    );
     let _ = blackbox::run_boxr(&home, &["rm", "-f", &cname]);
     let _ = blackbox::run_boxr(&home, &["network", "rm", &net]);
 }

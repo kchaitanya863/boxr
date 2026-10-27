@@ -22,8 +22,12 @@ pub fn resolve_target_endpoint(bundle: &std::path::Path) -> (String, u16) {
     let ports_path = bundle.join("ports.json");
     if ports_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&ports_path) {
-            if let Ok(mappings) = serde_json::from_str::<Vec<crate::network::PortMapping>>(&content) {
-                if let Some(first_tcp) = mappings.iter().find(|m| m.protocol.eq_ignore_ascii_case("tcp")) {
+            if let Ok(mappings) = serde_json::from_str::<Vec<crate::network::PortMapping>>(&content)
+            {
+                if let Some(first_tcp) = mappings
+                    .iter()
+                    .find(|m| m.protocol.eq_ignore_ascii_case("tcp"))
+                {
                     target_port = first_tcp.container_port;
                 }
             }

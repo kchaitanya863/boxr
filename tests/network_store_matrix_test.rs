@@ -53,7 +53,8 @@ fn test_validate_network_port_compatibility_matrix() {
     for bad_net in ["none", "host"] {
         let err = validate_network_port_compatibility(bad_net, &ports).unwrap_err();
         assert!(
-            err.to_string().contains("published ports are not supported"),
+            err.to_string()
+                .contains("published ports are not supported"),
             "bad_net={}: {}",
             bad_net,
             err
@@ -167,7 +168,9 @@ fn test_network_store_ipam_hosts_and_lifecycle() {
     assert!(hosts_a.contains("svc-b"));
     assert!(hosts_a.contains(&ep_b.ipv4_address));
 
-    store.disconnect_container(net_name, "aaaaaaaaaaaa").unwrap();
+    store
+        .disconnect_container(net_name, "aaaaaaaaaaaa")
+        .unwrap();
     let ep_a_again = store
         .connect_container(net_name, "aaaaaaaaaaaa", "svc-a")
         .unwrap();
@@ -177,8 +180,12 @@ fn test_network_store_ipam_hosts_and_lifecycle() {
     );
 
     assert!(store.remove(net_name).is_err(), "active endpoints block rm");
-    store.disconnect_container(net_name, "bbbbbbbbbbbb").unwrap();
-    store.disconnect_container(net_name, "aaaaaaaaaaaa").unwrap();
+    store
+        .disconnect_container(net_name, "bbbbbbbbbbbb")
+        .unwrap();
+    store
+        .disconnect_container(net_name, "aaaaaaaaaaaa")
+        .unwrap();
     store.remove(net_name).unwrap();
     assert!(store.find(net_name).is_none());
 }

@@ -237,19 +237,18 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 // Host TCP/DNS relay must start before CLONE_NEWNET (TAP worker cannot setns to host).
                 let mut usernet_relay_pid = None;
                 if network_mode.should_use_native_usernet() && !use_pasta {
-                    if let Ok(pid) =
-                        crate::network::usernet::relay::spawn_host_relay(bundle_path)
-                    {
+                    if let Ok(pid) = crate::network::usernet::relay::spawn_host_relay(bundle_path) {
                         usernet_relay_pid = Some(nix::unistd::Pid::from_raw(pid));
                     }
                 }
                 // First unshare network namespace if required, so we can configure networking
                 // with external helper commands (ip) before creating the container PID namespace.
-                let host_netns_for_tap = if requires_netns && network_mode.should_use_native_usernet() {
-                    std::fs::File::open("/proc/self/ns/net").ok()
-                } else {
-                    None
-                };
+                let host_netns_for_tap =
+                    if requires_netns && network_mode.should_use_native_usernet() {
+                        std::fs::File::open("/proc/self/ns/net").ok()
+                    } else {
+                        None
+                    };
                 if requires_netns {
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWNET) {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
@@ -258,7 +257,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     let _ = std::process::Command::new("ip")
                         .args(["link", "set", "lo", "up"])
                         .status();
-                } else if let Some(target_cont) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network_container")) {
+                } else if let Some(target_cont) = spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.network_container"))
+                {
                     // Attach to existing container's network namespace (container:<target>)
                     let store = crate::storage::ContainerStore::new();
                     if let Some(target_rec) = store.find(target_cont) {
@@ -426,13 +429,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 usernet_relay_pid = Some(nix::unistd::Pid::from_raw(pid));
             }
         }
-        let host_netns_for_tap = if network_mode.requires_new_netns()
-            && network_mode.should_use_native_usernet()
-        {
-            std::fs::File::open("/proc/self/ns/net").ok()
-        } else {
-            None
-        };
+        let host_netns_for_tap =
+            if network_mode.requires_new_netns() && network_mode.should_use_native_usernet() {
+                std::fs::File::open("/proc/self/ns/net").ok()
+            } else {
+                None
+            };
         if network_mode.requires_new_netns() {
             unshare(CloneFlags::CLONE_NEWNET)
                 .context("Failed to unshare network namespace (requires CAP_NET_ADMIN or root)")?;
@@ -488,7 +490,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     Err(_) => {}
                 }
             }
-        } else if let Some(target_cont) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network_container")) {
+        } else if let Some(target_cont) = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.network_container"))
+        {
             // Root mode: attach to existing container's network namespace (container:<target>)
             let store = crate::storage::ContainerStore::new();
             if let Some(target_rec) = store.find(target_cont) {
@@ -536,8 +542,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     let _ = waitpid(fwd_pid, None);
                 }
                 if let Some(relay_pid) = usernet_relay_pid {
-                    let _ =
-                        nix::sys::signal::kill(relay_pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = nix::sys::signal::kill(relay_pid, nix::sys::signal::Signal::SIGKILL);
                     let _ = waitpid(relay_pid, None);
                 }
 
@@ -640,8 +645,7 @@ fn resolve_container_pid(bundle_path: &Path) -> Option<i32> {
 }
 
 fn wait_for_live_container_pid(bundle_path: &Path) -> Result<i32> {
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     while std::time::Instant::now() < deadline {
         if let Some(p) = resolve_container_pid(bundle_path) {
             if unsafe { libc::kill(p, 0) == 0 } {
@@ -910,7 +914,13 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
             }
         }
         let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
-        mount(Some(&m.source), &target, None::<&str>, bind_flags, None::<&str>)?;
+        mount(
+            Some(&m.source),
+            &target,
+            None::<&str>,
+            bind_flags,
+            None::<&str>,
+        )?;
         if m.read_only {
             mount(
                 None::<&str>,

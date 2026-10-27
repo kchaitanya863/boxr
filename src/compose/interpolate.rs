@@ -21,7 +21,10 @@ pub fn project_env(project_dir: &Path) -> HashMap<String, String> {
 }
 
 /// Walk a parsed YAML tree and interpolate string scalars in place.
-pub fn interpolate_yaml(value: &mut serde_yaml::Value, env: &HashMap<String, String>) -> Result<()> {
+pub fn interpolate_yaml(
+    value: &mut serde_yaml::Value,
+    env: &HashMap<String, String>,
+) -> Result<()> {
     match value {
         serde_yaml::Value::String(s) => {
             *s = interpolate(s, env)?;
@@ -126,7 +129,10 @@ fn expand_braced(inner: &str, env: &HashMap<String, String>) -> Result<String> {
         if let Some(idx) = inner.find(sep) {
             let name = inner[..idx].trim();
             if name.is_empty() {
-                bail!("invalid compose substitution: empty variable name in '${{{}}}'", inner);
+                bail!(
+                    "invalid compose substitution: empty variable name in '${{{}}}'",
+                    inner
+                );
             }
             let operand = inner[idx + sep.len()..].to_string();
             return apply_modifier(name, operand, modifier, env);
@@ -245,7 +251,9 @@ fn parse_dotenv_value(raw: &str) -> String {
     if raw.is_empty() {
         return String::new();
     }
-    if (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\'')) {
+    if (raw.starts_with('"') && raw.ends_with('"'))
+        || (raw.starts_with('\'') && raw.ends_with('\''))
+    {
         return raw[1..raw.len() - 1].to_string();
     }
     raw.to_string()
@@ -283,10 +291,7 @@ mod tests {
     #[test]
     fn test_default_unset_only() {
         let env = env_map(&[("PORT", "")]);
-        assert_eq!(
-            interpolate("${PORT-8080}", &env).unwrap(),
-            ""
-        );
+        assert_eq!(interpolate("${PORT-8080}", &env).unwrap(), "");
         assert_eq!(
             interpolate("${MISSING-8080}", &env_map(&[])).unwrap(),
             "8080"
@@ -341,6 +346,9 @@ mod tests {
         let env = env_map(&[("SET", "x")]);
         assert_eq!(interpolate("${SET:+yes}", &env).unwrap(), "yes");
         assert_eq!(interpolate("${UNSET:+yes}", &env).unwrap(), "");
-        assert_eq!(interpolate("${SET+yes}", &env_map(&[("SET", "")])).unwrap(), "yes");
+        assert_eq!(
+            interpolate("${SET+yes}", &env_map(&[("SET", "")])).unwrap(),
+            "yes"
+        );
     }
 }

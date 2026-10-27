@@ -7,8 +7,8 @@ use std::net::Ipv4Addr;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TcpFlowKey {
@@ -179,9 +179,8 @@ impl UserNetEngine {
         let is_syn = (tcp.flags & TCP_FLAG_SYN) != 0 && (tcp.flags & TCP_FLAG_ACK) == 0;
         if outbound && is_syn && tcp_data.is_empty() {
             let bundle = self.bundle_path.as_deref();
-            let connected = bundle.and_then(|b| {
-                super::relay::dial_via_relay(b, ip.dst_ip, tcp.dst_port).ok()
-            });
+            let connected =
+                bundle.and_then(|b| super::relay::dial_via_relay(b, ip.dst_ip, tcp.dst_port).ok());
             match connected {
                 Some(relay) => {
                     let host_seq = 1000u32;
@@ -274,9 +273,7 @@ impl UserNetEngine {
                             urgent_ptr: 0,
                         };
                         flow_state.host_seq = flow_state.host_seq.wrapping_add(n as u32);
-                        return Some(
-                            Self::build_tcp_reply(eth, ip, reply_tcp, &response_data),
-                        );
+                        return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &response_data));
                     }
                 }
             }
@@ -370,7 +367,8 @@ impl UserNetEngine {
         if ip.dst_ip != self.gateway_ip && ip.dst_ip != self.container_ip {
             if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
                 let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-                let target = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, udp.dst_port));
+                let target =
+                    std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, udp.dst_port));
                 if socket.send_to(udp_payload, target).is_ok() {
                     let mut buf = [0u8; 65507];
                     if let Ok((len, _)) = socket.recv_from(&mut buf) {
@@ -466,11 +464,7 @@ fn forward_dns_query(host_netns: Option<&File>, query: &[u8]) -> Result<Vec<u8>>
             .set_read_timeout(Some(Duration::from_millis(600)))
             .context("Failed to set DNS read timeout")?;
 
-        let upstream_targets = [
-            "127.0.0.53:53",
-            "1.1.1.1:53",
-            "8.8.8.8:53",
-        ];
+        let upstream_targets = ["127.0.0.53:53", "1.1.1.1:53", "8.8.8.8:53"];
         for target in upstream_targets {
             if socket.send_to(query, target).is_ok() {
                 let mut buf = [0u8; 4096];

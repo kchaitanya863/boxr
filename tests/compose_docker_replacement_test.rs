@@ -13,7 +13,8 @@ use tempfile::tempdir;
 mod blackbox;
 
 fn fixture_stack_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compose/docker-replacement-stack")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compose/docker-replacement-stack")
 }
 
 fn compose_fixture_path() -> PathBuf {
@@ -71,7 +72,10 @@ fn test_compose_fixture_loads_env_and_interpolates_ports() {
     let web_ports = project.compose.services["web"].ports.as_ref().unwrap();
     assert_eq!(web_ports[0], "13000:80");
 
-    let api_env = project.compose.services["api"].environment.as_ref().unwrap();
+    let api_env = project.compose.services["api"]
+        .environment
+        .as_ref()
+        .unwrap();
     let env_list = api_env.to_vec();
     assert!(env_list.iter().any(|e| e.contains("fixture-api-key")));
 }
@@ -146,10 +150,7 @@ fn test_compose_up_single_service_blackbox() {
         stdout
     );
 
-    let ps = blackbox::run_boxr(
-        &home,
-        &["compose", "-f", compose.to_str().unwrap(), "ps"],
-    );
+    let ps = blackbox::run_boxr(&home, &["compose", "-f", compose.to_str().unwrap(), "ps"]);
     assert!(ps.status.success());
     let ps_out = String::from_utf8_lossy(&ps.stdout);
     assert!(ps_out.contains("replacement-web"));
@@ -165,7 +166,14 @@ fn test_compose_up_single_service_blackbox() {
 fn test_compose_fixture_matches_docker_compose_config_when_available() {
     let compose = compose_fixture_path();
     let docker = Command::new("docker")
-        .args(["compose", "-f", compose.to_str().unwrap(), "config", "--format", "json"])
+        .args([
+            "compose",
+            "-f",
+            compose.to_str().unwrap(),
+            "config",
+            "--format",
+            "json",
+        ])
         .output();
     if docker.is_err() {
         eprintln!("SKIPPED: docker compose not available for cross-check");

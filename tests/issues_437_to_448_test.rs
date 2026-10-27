@@ -27,7 +27,10 @@ fn test_issue_447_port_collision_intra_request() {
     ];
 
     let result = PortCollisionGuard::ensure_no_conflicts_with_containers(&dup_ports, &[]);
-    assert!(result.is_err(), "Intra-request duplicate ports must be rejected");
+    assert!(
+        result.is_err(),
+        "Intra-request duplicate ports must be rejected"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(err_msg.contains("duplicate host port binding"));
 }
@@ -46,22 +49,74 @@ fn test_issue_443_subnet_overlap_detection() {
     let _ = net_store.remove_with_force(net3, true);
 
     // Create 172.55.0.0/16
-    let res1 = net_store.create_with_options(net1, "bridge", Some("172.55.0.0/16"), None, false, false, HashMap::new());
-    assert!(res1.is_ok(), "First subnet should succeed: {:?}", res1.err());
+    let res1 = net_store.create_with_options(
+        net1,
+        "bridge",
+        Some("172.55.0.0/16"),
+        None,
+        false,
+        false,
+        HashMap::new(),
+    );
+    assert!(
+        res1.is_ok(),
+        "First subnet should succeed: {:?}",
+        res1.err()
+    );
 
     // Try to create overlapping subnet 172.55.1.0/24 (subset of 172.55.0.0/16)
-    let res2 = net_store.create_with_options(net2, "bridge", Some("172.55.1.0/24"), None, false, false, HashMap::new());
+    let res2 = net_store.create_with_options(
+        net2,
+        "bridge",
+        Some("172.55.1.0/24"),
+        None,
+        false,
+        false,
+        HashMap::new(),
+    );
     assert!(res2.is_err(), "Overlapping subnet should be rejected");
-    assert!(res2.unwrap_err().to_string().contains("Pool overlaps with other one"));
+    assert!(
+        res2.unwrap_err()
+            .to_string()
+            .contains("Pool overlaps with other one")
+    );
 
     // Also check overlap against default boxr0 (172.28.0.0/16)
-    let res_boxr0 = net_store.create_with_options(net2, "bridge", Some("172.28.10.0/24"), None, false, false, HashMap::new());
-    assert!(res_boxr0.is_err(), "Subnet overlapping with boxr0 default bridge must be rejected");
-    assert!(res_boxr0.unwrap_err().to_string().contains("Pool overlaps with other one"));
+    let res_boxr0 = net_store.create_with_options(
+        net2,
+        "bridge",
+        Some("172.28.10.0/24"),
+        None,
+        false,
+        false,
+        HashMap::new(),
+    );
+    assert!(
+        res_boxr0.is_err(),
+        "Subnet overlapping with boxr0 default bridge must be rejected"
+    );
+    assert!(
+        res_boxr0
+            .unwrap_err()
+            .to_string()
+            .contains("Pool overlaps with other one")
+    );
 
     // Non-overlapping subnet 10.99.0.0/16 should succeed
-    let res3 = net_store.create_with_options(net3, "bridge", Some("10.99.0.0/16"), None, false, false, HashMap::new());
-    assert!(res3.is_ok(), "Non-overlapping subnet should succeed: {:?}", res3.err());
+    let res3 = net_store.create_with_options(
+        net3,
+        "bridge",
+        Some("10.99.0.0/16"),
+        None,
+        false,
+        false,
+        HashMap::new(),
+    );
+    assert!(
+        res3.is_ok(),
+        "Non-overlapping subnet should succeed: {:?}",
+        res3.err()
+    );
 
     // Cleanup
     let _ = net_store.remove_with_force(net1, true);
@@ -120,22 +175,26 @@ services:
     assert!(created.contains(&back_net.to_string()));
 
     // Verify build_service_run_args assigns designated primary network
-    let run_web = proj.build_service_run_args(
-        "web",
-        &proj.compose.services["web"],
-        "customnetproj_web_1",
-        "alpine:latest",
-        true,
-    ).unwrap();
+    let run_web = proj
+        .build_service_run_args(
+            "web",
+            &proj.compose.services["web"],
+            "customnetproj_web_1",
+            "alpine:latest",
+            true,
+        )
+        .unwrap();
     assert_eq!(run_web.network, front_net);
 
-    let run_api = proj.build_service_run_args(
-        "api",
-        &proj.compose.services["api"],
-        "customnetproj_api_1",
-        "alpine:latest",
-        true,
-    ).unwrap();
+    let run_api = proj
+        .build_service_run_args(
+            "api",
+            &proj.compose.services["api"],
+            "customnetproj_api_1",
+            "alpine:latest",
+            true,
+        )
+        .unwrap();
     assert_eq!(run_api.network, front_net);
 
     // Teardown with down() should remove all custom project networks
@@ -159,12 +218,20 @@ fn test_issue_442_macos_compose_mesh_dynamic_ports_and_ips() {
         container_port: 80,
         protocol: "tcp".to_string(),
     }];
-    fs::write(bundle.join("ports.json"), serde_json::to_string(&ports).unwrap()).unwrap();
+    fs::write(
+        bundle.join("ports.json"),
+        serde_json::to_string(&ports).unwrap(),
+    )
+    .unwrap();
 
     // Mock compose_net.json for target container
     let mut compose_net = HashMap::new();
     compose_net.insert("self_ip".to_string(), "10.88.0.42".to_string());
-    fs::write(bundle.join("compose_net.json"), serde_json::to_string(&compose_net).unwrap()).unwrap();
+    fs::write(
+        bundle.join("compose_net.json"),
+        serde_json::to_string(&compose_net).unwrap(),
+    )
+    .unwrap();
 
     let (target_ip, target_port) = resolve_target_endpoint(bundle);
     assert_eq!(target_port, 80);
@@ -181,7 +248,9 @@ fn test_issue_444_network_connect_disconnect_endpoints() {
     let _ = net_store.create(net_name, None, None);
 
     // Connect container
-    let ep = net_store.connect_container(net_name, "c_test_444", "test_worker").unwrap();
+    let ep = net_store
+        .connect_container(net_name, "c_test_444", "test_worker")
+        .unwrap();
     assert_eq!(ep.container_name, "test_worker");
     assert_eq!(ep.container_id, "c_test_444");
     assert!(!ep.ipv4_address.is_empty());
@@ -211,16 +280,33 @@ fn test_issue_445_darwin_resolv_conf_nameserver_preservation() {
     let bundle = temp.path();
 
     // Create dns_search.json with a search domain
-    fs::write(bundle.join("dns_search.json"), r#"["internal.corp", "example.com"]"#).unwrap();
+    fs::write(
+        bundle.join("dns_search.json"),
+        r#"["internal.corp", "example.com"]"#,
+    )
+    .unwrap();
     // Create dns_option.json with an option
     fs::write(bundle.join("dns_option.json"), r#"["ndots:5"]"#).unwrap();
 
-    let resolv_conf = boxr::runtime::darwin::generate_guest_resolv_conf(bundle, Some("subdomain.example.com"));
+    let resolv_conf =
+        boxr::runtime::darwin::generate_guest_resolv_conf(bundle, Some("subdomain.example.com"));
 
     // Verify default nameserver entries are not missing
-    assert!(resolv_conf.contains("nameserver 192.168.64.1"), "Resolv.conf must retain gateway nameserver: {}", resolv_conf);
-    assert!(resolv_conf.contains("nameserver 1.1.1.1"), "Resolv.conf must retain cloudflare nameserver: {}", resolv_conf);
-    assert!(resolv_conf.contains("nameserver 8.8.8.8"), "Resolv.conf must retain google nameserver: {}", resolv_conf);
+    assert!(
+        resolv_conf.contains("nameserver 192.168.64.1"),
+        "Resolv.conf must retain gateway nameserver: {}",
+        resolv_conf
+    );
+    assert!(
+        resolv_conf.contains("nameserver 1.1.1.1"),
+        "Resolv.conf must retain cloudflare nameserver: {}",
+        resolv_conf
+    );
+    assert!(
+        resolv_conf.contains("nameserver 8.8.8.8"),
+        "Resolv.conf must retain google nameserver: {}",
+        resolv_conf
+    );
 
     // Verify search, options, and domain directives are also present
     assert!(resolv_conf.contains("search internal.corp example.com"));
@@ -311,7 +397,8 @@ async fn test_issue_437_udp_forwarder_socket_lifecycle() {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let fwd = RootlessUdpPortForwarder::new(host_addr, std::path::PathBuf::from("/tmp/dummy.sock"));
+        let fwd =
+            RootlessUdpPortForwarder::new(host_addr, std::path::PathBuf::from("/tmp/dummy.sock"));
         assert_eq!(fwd.host_addr, host_addr);
     }
 
@@ -351,7 +438,3 @@ fn test_issue_439_usernet_udp_forwarding() {
         "usernet engine must support generic UDP forwarding"
     );
 }
-
-
-
-

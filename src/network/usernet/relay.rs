@@ -60,7 +60,9 @@ fn dispatch_client(unix: &mut UnixStream) -> Result<()> {
     reader.read_line(&mut line)?;
     let line = line.trim();
     if line.starts_with("DNSUDP ") {
-        let len_s = line.strip_prefix("DNSUDP ").ok_or_else(|| anyhow!("bad DNSUDP"))?;
+        let len_s = line
+            .strip_prefix("DNSUDP ")
+            .ok_or_else(|| anyhow!("bad DNSUDP"))?;
         let len: usize = len_s.parse().context("bad DNSUDP length")?;
         let mut query = vec![0u8; len];
         reader.read_exact(&mut query)?;
