@@ -311,14 +311,13 @@ if section_enabled podman; then
     echo -e "\n${BOLD}K. Podman parity (P0)${NC}"
     PODMAN_FIX="$REPO_ROOT/tests/fixtures/podman"
     COMPOSE_STACK="$REPO_ROOT/tests/fixtures/compose/docker-replacement-stack/docker-compose.yml"
-    # Run embedded TAP check first (before other K steps exhaust user/net namespaces on CI).
     if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
         if embedded_usernet_smoke_ok; then
             test_step "K6 embedded usernet gateway" "env BOXR_FORCE_EMBEDDED_USERNET=1 $BOXR_CMD run --rm --network usernet alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
         else
             skip_step "K6 embedded usernet gateway" "embedded usernet smoke failed (netns EPERM or relay)"
         fi
-    fi
+    else
     test_step "K1 container exists missing" "! $BOXR_CMD container exists bb-missing-$(rand_id)"
     VID="bb-vol-$(rand_id)"
     test_step "K2 volume create+exists" "$BOXR_CMD volume create $VID && $BOXR_CMD volume exists $VID"
@@ -339,6 +338,7 @@ if section_enabled podman; then
         test_step "K5 quadlet install" "$BOXR_CMD quadlet install \"$PODMAN_FIX/sample.container\""
     else
         skip_step "K5 quadlet" "fixture missing"
+    fi
     fi
 fi
 
