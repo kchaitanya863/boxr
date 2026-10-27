@@ -299,9 +299,6 @@ if section_enabled podman; then
     run_cmd "$BOXR_CMD volume rm $VID" 2>/dev/null || true
     if [[ -f "$COMPOSE_STACK" ]]; then
         test_step "K3 compose up web" "$BOXR_CMD compose -f \"$COMPOSE_STACK\" up -d web"
-        if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
-            test_step "K6 embedded usernet gateway" "$BOXR_CMD exec replacement-api grep -q 10.0.2.3 /etc/resolv.conf"
-        fi
         run_cmd "$BOXR_CMD compose -f \"$COMPOSE_STACK\" down -v" 2>/dev/null || true
     else
         skip_step "K3 compose stack" "fixture missing"
@@ -316,6 +313,9 @@ if section_enabled podman; then
         test_step "K5 quadlet install" "$BOXR_CMD quadlet install \"$PODMAN_FIX/sample.container\""
     else
         skip_step "K5 quadlet" "fixture missing"
+    fi
+    if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
+        test_step "K6 embedded usernet gateway" "cd \"$REPO_ROOT\" && cargo test --test network_integration_matrix_test test_matrix_embedded_usernet_resolv -- --exact --test-threads=1"
     fi
 fi
 
