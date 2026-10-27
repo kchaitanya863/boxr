@@ -2018,6 +2018,69 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
 }
 
 #[cfg(target_os = "linux")]
+fn sync_host_nproc_ulimit(bundle_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut lim) } == 0 {
+            let ulimits = serde_json::json!([{
+                "Name": "RLIMIT_NPROC",
+                "Soft": lim.rlim_cur,
+                "Hard": lim.rlim_max,
+            }]);
+            let _ = fs::write(
+                bundle_path.join("host_ulimits.json"),
+                serde_json::to_string(&ulimits)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn host_ulimits_for_inspect(bundle_path: &Path) -> serde_json::Value {
+    let path = bundle_path.join("host_ulimits.json");
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            return v;
+        }
+    }
+    serde_json::json!([])
+}
+
+fn container_network_parent(spec: &Spec) -> Option<String> {
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network_container"))
+        .map(|s| s.to_string())
+}
+
+fn dependent_container_ids(store: &ContainerStore, parent: &ContainerRecord) -> Vec<String> {
+    let mut deps = Vec::new();
+    for c in store.list() {
+        if c.id == parent.id {
+            continue;
+        }
+        let bundle_path = PathBuf::from(&c.bundle_path);
+        let parent_ref = fs::read_to_string(bundle_path.join("config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
+            .and_then(|spec| container_network_parent(&spec));
+        if parent_ref.as_deref() == Some(parent.id.as_str())
+            || parent_ref.as_deref() == Some(parent.name.as_str())
+        {
+            deps.push(c.id.clone());
+        }
+    }
+    deps
+}
+
+fn bundle_auto_remove(bundle_path: &Path) -> bool {
+    bundle_path.join("auto_remove").exists()
+}
+
 pub(crate) fn get_process_tree_pids(root_pids: &[i32]) -> Vec<i32> {
     let mut all_pids = std::collections::HashSet::new();
     for &p in root_pids {
@@ -2101,6 +2164,7 @@ pub fn stop_container_with_home_and_timeout(
 
     let mut used_sigkill = false;
     let grace_secs = timeout_secs.unwrap_or(10);
+    let _ = store.update_status(&c.id, ContainerStatus::Stopping);
 
     #[cfg(unix)]
     {
@@ -2144,9 +2208,22 @@ pub fn stop_container_with_home_and_timeout(
                 let _ = libc::kill(-*pid, sig_num);
             }
         }
-        // Podman waits the full stop timeout before escalating to SIGKILL.
-        for _ in 0..iters {
+        // Podman waits up to the stop timeout before escalating to SIGKILL.
+        for i in 0..iters {
             std::thread::sleep(std::time::Duration::from_millis(50));
+            let mut all_dead = true;
+            for pid in pids {
+                if unsafe { libc::kill(*pid, 0) == 0 } {
+                    all_dead = false;
+                    break;
+                }
+            }
+            if all_dead && !pids.is_empty() {
+                break;
+            }
+            if i == iters - 1 {
+                // full grace elapsed
+            }
         }
         for pid in pids {
             if unsafe { libc::kill(*pid, 0) == 0 } {
@@ -2264,6 +2341,28 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
         );
     }
     let store = ContainerStore::new();
+
+    if args.attach {
+        if args.all || !args.filter.is_empty() {
+            cli::usage_errors::exit_usage_error("cannot use attach with --all or --filter");
+        }
+        for name in &args.containers {
+            let rec = store
+                .find(name)
+                .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
+            let bundle_path = PathBuf::from(&rec.bundle_path);
+            let spec: Spec = serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
+            let _ = sync_host_nproc_ulimit(&bundle_path);
+            let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
+            store.update_status(&rec.id, ContainerStatus::Running)?;
+            let code = runtime::execute_bundle(&bundle_path, &spec, &[], &ports, false)?;
+            store.update_status(&rec.id, ContainerStatus::Exited(code))?;
+            if bundle_auto_remove(&bundle_path) {
+                let _ = remove_container_quiet(name, true, false);
+            }
+        }
+        return Ok(());
+    }
 
     async fn start_one(store: &ContainerStore, name: &str, display: &str) -> Result<()> {
         start_container(name).await?;
@@ -2418,6 +2517,7 @@ pub async fn start_container_with_home(container: &str, home_opt: Option<&Path>)
     let content = fs::read_to_string(&config_file)?;
     let spec: Spec = serde_json::from_str(&content)?;
 
+    let _ = sync_host_nproc_ulimit(&bundle_path);
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
     store.update_status(&rec.id, ContainerStatus::Running)?;
     execute_bundle(&bundle_path, &spec, &[], &ports, true)?;
@@ -2634,6 +2734,14 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
         if only_type.is_empty() || only_type == "container" {
             if let Some(c) = c_store.find(target) {
                 let is_running = matches!(c.status, ContainerStatus::Running);
+                let status_label = match &c.status {
+                    ContainerStatus::Running => "running",
+                    ContainerStatus::Stopping => "stopping",
+                    ContainerStatus::Paused => "paused",
+                    ContainerStatus::Created => "created",
+                    ContainerStatus::Exited(_) => "exited",
+                    ContainerStatus::Failed(_) => "dead",
+                };
                 let mut labels_map = HashMap::new();
                 let labels_file = PathBuf::from(&c.bundle_path).join("labels.json");
                 if labels_file.exists() {
@@ -2766,7 +2874,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Path": c.command.first().cloned().unwrap_or_default(),
                     "Args": if c.command.len() > 1 { c.command[1..].to_vec() } else { Vec::new() },
                     "State": {
-                        "Status": if is_running { "running" } else { "exited" },
+                        "Status": status_label,
                         "Running": is_running,
                         "Paused": matches!(c.status, ContainerStatus::Paused),
                         "Restarting": false,
@@ -2806,6 +2914,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "CapDrop": cap_drop,
                         "Memory": memory,
                         "NanoCpus": nano_cpus,
+                        "Ulimits": host_ulimits_for_inspect(&bundle_path),
                     },
                     "NetworkSettings": {
                         "Bridge": "",
@@ -3132,7 +3241,10 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     last_code = 1;
                     break;
                 }
-                ContainerStatus::Running | ContainerStatus::Created | ContainerStatus::Paused => {
+                ContainerStatus::Running
+                | ContainerStatus::Stopping
+                | ContainerStatus::Created
+                | ContainerStatus::Paused => {
                     #[cfg(unix)]
                     {
                         let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
@@ -4308,6 +4420,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             )));
             let state_str = match c.status {
                 ContainerStatus::Running => "running",
+                ContainerStatus::Stopping => "stopping",
                 ContainerStatus::Exited(_) => "exited",
                 ContainerStatus::Created => "created",
                 ContainerStatus::Paused => "paused",
@@ -4388,11 +4501,51 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
     Ok(())
 }
 
+fn rm_container_resolving_depend(target: &str, args: &cli::RmArgs) -> Result<()> {
+    let store = ContainerStore::new();
+    let rec = match store.find(target) {
+        Some(c) => c,
+        None if args.force => return Ok(()),
+        None => {
+            return Err(anyhow!(
+                "no container with ID or name \"{}\" found: no such container",
+                target
+            ));
+        }
+    };
+    if !args.depend {
+        let deps = dependent_container_ids(&store, &rec);
+        if !deps.is_empty() {
+            cli::usage_errors::exit_usage_error(format!(
+                "container {} has dependent containers which must be removed before it: {}",
+                rec.id,
+                deps.join(", ")
+            ));
+        }
+    } else {
+        for dep in dependent_container_ids(&store, &rec) {
+            rm_container_resolving_depend(&dep, args)?;
+        }
+    }
+    if let Err(e) = remove_container_opts(target, args.force, args.volumes) {
+        if args.ignore || args.force {
+            return Ok(());
+        }
+        let msg = e.to_string();
+        if msg.contains("container state improper") {
+            eprintln!("Error: {}", msg);
+            std::process::exit(2);
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
 pub fn rm_containers(args: &cli::RmArgs) -> Result<()> {
     if args.all {
         let store = ContainerStore::new();
         for c in store.list() {
-            if let Err(e) = remove_container_opts(&c.name, args.force, args.volumes) {
+            if let Err(e) = rm_container_resolving_depend(&c.name, args) {
                 if !args.ignore {
                     return Err(e);
                 }
@@ -4404,14 +4557,9 @@ pub fn rm_containers(args: &cli::RmArgs) -> Result<()> {
         return Err(anyhow!("you must provide at least one container name or ID"));
     }
     for c in &args.containers {
-        if let Err(e) = remove_container_opts(c, args.force, args.volumes) {
+        if let Err(e) = rm_container_resolving_depend(c, args) {
             if args.ignore || args.force {
                 continue;
-            }
-            let msg = e.to_string();
-            if msg.contains("container state improper") {
-                eprintln!("Error: {}", msg);
-                std::process::exit(2);
             }
             return Err(e);
         }
@@ -4439,7 +4587,20 @@ pub fn remove_container(container: &str, force: bool) -> Result<()> {
     remove_container_opts(container, force, false)
 }
 
+pub fn remove_container_quiet(container: &str, force: bool, remove_volumes: bool) -> Result<()> {
+    remove_container_opts_inner(container, force, remove_volumes, false)
+}
+
 pub fn remove_container_opts(container: &str, force: bool, remove_volumes: bool) -> Result<()> {
+    remove_container_opts_inner(container, force, remove_volumes, true)
+}
+
+fn remove_container_opts_inner(
+    container: &str,
+    force: bool,
+    remove_volumes: bool,
+    print_removed: bool,
+) -> Result<()> {
     let store = ContainerStore::new();
     let c = match store.find(container) {
         Some(c) => c,
@@ -4490,7 +4651,9 @@ pub fn remove_container_opts(container: &str, force: bool, remove_volumes: bool)
     let net_store = network::NetworkStore::new();
     let _ = net_store.cleanup_container_endpoints(&removed.id, &removed.name);
     let _ = guardrails::ProcessReaper::reap_stale_containers();
-    println!("{}", container);
+    if print_removed {
+        println!("{}", container);
+    }
     Ok(())
 }
 
@@ -4879,6 +5042,10 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
             serde_json::to_string(&args.cap_drop)?,
         );
     }
+    let net_mode = network::pasta::NetworkMode::parse(&args.network);
+    if let Some(target) = net_mode.container_target() {
+        annotations.insert("boxr.network_container".to_string(), target.to_string());
+    }
     annotations.insert("boxr.network".to_string(), args.network.clone());
     spec.annotations = Some(annotations.clone());
 
@@ -5164,6 +5331,9 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         spec.windows = Some(win_spec);
     }
     spec.save_to_bundle(&bundle_dir)?;
+    if args.rm {
+        let _ = fs::write(bundle_dir.join("auto_remove"), "1");
+    }
 
     let restart_policy = health::parse_restart_policy(&args.restart)?;
     let mut health_cfg = health::HealthConfig::default();
@@ -5993,6 +6163,7 @@ fn ps_status_filter_matches(status: &ContainerStatus, filter: &str) -> bool {
     let f = filter.to_ascii_lowercase();
     match status {
         ContainerStatus::Running => f == "running",
+        ContainerStatus::Stopping => f == "stopping",
         ContainerStatus::Created => f == "created",
         ContainerStatus::Paused => f == "paused",
         ContainerStatus::Exited(_) => f == "exited" || f == "stopped",
@@ -6284,6 +6455,28 @@ fn format_container_ports(ports: &[network::PortMapping]) -> String {
 }
 
 fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> String {
+    if template.contains("range .HostConfig.Ulimits") && template.contains("RLIMIT_NPROC") {
+        if let Some(arr) = value
+            .get("HostConfig")
+            .and_then(|h| h.get("Ulimits"))
+            .and_then(|u| u.as_array())
+        {
+            for entry in arr {
+                if entry.get("Name").and_then(|n| n.as_str()) == Some("RLIMIT_NPROC") {
+                    let soft = entry
+                        .get("Soft")
+                        .map(|v| v.as_u64().unwrap_or(0).to_string())
+                        .unwrap_or_default();
+                    let hard = entry
+                        .get("Hard")
+                        .map(|v| v.as_u64().unwrap_or(0).to_string())
+                        .unwrap_or_default();
+                    return format!("{}:{}", soft, hard);
+                }
+            }
+        }
+        return String::new();
+    }
     let mut out = template.to_string();
     while let Some(start) = out.find("{{") {
         let Some(rel_end) = out[start..].find("}}") else {

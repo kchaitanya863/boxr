@@ -26,6 +26,7 @@ pub fn rand_id() -> [u8; 6] {
 pub enum ContainerStatus {
     Created,
     Running,
+    Stopping,
     Paused,
     Exited(i32),
     Failed(String),
@@ -36,6 +37,7 @@ impl std::fmt::Display for ContainerStatus {
         match self {
             ContainerStatus::Created => write!(f, "Created"),
             ContainerStatus::Running => write!(f, "Up"),
+            ContainerStatus::Stopping => write!(f, "Stopping"),
             ContainerStatus::Paused => write!(f, "Paused"),
             ContainerStatus::Exited(code) => write!(f, "Exited ({})", code),
             ContainerStatus::Failed(err) => write!(f, "Failed: {}", err),

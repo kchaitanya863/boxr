@@ -429,6 +429,7 @@ pub async fn inspect_container(
 
     let status_str = match c.status {
         ContainerStatus::Running => "running",
+        ContainerStatus::Stopping => "stopping",
         ContainerStatus::Paused => "paused",
         ContainerStatus::Created => "created",
         ContainerStatus::Exited(_) => "exited",

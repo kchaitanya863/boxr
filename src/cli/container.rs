@@ -427,7 +427,7 @@ pub struct RunArgs {
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct StopArgs {
     /// Seconds to wait before killing the container
-    #[arg(short = 't', long = "time")]
+    #[arg(short = 't', long = "time", alias = "timeout")]
     pub time: Option<i32>,
 
     /// Signal to send to the container
@@ -732,6 +732,10 @@ pub struct RmArgs {
     /// Ignore errors when a container cannot be removed
     #[arg(long = "ignore")]
     pub ignore: bool,
+
+    /// Remove dependent containers before removing the container
+    #[arg(long = "depend")]
+    pub depend: bool,
 
     /// Container IDs or names to remove
     pub containers: Vec<String>,

@@ -73,9 +73,9 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `030-run.bats` | **basic tests** green (exec exit 127/126 + OCI error text); full file still mostly red |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
-| `045-start.bats` | **6/8** in isolation; remaining: ulimit / attach+`--rm` |
-| `050-stop.bats` | **7/9** in isolation; remaining: signal trap / stop-unlock race |
-| `055-rm.bats` | **5/10** (`rm`, running w/o force, race, `rm -f`, `container rm --force bogus`); buildah/conmon red |
+| `045-start.bats` | **8/8** in isolation |
+| `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
+| `055-rm.bats` | **6/10** (`--depend` green); buildah external / conmon cases red |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*` (not auto-rmi’d on `pod rm`) |
 
