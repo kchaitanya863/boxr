@@ -303,6 +303,15 @@ if section_enabled podman; then
     printf 'parity-secret' >"$SEC_FILE"
     test_step "K16 secret create+exists+rm" "$BOXR_CMD secret create --name $SEC_N -f \"$SEC_FILE\" && $BOXR_CMD secret exists $SEC_N && $BOXR_CMD secret rm $SEC_N"
     rm -f "$SEC_FILE" 2>/dev/null || true
+    VR_OLD="bb-vro-$(rand_id)"
+    VR_NEW="bb-vrn-$(rand_id)"
+    test_step "K17 volume rename" "$BOXR_CMD volume create $VR_OLD && $BOXR_CMD volume rename $VR_OLD $VR_NEW && $BOXR_CMD volume exists $VR_NEW"
+    run_cmd "$BOXR_CMD volume rm $VR_NEW >/dev/null 2>&1" || true
+    CL_SRC="bb-cl-src-$(rand_id)"
+    CL_DST="bb-cl-dst-$(rand_id)"
+    test_step "K18 container clone" "$BOXR_CMD pull alpine:latest >/dev/null && $BOXR_CMD create --name $CL_SRC alpine:latest sleep 999 >/dev/null && $BOXR_CMD container clone $CL_SRC $CL_DST && $BOXR_CMD container exists $CL_DST"
+    run_cmd "$BOXR_CMD rm -f $CL_SRC $CL_DST >/dev/null 2>&1" || true
+    test_step "K19 unshare" "$BOXR_CMD unshare /bin/sh -c 'echo unshare-parity'"
     VID="bb-vol-$(rand_id)"
     test_step "K2 volume create+exists" "$BOXR_CMD volume create $VID && $BOXR_CMD volume exists $VID"
     run_cmd "$BOXR_CMD volume rm $VID >/dev/null 2>&1" || true

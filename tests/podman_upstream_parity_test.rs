@@ -419,3 +419,162 @@ fn test_network_connect_disconnect() {
     let _ = blackbox::run_boxr(home, &["rm", "-f", &cname]);
     let _ = blackbox::run_boxr(home, &["network", "rm", &net]);
 }
+
+/// `test/e2e/volume_rename_test.go`, BATS `160-volumes.bats`
+#[test]
+fn test_volume_rename_updates_store() {
+    let Some(ctx) = home_ctx() else {
+        return;
+    };
+    let home = &ctx.home;
+    let bin = blackbox::boxr_bin();
+    let old = format!("vol-old-{}", blackbox::rand_suffix());
+    let new = format!("vol-new-{}", blackbox::rand_suffix());
+    assert!(
+        blackbox::run_boxr(home, &["volume", "create", &old])
+            .status
+            .success()
+    );
+    let rename = blackbox::run_boxr(home, &["volume", "rename", &old, &new]);
+    assert!(
+        rename.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rename.stderr)
+    );
+    assert!(
+        Command::new(&bin)
+            .env("BOXR_HOME", home)
+            .args(["volume", "exists", &new])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        !Command::new(&bin)
+            .env("BOXR_HOME", home)
+            .args(["volume", "exists", &old])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let _ = blackbox::run_boxr(home, &["volume", "rm", &new]);
+}
+
+/// `test/e2e/container_clone_test.go`
+#[test]
+fn test_container_clone_created_state() {
+    let Some(ctx) = home_ctx() else {
+        return;
+    };
+    let home = &ctx.home;
+    let bin = blackbox::boxr_bin();
+    blackbox::pull_if_needed(home, "alpine:latest");
+    let src = format!("clone-src-{}", blackbox::rand_suffix());
+    let dst = format!("clone-dst-{}", blackbox::rand_suffix());
+    assert!(
+        blackbox::run_boxr(
+            home,
+            &["create", "--name", &src, "alpine:latest", "sleep", "999"],
+        )
+        .status
+        .success()
+    );
+    let clone = blackbox::run_boxr(home, &["container", "clone", &src, &dst]);
+    assert!(
+        clone.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert!(
+        Command::new(&bin)
+            .env("BOXR_HOME", home)
+            .args(["container", "exists", &dst])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let inspect = blackbox::run_boxr(home, &["inspect", &dst, "--format", "{{.Config.Image}}"]);
+    assert!(inspect.status.success());
+    assert!(String::from_utf8_lossy(&inspect.stdout).contains("alpine"));
+    let _ = blackbox::run_boxr(home, &["rm", "-f", &src, &dst]);
+}
+
+/// `test/e2e/container_clone_test.go` (`--run`)
+#[test]
+fn test_container_clone_run_starts_target() {
+    let Some(ctx) = runtime_ctx() else {
+        return;
+    };
+    let home = &ctx.home;
+    let bin = blackbox::boxr_bin();
+    blackbox::pull_if_needed(home, "alpine:latest");
+    let src = format!("clone-run-src-{}", blackbox::rand_suffix());
+    let dst = format!("clone-run-dst-{}", blackbox::rand_suffix());
+    assert!(
+        blackbox::run_boxr(
+            home,
+            &[
+                "run",
+                "-d",
+                "--name",
+                &src,
+                "alpine:latest",
+                "sleep",
+                "300",
+            ],
+        )
+        .status
+        .success()
+    );
+    let clone = blackbox::run_boxr(
+        home,
+        &["container", "clone", "--run", &src, &dst],
+    );
+    assert!(
+        clone.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    let ps = blackbox::run_boxr(home, &["ps", "--filter", &format!("name={}", dst), "-q"]);
+    assert!(ps.status.success());
+    assert!(!String::from_utf8_lossy(&ps.stdout).trim().is_empty());
+    assert!(
+        Command::new(&bin)
+            .env("BOXR_HOME", home)
+            .args(["container", "exists", &dst])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let _ = blackbox::run_boxr(home, &["rm", "-f", &src, &dst]);
+}
+
+/// `test/e2e/unshare_test.go`, BATS `170-run-userns.bats` (rootless user namespace entry)
+#[test]
+fn test_unshare_runs_command_in_user_namespace() {
+    let bin = blackbox::boxr_bin();
+    if !bin.exists() {
+        eprintln!("SKIPPED: boxr binary not built");
+        return;
+    }
+    if !cfg!(target_os = "linux") {
+        eprintln!("SKIPPED: unshare parity is Linux-first");
+        return;
+    }
+    let out = Command::new(&bin)
+        .args(["unshare", "/bin/sh", "-c", "echo boxr-unshare-ok"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .contains("boxr-unshare-ok")
+    );
+}

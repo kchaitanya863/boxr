@@ -15,6 +15,7 @@ This document maps [Podman](https://github.com/podman-container-tools/podman) te
 ## In scope for boxr
 
 - Podman P0/P1 CLI parity in [PODMAN_PARITY.md](PODMAN_PARITY.md)
+- **Linux-first** for runtime-heavy smokes (`unshare`, `container clone --run`, networking); macOS VZ follows once Linux gates are solid
 - Rootless Linux + macOS VZ paths
 - Subset checkpoint (metadata, not CRIU), quadlet, kube play/generate, farm, auto-update dry-run
 
@@ -53,6 +54,9 @@ This document maps [Podman](https://github.com/podman-container-tools/podman) te
 | `farm_test.go` | `podman_parity_blackbox_test::test_farm_create_list_remove` |
 | `quadlet_test.go` | `podman_parity_blackbox_test::test_quadlet_install_and_print` |
 | `volume_*`, `artifact_*`, `checkpoint_test.go` | `podman_parity_blackbox_test` K9–K11 |
+| `volume_rename_test.go`, BATS `160-volumes` | `test_volume_rename_updates_store` |
+| `container_clone_test.go` | `test_container_clone_created_state`, `test_container_clone_run_starts_target` |
+| `unshare_test.go`, BATS `170-run-userns` | `test_unshare_runs_command_in_user_namespace` |
 | `run_test.go`, `create_test.go` | `docker_parity_test`, `blackbox_runtime_test` |
 | `compose` (850) | `compose_docker_replacement_test`, blackbox K3 |
 
