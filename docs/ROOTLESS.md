@@ -72,7 +72,8 @@ If `newuidmap` and `newgidmap` (setuid shadow utilities) are available on the ho
    newgidmap <child_pid> 0 <host_gid> 1 1 <sub_gid_start> <sub_gid_count>
    ```
 4. The parent notifies the child (`"done"`).
-5. The child has full access to 65,536 mapped IDs inside the container.
+5. The child writes `"allow"` to `/proc/self/setgroups` so entrypoints can use supplementary groups (e.g. `postgres` official images).
+6. The child has full access to 65,536 mapped IDs inside the container.
 
 ### Direct Procfs Fallback
 If subordinate utilities or files are absent, Boxr falls back to writing directly to `/proc/<pid>/uid_map` and `/proc/<pid>/gid_map`:
