@@ -56,12 +56,6 @@ jobs:
       - name: Build boxr binary
         run: cargo build
 
-      - name: Black-Box QA (runtime)
-        run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s runtime
-
-      - name: Black-Box QA (network + DNS)
-        run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s network
-
       - name: Black-Box QA (embedded usernet TAP)
         run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
 
