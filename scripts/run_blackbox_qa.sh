@@ -177,7 +177,7 @@ echo ""
 # --- A: Runtime ---
 if section_enabled runtime; then
     echo -e "${BOLD}A. Runtime Invariants${NC}"
-    test_step "A1 version" "$BOXR_CMD version | grep -q Client"
+    test_step "A1 version" "out=\$($BOXR_CMD version 2>&1); grep -q Client <<< \"\$out\""
     test_step "A1 run alpine echo" "$BOXR_CMD run --rm alpine:latest echo ok | grep -q ok"
     test_step "A2 /tmp sticky 1777" "$BOXR_CMD run --rm alpine stat -c '%a' /tmp | grep -E '1777|777'"
     test_step "A2 nonroot /tmp write" "$BOXR_CMD run --rm --user 65534:65534 alpine sh -c 'echo ok > /tmp/t && cat /tmp/t' | grep -q ok"

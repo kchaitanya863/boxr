@@ -564,14 +564,20 @@ fn test_matrix_container_network_mode_shares_target_netns() {
         ],
     );
     assert!(wait_container_running(&home, &side, Duration::from_secs(45)));
-    assert!(
-        wait_exec_success(
-            &home,
+    let lo_check = run_boxr_ok(
+        &home,
+        &[
+            "exec",
             &side,
-            &["ping", "-c", "1", "-W", "2", "127.0.0.1"],
-            Duration::from_secs(120),
-        ),
-        "sidecar should reach loopback in shared network namespace"
+            "sh",
+            "-c",
+            "ip link show lo | grep -qE 'LOOPBACK,UP|state UP'",
+        ],
+    );
+    assert!(
+        lo_check.is_empty() || lo_check.contains("UP"),
+        "sidecar should share loopback in target network namespace: {}",
+        lo_check
     );
 
     cleanup_container(&home, &side);

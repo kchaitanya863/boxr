@@ -155,10 +155,6 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
         match unsafe { fork() }? {
             ForkResult::Parent { child } => {
-                let _ = fs::write(
-                    bundle_path.join("container.pid"),
-                    child.as_raw().to_string(),
-                );
                 drop(child_sock);
                 // 1. Wait for child to unshare user namespace
                 let mut sync_buf = [0u8; 5];
@@ -190,10 +186,6 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
                 drop(parent_sock);
 
-                let _ = fs::write(
-                    bundle_path.join("container.pid"),
-                    child.as_raw().to_string(),
-                );
                 if let Some(cont_id) = bundle_path.file_name().and_then(|s| s.to_str()) {
                     if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(cont_id) {
                         let _ = cgroup_mgr.add_process(child.as_raw());
@@ -263,6 +255,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
                         std::process::exit(1);
                     }
+                    let _ = std::process::Command::new("ip")
+                        .args(["link", "set", "lo", "up"])
+                        .status();
                 } else if let Some(target_cont) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network_container")) {
                     // Attach to existing container's network namespace (container:<target>)
                     let store = crate::storage::ContainerStore::new();
@@ -621,21 +616,14 @@ pub fn run_trampoline_exec(args: &[String]) -> Result<i32> {
     exec_in_bundle(bundle_path, cmd, &[], None, None, false)
 }
 
-pub fn exec_in_bundle(
-    bundle_path: &Path,
-    command: &[String],
-    env: &[String],
-    workdir: Option<&str>,
-    user: Option<&str>,
-    detach: bool,
-) -> Result<i32> {
+fn resolve_container_pid(bundle_path: &Path) -> Option<i32> {
     let target_pid = if let Ok(pid_str) = fs::read_to_string(bundle_path.join("container.pid")) {
         pid_str.trim().parse::<i32>().ok()
     } else {
         None
     };
 
-    let target_pid = target_pid.or_else(|| {
+    target_pid.or_else(|| {
         if let Ok(pid_str) = fs::read_to_string(bundle_path.join("vm.pid")) {
             let pid = pid_str.trim().parse::<i32>().ok()?;
             let proc_task = format!("/proc/{}/task/{}/children", pid, pid);
@@ -648,12 +636,32 @@ pub fn exec_in_bundle(
         } else {
             None
         }
-    });
+    })
+}
 
-    let pid = match target_pid {
-        Some(p) if unsafe { libc::kill(p, 0) == 0 } => p,
-        _ => return Err(anyhow!("Container is not running")),
-    };
+fn wait_for_live_container_pid(bundle_path: &Path) -> Result<i32> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < deadline {
+        if let Some(p) = resolve_container_pid(bundle_path) {
+            if unsafe { libc::kill(p, 0) == 0 } {
+                return Ok(p);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Err(anyhow!("Container is not running"))
+}
+
+pub fn exec_in_bundle(
+    bundle_path: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+    detach: bool,
+) -> Result<i32> {
+    let pid = wait_for_live_container_pid(bundle_path)?;
 
     let mut cmd = std::process::Command::new("nsenter");
     // Only enter the user namespace if the container actually has a private
@@ -695,7 +703,7 @@ pub fn exec_in_bundle(
         return Ok(0);
     }
     match cmd.status() {
-        Ok(status) => Ok(status.code().unwrap_or(0)),
+        Ok(status) => return Ok(status.code().unwrap_or(0)),
         Err(_) => {
             // Fallback: enter namespaces via /proc/<pid>/ns using setns if nsenter command is not installed
             use nix::sched::{CloneFlags, setns};

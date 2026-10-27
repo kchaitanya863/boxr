@@ -1,5 +1,6 @@
 use boxr::compose::ComposeProject;
 use boxr::guardrails::PortCollisionGuard;
+#[cfg(target_os = "macos")]
 use boxr::network::macos_compose::resolve_target_endpoint;
 use boxr::network::pasta::NetworkMode;
 use boxr::network::{NetworkStore, PortMapping};
@@ -145,6 +146,7 @@ services:
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn test_issue_442_macos_compose_mesh_dynamic_ports_and_ips() {
     // Issue #442: macOS compose mesh dynamic target resolution
     let temp = tempdir().unwrap();
@@ -202,6 +204,7 @@ fn test_issue_444_network_connect_disconnect_endpoints() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn test_issue_445_darwin_resolv_conf_nameserver_preservation() {
     // Issue #445: Ensure default nameservers are preserved when search/options/domain are present
     let temp = tempdir().unwrap();
