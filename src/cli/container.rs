@@ -434,7 +434,19 @@ pub struct StopArgs {
     #[arg(short = 's', long = "signal")]
     pub signal: Option<String>,
 
-    #[arg(required = true)]
+    /// Stop all running containers
+    #[arg(long = "all")]
+    pub all: bool,
+
+    /// Ignore errors when a container cannot be stopped
+    #[arg(long = "ignore")]
+    pub ignore: bool,
+
+    /// Suppress output
+    #[arg(long = "noout")]
+    pub noout: bool,
+
+    #[arg(value_name = "CONTAINER")]
     pub containers: Vec<String>,
 }
 
@@ -461,7 +473,15 @@ pub struct StartArgs {
     #[arg(long = "checkpoint-dir")]
     pub checkpoint_dir: Option<String>,
 
-    #[arg(required = true)]
+    /// Start all created or exited containers
+    #[arg(long = "all")]
+    pub all: bool,
+
+    /// Filter output based on conditions provided
+    #[arg(long = "filter")]
+    pub filter: Vec<String>,
+
+    #[arg(value_name = "CONTAINER")]
     pub containers: Vec<String>,
 }
 
@@ -785,6 +805,10 @@ pub struct RenameArgs {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct WaitArgs {
+    /// Ignore missing containers
+    #[arg(long = "ignore")]
+    pub ignore: bool,
+
     /// Containers to wait on
     #[arg(required = true)]
     pub containers: Vec<String>,

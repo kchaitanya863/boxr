@@ -162,20 +162,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Stop(args) => {
-            for c in &args.containers {
-                stop_container(c, args.signal.as_deref())?;
-            }
+            stop_containers(&args)?;
             Ok(0)
         }
         Commands::Start(args) => {
-            for c in &args.containers {
-                if let Some(_cp) = &args.checkpoint {
-                    let cp_dir = args.checkpoint_dir.as_deref().map(Path::new);
-                    let _ = runtime::CheckpointManager::restore(c, cp_dir, false);
-                }
-                start_container(c).await?;
-                println!("{}", c);
-            }
+            start_containers(&args).await?;
             Ok(0)
         }
         Commands::Logs(args) => {
@@ -261,20 +252,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ContainerAction::Start(start_args) => {
-                for c in &start_args.containers {
-                    if let Some(_cp) = &start_args.checkpoint {
-                        let cp_dir = start_args.checkpoint_dir.as_deref().map(Path::new);
-                        let _ = runtime::CheckpointManager::restore(c, cp_dir, false);
-                    }
-                    start_container(c).await?;
-                    println!("{}", c);
-                }
+                start_containers(&start_args).await?;
                 Ok(0)
             }
             cli::ContainerAction::Stop(stop_args) => {
-                for c in &stop_args.containers {
-                    stop_container(c, stop_args.signal.as_deref())?;
-                }
+                stop_containers(&stop_args)?;
                 Ok(0)
             }
             cli::ContainerAction::Restart(restart_args) => {
@@ -2073,7 +2055,7 @@ pub(crate) fn get_process_tree_pids(root_pids: &[i32]) -> Vec<i32> {
 }
 
 pub fn stop_container(container: &str, signal: Option<&str>) -> Result<()> {
-    stop_container_with_home(container, signal, None)
+    stop_container_with_home_and_timeout(container, signal, None, None, false)
 }
 
 pub fn stop_container_with_home(
@@ -2081,7 +2063,7 @@ pub fn stop_container_with_home(
     signal: Option<&str>,
     home_opt: Option<&Path>,
 ) -> Result<()> {
-    stop_container_with_home_and_timeout(container, signal, None, home_opt)
+    stop_container_with_home_and_timeout(container, signal, None, home_opt, false)
 }
 
 pub fn stop_container_with_home_and_timeout(
@@ -2089,6 +2071,7 @@ pub fn stop_container_with_home_and_timeout(
     signal: Option<&str>,
     timeout_secs: Option<u64>,
     home_opt: Option<&Path>,
+    quiet: bool,
 ) -> Result<()> {
     let store = match home_opt {
         Some(h) => ContainerStore::with_home(h.to_path_buf()),
@@ -2104,46 +2087,61 @@ pub fn stop_container_with_home_and_timeout(
         libc::SIGTERM
     };
 
+    let mut used_sigkill = false;
+
     #[cfg(unix)]
     {
         let bundle_path = std::path::PathBuf::from(&c.bundle_path);
-        let mut pids = Vec::new();
+        let mut workload_pids = Vec::new();
+        let mut all_pids = Vec::new();
         if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                pids.push(pid);
+                all_pids.push(pid);
             }
         }
         if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                pids.push(pid);
+                workload_pids.push(pid);
+                all_pids.push(pid);
             }
         }
         if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("forwarder.pid")) {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                pids.push(pid);
+                workload_pids.push(pid);
+                all_pids.push(pid);
             }
         }
         #[cfg(target_os = "linux")]
-        let pids = get_process_tree_pids(&pids);
+        {
+            workload_pids = get_process_tree_pids(&workload_pids);
+            all_pids = get_process_tree_pids(&all_pids);
+        }
+        let pids = &all_pids;
+        let stop_pids = if workload_pids.is_empty() {
+            all_pids.clone()
+        } else {
+            workload_pids.clone()
+        };
 
-        let grace_ms = timeout_secs.unwrap_or(3) * 1000;
+        let grace_secs = timeout_secs.unwrap_or(10);
+        let grace_ms = grace_secs * 1000;
         let iters = (grace_ms / 50).max(1);
-        for pid in pids {
+        for pid in &stop_pids {
             unsafe {
-                libc::kill(pid, sig_num);
-                let _ = libc::kill(-pid, sig_num);
+                libc::kill(*pid, sig_num);
+                let _ = libc::kill(-*pid, sig_num);
             }
-            // Wait up to graceful timeout for hypervisor/process stop
-            for _ in 0..iters {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                if unsafe { libc::kill(pid, 0) != 0 } {
-                    break;
-                }
-            }
-            if unsafe { libc::kill(pid, 0) == 0 } {
+        }
+        // Podman waits the full stop timeout before escalating to SIGKILL.
+        for _ in 0..iters {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        for pid in pids {
+            if unsafe { libc::kill(*pid, 0) == 0 } {
+                used_sigkill = true;
                 unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                    let _ = libc::kill(-pid, libc::SIGKILL);
+                    libc::kill(*pid, libc::SIGKILL);
+                    let _ = libc::kill(-*pid, libc::SIGKILL);
                 }
             }
         }
@@ -2155,9 +2153,12 @@ pub fn stop_container_with_home_and_timeout(
                 if let Ok(content) = std::fs::read_to_string(procs_file) {
                     for line in content.lines() {
                         if let Ok(pid) = line.trim().parse::<i32>() {
-                            unsafe {
-                                libc::kill(pid, libc::SIGKILL);
-                                let _ = libc::kill(-pid, libc::SIGKILL);
+                            if unsafe { libc::kill(pid, 0) == 0 } {
+                                used_sigkill = true;
+                                unsafe {
+                                    libc::kill(pid, libc::SIGKILL);
+                                    let _ = libc::kill(-pid, libc::SIGKILL);
+                                }
                             }
                         }
                     }
@@ -2181,9 +2182,156 @@ pub fn stop_container_with_home_and_timeout(
             }
         }
     }
-    store.update_status(&c.id, ContainerStatus::Exited(0))?;
+    let exit_code = if used_sigkill { 137 } else { 0 };
+    store.update_status(&c.id, ContainerStatus::Exited(exit_code))?;
     let _ = guardrails::ProcessReaper::reap_stale_containers();
-    println!("{}", container);
+    #[cfg(unix)]
+    if used_sigkill {
+        eprintln!(
+            "StopSignal SIGTERM failed to stop container {}, resorting to SIGKILL",
+            c.id
+        );
+    }
+    if !quiet {
+        println!("{}", container);
+    }
+    Ok(())
+}
+
+fn parse_restart_policy_filter(value: &str) -> Result<health::RestartPolicy> {
+    health::parse_restart_policy(value)
+        .map_err(|_| anyhow!("{} invalid restart policy", value))
+}
+
+fn container_matches_restart_filter(
+    c: &crate::storage::ContainerRecord,
+    filters: &[String],
+) -> Result<bool> {
+    let restart_filters: Vec<String> = filters
+        .iter()
+        .filter_map(|f| {
+            f.split_once('=')
+                .filter(|(k, _)| k.trim() == "restart-policy")
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .collect();
+    if restart_filters.is_empty() {
+        return Ok(true);
+    }
+    for v in restart_filters {
+        let want = parse_restart_policy_filter(&v)?;
+        let matches = match (&c.restart_policy, &want) {
+            (
+                health::RestartPolicy::OnFailure { .. },
+                health::RestartPolicy::OnFailure { .. },
+            ) => true,
+            (a, b) => a == b,
+        };
+        if matches {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
+    if args.all && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "either start all containers or the container(s) provided in the arguments",
+        );
+    }
+    let store = ContainerStore::new();
+
+    async fn start_one(store: &ContainerStore, name: &str, display: &str) -> Result<()> {
+        start_container(name).await?;
+        let _ = store
+            .find(name)
+            .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
+        println!("{}", display);
+        Ok(())
+    }
+
+    if !args.containers.is_empty() && !args.filter.is_empty() {
+        for name in &args.containers {
+            let c = store
+                .find(name)
+                .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
+            if container_matches_restart_filter(&c, &args.filter)? {
+                start_one(&store, name, name).await?;
+            }
+        }
+        return Ok(());
+    }
+
+    if !args.filter.is_empty() || args.all {
+        for c in store.list() {
+            if matches!(c.status, ContainerStatus::Running) {
+                continue;
+            }
+            if !matches!(
+                c.status,
+                ContainerStatus::Exited(_) | ContainerStatus::Created
+            ) {
+                continue;
+            }
+            if !container_matches_restart_filter(&c, &args.filter)? {
+                continue;
+            }
+            start_one(&store, &c.name, &c.id).await?;
+        }
+        return Ok(());
+    }
+
+    if args.containers.is_empty() {
+        return Err(anyhow!("you must provide at least one container name or ID"));
+    }
+    for name in &args.containers {
+        if let Some(_cp) = &args.checkpoint {
+            let cp_dir = args.checkpoint_dir.as_deref().map(Path::new);
+            let _ = runtime::CheckpointManager::restore(name, cp_dir, false);
+        }
+        let rec = store
+            .find(name)
+            .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
+        start_one(&store, name, &rec.id).await?;
+    }
+    Ok(())
+}
+
+pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
+    let timeout = match args.time {
+        None => None,
+        Some(-1) => None,
+        Some(0) => Some(0),
+        Some(t) if t > 0 => Some(t as u64),
+        _ => None,
+    };
+    let store = ContainerStore::new();
+    let targets: Vec<String> = if args.all {
+        store
+            .list()
+            .into_iter()
+            .filter(|c| matches!(c.status, ContainerStatus::Running))
+            .map(|c| c.name.clone())
+            .collect()
+    } else if args.containers.is_empty() {
+        return Err(anyhow!("you must provide at least one container name or ID"));
+    } else {
+        args.containers.clone()
+    };
+    for t in targets {
+        if let Err(e) = stop_container_with_home_and_timeout(
+            &t,
+            args.signal.as_deref(),
+            timeout,
+            None,
+            args.noout,
+        ) {
+            if !args.ignore {
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2707,7 +2855,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
         }
 
         if !matched {
-            return Err(anyhow!("No such container or image: '{}'", target));
+            println!("[]");
+            cli::usage_errors::exit_usage_error(format!("no such object: \"{}\"", target));
         }
     }
 
@@ -2716,7 +2865,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
             if fmt == "json" || fmt == "{{json .}}" {
                 println!("{}", serde_json::to_string_pretty(res)?);
             } else {
-                println!("{}", evaluate_simple_template(fmt, res));
+                println!("{}", apply_inspect_format_template(fmt, res));
             }
         }
     } else {
@@ -2893,9 +3042,20 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
     for container in &args.containers {
         let c_store = ContainerStore::new();
         loop {
-            let cont = c_store
-                .find(container)
-                .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
+            let cont = match c_store.find(container) {
+                Some(c) => c,
+                None if args.ignore => {
+                    println!("-1");
+                    last_code = -1;
+                    break;
+                }
+                None => {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no container with name or ID \"{}\" found: no such container",
+                        container
+                    ));
+                }
+            };
             match cont.status {
                 ContainerStatus::Exited(code) => {
                     println!("{}", code);
@@ -3481,6 +3641,7 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                     }
                 }
                 let _ = wait_container(&cli::WaitArgs {
+                    ignore: false,
                     containers: vec![c.name.clone()],
                 })?;
             }
@@ -4182,6 +4343,11 @@ pub fn rm_containers(args: &cli::RmArgs) -> Result<()> {
             if args.ignore || args.force {
                 continue;
             }
+            let msg = e.to_string();
+            if msg.contains("container state improper") {
+                eprintln!("Error: {}", msg);
+                std::process::exit(2);
+            }
             return Err(e);
         }
     }
@@ -4220,7 +4386,7 @@ pub fn remove_container_opts(container: &str, force: bool, remove_volumes: bool)
         matches!(c.status, ContainerStatus::Running) || matches!(c.status, ContainerStatus::Paused);
     if is_active && !force {
         return Err(anyhow!(
-            "Conflict. You cannot remove a running or paused container {}. Stop the container before attempting removal or force remove",
+            "cannot remove container {} as it is running - running or paused containers cannot be removed without force: container state improper",
             c.id
         ));
     }
@@ -4254,7 +4420,7 @@ pub fn remove_container_opts(container: &str, force: bool, remove_volumes: bool)
     let net_store = network::NetworkStore::new();
     let _ = net_store.cleanup_container_endpoints(&removed.id, &removed.name);
     let _ = guardrails::ProcessReaper::reap_stale_containers();
-    println!("{}", removed.id);
+    println!("{}", container);
     Ok(())
 }
 
@@ -6047,6 +6213,20 @@ fn format_container_ports(ports: &[network::PortMapping]) -> String {
         .join(", ")
 }
 
+fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> String {
+    let mut out = template.to_string();
+    while let Some(start) = out.find("{{") {
+        let Some(rel_end) = out[start..].find("}}") else {
+            break;
+        };
+        let end = start + rel_end + 2;
+        let token = &out[start..end];
+        let rendered = evaluate_simple_template(token, value);
+        out.replace_range(start..end, &rendered);
+    }
+    out
+}
+
 fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String {
     let mut cleaned = template.trim();
     if cleaned.starts_with("{{") && cleaned.ends_with("}}") {
@@ -7523,5 +7703,14 @@ mod tests {
         // Removing the last tag leaves the data unreferenced.
         let removed = store.remove("alpine:latest").unwrap();
         assert!(!image_data_still_referenced(&store, &removed));
+    }
+
+    #[test]
+    fn test_inspect_dual_format_template() {
+        let v = serde_json::json!({
+            "State": {"Status": "exited", "ExitCode": 137}
+        });
+        let out = apply_inspect_format_template("{{.State.Status}} {{.State.ExitCode}}", &v);
+        assert_eq!(out, "exited 137");
     }
 }

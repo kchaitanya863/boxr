@@ -73,6 +73,9 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `030-run.bats` | **basic tests** green (exec exit 127/126 + OCI error text); full file still mostly red |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
+| `045-start.bats` | **3/8** (`start --all`, incompatible options, `--filter`); invalid-policy/print-ID still red |
+| `050-stop.bats` | **2/9** (`basic test`, `--rm`); `--all` / `--ignore` / `--noout` still red |
+| `055-rm.bats` | **4/10** (`podman rm`, running w/o force, `run --rm race`, `rm -f`); buildah/external/conmon red |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*` (not auto-rmi’d on `pod rm`) |
 

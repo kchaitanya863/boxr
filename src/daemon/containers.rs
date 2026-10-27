@@ -272,6 +272,7 @@ pub async fn stop_container(
         query.signal.as_deref(),
         query.t,
         Some(&state.home),
+        true,
     ) {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
