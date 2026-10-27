@@ -1314,7 +1314,13 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
             }
         }
     }
-    if !has_path {
+    let unsetenv_all = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.unsetenv_all"))
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !has_path && !unsetenv_all {
         unsafe {
             std::env::set_var(
                 "PATH",
@@ -1322,13 +1328,8 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
             );
         }
     }
-    if !has_term {
-        if let Some(t) = host_term {
-            unsafe {
-                std::env::set_var("TERM", t);
-            }
-        }
-    }
+    // Podman: do not inject host TERM unless the spec includes it (e.g. -t).
+    let _ = host_term;
 
     if spec.root.readonly {
         let _ = mount(

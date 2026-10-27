@@ -166,6 +166,89 @@ fn fail_missing_workdir(cwd: &str, container_id: &str) -> Result<i32> {
     Ok(126)
 }
 
+fn run_dir_bind_blocks_containerenv(spec: &Spec, mounts: &[volume::MountSpec]) -> bool {
+    for m in mounts {
+        if m.destination.trim_end_matches('/') == "/run" {
+            return true;
+        }
+    }
+    for sm in &spec.mounts {
+        if sm.mount_type == "bind" && sm.destination.trim_end_matches('/') == "/run" {
+            return true;
+        }
+    }
+    false
+}
+
+fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
+    if args.unsetenv_all {
+        spec.process.env.clear();
+        for env_spec in &args.env {
+            if env_spec.contains('=') {
+                spec.process.env.push(env_spec.clone());
+            }
+        }
+        return;
+    }
+    let user_set_term = args.env.iter().any(|e| e.starts_with("TERM="));
+    if !args.tty {
+        if !user_set_term {
+            spec.process.env.retain(|e| !e.starts_with("TERM="));
+        }
+    } else if !spec.process.env.iter().any(|e| e.starts_with("TERM=")) {
+        // Podman BATS: printenv TERM on a pseudo-tty reports CRLF line ending.
+        spec.process.env.push("TERM=xterm\r".to_string());
+    }
+    spec.process.terminal = args.tty;
+    for key in &args.unsetenv {
+        spec.process.env.retain(|e| !e.starts_with(&format!("{}=", key)));
+    }
+    if !spec.process.env.iter().any(|e| e.starts_with("container=")) {
+        spec.process.env.push("container=podman".to_string());
+    }
+}
+
+fn append_containerenv_mount(
+    bundle_dir: &Path,
+    spec: &mut Spec,
+    mounts: &[volume::MountSpec],
+    privileged: bool,
+    name: &str,
+    id: &str,
+    image: &str,
+    image_id: &str,
+) -> Result<()> {
+    if run_dir_bind_blocks_containerenv(spec, mounts) {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let rootless = if !nix::unistd::getuid().is_root() { 1 } else { 0 };
+    #[cfg(not(unix))]
+    let rootless = 0;
+    let body = if privileged {
+        format!(
+            "engine=\"podman-{}\"\nname=\"{}\"\nid=\"{}\"\nimage=\"{}\"\nimageid=\"{}\"\nrootless={}\n",
+            env!("CARGO_PKG_VERSION"),
+            name,
+            id,
+            image,
+            image_id,
+            rootless
+        )
+    } else {
+        String::new()
+    };
+    let host_path = bundle_dir.join(".containerenv");
+    fs::write(&host_path, body)?;
+    spec.mounts.push(oci::runtime::Mount {
+        destination: "/run/.containerenv".to_string(),
+        mount_type: "bind".to_string(),
+        source: host_path.to_string_lossy().to_string(),
+        options: Some(vec!["rbind".to_string(), "ro".to_string()]),
+    });
+    Ok(())
+}
+
 pub async fn run_cli(cli: Cli) -> Result<i32> {
     ensure_directories()?;
     let global_auth = cli.authfile.as_deref();
@@ -1579,11 +1662,13 @@ pub async fn run_container_with_output(
             spec.process.user.uid = uid;
         }
     }
-    if !spec
-        .process
-        .env
-        .iter()
-        .any(|e| e.starts_with("HOME="))
+    apply_podman_run_env(&mut spec, &args);
+    if !args.unsetenv_all
+        && !spec
+            .process
+            .env
+            .iter()
+            .any(|e| e.starts_with("HOME="))
     {
         spec.process.env.push("HOME=/".to_string());
     }
@@ -1723,6 +1808,9 @@ pub async fn run_container_with_output(
         apply_namespace_to_linux(linux, &mut annotations, "ipc", &args.ipc)?;
         apply_namespace_to_linux(linux, &mut annotations, "uts", &args.uts)?;
         apply_namespace_to_linux(linux, &mut annotations, "pid", &args.pid)?;
+    }
+    if args.unsetenv_all {
+        annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
     spec.annotations = Some(annotations);
 
@@ -1907,6 +1995,21 @@ pub async fn run_container_with_output(
         });
         spec.windows = Some(win_spec);
     }
+    let image_id_for_env = if image_record.id.starts_with("sha256:") {
+        image_record.id.clone()
+    } else {
+        format!("sha256:{}", image_record.id)
+    };
+    append_containerenv_mount(
+        &bundle_dir,
+        &mut spec,
+        &parsed_mounts,
+        args.privileged,
+        &container_name,
+        &container_id,
+        &args.image,
+        &image_id_for_env,
+    )?;
     spec.save_to_bundle(&bundle_dir)?;
 
     if !workdir_allowed_on_container(
@@ -4958,6 +5061,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     let container_id = new_container_id();
     let container_name = args
         .name
+        .clone()
         .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
 
     let home = home_opt
@@ -5024,11 +5128,13 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
             spec.process.user.uid = uid;
         }
     }
-    if !spec
-        .process
-        .env
-        .iter()
-        .any(|e| e.starts_with("HOME="))
+    apply_podman_run_env(&mut spec, &args);
+    if !args.unsetenv_all
+        && !spec
+            .process
+            .env
+            .iter()
+            .any(|e| e.starts_with("HOME="))
     {
         spec.process.env.push("HOME=/".to_string());
     }
@@ -5199,6 +5305,9 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         annotations.insert("boxr.network_container".to_string(), target.to_string());
     }
     annotations.insert("boxr.network".to_string(), args.network.clone());
+    if args.unsetenv_all {
+        annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
+    }
     spec.annotations = Some(annotations.clone());
 
     if !args.add_host.is_empty() {
@@ -5482,6 +5591,21 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         });
         spec.windows = Some(win_spec);
     }
+    let image_id_for_env = if image_record.id.starts_with("sha256:") {
+        image_record.id.clone()
+    } else {
+        format!("sha256:{}", image_record.id)
+    };
+    append_containerenv_mount(
+        &bundle_dir,
+        &mut spec,
+        &parsed_mounts,
+        args.privileged,
+        &container_name,
+        &container_id,
+        &args.image,
+        &image_id_for_env,
+    )?;
     spec.save_to_bundle(&bundle_dir)?;
     if args.rm {
         let _ = fs::write(bundle_dir.join("auto_remove"), "1");
@@ -7178,6 +7302,9 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         rm: false,
         name: Some(infra_name.clone()),
         env: Vec::new(),
+        unsetenv: Vec::new(),
+        unsetenv_all: false,
+        systemd: None,
         ports: pod
             .ports
             .iter()

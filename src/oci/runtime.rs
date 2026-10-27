@@ -233,7 +233,6 @@ impl Spec {
 
         let mut env = vec![
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-            "TERM=xterm".to_string(),
         ];
 
         if let Some(cfg) = image_config {

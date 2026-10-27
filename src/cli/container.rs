@@ -10,7 +10,13 @@ pub struct RunArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
-    #[arg(short = 't', long = "tty")]
+    #[arg(
+        short = 't',
+        long = "tty",
+        action = clap::ArgAction::Set,
+        default_value = "false",
+        value_parser = clap::value_parser!(bool)
+    )]
     pub tty: bool,
 
     #[arg(short = 'd', long = "detach")]
@@ -24,6 +30,18 @@ pub struct RunArgs {
 
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
+
+    /// Unset environment variables
+    #[arg(long = "unsetenv")]
+    pub unsetenv: Vec<String>,
+
+    /// Unset all default environment variables
+    #[arg(long = "unsetenv-all")]
+    pub unsetenv_all: bool,
+
+    /// Run container in systemd mode (Podman-compatible flag; accepted for parity)
+    #[arg(long = "systemd")]
+    pub systemd: Option<String>,
 
     #[arg(short = 'p', long = "publish")]
     pub ports: Vec<String>,
