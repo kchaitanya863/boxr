@@ -70,6 +70,14 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `--authfile` | Global + pull/run/build/login/… |
 | BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash` |
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
+| `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
+| `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
+| Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*` (not auto-rmi’d on `pod rm`) |
+
+### Known gaps (`040-ps`)
+
+- **`podman ps --external`**: Requires **buildah** and Podman storage “external” containers; not installed in typical CI/agent images. `ps --external` with no externals prints the table header only (Podman-shaped).
+- Full **manifest.txt** run still has many reds (`030-run`, `020-tag`, volumes, etc.); use per-file manifests to track focused progress.
 
 **100% pass** of upstream suites is not realistic until `info`, logging, networking, and storage output match Podman; the harness measures progress.
 
