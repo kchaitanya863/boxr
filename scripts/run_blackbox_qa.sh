@@ -121,30 +121,6 @@ section_enabled() {
     [[ "$SECTION" == "all" || "$SECTION" == "$name" ]]
 }
 
-# Probe rootless-style user+net namespace (matches boxr trampoline). Skip embedded
-# usernet QA when the runner refuses unshare (common after long CI jobs on GHA).
-linux_user_netns_ok() {
-    [[ "$(uname -s)" == "Linux" ]] || return 1
-    unshare --user --map-root-user --net -- sh -c 'true' 2>/dev/null
-}
-
-embedded_usernet_smoke_ok() {
-    [[ "$(uname -s)" == "Linux" ]] || return 1
-    linux_user_netns_ok || return 1
-    "$BOXR_CMD" pull -q alpine:latest >/dev/null 2>&1 || true
-    local err
-    # Probe a normal rootless container run (not --network none; GHA can EPERM on none
-    # while passt/bridge runs still work). K6 itself uses BOXR_FORCE_EMBEDDED_USERNET.
-    if "$BOXR_CMD" run --rm alpine true >/dev/null 2>&1; then
-        return 0
-    fi
-    err="$("$BOXR_CMD" run --rm alpine true 2>&1)" || true
-    if [[ "$err" == *"EPERM"* ]] || [[ "$err" == *"unshare network namespace"* ]]; then
-        return 1
-    fi
-    return 0
-}
-
 test_step() {
     local name="$1"
     local cmd="$2"
@@ -339,11 +315,7 @@ if section_enabled podman; then
         skip_step "K5 quadlet" "fixture missing"
     fi
     if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
-        if embedded_usernet_smoke_ok; then
-            test_step "K6 embedded usernet gateway" "env BOXR_FORCE_EMBEDDED_USERNET=1 $BOXR_CMD run --rm --network usernet alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
-        else
-            skip_step "K6 embedded usernet gateway" "embedded usernet smoke failed (netns EPERM or relay)"
-        fi
+        test_step "K6 embedded usernet gateway" "env BOXR_FORCE_EMBEDDED_USERNET=1 $BOXR_CMD run --rm --network usernet alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
     fi
 fi
 
