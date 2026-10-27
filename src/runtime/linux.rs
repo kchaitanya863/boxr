@@ -242,6 +242,15 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // 4. Child is now root in user namespace.
+                // Host TCP/DNS relay must start before CLONE_NEWNET (TAP worker cannot setns to host).
+                let mut usernet_relay_pid = None;
+                if network_mode.should_use_native_usernet() && !use_pasta {
+                    if let Ok(pid) =
+                        crate::network::usernet::relay::spawn_host_relay(bundle_path)
+                    {
+                        usernet_relay_pid = Some(nix::unistd::Pid::from_raw(pid));
+                    }
+                }
                 // First unshare network namespace if required, so we can configure networking
                 // with external helper commands (ip) before creating the container PID namespace.
                 let host_netns_for_tap = if requires_netns && network_mode.should_use_native_usernet() {
@@ -384,6 +393,13 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                                 nix::sys::signal::kill(fwd_pid, nix::sys::signal::Signal::SIGKILL);
                             let _ = waitpid(fwd_pid, None);
                         }
+                        if let Some(relay_pid) = usernet_relay_pid {
+                            let _ = nix::sys::signal::kill(
+                                relay_pid,
+                                nix::sys::signal::Signal::SIGKILL,
+                            );
+                            let _ = waitpid(relay_pid, None);
+                        }
 
                         let _ = fs::write(bundle_path.join("boxr-exitcode"), status.to_string());
                         std::process::exit(status);
@@ -409,6 +425,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         // Unshare network namespace first if required
         let mut tap_worker_pid = None;
         let mut fwd_helper_pid = None;
+        let mut usernet_relay_pid = None;
+        if network_mode.should_use_native_usernet() && !network_mode.should_use_pasta() {
+            if let Ok(pid) = crate::network::usernet::relay::spawn_host_relay(bundle_path) {
+                usernet_relay_pid = Some(nix::unistd::Pid::from_raw(pid));
+            }
+        }
         let host_netns_for_tap = if network_mode.requires_new_netns()
             && network_mode.should_use_native_usernet()
         {
@@ -517,6 +539,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if let Some(fwd_pid) = fwd_helper_pid {
                     let _ = nix::sys::signal::kill(fwd_pid, nix::sys::signal::Signal::SIGKILL);
                     let _ = waitpid(fwd_pid, None);
+                }
+                if let Some(relay_pid) = usernet_relay_pid {
+                    let _ =
+                        nix::sys::signal::kill(relay_pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = waitpid(relay_pid, None);
                 }
 
                 status

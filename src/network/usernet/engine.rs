@@ -3,7 +3,8 @@ use crate::network::PortMapping;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::fs::File;
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::Ipv4Addr;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -16,6 +17,18 @@ struct TcpFlowKey {
     dst_port: u16,
 }
 
+struct TcpFlowState {
+    relay: UnixStream,
+    /// Next sequence number we send toward the container.
+    host_seq: u32,
+}
+
+const TCP_FLAG_FIN: u16 = 0x01;
+const TCP_FLAG_SYN: u16 = 0x02;
+const TCP_FLAG_RST: u16 = 0x04;
+const TCP_FLAG_PSH: u16 = 0x08;
+const TCP_FLAG_ACK: u16 = 0x10;
+
 pub struct UserNetEngine {
     pub container_ip: Ipv4Addr,
     pub gateway_ip: Ipv4Addr,
@@ -25,7 +38,7 @@ pub struct UserNetEngine {
     #[allow(dead_code)]
     bundle_path: Option<PathBuf>,
     host_netns: Option<File>,
-    tcp_streams: Mutex<HashMap<TcpFlowKey, TcpStream>>,
+    tcp_flows: Mutex<HashMap<TcpFlowKey, TcpFlowState>>,
 }
 
 impl UserNetEngine {
@@ -42,7 +55,16 @@ impl UserNetEngine {
             running: Arc::new(AtomicBool::new(true)),
             bundle_path: bundle_path.map(Path::to_path_buf),
             host_netns,
-            tcp_streams: Mutex::new(HashMap::new()),
+            tcp_flows: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn tcp_debug(msg: &str) {
+        if matches!(
+            std::env::var("BOXR_USERNET_DEBUG").as_deref(),
+            Ok("1") | Ok("true")
+        ) {
+            eprintln!("usernet: {}", msg);
         }
     }
 
@@ -153,40 +175,55 @@ impl UserNetEngine {
         let outbound = self.is_outbound_ipv4(ip);
         let flow = Self::tcp_flow_key(&tcp, ip);
 
-        // Outbound SYN: dial from host network namespace and track the socket.
-        if outbound && (tcp.flags & 0x02) != 0 {
-            let target_addr =
-                std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, tcp.dst_port));
-            let connected = with_host_network(self.host_netns.as_ref(), || {
-                TcpStream::connect_timeout(&target_addr, std::time::Duration::from_secs(5))
-                    .context("usernet tcp connect")
+        // Outbound SYN (no ACK): dial from host network namespace and track the socket.
+        let is_syn = (tcp.flags & TCP_FLAG_SYN) != 0 && (tcp.flags & TCP_FLAG_ACK) == 0;
+        if outbound && is_syn && tcp_data.is_empty() {
+            let bundle = self.bundle_path.as_deref();
+            let connected = bundle.and_then(|b| {
+                super::relay::dial_via_relay(b, ip.dst_ip, tcp.dst_port).ok()
             });
-            if let Ok(stream) = connected {
-                let _ = stream.set_nodelay(true);
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
-                if let Ok(mut guard) = self.tcp_streams.lock() {
-                    guard.insert(flow, stream);
+            match connected {
+                Some(relay) => {
+                    let host_seq = 1000u32;
+                    if let Ok(mut guard) = self.tcp_flows.lock() {
+                        guard.insert(
+                            flow,
+                            TcpFlowState {
+                                relay,
+                                host_seq: host_seq + 1,
+                            },
+                        );
+                    }
+                    let reply_tcp = TcpHeader {
+                        src_port: tcp.dst_port,
+                        dst_port: tcp.src_port,
+                        seq_num: host_seq,
+                        ack_num: tcp.seq_num.wrapping_add(1),
+                        data_offset: 20,
+                        flags: TCP_FLAG_SYN | TCP_FLAG_ACK,
+                        window_size: 65535,
+                        checksum: 0,
+                        urgent_ptr: 0,
+                    };
+                    Self::tcp_debug(&format!(
+                        "syn-ack {}:{} -> container port {}",
+                        ip.dst_ip, tcp.dst_port, tcp.src_port
+                    ));
+                    return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
                 }
-                let reply_tcp = TcpHeader {
-                    src_port: tcp.dst_port,
-                    dst_port: tcp.src_port,
-                    seq_num: 1000,
-                    ack_num: tcp.seq_num.wrapping_add(1),
-                    data_offset: 20,
-                    flags: 0x12,
-                    window_size: 65535,
-                    checksum: 0,
-                    urgent_ptr: 0,
-                };
-                return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
+                None => {
+                    Self::tcp_debug(&format!(
+                        "syn relay dial failed {}:{}",
+                        ip.dst_ip, tcp.dst_port
+                    ));
+                    return None;
+                }
             }
-            return None;
         }
 
         // FIN: tear down tracked flow
-        if outbound && (tcp.flags & 0x01) != 0 {
-            if let Ok(mut guard) = self.tcp_streams.lock() {
+        if outbound && (tcp.flags & TCP_FLAG_FIN) != 0 {
+            if let Ok(mut guard) = self.tcp_flows.lock() {
                 guard.remove(&flow);
             }
             let reply_tcp = TcpHeader {
@@ -203,41 +240,43 @@ impl UserNetEngine {
             return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
         }
 
-        // Payload on established outbound flow
+        // Payload on established outbound flow (or late connect for unit tests)
         if outbound && !tcp_data.is_empty() {
-            use std::io::{Read, Write};
-            let mut guard = self.tcp_streams.lock().ok()?;
+            let mut guard = self.tcp_flows.lock().ok()?;
             if !guard.contains_key(&flow) {
-                let target_addr =
-                    std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, tcp.dst_port));
-                if let Ok(stream) = with_host_network(self.host_netns.as_ref(), || {
-                    TcpStream::connect_timeout(&target_addr, std::time::Duration::from_secs(5))
-                        .context("usernet tcp connect")
-                }) {
-                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-                    guard.insert(flow, stream);
+                if let Some(b) = self.bundle_path.as_deref() {
+                    if let Ok(relay) = super::relay::dial_via_relay(b, ip.dst_ip, tcp.dst_port) {
+                        guard.insert(
+                            flow,
+                            TcpFlowState {
+                                relay,
+                                host_seq: 1001,
+                            },
+                        );
+                    }
                 }
             }
-            if let Some(stream) = guard.get_mut(&flow) {
-                if stream.write_all(tcp_data).is_ok() {
-                    let _ = stream.flush();
-                    let mut resp_buf = [0u8; 16384];
-                    if let Ok(n) = stream.read(&mut resp_buf) {
-                        if n > 0 {
-                            let response_data = &resp_buf[..n];
-                            let reply_tcp = TcpHeader {
-                                src_port: tcp.dst_port,
-                                dst_port: tcp.src_port,
-                                seq_num: tcp.ack_num,
-                                ack_num: tcp.seq_num.wrapping_add(tcp_data.len() as u32),
-                                data_offset: 20,
-                                flags: 0x18,
-                                window_size: 65535,
-                                checksum: 0,
-                                urgent_ptr: 0,
-                            };
-                            return Some(Self::build_tcp_reply(eth, ip, reply_tcp, response_data));
-                        }
+            if let Some(flow_state) = guard.get_mut(&flow) {
+                if let Ok(response_data) =
+                    super::relay::relay_exchange(&mut flow_state.relay, tcp_data)
+                {
+                    if !response_data.is_empty() {
+                        let n = response_data.len();
+                        let reply_tcp = TcpHeader {
+                            src_port: tcp.dst_port,
+                            dst_port: tcp.src_port,
+                            seq_num: flow_state.host_seq,
+                            ack_num: tcp.seq_num.wrapping_add(tcp_data.len() as u32),
+                            data_offset: 20,
+                            flags: TCP_FLAG_PSH | TCP_FLAG_ACK,
+                            window_size: 65535,
+                            checksum: 0,
+                            urgent_ptr: 0,
+                        };
+                        flow_state.host_seq = flow_state.host_seq.wrapping_add(n as u32);
+                        return Some(
+                            Self::build_tcp_reply(eth, ip, reply_tcp, &response_data),
+                        );
                     }
                 }
             }
@@ -245,7 +284,7 @@ impl UserNetEngine {
         }
 
         // Legacy SYN-ACK for non-outbound probes (unit tests)
-        if (tcp.flags & 0x02) != 0 {
+        if is_syn {
             let reply_tcp = TcpHeader {
                 src_port: tcp.dst_port,
                 dst_port: tcp.src_port,
@@ -317,8 +356,12 @@ impl UserNetEngine {
 
         // Intercept DNS requests on port 53 sent to virtual gateway or DNS IP
         if (ip.dst_ip == self.gateway_ip || ip.dst_ip == self.dns_ip) && udp.dst_port == 53 {
-            // Forward DNS query to host resolver
-            if let Ok(dns_reply) = forward_dns_query(self.host_netns.as_ref(), udp_payload) {
+            let dns_reply = self
+                .bundle_path
+                .as_deref()
+                .and_then(|b| super::relay::dns_via_relay(b, udp_payload).ok())
+                .or_else(|| forward_dns_query(self.host_netns.as_ref(), udp_payload).ok());
+            if let Some(dns_reply) = dns_reply {
                 return self.build_udp_reply(eth, ip, &udp, &dns_reply);
             }
         }
@@ -388,12 +431,21 @@ fn with_host_network<T, F: FnOnce() -> Result<T>>(host_netns: Option<&File>, f: 
 
     if let Some(host_ns) = host_netns {
         if let Ok(self_ns) = File::open("/proc/self/ns/net") {
-            if setns(host_ns, CloneFlags::CLONE_NEWNET).is_ok() {
-                let result = f();
-                let _ = setns(&self_ns, CloneFlags::CLONE_NEWNET);
-                return result;
+            match setns(host_ns, CloneFlags::CLONE_NEWNET) {
+                Ok(()) => {
+                    let result = f();
+                    let _ = setns(&self_ns, CloneFlags::CLONE_NEWNET);
+                    return result;
+                }
+                Err(e) => {
+                    UserNetEngine::tcp_debug(&format!("setns(host) failed: {:?}", e));
+                }
             }
+        } else {
+            UserNetEngine::tcp_debug("open /proc/self/ns/net failed");
         }
+    } else {
+        UserNetEngine::tcp_debug("host_netns fd missing in TAP worker");
     }
     f()
 }
