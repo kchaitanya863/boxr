@@ -4,7 +4,8 @@ use crate::volume::MountSpec;
 use anyhow::{Context, Result, anyhow};
 use nix::mount::{MsFlags, mount};
 use nix::sched::{CloneFlags, unshare};
-use nix::sys::wait::{WaitStatus, waitpid};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::unistd::Pid;
 use nix::unistd::{ForkResult, chdir, fork, pivot_root};
 use std::ffi::CString;
 use std::fs;
@@ -27,6 +28,102 @@ fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
     };
     eprintln!("Error: OCI runtime error: exec failed: {}: {}", executable, detail);
     std::process::exit(exit_code);
+}
+
+fn prepare_bind_mount_target(rootfs: &Path, destination: &str, source: &Path) -> std::path::PathBuf {
+    let clean_dest = destination.trim_start_matches('/');
+    let target = rootfs.join(clean_dest);
+    if source.is_file() {
+        if let Some(parent) = target.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if target.is_dir() {
+            let _ = fs::remove_dir(&target);
+        }
+        if !target.exists() {
+            let _ = fs::File::create(&target);
+        }
+    } else {
+        let _ = fs::create_dir_all(&target);
+    }
+    target
+}
+
+fn bind_mount_destinations(spec: &Spec, mounts: &[MountSpec]) -> Vec<String> {
+    let mut dests: Vec<String> = mounts.iter().map(|m| m.destination.clone()).collect();
+    for m in &spec.mounts {
+        if m.mount_type == "bind" {
+            dests.push(m.destination.clone());
+        }
+    }
+    dests
+}
+
+/// Create a missing workdir when it is an ancestor of a bind mount (Podman BATS 030-run).
+fn write_container_exit_code(bundle_path: &Path, status: i32) {
+    let stored = if status == 255 { -1 } else { status };
+    let _ = fs::write(bundle_path.join("boxr-exitcode"), stored.to_string());
+}
+
+fn run_timeout_secs(spec: &Spec) -> Option<u64> {
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.run_timeout"))
+        .and_then(|s| s.parse().ok())
+}
+
+fn wait_grandchild_with_optional_timeout(
+    grandchild: Pid,
+    bundle_path: &Path,
+    timeout_secs: Option<u64>,
+) -> i32 {
+    if timeout_secs.is_none() {
+        return match waitpid(grandchild, None) {
+            Ok(WaitStatus::Exited(_, code)) => code,
+            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+            _ => 1,
+        };
+    }
+    let deadline = timeout_secs.map(|s| {
+        std::time::Instant::now() + std::time::Duration::from_secs(s)
+    });
+    loop {
+        match waitpid(grandchild, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, code)) => return code,
+            Ok(WaitStatus::Signaled(_, sig, _)) => return 128 + sig as i32,
+            Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
+            Ok(_) => return 1,
+            Err(_) => return 1,
+        }
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                let _ = nix::sys::signal::kill(grandchild, nix::sys::signal::Signal::SIGKILL);
+                let _ = waitpid(grandchild, None);
+                write_container_exit_code(bundle_path, 255);
+                return 255;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+fn ensure_spec_workdir(spec: &Spec, mount_dests: &[String]) -> Result<()> {
+    if spec.process.cwd.is_empty() {
+        return Ok(());
+    }
+    let cwd_norm = spec.process.cwd.trim_end_matches('/');
+    let cwd_path = Path::new(cwd_norm);
+    if cwd_path.is_dir() {
+        return Ok(());
+    }
+    let covered = mount_dests.iter().any(|d| {
+        let d = d.trim_end_matches('/');
+        d == cwd_norm || d.starts_with(&format!("{}/", cwd_norm))
+    });
+    if covered {
+        fs::create_dir_all(cwd_path)?;
+    }
+    Ok(())
 }
 
 /// Native Linux execution of an OCI bundle using Linux namespaces and pivot_root.
@@ -225,7 +322,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 if let Ok(code) = &status {
-                    let _ = fs::write(bundle_path.join("boxr-exitcode"), code.to_string());
+                    write_container_exit_code(bundle_path, *code);
                 }
                 status
             }
@@ -397,11 +494,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             bundle_path.join("container.pid"),
                             grandchild.as_raw().to_string(),
                         );
-                        let status = match waitpid(grandchild, None) {
-                            Ok(WaitStatus::Exited(_, code)) => code,
-                            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
-                            _ => 1,
-                        };
+                        let timeout_secs = run_timeout_secs(&spec);
+                        let status = wait_grandchild_with_optional_timeout(
+                            grandchild,
+                            bundle_path,
+                            timeout_secs,
+                        );
 
                         if let Some(tap_pid) = tap_worker_pid {
                             let _ =
@@ -421,7 +519,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             let _ = waitpid(relay_pid, None);
                         }
 
-                        let _ = fs::write(bundle_path.join("boxr-exitcode"), status.to_string());
+                        write_container_exit_code(bundle_path, status);
                         std::process::exit(status);
                     }
                     Ok(ForkResult::Child) => {
@@ -549,11 +647,13 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     bundle_path.join("container.pid"),
                     child.as_raw().to_string(),
                 );
-                let status = match waitpid(child, None)? {
-                    WaitStatus::Exited(_, code) => Ok(code),
-                    WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
-                    _ => Ok(1),
-                };
+                let timeout_secs = run_timeout_secs(&spec);
+                let code = wait_grandchild_with_optional_timeout(
+                    child,
+                    bundle_path,
+                    timeout_secs,
+                );
+                let status = Ok(code);
 
                 if let Some(tap_pid) = tap_worker_pid {
                     let _ = nix::sys::signal::kill(tap_pid, nix::sys::signal::Signal::SIGKILL);
@@ -569,7 +669,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 if let Ok(code) = &status {
-                    let _ = fs::write(bundle_path.join("boxr-exitcode"), code.to_string());
+                    write_container_exit_code(bundle_path, *code);
                 }
                 status
             }
@@ -946,9 +1046,7 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
     // Mount external volumes/binds
     let canon_rootfs = rootfs.canonicalize()?;
     for m in mounts {
-        let clean_dest = m.destination.trim_start_matches('/');
-        let target = rootfs.join(clean_dest);
-        let _ = fs::create_dir_all(&target);
+        let target = prepare_bind_mount_target(rootfs, &m.destination, &m.source);
         if let Ok(canon_target) = target.canonicalize() {
             if !canon_target.starts_with(&canon_rootfs) {
                 return Err(anyhow!(
@@ -978,9 +1076,8 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
 
     for m in &spec.mounts {
         if m.mount_type == "bind" {
-            let clean_dest = m.destination.trim_start_matches('/');
-            let target = rootfs.join(clean_dest);
-            let _ = fs::create_dir_all(&target);
+            let target =
+                prepare_bind_mount_target(rootfs, &m.destination, Path::new(&m.source));
             if let Ok(canon_target) = target.canonicalize() {
                 if !canon_target.starts_with(&canon_rootfs) {
                     return Err(anyhow!(
@@ -1181,13 +1278,18 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
         None::<&str>,
     );
 
+    let mount_dests = bind_mount_destinations(spec, mounts);
+    ensure_spec_workdir(spec, &mount_dests)?;
+
     // Change to requested working directory
     let cwd = if spec.process.cwd.is_empty() {
         Path::new("/")
     } else {
         Path::new(&spec.process.cwd)
     };
-    let _ = chdir(cwd);
+    if chdir(cwd).is_err() {
+        return Err(anyhow!(std::io::Error::from_raw_os_error(libc::ENOTDIR)));
+    }
 
     let host_term = std::env::var("TERM").ok();
 

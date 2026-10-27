@@ -234,6 +234,7 @@ fn default_run_args(image: &str) -> RunArgs {
         volume_driver: None,
         volumes_from: Vec::new(),
         pod: None,
+        timeout: None,
         image: image.to_string(),
         command: vec!["true".to_string()],
     }

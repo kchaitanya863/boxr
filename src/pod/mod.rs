@@ -680,6 +680,7 @@ mod tests {
             volumes_from: vec![],
             workdir: None,
             pod: Some("mypod".to_string()),
+            timeout: None,
             image: "alpine".to_string(),
             command: vec![],
         };

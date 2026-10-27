@@ -417,6 +417,10 @@ pub struct RunArgs {
     #[arg(long = "pod")]
     pub pod: Option<String>,
 
+    /// Maximum time in seconds to run before killing the container
+    #[arg(long = "timeout")]
+    pub timeout: Option<u64>,
+
     pub image: String,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

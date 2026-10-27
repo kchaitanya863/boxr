@@ -278,6 +278,7 @@ impl KubeManager {
                 volumes_from: Vec::new(),
                 workdir: None,
                 pod: Some(pod.name.clone()),
+                timeout: None,
                 image: c_spec.image.clone(),
                 command: c_spec.command.clone().unwrap_or_default(),
             };

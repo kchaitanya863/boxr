@@ -1700,6 +1700,9 @@ pub async fn run_container_with_output(
     if let Some(timeout) = args.stop_timeout {
         annotations.insert("boxr.stop_timeout".to_string(), timeout.to_string());
     }
+    if let Some(timeout) = args.timeout {
+        annotations.insert("boxr.run_timeout".to_string(), timeout.to_string());
+    }
     if let Some(sig) = &args.stop_signal {
         annotations.insert("boxr.stop_signal".to_string(), sig.clone());
     }
@@ -2100,8 +2103,18 @@ pub async fn run_container_with_output(
             let _ = container_store.remove(&container_id);
             let _ = fs::remove_dir_all(&bundle_dir);
         } else {
-            let _ =
-                container_store.update_status(&container_id, ContainerStatus::Exited(exit_code));
+            let stored_exit = if exit_code == 255 {
+                fs::read_to_string(bundle_dir.join("boxr-exitcode"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .unwrap_or(-1)
+            } else {
+                exit_code
+            };
+            let _ = container_store.update_status(
+                &container_id,
+                ContainerStatus::Exited(stored_exit),
+            );
         }
     }
 
@@ -5160,6 +5173,9 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     if let Some(timeout) = args.stop_timeout {
         annotations.insert("boxr.stop_timeout".to_string(), timeout.to_string());
     }
+    if let Some(timeout) = args.timeout {
+        annotations.insert("boxr.run_timeout".to_string(), timeout.to_string());
+    }
     if let Some(sig) = &args.stop_signal {
         annotations.insert("boxr.stop_signal".to_string(), sig.clone());
     }
@@ -7271,6 +7287,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         volumes_from: Vec::new(),
         workdir: None,
         pod: None,
+        timeout: None,
         image: image_ref,
         command: vec!["sleep".to_string(), "infinity".to_string()],
     };

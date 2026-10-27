@@ -637,6 +637,7 @@ impl ComposeProject {
                 volumes_from: Vec::new(),
                 workdir: None,
                 pod: None,
+                timeout: None,
                 image: image_name,
                 command: cmd_vec,
             };
@@ -1045,6 +1046,7 @@ impl ComposeProject {
             volumes_from: Vec::new(),
             workdir: None,
             pod: None,
+            timeout: None,
             image: image_name.to_string(),
             command: cmd_vec,
         })
