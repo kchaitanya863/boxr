@@ -399,6 +399,19 @@ pub mod platform {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::{AsRawFd, FromRawFd};
     use std::process::Command;
+    use std::sync::OnceLock;
+
+    fn ip_command() -> &'static str {
+        static IP: OnceLock<String> = OnceLock::new();
+        IP.get_or_init(|| {
+            for candidate in ["/usr/sbin/ip", "/sbin/ip", "/bin/ip"] {
+                if std::path::Path::new(candidate).exists() {
+                    return candidate.to_string();
+                }
+            }
+            "ip".to_string()
+        })
+    }
 
     const TUNSETIFF: libc::c_ulong = 0x400454ca;
     const IFF_TAP: libc::c_short = 0x0002;
@@ -442,23 +455,24 @@ pub mod platform {
     /// Configure IP address, netmask, MTU, and default gateway inside the container network namespace
     pub fn configure_container_netns(ifname: &str, ip: Ipv4Addr, gateway: Ipv4Addr) -> Result<()> {
         // Bring loopback up
-        let _ = Command::new("ip")
+        let ip_bin = ip_command();
+        let _ = Command::new(ip_bin)
             .args(["link", "set", "lo", "up"])
             .status();
 
         // Assign IP address to TAP device
         let ip_cidr = format!("{}/24", ip);
-        let _ = Command::new("ip")
+        let _ = Command::new(ip_bin)
             .args(["addr", "add", &ip_cidr, "dev", ifname])
             .status();
 
         // Bring TAP interface up
-        let _ = Command::new("ip")
+        let _ = Command::new(ip_bin)
             .args(["link", "set", ifname, "up"])
             .status();
 
         // Set default route via gateway
-        let _ = Command::new("ip")
+        let _ = Command::new(ip_bin)
             .args([
                 "route",
                 "add",

@@ -5,6 +5,7 @@ Repeatable black-box QA for `boxr` — enterprise runtime invariants, compose, v
 ## Prerequisites
 
 - Built `boxr` binary: `cargo build --release`
+- Linux (rootless): `uidmap` (`newuidmap`/`newgidmap`) and `/etc/subuid` entries for the test user; `passt` optional (`--network=pasta` / default auto)
 - macOS: `boxr-vz` and VM kernel under `~/.boxr/vm/` (created on first container run)
 - Network access for image pulls (`alpine`, `nginx`, `postgres`, etc.)
 - `curl` on the host (daemon ping, published port checks)

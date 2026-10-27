@@ -23,7 +23,20 @@ pub fn execute_bundle(
         let _ = fs::write(bundle_path.join("mounts.json"), mounts_json);
     }
     let ports = crate::network::resolve_bundle_ports(bundle_path, _ports);
-    let _ = crate::network::spawn_port_forward_daemon(bundle_path, &ports);
+    let network_mode = _spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network"))
+        .map(|s| crate::network::pasta::NetworkMode::parse(s))
+        .unwrap_or_default();
+    if !ports.is_empty() {
+        let ports_json = serde_json::to_string(&ports)?;
+        let _ = fs::write(bundle_path.join("ports.json"), ports_json);
+        // Host-side Unix relay conflicts with passt/pasta binding the same host ports.
+        if !network_mode.should_use_pasta() {
+            let _ = crate::network::spawn_port_forward_daemon(bundle_path, &ports);
+        }
+    }
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
 
@@ -835,11 +848,17 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
                 ));
             }
         }
-        let mut flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+        let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+        mount(Some(&m.source), &target, None::<&str>, bind_flags, None::<&str>)?;
         if m.read_only {
-            flags |= MsFlags::MS_RDONLY;
+            mount(
+                None::<&str>,
+                &target,
+                None::<&str>,
+                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                None::<&str>,
+            )?;
         }
-        let _ = mount(Some(&m.source), &target, None::<&str>, flags, None::<&str>);
     }
 
     for m in &spec.mounts {
@@ -855,21 +874,28 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
                     ));
                 }
             }
-            let mut flags = MsFlags::MS_BIND | MsFlags::MS_REC;
-            if m.options
+            let ro = m
+                .options
                 .as_ref()
                 .map(|opts| opts.iter().any(|o| o == "ro"))
-                .unwrap_or(false)
-            {
-                flags |= MsFlags::MS_RDONLY;
-            }
-            let _ = mount(
+                .unwrap_or(false);
+            let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+            mount(
                 Some(Path::new(&m.source)),
                 &target,
                 None::<&str>,
-                flags,
+                bind_flags,
                 None::<&str>,
-            );
+            )?;
+            if ro {
+                mount(
+                    None::<&str>,
+                    &target,
+                    None::<&str>,
+                    MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                    None::<&str>,
+                )?;
+            }
         } else if m.mount_type == "tmpfs"
             && m.destination != "/dev"
             && m.destination != "/proc"
@@ -910,6 +936,16 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
                 }
             }
         }
+    }
+    let net_mode = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network"))
+        .map(|s| crate::network::pasta::NetworkMode::parse(s))
+        .unwrap_or_default();
+    if net_mode.should_use_native_usernet() {
+        use crate::network::usernet::DEFAULT_DNS_IP;
+        dns_content = format!("nameserver {}\n", DEFAULT_DNS_IP);
     }
     if dns_content.is_empty() {
         if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {

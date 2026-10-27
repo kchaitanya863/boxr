@@ -5559,8 +5559,23 @@ fn parse_ports(specs: &[String]) -> Result<Vec<network::PortMapping>> {
 }
 
 fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
-    if matches!(network, "none" | "host" | "bridge" | "auto" | "default") {
+    let trimmed = network.trim();
+    if trimmed.is_empty() {
         return Ok(());
+    }
+    let mode = network::pasta::NetworkMode::parse(trimmed);
+    match mode {
+        network::pasta::NetworkMode::None
+        | network::pasta::NetworkMode::Host
+        | network::pasta::NetworkMode::Auto
+        | network::pasta::NetworkMode::Pasta
+        | network::pasta::NetworkMode::UserNet
+        | network::pasta::NetworkMode::Container(_) => return Ok(()),
+        network::pasta::NetworkMode::Bridge => {
+            if matches!(trimmed, "bridge" | "default" | "auto") {
+                return Ok(());
+            }
+        }
     }
     let store = match home_opt {
         Some(h) => network::NetworkStore::with_home(h.to_path_buf()),

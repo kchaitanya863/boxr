@@ -134,41 +134,47 @@ impl RootlessUserConfig {
         let sub_gid = Self::read_subordinate_range(true);
 
         // Attempt newuidmap/newgidmap if both binaries and subuid/subgid ranges are available
-        if Self::has_newidmap_binaries() && sub_uid.is_some() && sub_gid.is_some() {
-            let u_range = sub_uid.unwrap();
-            let g_range = sub_gid.unwrap();
+        if Self::has_newidmap_binaries() {
+            if let (Some(u_range), Some(g_range)) = (sub_uid.as_ref(), sub_gid.as_ref()) {
+                // newuidmap <pid> 0 <host_uid> 1 1 <sub_uid_start> <sub_uid_count>
+                let uid_status = std::process::Command::new("newuidmap")
+                    .args([
+                        &pid.to_string(),
+                        "0",
+                        &host_uid.to_string(),
+                        "1",
+                        "1",
+                        &u_range.start.to_string(),
+                        &u_range.count.to_string(),
+                    ])
+                    .status();
 
-            // newuidmap <pid> 0 <host_uid> 1 1 <sub_uid_start> <sub_uid_count>
-            let uid_status = std::process::Command::new("newuidmap")
-                .args([
-                    &pid.to_string(),
-                    "0",
-                    &host_uid.to_string(),
-                    "1",
-                    "1",
-                    &u_range.start.to_string(),
-                    &u_range.count.to_string(),
-                ])
-                .status();
+                // newgidmap <pid> 0 <host_gid> 1 1 <sub_gid_start> <sub_gid_count>
+                let gid_status = std::process::Command::new("newgidmap")
+                    .args([
+                        &pid.to_string(),
+                        "0",
+                        &host_gid.to_string(),
+                        "1",
+                        "1",
+                        &g_range.start.to_string(),
+                        &g_range.count.to_string(),
+                    ])
+                    .status();
 
-            // newgidmap <pid> 0 <host_gid> 1 1 <sub_gid_start> <sub_gid_count>
-            let gid_status = std::process::Command::new("newgidmap")
-                .args([
-                    &pid.to_string(),
-                    "0",
-                    &host_gid.to_string(),
-                    "1",
-                    "1",
-                    &g_range.start.to_string(),
-                    &g_range.count.to_string(),
-                ])
-                .status();
-
-            if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
-                if u_st.success() && g_st.success() {
-                    return Ok(());
+                if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
+                    if u_st.success() && g_st.success() {
+                        return Ok(());
+                    }
                 }
             }
+        }
+
+        if sub_uid.is_some() && sub_gid.is_some() && !Self::has_newidmap_binaries() {
+            eprintln!(
+                "boxr: install the 'uidmap' package (newuidmap/newgidmap) for full rootless UID/GID ranges; \
+using single-ID mapping only (images requiring chown/--user may fail)"
+            );
         }
 
         // Fallback: write single UID/GID map directly to /proc/<pid>/uid_map and /proc/<pid>/gid_map
