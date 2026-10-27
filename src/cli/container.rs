@@ -665,6 +665,14 @@ pub struct PsArgs {
     #[arg(short = 'f', long = "filter")]
     pub filter: Vec<String>,
 
+    /// Do not print headers
+    #[arg(long = "noheading")]
+    pub noheading: bool,
+
+    /// Display external containers (buildah, etc.)
+    #[arg(long = "external")]
+    pub external: bool,
+
     /// Container names or IDs (accepted only for validation; not supported with --latest)
     #[arg(value_name = "CONTAINER")]
     pub containers: Vec<String>,

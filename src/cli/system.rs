@@ -244,48 +244,58 @@ pub struct PodLsArgs {
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
 
+    #[arg(long = "noheading")]
+    pub noheading: bool,
+
     #[arg(value_name = "POD")]
     pub pods: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct PodCreateArgs {
+    /// Pod name
+    #[arg(long = "name")]
+    pub name: Option<String>,
+    /// Publish port (e.g. 8080:80)
+    #[arg(short = 'p', long = "publish")]
+    pub ports: Vec<String>,
+    /// Set pod hostname
+    #[arg(long = "hostname")]
+    pub hostname: Option<String>,
+    /// Set metadata labels (key=value)
+    #[arg(short = 'l', long = "label")]
+    pub labels: Vec<String>,
+    /// Custom DNS servers
+    #[arg(long = "dns")]
+    pub dns: Vec<String>,
+    /// Memory limit for all containers in the pod
+    #[arg(short = 'm', long = "memory")]
+    pub memory: Option<String>,
+    /// CPU limit for all containers in the pod
+    #[arg(long = "cpus")]
+    pub cpus: Option<String>,
+    /// Network mode for the pod
+    #[arg(long = "network")]
+    pub network: Option<String>,
+    /// Share namespaces: ipc, net, uts, pid (comma-separated)
+    #[arg(long = "share", default_value = "ipc,net,uts")]
+    pub share: String,
+    /// Create an infra container
+    #[arg(long = "infra", default_value_t = true)]
+    pub infra: bool,
+    /// Do not create an infra container
+    #[arg(long = "no-infra", default_value_t = false)]
+    pub no_infra: bool,
+    /// Pod name (positional; same as --name)
+    #[arg(value_name = "NAME")]
+    pub pod: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum PodAction {
     /// Create a pod
-    Create {
-        /// Pod name
-        #[arg(long = "name")]
-        name: Option<String>,
-        /// Publish port (e.g. 8080:80)
-        #[arg(short = 'p', long = "publish")]
-        ports: Vec<String>,
-        /// Set pod hostname
-        #[arg(long = "hostname")]
-        hostname: Option<String>,
-        /// Set metadata labels (key=value)
-        #[arg(short = 'l', long = "label")]
-        labels: Vec<String>,
-        /// Custom DNS servers
-        #[arg(long = "dns")]
-        dns: Vec<String>,
-        /// Memory limit for all containers in the pod
-        #[arg(short = 'm', long = "memory")]
-        memory: Option<String>,
-        /// CPU limit for all containers in the pod
-        #[arg(long = "cpus")]
-        cpus: Option<String>,
-        /// Network mode for the pod
-        #[arg(long = "network")]
-        network: Option<String>,
-        /// Share namespaces: ipc, net, uts, pid (comma-separated)
-        #[arg(long = "share", default_value = "ipc,net,uts")]
-        share: String,
-        /// Create an infra container
-        #[arg(long = "infra", default_value_t = true)]
-        infra: bool,
-        /// Do not create an infra container
-        #[arg(long = "no-infra", default_value_t = false)]
-        no_infra: bool,
-    },
+    Create(PodCreateArgs),
     /// List pods
     #[command(alias = "list")]
     Ps(PodLsArgs),

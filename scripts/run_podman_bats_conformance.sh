@@ -44,7 +44,9 @@ apply_boxr_patches() {
   local helpers="$SRC_DIR/test/system/helpers.bash"
   local head
   head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo none)"
-  if [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "$head" ]]; then
+  local overrides_id
+  overrides_id="$(sha256sum "$OVERRIDES" | awk '{print $1}')"
+  if [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "${head}:${overrides_id}" ]]; then
     return 0
   fi
   # Re-apply overrides on each upstream bump (strip previous block first).
@@ -56,7 +58,7 @@ apply_boxr_patches() {
     echo '# BOXR_BATS_OVERRIDES'
     cat "$OVERRIDES"
   } >>"$helpers"
-  echo "$head" >"$stamp"
+  echo "${head}:${overrides_id}" >"$stamp"
 }
 
 write_wrapper() {

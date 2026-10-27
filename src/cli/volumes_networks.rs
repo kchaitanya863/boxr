@@ -115,6 +115,8 @@ pub struct VolumeLsArgs {
     pub filter: Vec<String>,
     #[arg(long = "format")]
     pub format: Option<String>,
+    #[arg(long = "noheading")]
+    pub noheading: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -233,6 +235,8 @@ pub struct NetworkLsArgs {
     pub format: Option<String>,
     #[arg(long = "no-trunc")]
     pub no_trunc: bool,
+    #[arg(short = 'n', long = "noheading")]
+    pub noheading: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]

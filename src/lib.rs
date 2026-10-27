@@ -67,7 +67,8 @@ use chrono::Utc;
 use cli::{
     BuildArgs, BuilderAction, Cli, Commands, ComposeArgs, ComposeSubcommand, DiffArgs, ExecArgs,
     GenerateAction, GenerateSubcommands, LogsArgs, NetworkAction, NetworkSubcommands, PlayAction,
-    PlaySubcommands, PodAction, PodLsArgs, PodSubcommands, PsArgs, RunArgs, SpecArgs, SystemAction,
+    PlaySubcommands, PodAction, PodCreateArgs, PodLsArgs, PodSubcommands, PsArgs, RunArgs,
+    SpecArgs, SystemAction,
     TopArgs, UnshareArgs, VolumeAction, VolumeSubcommands,
 };
 use events::{ContainerEvent, EventManager};
@@ -3492,7 +3493,9 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     println!("{}", line);
                 }
             } else {
-                println!("{:<20} {:<12} {:<40}", "VOLUME NAME", "DRIVER", "SCOPE");
+                if !ls_args.noheading {
+                    println!("{:<20} {:<12} {:<40}", "VOLUME NAME", "DRIVER", "SCOPE");
+                }
                 for v in vols {
                     println!("{:<20} {:<12} {:<40}", v.name, v.driver, v.scope);
                 }
@@ -3620,10 +3623,12 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     println!("{}", line);
                 }
             } else {
-                println!(
-                    "{:<14} {:<20} {:<12} {:<20}",
-                    "NETWORK ID", "NAME", "DRIVER", "SCOPE"
-                );
+                if !ls_args.noheading {
+                    println!(
+                        "{:<14} {:<20} {:<12} {:<20}",
+                        "NETWORK ID", "NAME", "DRIVER", "SCOPE"
+                    );
+                }
                 for n in nets {
                     let id = if ls_args.no_trunc {
                         n.id.clone()
@@ -3856,6 +3861,10 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
         cli::usage_errors::exit_usage_error(format!("{} takes no arguments", command_name));
     }
 
+    if args.external {
+        return Ok(());
+    }
+
     for f in &args.filter {
         if let Some((k, _)) = f.split_once('=') {
             validate_ps_filter_key(k.trim())?;
@@ -3981,16 +3990,18 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
         return Ok(());
     }
 
-    if args.size {
-        println!(
-            "{:<14} {:<24} {:<18} {:<20} {:<14} {:<10} {:<16}",
-            "CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "SIZE", "NAMES"
-        );
-    } else {
-        println!(
-            "{:<14} {:<24} {:<20} {:<20} {:<16} {:<16}",
-            "CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "NAMES"
-        );
+    if !args.noheading {
+        if args.size {
+            println!(
+                "{:<14} {:<24} {:<18} {:<20} {:<14} {:<10} {:<16}",
+                "CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "SIZE", "NAMES"
+            );
+        } else {
+            println!(
+                "{:<14} {:<24} {:<20} {:<20} {:<16} {:<16}",
+                "CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "NAMES"
+            );
+        }
     }
 
     for c in &filtered {
@@ -5560,10 +5571,12 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
         }
         return;
     }
-    println!(
-        "{:<14} {:<24} {:<16} {:<24} {:<14}",
-        "POD ID", "NAME", "STATUS", "CREATED", "# CONTAINERS"
-    );
+    if !ls_args.noheading {
+        println!(
+            "{:<14} {:<24} {:<16} {:<24} {:<14}",
+            "POD ID", "NAME", "STATUS", "CREATED", "# CONTAINERS"
+        );
+    }
     for p in pods {
         println!(
             "{:<14} {:<24} {:<16} {:<24} {:<14}",
@@ -6364,19 +6377,22 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
 pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
     let store = pod::PodStore::new();
     match args.command {
-        PodAction::Create {
-            name,
-            ports,
-            hostname,
-            labels,
-            dns,
-            memory,
-            cpus,
-            network,
-            share,
-            infra,
-            no_infra,
-        } => {
+        PodAction::Create(create_args) => {
+            let PodCreateArgs {
+                name,
+                ports,
+                hostname,
+                labels,
+                dns,
+                memory,
+                cpus,
+                network,
+                share,
+                infra,
+                no_infra,
+                pod,
+            } = create_args;
+            let pod_name = name.or(pod);
             let mut parsed_ports = Vec::new();
             for p in &ports {
                 parsed_ports.push(PortMapping::parse(p)?);
@@ -6389,7 +6405,7 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             }
             let (share_ipc, share_net, share_uts, share_pid) = parse_pod_share(&share);
             let config = pod::PodConfig {
-                name: name.clone(),
+                name: pod_name.clone(),
                 ports: parsed_ports,
                 hostname,
                 labels: label_map,

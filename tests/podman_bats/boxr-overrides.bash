@@ -37,3 +37,33 @@ function clean_setup() {
         _run_podman_quiet $action
     done
 }
+
+# boxr keeps a permanent default bridge network (boxr0); whitelist it like podman's "podman" net.
+function leak_check() {
+    local exit_code=0
+
+    _run_podman_quiet volume ls --format '{{.Name}} {{.Driver}}'
+    _leak_check_one "volume"
+
+    _run_podman_quiet network ls --noheading
+    output=$(
+        grep -ve "^[0-9a-z]\{12\} *podman\(-default-kube-network\)\? *bridge\$" <<<"$output" |
+            grep -ve "^[0-9a-z]\{12\} *boxr0 *bridge" || true
+    )
+    _leak_check_one "network"
+
+    _run_podman_quiet pod ls --format '{{.ID}} {{.Name}} status={{.Status}} ({{.NumberOfContainers}} containers)'
+    _leak_check_one "pod"
+
+    _run_podman_quiet ps -a --format '{{.ID}} {{.Image}} {{.Names}}  {{.Status}}'
+    _leak_check_one "container"
+
+    _run_podman_quiet ps -a --external --filter=status=unknown --format '{{.ID}} {{.Image}} {{.Names}}  {{.Status}}'
+    _leak_check_one "storage container"
+
+    _run_podman_quiet images --all --format '{{.ID}} {{.Repository}}:{{.Tag}}'
+    output=$(awk "\$2 != \"$IMAGE\" && \$2 != \"$PODMAN_SYSTEMD_IMAGE_FQN\" && \$2 !~ \"localhost/podman-pause:\" { print }" <<<"$output")
+    _leak_check_one "image"
+
+    return $exit_code
+}

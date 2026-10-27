@@ -255,6 +255,8 @@ fn test_issue_163_ps_accepts_invalid_filter_keys_without_returning_an_error() {
         last: None,
         latest: false,
         filter: vec!["bogus=val".to_string()],
+        noheading: false,
+        external: false,
         containers: vec![],
     };
     let res = boxr::list_containers(args, "ps");
