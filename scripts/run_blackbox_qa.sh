@@ -297,19 +297,6 @@ if section_enabled podman; then
     VID="bb-vol-$(rand_id)"
     test_step "K2 volume create+exists" "$BOXR_CMD volume create $VID && $BOXR_CMD volume exists $VID"
     run_cmd "$BOXR_CMD volume rm $VID" 2>/dev/null || true
-    if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
-        _k6_cmd="env BOXR_FORCE_EMBEDDED_USERNET=1 $BOXR_CMD run --rm --network usernet alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
-        if eval "$_k6_cmd" >/dev/null 2>&1; then
-            test_step "K6 embedded usernet gateway" "$_k6_cmd"
-        else
-            _k6_err="$(eval "$_k6_cmd" 2>&1)" || true
-            if [[ "$_k6_err" == *"EPERM"* ]] || [[ "$_k6_err" == *"unshare network namespace"* ]]; then
-                skip_step "K6 embedded usernet gateway" "embedded usernet EPERM on runner (passt/default still covered by K3)"
-            else
-                test_step "K6 embedded usernet gateway" "$_k6_cmd"
-            fi
-        fi
-    fi
     if [[ -f "$COMPOSE_STACK" ]]; then
         test_step "K3 compose up web" "$BOXR_CMD compose -f \"$COMPOSE_STACK\" up -d web"
         run_cmd "$BOXR_CMD compose -f \"$COMPOSE_STACK\" down -v" 2>/dev/null || true
@@ -326,6 +313,11 @@ if section_enabled podman; then
         test_step "K5 quadlet install" "$BOXR_CMD quadlet install \"$PODMAN_FIX/sample.container\""
     else
         skip_step "K5 quadlet" "fixture missing"
+    fi
+    if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
+        # Bridge + FORCE uses the same embedded TAP stack as compose on Linux (passt bypassed).
+        # Run after K3–K5 so rootless netns is warm; publish a port like compose services.
+        test_step "K6 embedded usernet gateway" "env BOXR_FORCE_EMBEDDED_USERNET=1 $BOXR_CMD run --rm --network bridge -p 18080:80 alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
     fi
 fi
 
