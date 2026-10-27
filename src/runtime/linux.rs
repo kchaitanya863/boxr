@@ -10,6 +10,25 @@ use std::ffi::CString;
 use std::fs;
 use std::path::Path;
 
+/// Podman/crun-style message and exit code when exec fails in the container child.
+fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
+    let errno = err as i32;
+    let exit_code = match errno {
+        libc::ENOENT => 127,
+        libc::EACCES | libc::EISDIR | libc::ENOTDIR => 126,
+        _ => 1,
+    };
+    let detail: &str = match errno {
+        libc::ENOENT => "no such file or directory",
+        libc::EACCES => "permission denied",
+        libc::EISDIR => "is a directory",
+        libc::ENOTDIR => "not a directory",
+        _ => "failed to execute",
+    };
+    eprintln!("Error: OCI runtime error: exec failed: {}: {}", executable, detail);
+    std::process::exit(exit_code);
+}
+
 /// Native Linux execution of an OCI bundle using Linux namespaces and pivot_root.
 pub fn execute_bundle(
     bundle_path: &Path,
@@ -1297,6 +1316,8 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
         .map(|s| CString::new(s.as_str()).unwrap())
         .collect();
 
-    nix::unistd::execvp(&binary_c, &args_c)?;
+    if let Err(err) = nix::unistd::execvp(&binary_c, &args_c) {
+        container_exec_failure(binary, err);
+    }
     Ok(())
 }
