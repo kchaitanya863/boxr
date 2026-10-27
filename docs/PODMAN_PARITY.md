@@ -21,7 +21,7 @@ Automated checks:
 
 | Domain | CLI | Behavior | Linux | macOS | Tests | Notes |
 |--------|-----|----------|-------|-------|-------|-------|
-| **run / create / lifecycle** | partial | partial | partial | partial | `docker_parity_test`, blackbox runtime | Rootless default; `auto`/`usernet` use passt when installed, else embedded TAP |
+| **run / create / lifecycle** | partial | partial | partial | partial | `docker_parity_test`, blackbox runtime, `test_matrix_embedded_usernet_resolv` (K6) | Rootless default; `auto`/`usernet` use passt when installed, else embedded TAP (`BOXR_FORCE_EMBEDDED_USERNET`) |
 | **compose** | partial | partial | partial | partial | `compose_docker_replacement_test`, B9 | `.env`, `${VAR:-default}`, `up SERVICE` |
 | **container exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | Exit 0/1 like Podman |
 | **image exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |

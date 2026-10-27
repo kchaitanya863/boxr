@@ -89,7 +89,7 @@ Both the shell harness and Rust tests use a temporary `BOXR_HOME` per run. Heavy
 |---------|-----|-------|
 | A | runtime | /tmp 1777, shm, devices, apt, postgres, nginx, read-only, init, daemon |
 | B | compose | fullstack-compose, minimal-dns, docker-replacement-stack, cycles |
-| K | podman | exists, compose service target, play kube, specgen, quadlet, checkpoint, volume, artifact |
+| K | podman | K1–K5: exists, compose, play kube, quadlet; **K6** (Linux CI): embedded TAP via `test_matrix_embedded_usernet_resolv` when `BOXR_TEST_EMBEDDED_USERNET=1` |
 | C | volumes | CRUD, bind ro/rw, chown/chmod, cp |
 | D/E | network, dns | publish, none, custom DNS, bridge names |
 | F | security | user, read-only, privileged, env isolation |

@@ -412,8 +412,9 @@ fn test_matrix_embedded_usernet_resolv() {
             "--network",
             "usernet",
             "alpine",
-            "cat",
-            "/etc/resolv.conf",
+            "sh",
+            "-c",
+            "grep -q 10.0.2.3 /etc/resolv.conf && ping -c 1 -W 3 10.0.2.2 | grep -qE 'bytes from|1 received'",
         ],
     );
     if let Some(v) = saved_force {
@@ -431,8 +432,8 @@ fn test_matrix_embedded_usernet_resolv() {
         return;
     }
     assert!(
-        out.status.success() && combined.contains("10.0.2.3"),
-        "embedded usernet should install virtual DNS: {}",
+        out.status.success(),
+        "embedded usernet should configure virtual DNS and gateway ICMP: {}",
         combined
     );
 }
