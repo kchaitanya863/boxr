@@ -56,9 +56,6 @@ jobs:
       - name: Build boxr binary
         run: cargo build
 
-      - name: Black-Box QA (embedded usernet TAP)
-        run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
-
       - name: Podman P0 CLI audit
         run: python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
 
@@ -67,6 +64,11 @@ jobs:
 
       - name: Run Test Suite
         run: cargo test --all --verbose -- --test-threads=1
+
+      # K6 embedded smoke needs a prior successful rootless run on some GHA runners (first
+      # boxr invocation right after build can EPERM); run after the Rust integration suite.
+      - name: Black-Box QA (embedded usernet TAP)
+        run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
 
       - name: Black-Box QA (podman P0 shell)
         run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
