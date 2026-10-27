@@ -392,6 +392,52 @@ fn test_matrix_usernet_pings_virtual_gateway() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn test_matrix_embedded_usernet_resolv() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted");
+        return;
+    }
+    let saved_force = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+    unsafe {
+        std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", "1");
+    }
+    let (_guard, home) = isolated_home();
+    pull_if_needed(&home, "alpine:latest");
+    let out = run_boxr(
+        &home,
+        &[
+            "run",
+            "--rm",
+            "--network",
+            "usernet",
+            "alpine",
+            "cat",
+            "/etc/resolv.conf",
+        ],
+    );
+    if let Some(v) = saved_force {
+        unsafe {
+            std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", v);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+        }
+    }
+    let combined = combined_output(&out);
+    if combined.contains("unshare network namespace") && combined.contains("EPERM") {
+        eprintln!("SKIPPED: embedded usernet netns EPERM on runner");
+        return;
+    }
+    assert!(
+        out.status.success() && combined.contains("10.0.2.3"),
+        "embedded usernet should install virtual DNS: {}",
+        combined
+    );
+}
+
+#[test]
 #[cfg_attr(
     target_os = "macos",
     ignore = "micro-VM outbound networking is slow under parallel cargo test"

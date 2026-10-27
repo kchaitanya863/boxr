@@ -300,12 +300,7 @@ if section_enabled podman; then
     if [[ -f "$COMPOSE_STACK" ]]; then
         test_step "K3 compose up web" "$BOXR_CMD compose -f \"$COMPOSE_STACK\" up -d web"
         if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
-            _k6_cmd="$BOXR_CMD exec replacement-web wget -q -O /dev/null --timeout=10 http://example.com"
-            if eval "$_k6_cmd" >/dev/null 2>&1; then
-                test_step "K6 embedded usernet gateway" "$_k6_cmd"
-            else
-                skip_step "K6 embedded usernet gateway" "compose outbound/DNS unavailable on runner (stack still validated by K3 up)"
-            fi
+            test_step "K6 embedded usernet gateway" "$BOXR_CMD exec replacement-web grep -q 10.0.2.3 /etc/resolv.conf"
         fi
         run_cmd "$BOXR_CMD compose -f \"$COMPOSE_STACK\" down -v" 2>/dev/null || true
     else
