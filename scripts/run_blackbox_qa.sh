@@ -127,7 +127,16 @@ linux_user_netns_ok() {
 
 embedded_usernet_smoke_ok() {
     [[ "$(uname -s)" == "Linux" ]] || return 1
-    env BOXR_FORCE_EMBEDDED_USERNET=1 "$BOXR_CMD" run --rm --network none alpine true >/dev/null 2>&1
+    env BOXR_FORCE_EMBEDDED_USERNET=1 "$BOXR_CMD" pull -q alpine:latest >/dev/null 2>&1 || true
+    local err
+    if env BOXR_FORCE_EMBEDDED_USERNET=1 "$BOXR_CMD" run --rm --network none alpine true >/dev/null 2>&1; then
+        return 0
+    fi
+    err="$(env BOXR_FORCE_EMBEDDED_USERNET=1 "$BOXR_CMD" run --rm --network none alpine true 2>&1)" || true
+    if [[ "$err" == *"EPERM"* ]] || [[ "$err" == *"unshare network namespace"* ]]; then
+        return 1
+    fi
+    return 0
 }
 
 test_step() {
