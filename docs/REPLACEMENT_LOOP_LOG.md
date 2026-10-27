@@ -14,7 +14,7 @@ Hourly automated parity and real-world smoke tests. Each tick appends a section 
 
 | ID | Severity | Area | Summary | Repro | First seen |
 |----|----------|------|---------|-------|------------|
-| L-001 | **high** | runtime / USER | Official `postgres:16-alpine` exits immediately with `failed switching to 'postgres': operation not permitted` (exit 137). Breaks common DB workloads; compose fixture `replacement-postgres` logs the same error while `compose ps` may still show **Up**. | `BOXR_HOME=/tmp/x boxr run -d -e POSTGRES_PASSWORD=test postgres:16-alpine && boxr logs <id>` | Tick 1 |
+| L-001 | **fixed** | runtime / USER | Rootless child wrote `setgroups deny` before `newgidmap`, which **permanently** disables supplementary groups in the user namespace (kernel cannot revert to `allow`). Broke `gosu`/postgres entrypoints. **Fix:** stop denying from the child; let `newgidmap` + parent fallback set policy. | Same repro now passes `pg_isready` | Tick 1 → fixed tick 2 |
 | L-002 | **low** | CLI UX | `boxr unshare --help` exits 1 with `ENOENT` (trampoline path); other top-level commands return 0 for `--help`. | `boxr unshare --help` | Tick 1 |
 | L-003 | **test gap** | QA | Black-box B9 only asserts `replacement-web` is up; does not health-check `db` / postgres — L-001 not caught by `./scripts/run_blackbox_qa.sh`. | See `scripts/run_blackbox_qa.sh` B9 steps | Tick 1 |
 

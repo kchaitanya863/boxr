@@ -95,11 +95,20 @@ fn test_issue_428_compose_exec_tty_flags() {
 }
 
 #[test]
-fn test_issue_430_rootless_setgroups_deny_before_gid_map() {
+fn test_issue_430_rootless_setgroups_not_denied_by_child_before_gid_map() {
     let linux = include_str!("../src/runtime/linux.rs");
     assert!(
-        linux.contains("/proc/self/setgroups") && linux.contains("deny"),
-        "rootless child must write setgroups deny before gid_map"
+        linux.contains("Do not write \"deny\" here"),
+        "rootless child must not permanently deny setgroups before parent gid_map"
+    );
+    assert!(
+        linux.contains("try_enable_setgroups_after_mapping"),
+        "rootless runtime should attempt setgroups allow after mapping when needed"
+    );
+    let security = include_str!("../src/security/mod.rs");
+    assert!(
+        security.contains("setgroups_path") && security.contains("deny"),
+        "fallback gid_map path must still write setgroups deny from parent"
     );
 }
 
