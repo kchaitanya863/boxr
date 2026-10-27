@@ -66,3 +66,12 @@ python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
 cargo test --test podman_parity_blackbox_test -- --test-threads=1
 # Matrix: docs/PODMAN_PARITY.md
 ```
+
+---
+
+## Cursor Cloud specific instructions
+
+- This crate uses Rust edition 2024. The default image's rustc 1.83 cannot compile it. Cloud setup selects the stable toolchain with rustup and exports `RUSTUP_HOME=/usr/local/rustup` and `CARGO_HOME=/usr/local/cargo` from `/etc/profile.d/rust-env.sh`. The toolchain is not under `~/.cargo`.
+- Rootless execution needs the `uidmap`, `passt`, and `iproute2` packages (`newuidmap`, `newgidmap`, `pasta`, `ip`). The `ubuntu` user already has subordinate IDs in `/etc/subuid` and `/etc/subgid`.
+- `netns_available()` in `tests/common/blackbox.rs` probes bare `unshare(CLONE_NEWNET)`. That returns `EPERM` for unprivileged `ubuntu`, so black-box tests print `SKIPPED: network namespaces not permitted` and return success. Rootless `boxr run` still works: it creates a user namespace first, then a network namespace. Do not rerun those tests under sudo. A direct check is `boxr pull alpine:latest` followed by `boxr run --rm alpine:latest echo hello-from-boxr`.
+- `boxr` is a CLI. Development does not need a daemon. State is under `BOXR_HOME` (default `~/.boxr`).
