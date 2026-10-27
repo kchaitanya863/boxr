@@ -9,8 +9,9 @@ Releases are fully automatic. Merging a PR to `main` is the only trigger you nee
 
 1. A push to `main` (for example, a merged PR) triggers the `CI & Automated Release`
    workflow (`.github/workflows/ci.yml`).
-2. The `test` job (`Test & Lint`) runs `cargo fmt --check`, clippy, the full test
-   suite, and the black-box QA on the macOS self-hosted runner.
+2. The `test` job (`Test & Lint (macOS Self-Hosted)` — legacy check name) runs on
+   **GitHub-hosted Ubuntu** with rootless deps (`uidmap`, `passt`): `cargo fmt --check`,
+   clippy, the full test suite, Podman parity audit/blackbox, and shell black-box QA.
 3. If tests pass, the `bump-and-tag` job (`Bump Version & Create Git Tag`) runs:
    - Checks out `main` with full history.
    - Computes the next version: takes the highest existing `v*` tag and increments

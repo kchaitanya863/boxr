@@ -18,7 +18,8 @@ env:
 
 jobs:
   test:
-    name: Test & Lint (Linux)
+    # Check name kept for branch ruleset compatibility (job runs on Linux; self-hosted Mac retired).
+    name: Test & Lint (macOS Self-Hosted)
     runs-on: ubuntu-24.04
     defaults:
       run:
