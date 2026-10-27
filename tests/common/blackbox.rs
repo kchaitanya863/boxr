@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-fn container_name_from_args(args: &[&str]) -> Option<&str> {
+fn container_name_from_args<'a>(args: &'a [&'a str]) -> Option<&'a str> {
     args.iter()
         .position(|a| *a == "--name")
         .and_then(|i| args.get(i + 1).copied())
