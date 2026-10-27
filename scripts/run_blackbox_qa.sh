@@ -37,7 +37,7 @@ Options:
   -b, --binary <path>     Path to boxr binary (default: auto-detect)
   -r, --remote <host>    Run remotely over SSH
   -s, --section <name>   Run one section: runtime|compose|volumes|network|dns|
-                         security|memory|permissions|negative|stress|rust|all
+                         security|memory|permissions|negative|stress|podman|rust|all
   -j, --junit <file>      Write JUnit XML results
   --include-stress        Run stress tests (slow/flaky)
   --no-rust               Skip cargo test blackbox_* at end
@@ -285,11 +285,39 @@ elif section_enabled stress; then
     skip_step "J stress" "use --include-stress"
 fi
 
+# --- K: Podman P0 parity ---
+if section_enabled podman; then
+    echo -e "\n${BOLD}K. Podman parity (P0)${NC}"
+    PODMAN_FIX="$REPO_ROOT/tests/fixtures/podman"
+    COMPOSE_STACK="$REPO_ROOT/tests/fixtures/compose/docker-replacement-stack/docker-compose.yml"
+    test_step "K1 container exists missing" "! $BOXR_CMD container exists bb-missing-$(rand_id)"
+    VID="bb-vol-$(rand_id)"
+    test_step "K2 volume create+exists" "$BOXR_CMD volume create $VID && $BOXR_CMD volume exists $VID"
+    run_cmd "$BOXR_CMD volume rm $VID" 2>/dev/null || true
+    if [[ -f "$COMPOSE_STACK" ]]; then
+        test_step "K3 compose up web" "$BOXR_CMD compose -f \"$COMPOSE_STACK\" up -d web"
+        run_cmd "$BOXR_CMD compose -f \"$COMPOSE_STACK\" down -v" 2>/dev/null || true
+    else
+        skip_step "K3 compose stack" "fixture missing"
+    fi
+    if [[ -f "$PODMAN_FIX/minimal-pod.yaml" ]]; then
+        test_step "K4 play kube" "$BOXR_CMD play kube \"$PODMAN_FIX/minimal-pod.yaml\""
+        run_cmd "$BOXR_CMD play kube --down \"$PODMAN_FIX/minimal-pod.yaml\"" 2>/dev/null || true
+    else
+        skip_step "K4 play kube" "fixture missing"
+    fi
+    if [[ -f "$PODMAN_FIX/sample.container" ]]; then
+        test_step "K5 quadlet install" "$BOXR_CMD quadlet install \"$PODMAN_FIX/sample.container\""
+    else
+        skip_step "K5 quadlet" "fixture missing"
+    fi
+fi
+
 # --- Rust integration tests ---
 if [[ $RUN_RUST -eq 1 && ( "$SECTION" == "all" || "$SECTION" == "rust" ) ]]; then
     echo -e "\n${BOLD}Rust blackbox_* integration tests${NC}"
     if [[ -d "$REPO_ROOT" ]] && command -v cargo &>/dev/null; then
-        test_step "cargo blackbox tests" "cd \"$REPO_ROOT\" && cargo test --test 'blackbox_runtime_test' --test 'blackbox_volumes_test' --test 'blackbox_networking_test' --test 'blackbox_security_test' --test 'blackbox_resources_test' --test 'blackbox_negative_test' -- --test-threads=1"
+        test_step "cargo blackbox tests" "cd \"$REPO_ROOT\" && cargo test --test 'blackbox_runtime_test' --test 'blackbox_volumes_test' --test 'blackbox_networking_test' --test 'blackbox_security_test' --test 'blackbox_resources_test' --test 'blackbox_negative_test' --test 'podman_parity_blackbox_test' -- --test-threads=1"
     else
         skip_step "cargo blackbox tests" "cargo not available"
     fi

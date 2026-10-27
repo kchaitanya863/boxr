@@ -159,6 +159,71 @@ fn test_udp_header_serialization() {
 }
 
 #[test]
+fn test_usernet_engine_ignores_malformed_and_non_request_frames() {
+    let engine = UserNetEngine::new(&[]);
+    assert!(engine.handle_incoming_frame(&[0x01, 0x02]).is_none());
+
+    let mut unknown_eth = Vec::new();
+    EthernetHeader {
+        dst_mac: CONTAINER_MAC,
+        src_mac: VIRTUAL_GATEWAY_MAC,
+        ethertype: 0x88cc, // LLDP — not handled
+    }
+    .write_to(&mut unknown_eth);
+    assert!(engine.handle_incoming_frame(&unknown_eth).is_none());
+
+    // ARP replies (opcode 2) must not generate a response.
+    let mut arp_reply_frame = Vec::new();
+    EthernetHeader {
+        dst_mac: CONTAINER_MAC,
+        src_mac: VIRTUAL_GATEWAY_MAC,
+        ethertype: ETHERTYPE_ARP,
+    }
+    .write_to(&mut arp_reply_frame);
+    ArpPacket {
+        htype: 1,
+        ptype: 0x0800,
+        hlen: 6,
+        plen: 4,
+        opcode: 2,
+        sender_mac: VIRTUAL_GATEWAY_MAC,
+        sender_ip: DEFAULT_GATEWAY_IP,
+        target_mac: CONTAINER_MAC,
+        target_ip: DEFAULT_CONTAINER_IP,
+    }
+    .write_reply(VIRTUAL_GATEWAY_MAC, &mut arp_reply_frame);
+    assert!(engine.handle_incoming_frame(&arp_reply_frame).is_none());
+}
+
+#[test]
+fn test_usernet_engine_icmp_non_gateway_destination_ignored() {
+    let engine = UserNetEngine::new(&[]);
+    let icmp_payload = [8, 0, 0, 0, 0, 1, 0, 1];
+    let ip = Ipv4Header {
+        ihl: 5,
+        tos: 0,
+        total_length: 28,
+        id: 1,
+        flags_and_frag: 0,
+        ttl: 64,
+        protocol: IP_PROTO_ICMP,
+        checksum: 0,
+        src_ip: DEFAULT_CONTAINER_IP,
+        dst_ip: std::net::Ipv4Addr::new(8, 8, 8, 8),
+    };
+    let eth = EthernetHeader {
+        dst_mac: VIRTUAL_GATEWAY_MAC,
+        src_mac: CONTAINER_MAC,
+        ethertype: ETHERTYPE_IPV4,
+    };
+    let mut frame = Vec::new();
+    eth.write_to(&mut frame);
+    ip.write_to(&mut frame);
+    frame.extend_from_slice(&icmp_payload);
+    assert!(engine.handle_incoming_frame(&frame).is_none());
+}
+
+#[test]
 fn test_usernet_port_mappings_stored() {
     let ports = vec![
         PortMapping::parse("8080:80").unwrap(),

@@ -282,7 +282,8 @@ Test Pipeline Hierarchy
 │   ├── `issues_47_to_111_test` (String contracts, daemon endpoints, signal traps)
 │   ├── `issues_113_to_162_test` (Validation limits, relative workdirs, network IPAM)
 │   ├── `issues_163_to_342_test` (180 Docker CLI drift and Compose subcommands)
-│   └── `issues_343_to_391_test` (49 Podman parity features: artifacts, quadlets, kube, checkpoint)
+│   ├── `issues_343_to_391_test` (49 Podman parity features: artifacts, quadlets, kube, checkpoint)
+│   └── `podman_parity_blackbox_test` (P0 Podman replacement black-box; see `docs/PODMAN_PARITY.md`)
 └── 4. Enterprise Black-Box QA (`./scripts/run_blackbox_qa.sh`)
     └── Invariant verification: sticky bit 1777, /dev/shm tmpfs, device node permissions, and zombie reaping.
 ```

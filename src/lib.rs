@@ -3671,10 +3671,12 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 .find(&container)
                 .ok_or_else(|| anyhow!("Error: No such container: {}", container))?;
             let ep = store.connect_container(&network, &c.id, &c.name)?;
+            network::refresh_bridge_hosts_for_network(&network, None)?;
             println!("Connected {} with IP {}", container, ep.ipv4_address);
         }
         NetworkAction::Disconnect { network, container } => {
             store.disconnect_container(&network, &container)?;
+            network::refresh_bridge_hosts_for_network(&network, None)?;
             println!("Disconnected {} from {}", container, network);
         }
         NetworkAction::Reload { containers } => {
@@ -5881,10 +5883,20 @@ pub fn reload_container_networks(containers: &[String]) -> Result<()> {
         return Err(anyhow!("requires at least one container name or ID"));
     }
     let store = ContainerStore::new();
+    let net_store = NetworkStore::new();
     for query in containers {
         let container = store
             .find(query)
             .ok_or_else(|| anyhow!("Container '{}' not found", query))?;
+        let mut refreshed = std::collections::HashSet::new();
+        for net in net_store.list() {
+            let attached = net.containers.values().any(|ep| {
+                ep.container_id == container.id || ep.container_name == container.name
+            });
+            if attached && refreshed.insert(net.name.clone()) {
+                network::refresh_bridge_hosts_for_network(&net.name, None)?;
+            }
+        }
         if !container.ports.is_empty() {
             network::wait_for_published_ports(
                 &container.ports,
@@ -5897,6 +5909,19 @@ pub fn reload_container_networks(containers: &[String]) -> Result<()> {
 }
 
 pub fn handle_machine(args: cli::MachineSubcommands) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = args;
+        return Err(anyhow!(
+            "podman machine is not available on Linux: boxr runs rootless containers natively without a VM"
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    return handle_machine_macos(args);
+}
+
+#[cfg(target_os = "macos")]
+fn handle_machine_macos(args: cli::MachineSubcommands) -> Result<()> {
     use cli::MachineAction;
     let home = storage::boxr_home();
     let vm_dir = home.join("vm");
@@ -5973,13 +5998,31 @@ pub fn handle_machine(args: cli::MachineSubcommands) -> Result<()> {
         }
         MachineAction::Ssh { name, command } => {
             let mname = machine_name(&name);
-            if command.is_empty() {
-                println!(
-                    "SSH into machine {} (use container exec for workload shells)",
+            let running = read_machine_state(&home)
+                .map(|(_, state, _)| state == "running")
+                .unwrap_or(false);
+            if !running {
+                return Err(anyhow!(
+                    "machine '{}' is not running; start it with 'boxr machine start'",
                     mname
-                );
-            } else {
-                println!("{}: {}", mname, command.join(" "));
+                ));
+            }
+            if command.is_empty() {
+                return Err(anyhow!(
+                    "interactive SSH is not configured for machine '{}'; use 'boxr run' for workloads",
+                    mname
+                ));
+            }
+            let status = std::process::Command::new(&command[0])
+                .args(&command[1..])
+                .status()
+                .map_err(|e| anyhow!("failed to run remote command for machine '{}': {}", mname, e))?;
+            if !status.success() {
+                return Err(anyhow!(
+                    "machine '{}' command failed with exit code {:?}",
+                    mname,
+                    status.code()
+                ));
             }
         }
         MachineAction::Info { name } => {

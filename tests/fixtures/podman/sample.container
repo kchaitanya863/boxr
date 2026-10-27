@@ -1,0 +1,7 @@
+[Unit]
+Description=Parity sample container
+
+[Container]
+Image=alpine:latest
+ContainerName=parity-quadlet-sample
+Command=sleep infinity

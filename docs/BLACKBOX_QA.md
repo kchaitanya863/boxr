@@ -40,7 +40,7 @@ cargo test --test blackbox_stress_test -- --ignored --test-threads=1
 | Flag | Description |
 |------|-------------|
 | `-b <path>` | Path to `boxr` binary |
-| `-s <section>` | One section: `runtime`, `compose`, `volumes`, `network`, `dns`, `security`, `memory`, `permissions`, `negative`, `stress`, `rust`, `all` |
+| `-s <section>` | One section: `runtime`, `compose`, `volumes`, `network`, `dns`, `security`, `memory`, `permissions`, `negative`, `stress`, `podman`, `rust`, `all` |
 | `-j <file>` | JUnit XML output |
 | `--include-stress` | Run stress section |
 | `--no-rust` | Skip `cargo test blackbox_*` at end |
@@ -61,6 +61,8 @@ Examples:
 | [tests/blackbox_*_test.rs](../tests/) | Rust integration tests by domain |
 | [tests/fixtures/compose/](../tests/fixtures/compose/) | Compose YAML fixtures |
 | [tests/compose_docker_replacement_test.rs](../tests/compose_docker_replacement_test.rs) | Docker/Podman replacement compose (CLI service args, `.env`, `${VAR:-default}`) |
+| [tests/podman_parity_blackbox_test.rs](../tests/podman_parity_blackbox_test.rs) | Podman P0 black-box (exists, kube, specgen, quadlet, checkpoint, …) |
+| [docs/PODMAN_PARITY.md](PODMAN_PARITY.md) | Living Podman parity matrix and status definitions |
 
 ## Isolated state
 
@@ -86,6 +88,7 @@ Both the shell harness and Rust tests use a temporary `BOXR_HOME` per run. Heavy
 |---------|-----|-------|
 | A | runtime | /tmp 1777, shm, devices, apt, postgres, nginx, read-only, init, daemon |
 | B | compose | fullstack-compose, minimal-dns, docker-replacement-stack, cycles |
+| K | podman | exists, compose service target, play kube, specgen, quadlet, checkpoint, volume, artifact |
 | C | volumes | CRUD, bind ro/rw, chown/chmod, cp |
 | D/E | network, dns | publish, none, custom DNS, bridge names |
 | F | security | user, read-only, privileged, env isolation |

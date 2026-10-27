@@ -60,4 +60,9 @@ cargo test -- --test-threads=1
 # 4. Enterprise black-box QA (compose, volumes, networking, security)
 ./scripts/run_blackbox_qa.sh -b ./target/release/boxr
 # See docs/BLACKBOX_QA.md for section filters and Rust-only runs
+
+# 5. Podman parity (P0 CLI audit + black-box)
+python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
+cargo test --test podman_parity_blackbox_test -- --test-threads=1
+# Matrix: docs/PODMAN_PARITY.md
 ```

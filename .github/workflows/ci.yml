@@ -51,6 +51,9 @@ jobs:
       - name: Build boxr binary
         run: cargo build
 
+      - name: Podman P0 CLI audit
+        run: python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
+
       - name: Run Test Suite
         run: cargo test --all --verbose -- --test-threads=1
 
