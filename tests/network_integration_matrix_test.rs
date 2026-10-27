@@ -62,6 +62,10 @@ fn outbound_ok(out: &Output) -> bool {
 
 #[test]
 fn test_matrix_none_blocks_wan_allows_loopback() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
 
@@ -534,6 +538,10 @@ fn test_matrix_peer_hosts_updated_when_second_container_joins() {
 
 #[test]
 fn test_matrix_container_network_mode_shares_target_netns() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
@@ -568,20 +576,18 @@ fn test_matrix_container_network_mode_shares_target_netns() {
         &side,
         Duration::from_secs(45)
     ));
-    let lo_check = run_boxr_ok(
-        &home,
-        &[
-            "exec",
-            &side,
-            "sh",
-            "-c",
-            "ip link show lo | grep -qE 'LOOPBACK,UP|state UP'",
-        ],
-    );
     assert!(
-        lo_check.is_empty() || lo_check.contains("UP"),
-        "sidecar should share loopback in target network namespace: {}",
-        lo_check
+        wait_exec_success(
+            &home,
+            &side,
+            &[
+                "sh",
+                "-c",
+                "ip link show lo | grep -qE 'LOOPBACK,UP|state UP'",
+            ],
+            Duration::from_secs(60),
+        ),
+        "sidecar should share loopback in target network namespace"
     );
 
     cleanup_container(&home, &side);
