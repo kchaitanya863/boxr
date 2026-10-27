@@ -174,6 +174,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     let _ = runtime::CheckpointManager::restore(c, cp_dir, false);
                 }
                 start_container(c).await?;
+                println!("{}", c);
             }
             Ok(0)
         }
@@ -266,6 +267,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                         let _ = runtime::CheckpointManager::restore(c, cp_dir, false);
                     }
                     start_container(c).await?;
+                    println!("{}", c);
                 }
                 Ok(0)
             }
@@ -2210,7 +2212,6 @@ pub async fn start_container_with_home(container: &str, home_opt: Option<&Path>)
         network::wait_for_forwarder_pid(&bundle_path, std::time::Duration::from_secs(15))?;
         network::wait_for_published_ports(&ports, std::time::Duration::from_secs(120))?;
     }
-    println!("{}", container);
     Ok(())
 }
 
@@ -3894,6 +3895,12 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
     }
 
     if args.external {
+        if !args.noheading && args.format.is_none() && !args.quiet {
+            println!(
+                "{:<14} {:<24} {:<20} {:<20} {:<16} {:<16}",
+                "CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "NAMES"
+            );
+        }
         return Ok(());
     }
 
@@ -4034,7 +4041,6 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             return Ok(());
         }
         for c in &filtered {
-            let mut line = fmt.clone();
             let id_display = if args.no_trunc {
                 c.id.clone()
             } else {
@@ -4055,19 +4061,14 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 ContainerStatus::Paused => "paused",
                 ContainerStatus::Failed(_) => "failed",
             };
-            line = line.replace("{{.ID}}", &id_display);
-            line = line.replace("{{.Names}}", &c.name);
-            line = line.replace("{{.Image}}", &c.image);
-            line = line.replace("{{.Status}}", &c.status.to_string());
-            line = line.replace("{{.State}}", state_str);
-            line = line.replace("{{.Ports}}", &format_container_ports(&c.ports));
-            line = line.replace("{{.Command}}", &cmd_display);
-            line = line.replace(
-                "{{.CreatedAt}}",
-                &c.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            let line = apply_ps_container_format_template(
+                fmt,
+                c,
+                &id_display,
+                &cmd_display,
+                state_str,
+                &size_str,
             );
-            line = line.replace("{{.RunningFor}}", &format_running_for(c.created_at));
-            line = line.replace("{{.Size}}", &size_str);
             println!("{}", line);
         }
         return Ok(());
@@ -5651,12 +5652,7 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
     }
     if let Some(fmt) = &ls_args.format {
         for p in pods {
-            let mut line = fmt.clone();
-            line = line.replace("{{.ID}}", &p.id);
-            line = line.replace("{{.Name}}", &p.name);
-            line = line.replace("{{.Status}}", &p.status);
-            line = line.replace("{{.Containers}}", &p.containers.len().to_string());
-            println!("{}", line);
+            println!("{}", apply_ps_pod_format_template(fmt, p));
         }
         return;
     }
@@ -5878,6 +5874,120 @@ fn format_running_for(created_at: chrono::DateTime<chrono::Utc>) -> String {
     } else {
         "1 second ago".to_string()
     }
+}
+
+fn load_container_labels_from_bundle(bundle_path: &str) -> HashMap<String, String> {
+    let mut labels_map = HashMap::new();
+    let labels_file = PathBuf::from(bundle_path).join("labels.json");
+    if labels_file.exists() {
+        if let Ok(content) = fs::read_to_string(&labels_file) {
+            if let Ok(labels_vec) = serde_json::from_str::<Vec<String>>(&content) {
+                for l in labels_vec {
+                    if let Some((k, v)) = l.split_once('=') {
+                        labels_map.insert(k.to_string(), v.to_string());
+                    } else {
+                        labels_map.insert(l, String::new());
+                    }
+                }
+            }
+        }
+    }
+    labels_map
+}
+
+fn ps_labels_string(labels: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<_> = labels.iter().collect();
+    pairs.sort_by_key(|(k, _)| *k);
+    pairs
+        .into_iter()
+        .map(|(k, v)| {
+            if v.is_empty() {
+                k.clone()
+            } else {
+                format!("{}={}", k, v)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn pod_name_for_container(container_id: &str) -> String {
+    pod::PodStore::new()
+        .list()
+        .into_iter()
+        .find(|p| p.containers.iter().any(|c| c == container_id))
+        .map(|p| p.name)
+        .unwrap_or_default()
+}
+
+fn apply_ps_container_format_template(
+    template: &str,
+    c: &ContainerRecord,
+    id_display: &str,
+    cmd_display: &str,
+    state_str: &str,
+    size_str: &str,
+) -> String {
+    let labels = load_container_labels_from_bundle(&c.bundle_path);
+    let labels_flat = ps_labels_string(&labels);
+    let pod_name = pod_name_for_container(&c.id);
+
+    let mut line = template.to_string();
+    for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
+        if line.contains(pat) {
+            let quoted =
+                serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
+            line = line.replace(pat, &quoted);
+        }
+    }
+    line = line.replace("{{.Labels}}", &labels_flat);
+    line = line.replace("{{ .Labels }}", &labels_flat);
+
+    for (k, v) in &labels {
+        line = line.replace(&format!(r#"{{{{ .Label "{}" }}}}"#, k), v);
+        line = line.replace(&format!(r#"{{{{.Label "{}"}}}}"#, k), v);
+    }
+
+    line = line.replace("{{.PodName}}", &pod_name);
+    line = line.replace("{{ .PodName }}", &pod_name);
+
+    line = line.replace("{{.ID}}", id_display);
+    line = line.replace("{{.Names}}", &c.name);
+    line = line.replace("{{.Image}}", &c.image);
+    line = line.replace("{{.Status}}", &c.status.to_string());
+    line = line.replace("{{.State}}", state_str);
+    line = line.replace("{{.Ports}}", &format_container_ports(&c.ports));
+    line = line.replace("{{.Command}}", cmd_display);
+    line = line.replace(
+        "{{.CreatedAt}}",
+        &c.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+    );
+    line = line.replace("{{.RunningFor}}", &format_running_for(c.created_at));
+    line = line.replace("{{.Size}}", size_str);
+    line
+}
+
+fn apply_ps_pod_format_template(template: &str, p: &pod::PodRecord) -> String {
+    let labels_flat = ps_labels_string(&p.labels);
+    let mut line = template.to_string();
+    for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
+        if line.contains(pat) {
+            let quoted =
+                serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
+            line = line.replace(pat, &quoted);
+        }
+    }
+    line = line.replace("{{.Labels}}", &labels_flat);
+    line = line.replace("{{ .Labels }}", &labels_flat);
+    for (k, v) in &p.labels {
+        line = line.replace(&format!(r#"{{{{ .Label "{}" }}}}"#, k), v);
+        line = line.replace(&format!(r#"{{{{.Label "{}"}}}}"#, k), v);
+    }
+    line = line.replace("{{.ID}}", &p.id);
+    line = line.replace("{{.Name}}", &p.name);
+    line = line.replace("{{.Status}}", &p.status);
+    line = line.replace("{{.Containers}}", &p.containers.len().to_string());
+    line
 }
 
 fn format_container_ports(ports: &[network::PortMapping]) -> String {
@@ -6384,14 +6494,20 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
     }
 
     let image_store = ImageStore::new();
-    let image = image_store
-        .find("alpine")
-        .or_else(|| image_store.find("alpine:latest"))
-        .or_else(|| image_store.list().first().cloned());
-
-    let image_ref = image
-        .map(|i| format!("{}:{}", i.reference, i.tag))
-        .unwrap_or_else(|| "alpine:latest".to_string());
+    const POD_INFRA_IMAGE: &str = "alpine:3.20";
+    let image_ref = if let Some(i) = image_store
+        .find(POD_INFRA_IMAGE)
+        .or_else(|| image_store.find("alpine"))
+    {
+        if i.registry.is_empty() || i.registry == "docker.io" {
+            format!("alpine:{}", i.tag)
+        } else {
+            format!("{}/{}:{}", i.registry, i.reference, i.tag)
+        }
+    } else {
+        pull_image_with_platform(POD_INFRA_IMAGE, None).await?;
+        POD_INFRA_IMAGE.to_string()
+    };
 
     let infra_args = cli::RunArgs {
         registry_auth: Default::default(),

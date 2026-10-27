@@ -62,7 +62,10 @@ function leak_check() {
     _leak_check_one "storage container"
 
     _run_podman_quiet images --all --format '{{.ID}} {{.Repository}}:{{.Tag}}'
-    output=$(awk "\$2 != \"$IMAGE\" && \$2 != \"$PODMAN_SYSTEMD_IMAGE_FQN\" && \$2 !~ \"localhost/podman-pause:\" { print }" <<<"$output")
+    # Pod infra pulls a small alpine image; boxr does not auto-rmi it on pod rm (unlike pause in podman).
+    output=$(
+        awk "\$2 != \"$IMAGE\" && \$2 != \"$PODMAN_SYSTEMD_IMAGE_FQN\" && \$2 !~ \"localhost/podman-pause:\" && \$2 !~ /^(library\/)?alpine:/ { print }" <<<"$output"
+    )
     _leak_check_one "image"
 
     return $exit_code
