@@ -290,6 +290,11 @@ mod tests {
 
     #[test]
     fn test_network_mode_requirements() {
+        let saved_force_embedded = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+        unsafe {
+            std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+        }
+
         assert!(NetworkMode::Pasta.should_use_pasta());
         assert!(NetworkMode::Pasta.requires_new_netns());
         assert!(NetworkMode::None.requires_new_netns());
@@ -310,6 +315,12 @@ mod tests {
             assert!(NetworkMode::UserNet.should_use_native_usernet());
         }
         assert!(NetworkMode::Bridge.should_use_native_usernet());
+
+        if let Some(v) = saved_force_embedded {
+            unsafe {
+                std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", v);
+            }
+        }
     }
 
     #[test]
