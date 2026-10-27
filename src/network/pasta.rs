@@ -36,6 +36,14 @@ impl Default for NetworkMode {
 }
 
 impl NetworkMode {
+    /// When set, `--network usernet` uses the embedded TAP stack even if passt is installed (tests/CI).
+    pub fn force_embedded_usernet() -> bool {
+        matches!(
+            std::env::var("BOXR_FORCE_EMBEDDED_USERNET").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+        )
+    }
+
     pub fn parse(s: &str) -> Self {
         let trimmed = s.trim();
         if let Some(target) = trimmed
@@ -72,7 +80,9 @@ impl NetworkMode {
     pub fn should_use_pasta(&self) -> bool {
         match self {
             Self::Pasta => true,
-            Self::Auto => PastaDriver::is_available(),
+            Self::Auto | Self::UserNet => {
+                PastaDriver::is_available() && !Self::force_embedded_usernet()
+            }
             _ => false,
         }
     }
@@ -80,7 +90,8 @@ impl NetworkMode {
     /// Determines whether native pure-Rust usernet should be activated
     pub fn should_use_native_usernet(&self) -> bool {
         match self {
-            Self::UserNet | Self::Bridge => true,
+            Self::Bridge => true,
+            Self::UserNet => Self::force_embedded_usernet() || !PastaDriver::is_available(),
             Self::Auto => !PastaDriver::is_available(),
             _ => false,
         }
@@ -279,6 +290,11 @@ mod tests {
 
     #[test]
     fn test_network_mode_requirements() {
+        let saved_force_embedded = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+        unsafe {
+            std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+        }
+
         assert!(NetworkMode::Pasta.should_use_pasta());
         assert!(NetworkMode::Pasta.requires_new_netns());
         assert!(NetworkMode::None.requires_new_netns());
@@ -292,8 +308,19 @@ mod tests {
         assert!(NetworkMode::UserNet.requires_new_netns());
 
         // Issue #414: usernet & bridge activate native usernet
-        assert!(NetworkMode::UserNet.should_use_native_usernet());
+        if PastaDriver::is_available() {
+            assert!(!NetworkMode::UserNet.should_use_native_usernet());
+            assert!(NetworkMode::UserNet.should_use_pasta());
+        } else {
+            assert!(NetworkMode::UserNet.should_use_native_usernet());
+        }
         assert!(NetworkMode::Bridge.should_use_native_usernet());
+
+        if let Some(v) = saved_force_embedded {
+            unsafe {
+                std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", v);
+            }
+        }
     }
 
     #[test]

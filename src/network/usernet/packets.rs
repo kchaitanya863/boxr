@@ -262,7 +262,8 @@ impl TcpHeader {
         let seq_num = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
         let ack_num = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
         let data_offset = (buf[12] >> 4) * 4;
-        let flags = u16::from_be_bytes([buf[12] & 0x01, buf[13]]);
+        // TCP control flags live in the low 6 bits of byte 13 (FIN/SYN/RST/PSH/ACK/URG).
+        let flags = buf[13] as u16;
         let window_size = u16::from_be_bytes([buf[14], buf[15]]);
         let checksum = u16::from_be_bytes([buf[16], buf[17]]);
         let urgent_ptr = u16::from_be_bytes([buf[18], buf[19]]);

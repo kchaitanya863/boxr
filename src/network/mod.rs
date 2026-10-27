@@ -549,9 +549,10 @@ impl NetworkStore {
                     let octet = 29 + (network_count + offset) % 200;
                     let cand_subnet = format!("172.{}.0.0/16", octet);
                     let cand_gw = format!("172.{}.0.1", octet);
-                    let overlaps = data.networks.iter().any(|n| {
-                        subnets_overlap(&n.subnet, &cand_subnet).unwrap_or(false)
-                    });
+                    let overlaps = data
+                        .networks
+                        .iter()
+                        .any(|n| subnets_overlap(&n.subnet, &cand_subnet).unwrap_or(false));
                     if !overlaps {
                         chosen_subnet = Some(cand_subnet);
                         chosen_gw = Some(cand_gw);
@@ -560,7 +561,8 @@ impl NetworkStore {
                 }
             }
 
-            let chosen_subnet = chosen_subnet.ok_or_else(|| anyhow!("No available subnet addresses found"))?;
+            let chosen_subnet =
+                chosen_subnet.ok_or_else(|| anyhow!("No available subnet addresses found"))?;
             let chosen_gw = chosen_gw.unwrap_or_else(|| {
                 // If user supplied subnet without gateway, default to .1
                 if let Some((ip_str, _)) = chosen_subnet.split_once('/') {

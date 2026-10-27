@@ -50,7 +50,10 @@ pub async fn remove_network(
         Ok(_) => StatusCode::NO_CONTENT,
         Err(e) => {
             let msg = e.to_string().to_lowercase();
-            if msg.contains("active endpoints") || msg.contains("default bridge") || msg.contains("in use") {
+            if msg.contains("active endpoints")
+                || msg.contains("default bridge")
+                || msg.contains("in use")
+            {
                 StatusCode::CONFLICT
             } else {
                 StatusCode::NOT_FOUND
@@ -72,7 +75,9 @@ pub async fn connect_network(
 ) -> Result<StatusCode, StatusCode> {
     let store = NetworkStore::with_home(state.home.clone());
     let c_store = crate::storage::ContainerStore::with_home(state.home.clone());
-    let c = c_store.find(&payload.container).ok_or(StatusCode::NOT_FOUND)?;
+    let c = c_store
+        .find(&payload.container)
+        .ok_or(StatusCode::NOT_FOUND)?;
     store.connect_container(&id, &c.id, &c.name).map_err(|e| {
         let msg = e.to_string().to_lowercase();
         if msg.contains("not found") {
@@ -98,14 +103,16 @@ pub async fn disconnect_network(
     Json(payload): Json<DisconnectNetworkRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let store = NetworkStore::with_home(state.home.clone());
-    store.disconnect_container(&id, &payload.container).map_err(|e| {
-        let msg = e.to_string().to_lowercase();
-        if msg.contains("not found") || msg.contains("not connected") {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::BAD_REQUEST
-        }
-    })?;
+    store
+        .disconnect_container(&id, &payload.container)
+        .map_err(|e| {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("not found") || msg.contains("not connected") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            }
+        })?;
     Ok(StatusCode::OK)
 }
 

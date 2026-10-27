@@ -50,15 +50,30 @@ fn test_issue_413_root_and_bridge_network_isolation() {
 
 #[test]
 fn test_issue_414_usernet_tap_and_netns_interface_configuration() {
-    // Issue #414: usernet and bridge modes must activate user-mode networking
-    assert!(
-        NetworkMode::UserNet.should_use_native_usernet(),
-        "UserNet must activate native usernet TAP networking"
-    );
+    // Issue #414: usernet uses passt when available (Podman-style), else embedded TAP
+    use boxr::network::pasta::PastaDriver;
+    let saved_force = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+    unsafe {
+        std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+    }
+    if PastaDriver::is_available() {
+        assert!(
+            !NetworkMode::UserNet.should_use_native_usernet(),
+            "UserNet should prefer passt when installed"
+        );
+        assert!(NetworkMode::UserNet.should_use_pasta());
+    } else {
+        assert!(NetworkMode::UserNet.should_use_native_usernet());
+    }
     assert!(
         NetworkMode::Bridge.should_use_native_usernet(),
         "Bridge must activate native usernet TAP networking"
     );
+    if let Some(v) = saved_force {
+        unsafe {
+            std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", v);
+        }
+    }
 
     // Verify default network configuration constants
     use boxr::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_DNS_IP, DEFAULT_GATEWAY_IP};

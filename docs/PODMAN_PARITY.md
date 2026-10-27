@@ -21,14 +21,14 @@ Automated checks:
 
 | Domain | CLI | Behavior | Linux | macOS | Tests | Notes |
 |--------|-----|----------|-------|-------|-------|-------|
-| **run / create / lifecycle** | partial | partial | partial | partial | `docker_parity_test`, blackbox runtime | Rootless default; pasta/usernet on Linux |
+| **run / create / lifecycle** | partial | partial | partial | partial | `docker_parity_test`, blackbox runtime, `test_matrix_embedded_usernet_resolv` (K6) | Rootless default; `auto`/`usernet` use passt when installed, else embedded TAP (`BOXR_FORCE_EMBEDDED_USERNET`) |
 | **compose** | partial | partial | partial | partial | `compose_docker_replacement_test`, B9 | `.env`, `${VAR:-default}`, `up SERVICE` |
 | **container exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | Exit 0/1 like Podman |
 | **image exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **volume exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **network exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
-| **network reload** | full | partial | partial | partial | `podman_parity_blackbox_test`, `network/mod` | Refreshes bridge `/etc/hosts` + port wait |
-| **pod lifecycle** | partial | partial | partial | partial | `podman_parity_blackbox_test` | create → start → ps → rm |
+| **network reload** | full | partial | partial | partial | `podman_parity_blackbox_test`, blackbox K13, `network/mod` | Refreshes bridge `/etc/hosts` + port wait |
+| **pod lifecycle** | partial | partial | partial | partial | `podman_parity_blackbox_test`, blackbox K12 | create → start → ps → rm |
 | **play kube** | partial | partial | partial | partial | `fixtures/podman/minimal-pod.yaml` | Pod + multi-doc YAML |
 | **generate spec** | partial | partial | partial | partial | `podman_parity_blackbox_test` | SpecGenerator JSON subset |
 | **quadlet** | partial | partial | partial | partial | `podman_parity_blackbox_test` | install + print round-trip |
@@ -36,9 +36,9 @@ Automated checks:
 | **volume export/import** | partial | partial | partial | partial | `podman_parity_blackbox_test` | Tarball round-trip |
 | **artifact** | partial | partial | partial | partial | `podman_parity_blackbox_test` | add / ls / rm |
 | **machine** | partial | stub | **n/a** | partial | `podman_parity_blackbox_test` | Linux: clear error; macOS: VZ state |
-| **farm** | partial | stub | partial | partial | `podman_parity_test` | Local farm metadata only |
-| **auto-update** | partial | stub | partial | partial | `issues_343_to_391_test` | Dry-run smoke |
-| **system connection** | partial | stub | partial | partial | `issues_343_to_391_test` | Connection store subset |
+| **farm** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `podman_parity_test` | Local farm metadata create/ls/rm |
+| **auto-update** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `issues_343_to_391_test` | `--dry-run` smoke |
+| **system connection** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `issues_343_to_391_test` | `connection ls` subset |
 
 ## Out of scope (Docker-only)
 

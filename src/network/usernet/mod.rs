@@ -1,5 +1,6 @@
 pub mod engine;
 pub mod packets;
+pub mod relay;
 
 pub use engine::UserNetEngine;
 pub use packets::*;
@@ -27,7 +28,7 @@ mod tests {
 
     #[test]
     fn test_arp_request_and_reply_cycle() {
-        let engine = UserNetEngine::new(&[]);
+        let engine = UserNetEngine::new(None, &[], None);
         let arp = ArpPacket {
             htype: 1,
             ptype: 0x0800,
@@ -70,7 +71,7 @@ mod tests {
 
     #[test]
     fn test_icmp_echo_ping_handling() {
-        let engine = UserNetEngine::new(&[]);
+        let engine = UserNetEngine::new(None, &[], None);
         let icmp_echo = [
             0x08, 0x00, // Type: 8 (Echo), Code: 0
             0xf7, 0xff, // Checksum placeholder
@@ -122,11 +123,23 @@ mod tests {
 
     #[test]
     fn test_usernet_tcp_syn_and_handshake() {
-        let engine = UserNetEngine::new(&[]);
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let bundle = std::env::temp_dir().join(format!("boxr-usernet-syn-{}", port));
+        std::fs::create_dir_all(&bundle).unwrap();
+        let _relay_pid = relay::spawn_host_relay(&bundle).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let engine = UserNetEngine::new(Some(&bundle), &[], None);
 
         let tcp_syn = TcpHeader {
             src_port: 54321,
-            dst_port: 80,
+            dst_port: port,
             seq_num: 500,
             ack_num: 0,
             data_offset: 20,
@@ -149,7 +162,7 @@ mod tests {
             protocol: IP_PROTO_TCP,
             checksum: 0,
             src_ip: DEFAULT_CONTAINER_IP,
-            dst_ip: Ipv4Addr::new(93, 184, 216, 34), // example.com
+            dst_ip: Ipv4Addr::new(127, 0, 0, 1),
         };
 
         let eth = EthernetHeader {
@@ -176,7 +189,7 @@ mod tests {
         let (r_ip, r_tcp_raw) = Ipv4Header::parse(r_payload).unwrap();
         assert_eq!(r_ip.protocol, IP_PROTO_TCP);
         let (r_tcp, _) = TcpHeader::parse(r_tcp_raw).unwrap();
-        assert_eq!(r_tcp.src_port, 80);
+        assert_eq!(r_tcp.src_port, port);
         assert_eq!(r_tcp.dst_port, 54321);
         assert_eq!(r_tcp.flags, 0x12); // SYN | ACK
         assert_eq!(r_tcp.ack_num, 501); // ACK = SEQ + 1
@@ -201,7 +214,12 @@ mod tests {
             }
         });
 
-        let engine = UserNetEngine::new(&[]);
+        let bundle = std::env::temp_dir().join(format!("boxr-usernet-test-{}", port));
+        std::fs::create_dir_all(&bundle).unwrap();
+        let _relay_pid = relay::spawn_host_relay(&bundle).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let engine = UserNetEngine::new(Some(&bundle), &[], None);
 
         let tcp_payload = b"GET / HTTP/1.1\r\n\r\n";
         let tcp_data = TcpHeader {

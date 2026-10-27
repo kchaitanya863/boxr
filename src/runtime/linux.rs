@@ -23,7 +23,20 @@ pub fn execute_bundle(
         let _ = fs::write(bundle_path.join("mounts.json"), mounts_json);
     }
     let ports = crate::network::resolve_bundle_ports(bundle_path, _ports);
-    let _ = crate::network::spawn_port_forward_daemon(bundle_path, &ports);
+    let network_mode = _spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network"))
+        .map(|s| crate::network::pasta::NetworkMode::parse(s))
+        .unwrap_or_default();
+    if !ports.is_empty() {
+        let ports_json = serde_json::to_string(&ports)?;
+        let _ = fs::write(bundle_path.join("ports.json"), ports_json);
+        // Host-side Unix relay conflicts with passt/pasta binding the same host ports.
+        if !network_mode.should_use_pasta() {
+            let _ = crate::network::spawn_port_forward_daemon(bundle_path, &ports);
+        }
+    }
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
 
@@ -82,6 +95,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         return Err(anyhow!("No bundle path specified for trampoline"));
     }
     let bundle_path = Path::new(&args[0]);
+    let _ = fs::write(
+        bundle_path.join("host_netns.pid"),
+        std::process::id().to_string(),
+    );
     let spec_path = bundle_path.join("config.json");
     if !spec_path.exists() {
         return Err(anyhow!("config.json not found in bundle {:?}", bundle_path));
@@ -138,10 +155,6 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
         match unsafe { fork() }? {
             ForkResult::Parent { child } => {
-                let _ = fs::write(
-                    bundle_path.join("container.pid"),
-                    child.as_raw().to_string(),
-                );
                 drop(child_sock);
                 // 1. Wait for child to unshare user namespace
                 let mut sync_buf = [0u8; 5];
@@ -173,10 +186,6 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
                 drop(parent_sock);
 
-                let _ = fs::write(
-                    bundle_path.join("container.pid"),
-                    child.as_raw().to_string(),
-                );
                 if let Some(cont_id) = bundle_path.file_name().and_then(|s| s.to_str()) {
                     if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(cont_id) {
                         let _ = cgroup_mgr.add_process(child.as_raw());
@@ -225,26 +234,46 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // 4. Child is now root in user namespace.
+                // Host TCP/DNS relay must start before CLONE_NEWNET (TAP worker cannot setns to host).
+                let mut usernet_relay_pid = None;
+                if network_mode.should_use_native_usernet() && !use_pasta {
+                    if let Ok(pid) = crate::network::usernet::relay::spawn_host_relay(bundle_path) {
+                        usernet_relay_pid = Some(nix::unistd::Pid::from_raw(pid));
+                    }
+                }
                 // First unshare network namespace if required, so we can configure networking
                 // with external helper commands (ip) before creating the container PID namespace.
+                let host_netns_for_tap =
+                    if requires_netns && network_mode.should_use_native_usernet() {
+                        std::fs::File::open("/proc/self/ns/net").ok()
+                    } else {
+                        None
+                    };
                 if requires_netns {
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWNET) {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
                         std::process::exit(1);
                     }
-                } else if let Some(target_cont) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network_container")) {
+                    let _ = std::process::Command::new("ip")
+                        .args(["link", "set", "lo", "up"])
+                        .status();
+                } else if let Some(target_cont) = spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.network_container"))
+                {
                     // Attach to existing container's network namespace (container:<target>)
                     let store = crate::storage::ContainerStore::new();
                     if let Some(target_rec) = store.find(target_cont) {
-                        let target_pid = target_rec.pid.or_else(|| {
-                            let p = std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
-                            fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<i32>().ok())
-                        });
+                        let pid_path =
+                            std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
+                        let target_pid = fs::read_to_string(pid_path)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok());
                         if let Some(t_pid) = target_pid {
                             let netns_path = format!("/proc/{}/ns/net", t_pid);
                             if let Ok(netns_file) = std::fs::File::open(&netns_path) {
-                                use std::os::unix::io::AsRawFd;
-                                let _ = nix::sched::setns(netns_file.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                                let _ = nix::sched::setns(&netns_file, CloneFlags::CLONE_NEWNET);
                             }
                         }
                     }
@@ -273,7 +302,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         // Fork background TAP engine worker before unsharing PID namespace
                         match unsafe { fork() } {
                             Ok(ForkResult::Child) => {
-                                platform::run_tap_network_loop(tap_file, &ports);
+                                platform::run_tap_network_loop(
+                                    bundle_path,
+                                    tap_file,
+                                    &ports,
+                                    host_netns_for_tap,
+                                );
                                 std::process::exit(0);
                             }
                             Ok(ForkResult::Parent { child: tap_child }) => {
@@ -357,6 +391,13 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                                 nix::sys::signal::kill(fwd_pid, nix::sys::signal::Signal::SIGKILL);
                             let _ = waitpid(fwd_pid, None);
                         }
+                        if let Some(relay_pid) = usernet_relay_pid {
+                            let _ = nix::sys::signal::kill(
+                                relay_pid,
+                                nix::sys::signal::Signal::SIGKILL,
+                            );
+                            let _ = waitpid(relay_pid, None);
+                        }
 
                         let _ = fs::write(bundle_path.join("boxr-exitcode"), status.to_string());
                         std::process::exit(status);
@@ -382,6 +423,18 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         // Unshare network namespace first if required
         let mut tap_worker_pid = None;
         let mut fwd_helper_pid = None;
+        let mut usernet_relay_pid = None;
+        if network_mode.should_use_native_usernet() && !network_mode.should_use_pasta() {
+            if let Ok(pid) = crate::network::usernet::relay::spawn_host_relay(bundle_path) {
+                usernet_relay_pid = Some(nix::unistd::Pid::from_raw(pid));
+            }
+        }
+        let host_netns_for_tap =
+            if network_mode.requires_new_netns() && network_mode.should_use_native_usernet() {
+                std::fs::File::open("/proc/self/ns/net").ok()
+            } else {
+                None
+            };
         if network_mode.requires_new_netns() {
             unshare(CloneFlags::CLONE_NEWNET)
                 .context("Failed to unshare network namespace (requires CAP_NET_ADMIN or root)")?;
@@ -407,7 +460,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             unsafe {
                                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                             }
-                            platform::run_tap_network_loop(tap_file, &ports);
+                            platform::run_tap_network_loop(
+                                bundle_path,
+                                tap_file,
+                                &ports,
+                                host_netns_for_tap,
+                            );
                             std::process::exit(0);
                         }
                         Ok(ForkResult::Parent { child: tap_child }) => {
@@ -432,19 +490,23 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     Err(_) => {}
                 }
             }
-        } else if let Some(target_cont) = spec.annotations.as_ref().and_then(|a| a.get("boxr.network_container")) {
+        } else if let Some(target_cont) = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.network_container"))
+        {
             // Root mode: attach to existing container's network namespace (container:<target>)
             let store = crate::storage::ContainerStore::new();
             if let Some(target_rec) = store.find(target_cont) {
-                let target_pid = target_rec.pid.or_else(|| {
-                    let p = std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
-                    fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<i32>().ok())
-                });
+                let pid_path =
+                    std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
+                let target_pid = fs::read_to_string(pid_path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok());
                 if let Some(t_pid) = target_pid {
                     let netns_path = format!("/proc/{}/ns/net", t_pid);
                     if let Ok(netns_file) = std::fs::File::open(&netns_path) {
-                        use std::os::unix::io::AsRawFd;
-                        let _ = nix::sched::setns(netns_file.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                        let _ = nix::sched::setns(&netns_file, CloneFlags::CLONE_NEWNET);
                     }
                 }
             }
@@ -478,6 +540,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if let Some(fwd_pid) = fwd_helper_pid {
                     let _ = nix::sys::signal::kill(fwd_pid, nix::sys::signal::Signal::SIGKILL);
                     let _ = waitpid(fwd_pid, None);
+                }
+                if let Some(relay_pid) = usernet_relay_pid {
+                    let _ = nix::sys::signal::kill(relay_pid, nix::sys::signal::Signal::SIGKILL);
+                    let _ = waitpid(relay_pid, None);
                 }
 
                 status
@@ -555,21 +621,14 @@ pub fn run_trampoline_exec(args: &[String]) -> Result<i32> {
     exec_in_bundle(bundle_path, cmd, &[], None, None, false)
 }
 
-pub fn exec_in_bundle(
-    bundle_path: &Path,
-    command: &[String],
-    env: &[String],
-    workdir: Option<&str>,
-    user: Option<&str>,
-    detach: bool,
-) -> Result<i32> {
+fn resolve_container_pid(bundle_path: &Path) -> Option<i32> {
     let target_pid = if let Ok(pid_str) = fs::read_to_string(bundle_path.join("container.pid")) {
         pid_str.trim().parse::<i32>().ok()
     } else {
         None
     };
 
-    let target_pid = target_pid.or_else(|| {
+    target_pid.or_else(|| {
         if let Ok(pid_str) = fs::read_to_string(bundle_path.join("vm.pid")) {
             let pid = pid_str.trim().parse::<i32>().ok()?;
             let proc_task = format!("/proc/{}/task/{}/children", pid, pid);
@@ -582,12 +641,31 @@ pub fn exec_in_bundle(
         } else {
             None
         }
-    });
+    })
+}
 
-    let pid = match target_pid {
-        Some(p) if unsafe { libc::kill(p, 0) == 0 } => p,
-        _ => return Err(anyhow!("Container is not running")),
-    };
+fn wait_for_live_container_pid(bundle_path: &Path) -> Result<i32> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while std::time::Instant::now() < deadline {
+        if let Some(p) = resolve_container_pid(bundle_path) {
+            if unsafe { libc::kill(p, 0) == 0 } {
+                return Ok(p);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    Err(anyhow!("Container is not running"))
+}
+
+pub fn exec_in_bundle(
+    bundle_path: &Path,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    user: Option<&str>,
+    detach: bool,
+) -> Result<i32> {
+    let pid = wait_for_live_container_pid(bundle_path)?;
 
     let mut cmd = std::process::Command::new("nsenter");
     // Only enter the user namespace if the container actually has a private
@@ -629,7 +707,7 @@ pub fn exec_in_bundle(
         return Ok(0);
     }
     match cmd.status() {
-        Ok(status) => Ok(status.code().unwrap_or(0)),
+        Ok(status) => return Ok(status.code().unwrap_or(0)),
         Err(_) => {
             // Fallback: enter namespaces via /proc/<pid>/ns using setns if nsenter command is not installed
             use nix::sched::{CloneFlags, setns};
@@ -835,11 +913,23 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
                 ));
             }
         }
-        let mut flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+        let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+        mount(
+            Some(&m.source),
+            &target,
+            None::<&str>,
+            bind_flags,
+            None::<&str>,
+        )?;
         if m.read_only {
-            flags |= MsFlags::MS_RDONLY;
+            mount(
+                None::<&str>,
+                &target,
+                None::<&str>,
+                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                None::<&str>,
+            )?;
         }
-        let _ = mount(Some(&m.source), &target, None::<&str>, flags, None::<&str>);
     }
 
     for m in &spec.mounts {
@@ -855,21 +945,28 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
                     ));
                 }
             }
-            let mut flags = MsFlags::MS_BIND | MsFlags::MS_REC;
-            if m.options
+            let ro = m
+                .options
                 .as_ref()
                 .map(|opts| opts.iter().any(|o| o == "ro"))
-                .unwrap_or(false)
-            {
-                flags |= MsFlags::MS_RDONLY;
-            }
-            let _ = mount(
+                .unwrap_or(false);
+            let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
+            mount(
                 Some(Path::new(&m.source)),
                 &target,
                 None::<&str>,
-                flags,
+                bind_flags,
                 None::<&str>,
-            );
+            )?;
+            if ro {
+                mount(
+                    None::<&str>,
+                    &target,
+                    None::<&str>,
+                    MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                    None::<&str>,
+                )?;
+            }
         } else if m.mount_type == "tmpfs"
             && m.destination != "/dev"
             && m.destination != "/proc"
@@ -910,6 +1007,16 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
                 }
             }
         }
+    }
+    let net_mode = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network"))
+        .map(|s| crate::network::pasta::NetworkMode::parse(s))
+        .unwrap_or_default();
+    if net_mode.should_use_native_usernet() {
+        use crate::network::usernet::DEFAULT_DNS_IP;
+        dns_content = format!("nameserver {}\n", DEFAULT_DNS_IP);
     }
     if dns_content.is_empty() {
         if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {

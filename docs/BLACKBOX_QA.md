@@ -5,6 +5,7 @@ Repeatable black-box QA for `boxr` — enterprise runtime invariants, compose, v
 ## Prerequisites
 
 - Built `boxr` binary: `cargo build --release`
+- Linux (rootless): `uidmap` (`newuidmap`/`newgidmap`) and `/etc/subuid` entries for the test user; `passt` optional (`--network=pasta` / default auto)
 - macOS: `boxr-vz` and VM kernel under `~/.boxr/vm/` (created on first container run)
 - Network access for image pulls (`alpine`, `nginx`, `postgres`, etc.)
 - `curl` on the host (daemon ping, published port checks)
@@ -88,7 +89,7 @@ Both the shell harness and Rust tests use a temporary `BOXR_HOME` per run. Heavy
 |---------|-----|-------|
 | A | runtime | /tmp 1777, shm, devices, apt, postgres, nginx, read-only, init, daemon |
 | B | compose | fullstack-compose, minimal-dns, docker-replacement-stack, cycles |
-| K | podman | exists, compose service target, play kube, specgen, quadlet, checkpoint, volume, artifact |
+| K | podman | K1–K13: P0 parity (exists, compose, kube, quadlet, embedded TAP, specgen, checkpoint, volume, artifact, pod, network reload); K14–K15: auto-update, system connection |
 | C | volumes | CRUD, bind ro/rw, chown/chmod, cp |
 | D/E | network, dns | publish, none, custom DNS, bridge names |
 | F | security | user, read-only, privileged, env isolation |

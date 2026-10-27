@@ -89,6 +89,9 @@ BOXR_CMD="${REMOTE_HOST:+docker}"
 BOXR_CMD="${BOXR_CMD:-$BIN}"
 
 # Isolated BOXR_HOME
+# Match Rust blackbox helpers: stray DOCKER_HOST breaks rootless runs on some CI hosts.
+unset DOCKER_HOST
+
 BOXR_HOME_TMP="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bb-qa.XXXXXX")"
 export BOXR_HOME="$BOXR_HOME_TMP"
 REAL_HOME="${HOME}/.boxr"
@@ -122,17 +125,21 @@ test_step() {
     local name="$1"
     local cmd="$2"
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
-    printf "  [..] %-60s " "$name"
+    printf "  [..] %-60s\n" "$name"
     local output exit_code=0
-    output=$(run_cmd "$cmd" 2>&1) || exit_code=$?
+    local _bb_out
+    _bb_out="$(mktemp "${TMPDIR:-/tmp}/boxr-bb-step.XXXXXX")"
+    run_cmd "$cmd" >"$_bb_out" 2>&1 || exit_code=$?
+    output="$(cat "$_bb_out")"
+    rm -f "$_bb_out"
     if [[ $exit_code -eq 0 ]]; then
         PASSED_TESTS=$((PASSED_TESTS + 1))
-        printf "\r  [${GREEN}PASS${NC}] %-60s\n" "$name"
+        printf "  [${GREEN}PASS${NC}] %-60s\n" "$name"
         [[ -n "$JUNIT_FILE" ]] && echo "<testcase name=\"${name}\" classname=\"blackbox\"/>" >> "$JUNIT_FILE.tmp"
         return 0
     fi
     FAILED_TESTS=$((FAILED_TESTS + 1))
-    printf "\r  [${RED}FAIL${NC}] %-60s (exit %d)\n" "$name" "$exit_code"
+    printf "  [${RED}FAIL${NC}] %-60s (exit %d)\n" "$name" "$exit_code"
     echo -e "${YELLOW}       $cmd${NC}"
     echo -e "${RED}       ${output}${NC}"
     [[ -n "$JUNIT_FILE" ]] && echo "<testcase name=\"${name}\" classname=\"blackbox\"><failure>${output}</failure></testcase>" >> "$JUNIT_FILE.tmp"
@@ -177,7 +184,7 @@ echo ""
 # --- A: Runtime ---
 if section_enabled runtime; then
     echo -e "${BOLD}A. Runtime Invariants${NC}"
-    test_step "A1 version" "$BOXR_CMD version | grep -q Client"
+    test_step "A1 version" "out=\$($BOXR_CMD version 2>&1); grep -q Client <<< \"\$out\""
     test_step "A1 run alpine echo" "$BOXR_CMD run --rm alpine:latest echo ok | grep -q ok"
     test_step "A2 /tmp sticky 1777" "$BOXR_CMD run --rm alpine stat -c '%a' /tmp | grep -E '1777|777'"
     test_step "A2 nonroot /tmp write" "$BOXR_CMD run --rm --user 65534:65534 alpine sh -c 'echo ok > /tmp/t && cat /tmp/t' | grep -q ok"
@@ -293,7 +300,7 @@ if section_enabled podman; then
     test_step "K1 container exists missing" "! $BOXR_CMD container exists bb-missing-$(rand_id)"
     VID="bb-vol-$(rand_id)"
     test_step "K2 volume create+exists" "$BOXR_CMD volume create $VID && $BOXR_CMD volume exists $VID"
-    run_cmd "$BOXR_CMD volume rm $VID" 2>/dev/null || true
+    run_cmd "$BOXR_CMD volume rm $VID >/dev/null 2>&1" || true
     if [[ -f "$COMPOSE_STACK" ]]; then
         test_step "K3 compose up web" "$BOXR_CMD compose -f \"$COMPOSE_STACK\" up -d web"
         run_cmd "$BOXR_CMD compose -f \"$COMPOSE_STACK\" down -v" 2>/dev/null || true
@@ -311,6 +318,34 @@ if section_enabled podman; then
     else
         skip_step "K5 quadlet" "fixture missing"
     fi
+    if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
+        test_step "K6 embedded usernet gateway" "cd \"$REPO_ROOT\" && cargo test --test network_integration_matrix_test test_matrix_embedded_usernet_resolv -- --exact --test-threads=1"
+    fi
+    test_step "K7 image exists" "$BOXR_CMD pull alpine:latest >/dev/null && $BOXR_CMD image exists alpine:latest"
+    SPEC_C="bb-spec-$(rand_id)"
+    test_step "K8 generate spec" "$BOXR_CMD run -d --name $SPEC_C alpine:latest sleep 120 >/dev/null && $BOXR_CMD generate spec $SPEC_C | grep -q alpine && $BOXR_CMD rm -f $SPEC_C >/dev/null"
+    CP_C="bb-cp-$(rand_id)"
+    test_step "K9 checkpoint restore" "$BOXR_CMD run -d --name $CP_C alpine:latest sleep 300 >/dev/null && $BOXR_CMD container checkpoint $CP_C && $BOXR_CMD stop $CP_C && $BOXR_CMD container restore $CP_C && $BOXR_CMD rm -f $CP_C >/dev/null"
+    VEX="bb-vex-$(rand_id)"
+    VIM="bb-vim-$(rand_id)"
+    VOL_TAR="$(mktemp "${TMPDIR:-/tmp}/boxr-vol.XXXXXX").tar"
+    test_step "K10 volume export/import" "$BOXR_CMD volume create $VEX && $BOXR_CMD volume export $VEX -o \"$VOL_TAR\" && $BOXR_CMD volume import $VIM \"$VOL_TAR\" && $BOXR_CMD volume exists $VIM"
+    run_cmd "$BOXR_CMD volume rm -f $VEX $VIM >/dev/null 2>&1" || true
+    rm -f "$VOL_TAR" 2>/dev/null || true
+    ART_N="bb-art-$(rand_id)"
+    ART_FILE="$(mktemp "${TMPDIR:-/tmp}/boxr-art.XXXXXX")"
+    printf 'artifact-parity' >"$ART_FILE"
+    test_step "K11 artifact lifecycle" "$BOXR_CMD artifact add $ART_N \"$ART_FILE\" --type application/octet-stream && $BOXR_CMD artifact ls | grep -q $ART_N && $BOXR_CMD artifact rm $ART_N"
+    rm -f "$ART_FILE" 2>/dev/null || true
+    POD="bb-pod-$(rand_id)"
+    PC="${POD}-c1"
+    test_step "K12 pod lifecycle" "$BOXR_CMD pod create --name $POD >/dev/null && $BOXR_CMD run -d --pod $POD --name $PC alpine:latest sleep 120 >/dev/null && $BOXR_CMD pod ps | grep -q $POD && $BOXR_CMD pod rm -f $POD >/dev/null"
+    test_step "K14 auto-update dry-run" "$BOXR_CMD auto-update --dry-run"
+    test_step "K15 system connection ls" "$BOXR_CMD system connection ls | grep -qE 'local|NAME'"
+    # Do not name these NC/NET — NC is the ANSI color-reset constant at the top of this script.
+    RELOAD_NET="bb-net-$(rand_id)"
+    RELOAD_CTR="bb-netc-$(rand_id)"
+    test_step "K13 network reload" "$BOXR_CMD network create $RELOAD_NET >/dev/null && $BOXR_CMD network exists $RELOAD_NET >/dev/null && $BOXR_CMD run -d --name $RELOAD_CTR alpine:latest sleep 120 >/dev/null && $BOXR_CMD network connect $RELOAD_NET $RELOAD_CTR >/dev/null && $BOXR_CMD network reload $RELOAD_CTR >/dev/null && $BOXR_CMD rm -f $RELOAD_CTR >/dev/null && $BOXR_CMD network rm $RELOAD_NET >/dev/null"
 fi
 
 # --- Rust integration tests ---

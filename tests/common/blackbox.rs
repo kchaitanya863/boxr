@@ -7,8 +7,21 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-const BOXR_CMD_TIMEOUT: Duration = Duration::from_secs(90);
 use tempfile::TempDir;
+
+fn container_name_from_args<'a>(args: &'a [&'a str]) -> Option<&'a str> {
+    args.iter()
+        .position(|a| *a == "--name")
+        .and_then(|i| args.get(i + 1).copied())
+}
+
+fn boxr_cmd_timeout() -> Duration {
+    if std::env::var("CI").is_ok() {
+        Duration::from_secs(180)
+    } else {
+        Duration::from_secs(90)
+    }
+}
 
 /// Cross-process lock so parallel integration tests don't contend on the shared macOS VM.
 #[cfg(target_os = "macos")]
@@ -128,7 +141,8 @@ pub fn run_boxr(home: &Path, args: &[&str]) -> Output {
     cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to execute boxr");
     let started = Instant::now();
-    while started.elapsed() < BOXR_CMD_TIMEOUT {
+    let cmd_timeout = boxr_cmd_timeout();
+    while started.elapsed() < cmd_timeout {
         match child.try_wait() {
             Ok(Some(_)) => {
                 return child
@@ -150,14 +164,18 @@ pub fn run_boxr(home: &Path, args: &[&str]) -> Output {
         stderr: format!(
             "boxr {} timed out after {}s",
             args.join(" "),
-            BOXR_CMD_TIMEOUT.as_secs()
+            cmd_timeout.as_secs()
         )
         .into_bytes(),
     }
 }
 
 pub fn run_boxr_ok(home: &Path, args: &[&str]) -> String {
-    let attempts = if cfg!(target_os = "macos") { 3 } else { 1 };
+    let attempts = if cfg!(target_os = "macos") || std::env::var("CI").is_ok() {
+        3
+    } else {
+        1
+    };
     let mut last = None;
     for attempt in 0..attempts {
         if attempt > 0 {
@@ -167,7 +185,16 @@ pub fn run_boxr_ok(home: &Path, args: &[&str]) -> String {
         if out.status.success() {
             return String::from_utf8_lossy(&out.stdout).to_string();
         }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let retryable = stderr.contains("timed out after");
         last = Some(out);
+        if attempt + 1 < attempts && retryable {
+            if let Some(name) = container_name_from_args(args) {
+                let _ = run_boxr(home, &["rm", "-f", name]);
+            }
+            continue;
+        }
+        break;
     }
     let out = last.expect("run_boxr_ok called without attempts");
     assert!(

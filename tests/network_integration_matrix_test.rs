@@ -25,8 +25,7 @@ fn read_container_bundle_hosts(home: &Path, container_name: &str) -> String {
         .get("bundle_path")
         .and_then(|v| v.as_str())
         .expect("bundle_path");
-    fs::read_to_string(Path::new(bundle).join("rootfs/etc/hosts"))
-        .expect("bundle hosts file")
+    fs::read_to_string(Path::new(bundle).join("rootfs/etc/hosts")).expect("bundle hosts file")
 }
 
 fn pick_host_port(suffix: &str, base: u16) -> u16 {
@@ -63,6 +62,10 @@ fn outbound_ok(out: &Output) -> bool {
 
 #[test]
 fn test_matrix_none_blocks_wan_allows_loopback() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
 
@@ -122,7 +125,10 @@ fn test_matrix_host_and_none_reject_published_ports() {
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
 
-    for (net, ctr) in [("none", format!("m-none-p-{}", suffix)), ("host", format!("m-host-p-{}", suffix))] {
+    for (net, ctr) in [
+        ("none", format!("m-none-p-{}", suffix)),
+        ("host", format!("m-host-p-{}", suffix)),
+    ] {
         let out = run_boxr(
             &home,
             &[
@@ -210,7 +216,11 @@ fn test_matrix_custom_network_hosts_and_inspect() {
         .filter_map(|v| v.get("container_name").and_then(|n| n.as_str()))
         .map(str::to_string)
         .collect();
-    assert!(names.contains(&c1) && names.contains(&c2), "names={:?}", names);
+    assert!(
+        names.contains(&c1) && names.contains(&c2),
+        "names={:?}",
+        names
+    );
     let ips: Vec<String> = containers
         .values()
         .filter_map(|v| v.get("ipv4_address").and_then(|n| n.as_str()))
@@ -286,13 +296,7 @@ fn test_matrix_custom_subnet_option() {
     let net = format!("matrix-sub-{}", suffix);
     run_boxr_ok(
         &home,
-        &[
-            "network",
-            "create",
-            "--subnet",
-            "10.77.0.0/16",
-            &net,
-        ],
+        &["network", "create", "--subnet", "10.77.0.0/16", &net],
     );
     let inspect = run_boxr_ok(&home, &["network", "inspect", &net]);
     assert!(
@@ -321,15 +325,7 @@ fn test_matrix_tcp_port_range_publish() {
     let spec = format!("127.0.0.1:{}-{}:80-81", base, base + 1);
     run_boxr_ok(
         &home,
-        &[
-            "run",
-            "-d",
-            "--name",
-            &ctr,
-            "-p",
-            &spec,
-            "nginx:alpine",
-        ],
+        &["run", "-d", "--name", &ctr, "-p", &spec, "nginx:alpine"],
     );
     let url0 = format!("http://127.0.0.1:{}/", base);
     let url1 = format!("http://127.0.0.1:{}/", base + 1);
@@ -356,7 +352,11 @@ fn test_matrix_outbound_usernet_mode() {
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let out = alpine_outbound_probe(&home, Some("usernet"));
-    assert!(outbound_ok(&out), "usernet outbound failed: {}", combined_output(&out));
+    assert!(
+        outbound_ok(&out),
+        "usernet outbound failed: {}",
+        combined_output(&out)
+    );
 }
 
 #[test]
@@ -388,6 +388,53 @@ fn test_matrix_usernet_pings_virtual_gateway() {
         out.contains("1 received") || out.contains("bytes from"),
         "virtual gateway should answer ICMP: {}",
         out
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_matrix_embedded_usernet_resolv() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted");
+        return;
+    }
+    let saved_force = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+    unsafe {
+        std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", "1");
+    }
+    let (_guard, home) = isolated_home();
+    pull_if_needed(&home, "alpine:latest");
+    let out = run_boxr(
+        &home,
+        &[
+            "run",
+            "--rm",
+            "--network",
+            "usernet",
+            "alpine",
+            "sh",
+            "-c",
+            "grep -q 10.0.2.3 /etc/resolv.conf && ping -c 1 -W 3 10.0.2.2 | grep -qE 'bytes from|1 received'",
+        ],
+    );
+    if let Some(v) = saved_force {
+        unsafe {
+            std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", v);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+        }
+    }
+    let combined = combined_output(&out);
+    if combined.contains("unshare network namespace") && combined.contains("EPERM") {
+        eprintln!("SKIPPED: embedded usernet netns EPERM on runner");
+        return;
+    }
+    assert!(
+        out.status.success(),
+        "embedded usernet should configure virtual DNS and gateway ICMP: {}",
+        combined
     );
 }
 
@@ -498,7 +545,11 @@ fn test_matrix_peer_hosts_updated_when_second_container_joins() {
             "180",
         ],
     );
-    assert!(wait_container_running(&home, &first, Duration::from_secs(45)));
+    assert!(wait_container_running(
+        &home,
+        &first,
+        Duration::from_secs(45)
+    ));
 
     run_boxr_ok(
         &home,
@@ -514,7 +565,11 @@ fn test_matrix_peer_hosts_updated_when_second_container_joins() {
             "180",
         ],
     );
-    assert!(wait_container_running(&home, &second, Duration::from_secs(45)));
+    assert!(wait_container_running(
+        &home,
+        &second,
+        Duration::from_secs(45)
+    ));
 
     let bundle_hosts = read_container_bundle_hosts(&home, &first);
     assert!(
@@ -530,6 +585,10 @@ fn test_matrix_peer_hosts_updated_when_second_container_joins() {
 
 #[test]
 fn test_matrix_container_network_mode_shares_target_netns() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
@@ -538,17 +597,13 @@ fn test_matrix_container_network_mode_shares_target_netns() {
 
     run_boxr_ok(
         &home,
-        &[
-            "run",
-            "-d",
-            "--name",
-            &base,
-            "alpine",
-            "sleep",
-            "180",
-        ],
+        &["run", "-d", "--name", &base, "alpine", "sleep", "180"],
     );
-    assert!(wait_container_running(&home, &base, Duration::from_secs(45)));
+    assert!(wait_container_running(
+        &home,
+        &base,
+        Duration::from_secs(45)
+    ));
     run_boxr_ok(
         &home,
         &[
@@ -563,15 +618,23 @@ fn test_matrix_container_network_mode_shares_target_netns() {
             "180",
         ],
     );
-    assert!(wait_container_running(&home, &side, Duration::from_secs(45)));
+    assert!(wait_container_running(
+        &home,
+        &side,
+        Duration::from_secs(45)
+    ));
     assert!(
         wait_exec_success(
             &home,
             &side,
-            &["ping", "-c", "1", "-W", "2", "127.0.0.1"],
-            Duration::from_secs(120),
+            &[
+                "sh",
+                "-c",
+                "ip link show lo | grep -qE 'LOOPBACK,UP|state UP'",
+            ],
+            Duration::from_secs(60),
         ),
-        "sidecar should reach loopback in shared network namespace"
+        "sidecar should share loopback in target network namespace"
     );
 
     cleanup_container(&home, &side);

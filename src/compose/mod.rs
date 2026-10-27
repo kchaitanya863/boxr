@@ -50,7 +50,10 @@ impl BuildConfig {
     pub fn dockerfile_name(&self) -> String {
         match self {
             BuildConfig::Path(_) => "Dockerfile".to_string(),
-            BuildConfig::Spec(s) => s.dockerfile.clone().unwrap_or_else(|| "Dockerfile".to_string()),
+            BuildConfig::Spec(s) => s
+                .dockerfile
+                .clone()
+                .unwrap_or_else(|| "Dockerfile".to_string()),
         }
     }
 
@@ -1328,7 +1331,10 @@ services:
         assert_eq!(build.context_path(), "./frontend");
         assert_eq!(build.dockerfile_name(), "Dockerfile");
         assert_eq!(
-            build.build_args().get("NEXT_PUBLIC_API_URL").map(String::as_str),
+            build
+                .build_args()
+                .get("NEXT_PUBLIC_API_URL")
+                .map(String::as_str),
             Some("http://localhost:8080/api")
         );
 

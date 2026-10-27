@@ -1909,7 +1909,10 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
 
         #[cfg(target_os = "linux")]
         if !parsed_ports.is_empty() {
-            network::wait_for_published_ports(&parsed_ports, std::time::Duration::from_secs(90))?;
+            // Rootless forward helper may write forwarder.pid; passt/pasta does not.
+            let _ =
+                network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
+            // Detached starts must not block on in-container listeners (Docker/Podman parity).
         }
         if !health_cfg.test.is_empty() {
             let mut health_res = health::HealthCheckResult::default();
@@ -3680,7 +3683,9 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             println!("Disconnected {} from {}", container, network);
         }
         NetworkAction::Reload { containers } => {
-            reload_container_networks(&containers)?;
+            for name in reload_container_networks(&containers)? {
+                println!("{}", name);
+            }
         }
         NetworkAction::Exists { name } => {
             ensure_network_exists(&name)?;
@@ -5559,8 +5564,23 @@ fn parse_ports(specs: &[String]) -> Result<Vec<network::PortMapping>> {
 }
 
 fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
-    if matches!(network, "none" | "host" | "bridge" | "auto" | "default") {
+    let trimmed = network.trim();
+    if trimmed.is_empty() {
         return Ok(());
+    }
+    let mode = network::pasta::NetworkMode::parse(trimmed);
+    match mode {
+        network::pasta::NetworkMode::None
+        | network::pasta::NetworkMode::Host
+        | network::pasta::NetworkMode::Auto
+        | network::pasta::NetworkMode::Pasta
+        | network::pasta::NetworkMode::UserNet
+        | network::pasta::NetworkMode::Container(_) => return Ok(()),
+        network::pasta::NetworkMode::Bridge => {
+            if matches!(trimmed, "bridge" | "default" | "auto") {
+                return Ok(());
+            }
+        }
     }
     let store = match home_opt {
         Some(h) => network::NetworkStore::with_home(h.to_path_buf()),
@@ -5878,21 +5898,23 @@ pub fn ensure_secret_exists(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn reload_container_networks(containers: &[String]) -> Result<()> {
+pub fn reload_container_networks(containers: &[String]) -> Result<Vec<String>> {
     if containers.is_empty() {
         return Err(anyhow!("requires at least one container name or ID"));
     }
     let store = ContainerStore::new();
     let net_store = NetworkStore::new();
+    let mut reloaded = Vec::with_capacity(containers.len());
     for query in containers {
         let container = store
             .find(query)
             .ok_or_else(|| anyhow!("Container '{}' not found", query))?;
         let mut refreshed = std::collections::HashSet::new();
         for net in net_store.list() {
-            let attached = net.containers.values().any(|ep| {
-                ep.container_id == container.id || ep.container_name == container.name
-            });
+            let attached = net
+                .containers
+                .values()
+                .any(|ep| ep.container_id == container.id || ep.container_name == container.name);
             if attached && refreshed.insert(net.name.clone()) {
                 network::refresh_bridge_hosts_for_network(&net.name, None)?;
             }
@@ -5903,9 +5925,9 @@ pub fn reload_container_networks(containers: &[String]) -> Result<()> {
                 std::time::Duration::from_secs(15),
             )?;
         }
-        println!("{}", container.name);
+        reloaded.push(container.name.clone());
     }
-    Ok(())
+    Ok(reloaded)
 }
 
 pub fn handle_machine(args: cli::MachineSubcommands) -> Result<()> {
@@ -6016,7 +6038,13 @@ fn handle_machine_macos(args: cli::MachineSubcommands) -> Result<()> {
             let status = std::process::Command::new(&command[0])
                 .args(&command[1..])
                 .status()
-                .map_err(|e| anyhow!("failed to run remote command for machine '{}': {}", mname, e))?;
+                .map_err(|e| {
+                    anyhow!(
+                        "failed to run remote command for machine '{}': {}",
+                        mname,
+                        e
+                    )
+                })?;
             if !status.success() {
                 return Err(anyhow!(
                     "machine '{}' command failed with exit code {:?}",

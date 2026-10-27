@@ -231,7 +231,9 @@ impl PortCollisionGuard {
                 }
 
                 for p in &c.ports {
-                    if p.protocol.eq_ignore_ascii_case(&req.protocol) && p.host_port == req.host_port {
+                    if p.protocol.eq_ignore_ascii_case(&req.protocol)
+                        && p.host_port == req.host_port
+                    {
                         let running_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
                         let ips_overlap =
                             req_ip == "0.0.0.0" || running_ip == "0.0.0.0" || req_ip == running_ip;

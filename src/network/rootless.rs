@@ -160,11 +160,10 @@ impl RootlessUdpPortForwarder {
     }
 
     pub async fn start(&self) -> Result<()> {
-        let socket = Arc::new(
-            UdpSocket::bind(self.host_addr)
-                .await
-                .with_context(|| format!("Failed to bind UDP port forwarder on {}", self.host_addr))?,
-        );
+        let socket =
+            Arc::new(UdpSocket::bind(self.host_addr).await.with_context(|| {
+                format!("Failed to bind UDP port forwarder on {}", self.host_addr)
+            })?);
         let stop_notify = self.stop_notify.clone();
         let is_stopped = self.is_stopped.clone();
         #[cfg(all(unix, not(target_os = "macos")))]
