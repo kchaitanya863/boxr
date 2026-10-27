@@ -299,6 +299,10 @@ if section_enabled podman; then
     run_cmd "$BOXR_CMD volume rm $VID" 2>/dev/null || true
     if [[ -f "$COMPOSE_STACK" ]]; then
         test_step "K3 compose up web" "$BOXR_CMD compose -f \"$COMPOSE_STACK\" up -d web"
+        if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
+            # Join compose netns (no CLONE_NEWNET); wget exercises embedded/passt routing on GHA.
+            test_step "K6 embedded usernet gateway" "$BOXR_CMD run --rm --network container:replacement-web alpine wget -q -O /dev/null http://example.com"
+        fi
         run_cmd "$BOXR_CMD compose -f \"$COMPOSE_STACK\" down -v" 2>/dev/null || true
     else
         skip_step "K3 compose stack" "fixture missing"
@@ -313,11 +317,6 @@ if section_enabled podman; then
         test_step "K5 quadlet install" "$BOXR_CMD quadlet install \"$PODMAN_FIX/sample.container\""
     else
         skip_step "K5 quadlet" "fixture missing"
-    fi
-    if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
-        # Bridge + FORCE uses the same embedded TAP stack as compose on Linux (passt bypassed).
-        # Run after K3–K5 so rootless netns is warm; publish a port like compose services.
-        test_step "K6 embedded usernet gateway" "$BOXR_CMD run --rm --network bridge -p 18080:80 alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
     fi
 fi
 
