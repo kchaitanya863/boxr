@@ -523,6 +523,10 @@ pub struct ImagesArgs {
     /// Filter output based on conditions provided
     #[arg(short = 'f', long = "filter")]
     pub filter: Vec<String>,
+
+    /// Sort by repository, tag, id, or created (Podman-compatible)
+    #[arg(long = "sort")]
+    pub sort: Option<String>,
 }
 
 #[derive(Args, Debug)]

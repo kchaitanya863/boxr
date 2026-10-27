@@ -36,6 +36,8 @@ function clean_setup() {
     for action in "${actions[@]}"; do
         _run_podman_quiet $action
     done
+    # Upstream clean_setup also ensures the standard test image is present.
+    _prefetch "${PODMAN_TEST_IMAGE_FQN:-$IMAGE}"
 }
 
 # boxr keeps a permanent default bridge network (boxr0); whitelist it like podman's "podman" net.
@@ -64,7 +66,7 @@ function leak_check() {
     _run_podman_quiet images --all --format '{{.ID}} {{.Repository}}:{{.Tag}}'
     # Pod infra pulls a small alpine image; boxr does not auto-rmi it on pod rm (unlike pause in podman).
     output=$(
-        awk "\$2 != \"$IMAGE\" && \$2 != \"$PODMAN_SYSTEMD_IMAGE_FQN\" && \$2 !~ \"localhost/podman-pause:\" && \$2 !~ /^(library\/)?alpine:/ { print }" <<<"$output"
+        awk "\$2 != \"$IMAGE\" && \$2 != \"$PODMAN_SYSTEMD_IMAGE_FQN\" && \$2 !~ \"localhost/podman-pause:\" && \$2 !~ /^(library\/)?alpine:/ && \$2 !~ /<none>:<none>/ { print }" <<<"$output"
     )
     _leak_check_one "image"
 

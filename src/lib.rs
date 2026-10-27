@@ -2639,9 +2639,15 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
 
         if !matched && (only_type.is_empty() || only_type == "image") {
             if let Some(i) = i_store.find(target) {
+                let repo_tags: Vec<String> = i_store
+                    .list()
+                    .iter()
+                    .filter(|r| r.id == i.id && r.reference != "<none>" && r.tag != "<none>")
+                    .map(|r| format!("{}:{}", r.display_reference(), r.tag))
+                    .collect();
                 let docker_compat_image = serde_json::json!({
                     "Id": format!("sha256:{}", i.id),
-                    "RepoTags": [format!("{}:{}", i.display_reference(), i.tag)],
+                    "RepoTags": repo_tags,
                     "Size": i.size_bytes,
                     "Created": i.created_at.to_rfc3339(),
                     "Architecture": i.config.architecture,
@@ -3768,7 +3774,7 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
     let store = ImageStore::new();
     let images = store.list();
 
-    let filtered: Vec<_> = images
+    let mut filtered: Vec<_> = images
         .into_iter()
         .filter(|img| {
             for f in &args.filter {
@@ -3793,6 +3799,26 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
             true
         })
         .collect();
+
+    match args.sort.as_deref() {
+        Some("repository") | Some("repo") => {
+            filtered.sort_by(|a, b| {
+                a.display_reference()
+                    .cmp(&b.display_reference())
+                    .then_with(|| a.tag.cmp(&b.tag))
+            });
+        }
+        Some("tag") => {
+            filtered.sort_by(|a, b| a.tag.cmp(&b.tag));
+        }
+        Some("id") => {
+            filtered.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+        Some("created") => {
+            filtered.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        }
+        _ => {}
+    }
 
     if args.quiet {
         for img in &filtered {
@@ -5030,6 +5056,23 @@ pub fn tag_image(args: &cli::TagArgs) -> Result<()> {
         let target_ref = crate::oci::reference::ImageReference::parse(target)
             .map_err(|e| anyhow!("invalid target reference '{}': {}", target, e))?;
 
+        // Podman: a tag without a registry path (no slash in the name) is stored as localhost/…
+        let name_only = target
+            .split('@')
+            .next()
+            .unwrap_or(target)
+            .split(':')
+            .next()
+            .unwrap_or(target);
+        let target_ref = if !name_only.contains('/') {
+            let mut r = target_ref;
+            r.registry = "localhost".to_string();
+            r.repository = name_only.to_string();
+            r
+        } else {
+            target_ref
+        };
+
         // ImageReference::parse normalizes ":v1" to repository "library/"; keep
         // the historical rejection of an empty repository name.
         let repo_name = target_ref
@@ -6015,7 +6058,12 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
         if part.is_empty() {
             continue;
         }
-        if let Some(next) = curr.get(part) {
+        let key = if part == "ID" {
+            "Id"
+        } else {
+            part
+        };
+        if let Some(next) = curr.get(key).or_else(|| curr.get(part)) {
             curr = next;
         } else {
             return String::new();
@@ -7065,13 +7113,47 @@ pub fn untag_image(query: &str, tags: &[String]) -> Result<()> {
         .ok_or_else(|| anyhow!("Image '{}' not found", query))?;
 
     if tags.is_empty() {
-        let _ = i_store.remove_metadata_only(&img.qualified_name());
-        println!("Untagged: {}:{}", img.display_reference(), img.tag);
+        let q = query.trim();
+        let untag_all_by_id = (q.starts_with("sha256:") && q.len() > 7)
+            || (q.len() >= 12 && q.chars().all(|c| c.is_ascii_hexdigit()));
+        if untag_all_by_id {
+            let to_remove: Vec<ImageRecord> = i_store
+                .list()
+                .into_iter()
+                .filter(|r| r.id == img.id)
+                .collect();
+            for r in &to_remove {
+                let removed = i_store.remove_metadata_only(&r.qualified_name())?;
+                println!("Untagged: {}:{}", removed.display_reference(), removed.tag);
+            }
+            if !to_remove.is_empty() {
+                let base = &to_remove[0];
+                let dangling = ImageRecord {
+                    id: base.id.clone(),
+                    reference: "<none>".to_string(),
+                    tag: "<none>".to_string(),
+                    registry: base.registry.clone(),
+                    manifest_digest: base.manifest_digest.clone(),
+                    config_digest: base.config_digest.clone(),
+                    size_bytes: base.size_bytes,
+                    created_at: base.created_at,
+                    rootfs_path: base.rootfs_path.clone(),
+                    config: base.config.clone(),
+                };
+                i_store.add(dangling)?;
+            }
+        } else {
+            let removed = i_store.remove_metadata_only(&img.qualified_name())?;
+            println!("Untagged: {}:{}", removed.display_reference(), removed.tag);
+        }
     } else {
         for t in tags {
-            let ref_with_tag = format!("{}:{}", img.display_reference(), t);
-            let _ = i_store.remove_metadata_only(&ref_with_tag);
-            println!("Untagged: {}", ref_with_tag);
+            let target = t.trim();
+            if i_store.find(target).is_none() {
+                cli::usage_errors::exit_usage_error(format!("{}: tag not known", target));
+            }
+            let removed = i_store.remove_metadata_only(target)?;
+            println!("Untagged: {}:{}", removed.display_reference(), removed.tag);
         }
     }
     Ok(())
