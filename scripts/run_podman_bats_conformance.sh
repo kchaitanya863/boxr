@@ -68,10 +68,13 @@ mkdir -p "\$BOXR_HOME"
 # Podman BATS expect '[options]' (lower case) in usage lines.
 podmanize_help() {
   sed -e 's/^Usage: podman /Usage:\\n  podman /' \
+      -e 's/<\\([A-Z][A-Z0-9_]*\\)>/\\1/g' \
       -e 's/\\[OPTIONS\\]/[options]/g' \
       -e 's/\\[ARGS\\]/[args]/g' \
       -e 's/ podman \\([^ ]*\\) \\[options\\] <COMMAND>/ podman \\1 [command] [options]/g' \
       -e 's/\\[options\\] <COMMAND>/[command] [options]/g' \
+      -e 's/\\[options\\] COMMAND/[command] [options]/g' \
+      -e 's/\\[options\\] \\[command\\]/[command] [options]/g' \
       -e 's/podman help \\[options\\] \\[command\\]/podman help [command] [options]/g'
 }
 if [[ "\${1:-}" == "help" ]] || [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
@@ -84,6 +87,10 @@ EOF
 }
 
 run_manifest() {
+  # Upstream 015-help.bats uses `[ "$@" = "network" ]`, which breaks under nested check_help.
+  sed -i 's/\[ "\$@" = "network"/[ "$*" = "network"/' \
+    "$SRC_DIR/test/system/015-help.bats" 2>/dev/null || true
+
   local patterns=()
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"

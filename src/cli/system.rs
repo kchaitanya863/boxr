@@ -220,6 +220,16 @@ pub struct PodSubcommands {
     pub command: PodAction,
 }
 
+#[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct PodTopArgs {
+    /// Pod to inspect
+    pub pod: String,
+    /// Format descriptors or ps arguments
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub descriptors: Vec<String>,
+}
+
 #[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PodLsArgs {
@@ -233,6 +243,9 @@ pub struct PodLsArgs {
     pub no_trunc: bool,
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
+
+    #[arg(value_name = "POD")]
+    pub pods: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -313,11 +326,7 @@ pub enum PodAction {
     /// Unpause pods
     Unpause { pods: Vec<String> },
     /// Display the running processes of containers in pods
-    Top {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        ps_args: Vec<String>,
-        pods: Vec<String>,
-    },
+    Top(PodTopArgs),
     /// Display a live stream of pod resource usage statistics
     Stats {
         #[arg(long = "no-stream")]
@@ -442,9 +451,10 @@ pub struct PodLogsArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct GenerateSpecArgs {
     /// Container name or ID to generate Specgen JSON for
+    #[arg(value_name = "TARGET")]
     pub target: String,
 }
 

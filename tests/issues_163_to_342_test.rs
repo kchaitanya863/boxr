@@ -255,8 +255,9 @@ fn test_issue_163_ps_accepts_invalid_filter_keys_without_returning_an_error() {
         last: None,
         latest: false,
         filter: vec!["bogus=val".to_string()],
+        containers: vec![],
     };
-    let res = boxr::list_containers(args);
+    let res = boxr::list_containers(args, "ps");
     assert!(res.is_err());
     let err = res.unwrap_err().to_string();
     assert!(err.contains("Invalid filter"), "Unexpected: {}", err);

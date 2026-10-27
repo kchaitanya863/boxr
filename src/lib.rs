@@ -313,7 +313,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ContainerAction::Ls(ps_args) => {
-                list_containers(ps_args)?;
+                list_containers(ps_args, "ls")?;
                 Ok(0)
             }
             cli::ContainerAction::Inspect(inspect_args) => {
@@ -788,7 +788,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Ps(args) => {
-            list_containers(args)?;
+            list_containers(args, "ps")?;
             Ok(0)
         }
         Commands::Rm(args) => {
@@ -3845,7 +3845,17 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn list_containers(args: PsArgs) -> Result<()> {
+pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
+    if args.all && args.latest {
+        cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if args.latest && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error("--latest and containers cannot be used together");
+    }
+    if !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(format!("{} takes no arguments", command_name));
+    }
+
     for f in &args.filter {
         if let Some((k, _)) = f.split_once('=') {
             validate_ps_filter_key(k.trim())?;
@@ -6400,6 +6410,12 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             println!("{}", pod.id);
         }
         PodAction::Ps(ls_args) | PodAction::Ls(ls_args) => {
+            if ls_args.latest && !ls_args.pods.is_empty() {
+                cli::usage_errors::exit_usage_error("--latest and pods cannot be used together");
+            }
+            if !ls_args.pods.is_empty() {
+                cli::usage_errors::exit_usage_error("ls takes no arguments");
+            }
             let pods = if ls_args.latest {
                 store.list().into_iter().take(1).collect()
             } else {
@@ -6527,18 +6543,16 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 println!("{}", pod);
             }
         }
-        PodAction::Top { ps_args, pods } => {
-            for pod in pods {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                for cid in store.member_container_ids(&p) {
-                    println!("=== {} ===", cid);
-                    top_container(&TopArgs {
-                        container: cid,
-                        ps_args: ps_args.clone(),
-                    })?;
-                }
+        PodAction::Top(args) => {
+            let p = store
+                .find(&args.pod)
+                .ok_or_else(|| anyhow!("Pod '{}' not found", args.pod))?;
+            for cid in store.member_container_ids(&p) {
+                println!("=== {} ===", cid);
+                top_container(&TopArgs {
+                    container: cid,
+                    ps_args: args.descriptors.clone(),
+                })?;
             }
         }
         PodAction::Stats { no_stream, pods } => {

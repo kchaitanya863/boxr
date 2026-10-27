@@ -1,6 +1,6 @@
 //! Podman-compatible usage / missing-subcommand messages for BATS help tests.
 
-use clap::error::ErrorKind;
+use clap::error::{ContextKind, ErrorKind};
 use clap::{Error, Parser};
 
 /// Emit Podman-shaped errors and exit 125 (do not use clap's default print).
@@ -15,7 +15,29 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
             print_unrecognized(argv);
             std::process::exit(125);
         }
-        ErrorKind::TooManyValues | ErrorKind::UnknownArgument => {
+        ErrorKind::TooManyValues => {
+            print_extra_positional_error(argv);
+            std::process::exit(125);
+        }
+        ErrorKind::UnknownArgument => {
+            if let Some(clap::error::ContextValue::String(flag)) =
+                err.get(ContextKind::InvalidArg)
+            {
+                if flag.starts_with('-') {
+                    eprintln!("Error: unknown flag: {}", flag.trim_start_matches('-'));
+                    std::process::exit(125);
+                }
+            }
+            let positionals = positional_args(argv);
+            let trailing_x = positionals
+                .iter()
+                .rev()
+                .take_while(|t| is_bats_numeric_token(t))
+                .count();
+            if trailing_x >= 2 {
+                eprintln!("Error: too many arguments");
+                std::process::exit(125);
+            }
             print_extra_positional_error(argv);
             std::process::exit(125);
         }
@@ -32,6 +54,12 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
             std::process::exit(125);
         }
     }
+}
+
+/// Podman-compatible CLI validation errors (exit 125).
+pub fn exit_usage_error(msg: impl AsRef<str>) -> ! {
+    eprintln!("Error: {}", msg.as_ref());
+    std::process::exit(125);
 }
 
 /// `podman help` / `podman help <cmd>` — show help for the root or nested command.
@@ -59,6 +87,12 @@ pub fn run_help_command(path: &[String]) -> ! {
         }
         Ok(_) => std::process::exit(0),
     }
+}
+
+fn is_bats_numeric_token(s: &str) -> bool {
+    s.len() > 1
+        && s.starts_with('x')
+        && s[1..].chars().all(|c| c.is_ascii_digit())
 }
 
 fn positional_args(argv: &[String]) -> Vec<&str> {

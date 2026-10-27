@@ -664,6 +664,10 @@ pub struct PsArgs {
     /// Filter output based on conditions provided
     #[arg(short = 'f', long = "filter")]
     pub filter: Vec<String>,
+
+    /// Container names or IDs (accepted only for validation; not supported with --latest)
+    #[arg(value_name = "CONTAINER")]
+    pub containers: Vec<String>,
 }
 
 #[derive(Args, Debug)]
