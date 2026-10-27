@@ -317,6 +317,24 @@ if section_enabled podman; then
     if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
         test_step "K6 embedded usernet gateway" "cd \"$REPO_ROOT\" && cargo test --test network_integration_matrix_test test_matrix_embedded_usernet_resolv -- --exact --test-threads=1"
     fi
+    test_step "K7 image exists" "$BOXR_CMD pull alpine:latest >/dev/null && $BOXR_CMD image exists alpine:latest"
+    SPEC_C="bb-spec-$(rand_id)"
+    test_step "K8 generate spec" "$BOXR_CMD run -d --name $SPEC_C alpine:latest sleep 120 && $BOXR_CMD generate spec $SPEC_C | grep -q alpine"
+    run_cmd "$BOXR_CMD rm -f $SPEC_C" 2>/dev/null || true
+    CP_C="bb-cp-$(rand_id)"
+    test_step "K9 checkpoint restore" "$BOXR_CMD run -d --name $CP_C alpine:latest sleep 300 && $BOXR_CMD container checkpoint $CP_C && $BOXR_CMD stop $CP_C && $BOXR_CMD container restore $CP_C"
+    run_cmd "$BOXR_CMD rm -f $CP_C" 2>/dev/null || true
+    VEX="bb-vex-$(rand_id)"
+    VIM="bb-vim-$(rand_id)"
+    VOL_TAR="$(mktemp "${TMPDIR:-/tmp}/boxr-vol.XXXXXX").tar"
+    test_step "K10 volume export/import" "$BOXR_CMD volume create $VEX && $BOXR_CMD volume export $VEX -o \"$VOL_TAR\" && $BOXR_CMD volume import $VIM \"$VOL_TAR\" && $BOXR_CMD volume exists $VIM"
+    run_cmd "$BOXR_CMD volume rm -f $VEX $VIM" 2>/dev/null || true
+    rm -f "$VOL_TAR" 2>/dev/null || true
+    ART_N="bb-art-$(rand_id)"
+    ART_FILE="$(mktemp "${TMPDIR:-/tmp}/boxr-art.XXXXXX")"
+    printf 'artifact-parity' >"$ART_FILE"
+    test_step "K11 artifact lifecycle" "$BOXR_CMD artifact add $ART_N \"$ART_FILE\" --type application/octet-stream && $BOXR_CMD artifact ls | grep -q $ART_N && $BOXR_CMD artifact rm $ART_N"
+    rm -f "$ART_FILE" 2>/dev/null || true
 fi
 
 # --- Rust integration tests ---
