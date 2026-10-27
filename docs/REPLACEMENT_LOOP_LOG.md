@@ -45,3 +45,29 @@ Hourly automated parity and real-world smoke tests. Each tick appends a section 
 | Top-level + nested `--help` sweep | Only `unshare` failed (L-002) |
 
 **Artifacts:** `/opt/cursor/artifacts/blackbox-qa-run.log`, `blackbox-junit.xml`, `podman-parity-audit.log`, `podman-compose-tests.log`
+
+### Tick 3 — 2026-10-27 ~1:00 PM PT
+
+**Binary:** `boxr 0.1.54` with L-001 fix merged (`cursor/fix-l001-rootless-setgroups-17b5` → QA branch).
+
+**Automated**
+
+| Suite | Result |
+|-------|--------|
+| `./scripts/run_blackbox_qa.sh --include-stress` | **PASS** — 57 passed, 0 failed, 0 skipped, ~140s |
+| `python3 tools/podman_parity_audit.py` | **PASS** — P0 14/14 |
+| `cargo test --test podman_parity_blackbox_test --test compose_docker_replacement_test` | **PASS** — 23 tests |
+
+**Manual / real-world (expanded)**
+
+| Check | Result |
+|-------|--------|
+| `postgres:16-alpine` + `pg_isready` | **OK** (L-001 verified fixed) |
+| `minimal-dns.yml` compose up/ps/down | OK |
+| host bind mount `:ro` | OK |
+| `play kube` minimal pod + down | OK |
+| L-002 `unshare --help` | Still **FAIL** ENOENT |
+
+**Notes:** Black-box harness teardown logged `rm: Permission denied` on postgres data dirs under temp `BOXR_HOME` (cosmetic cleanup; tests still passed).
+
+**Artifacts:** `/opt/cursor/artifacts/blackbox-tick3.log`, `blackbox-tick3-junit.xml`, `podman-parity-tick3.log`, `integration-tick3.log`
