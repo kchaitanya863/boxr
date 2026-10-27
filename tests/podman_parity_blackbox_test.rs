@@ -380,6 +380,59 @@ fn test_machine_linux_returns_clear_error() {
 }
 
 #[test]
+fn test_farm_create_list_remove() {
+    let bin = blackbox::boxr_bin();
+    if !bin.exists() {
+        return;
+    }
+    let (_guard, home) = blackbox::isolated_home();
+    let farm = format!("farm-{}", blackbox::rand_suffix());
+    let create = blackbox::run_boxr(
+        &home,
+        &["farm", "create", &farm, "node-a", "node-b"],
+    );
+    assert!(create.status.success(), "{}", String::from_utf8_lossy(&create.stderr));
+    let ls = blackbox::run_boxr(&home, &["farm", "ls"]);
+    assert!(ls.status.success());
+    let out = String::from_utf8_lossy(&ls.stdout);
+    assert!(out.contains(&farm));
+    let rm = blackbox::run_boxr(&home, &["farm", "rm", &farm]);
+    assert!(rm.status.success());
+}
+
+#[test]
+fn test_auto_update_dry_run_exits_zero() {
+    let bin = blackbox::boxr_bin();
+    if !bin.exists() {
+        return;
+    }
+    let out = Command::new(&bin)
+        .args(["auto-update", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn test_system_connection_list() {
+    let bin = blackbox::boxr_bin();
+    if !bin.exists() {
+        return;
+    }
+    let out = Command::new(&bin)
+        .args(["system", "connection", "ls"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(combined.contains("local") || combined.contains("NAME"));
+}
+
+#[test]
 fn test_network_reload_after_connect() {
     if !blackbox::netns_available() {
         eprintln!("SKIPPED: network namespaces not permitted");

@@ -36,9 +36,9 @@ Automated checks:
 | **volume export/import** | partial | partial | partial | partial | `podman_parity_blackbox_test` | Tarball round-trip |
 | **artifact** | partial | partial | partial | partial | `podman_parity_blackbox_test` | add / ls / rm |
 | **machine** | partial | stub | **n/a** | partial | `podman_parity_blackbox_test` | Linux: clear error; macOS: VZ state |
-| **farm** | partial | stub | partial | partial | `podman_parity_test` | Local farm metadata only |
-| **auto-update** | partial | stub | partial | partial | `issues_343_to_391_test` | Dry-run smoke |
-| **system connection** | partial | stub | partial | partial | `issues_343_to_391_test` | Connection store subset |
+| **farm** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `podman_parity_test` | Local farm metadata create/ls/rm |
+| **auto-update** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `issues_343_to_391_test` | `--dry-run` smoke |
+| **system connection** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `issues_343_to_391_test` | `connection ls` subset |
 
 ## Out of scope (Docker-only)
 

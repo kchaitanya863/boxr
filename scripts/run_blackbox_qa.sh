@@ -311,6 +311,9 @@ if section_enabled podman; then
     else
         skip_step "K5 quadlet" "fixture missing"
     fi
+    if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
+        test_step "K6 embedded usernet gateway" "env BOXR_FORCE_EMBEDDED_USERNET=1 $BOXR_CMD run --rm --network usernet alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
+    fi
 fi
 
 # --- Rust integration tests ---

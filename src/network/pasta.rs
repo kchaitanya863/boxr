@@ -36,6 +36,14 @@ impl Default for NetworkMode {
 }
 
 impl NetworkMode {
+    /// When set, `--network usernet` uses the embedded TAP stack even if passt is installed (tests/CI).
+    pub fn force_embedded_usernet() -> bool {
+        matches!(
+            std::env::var("BOXR_FORCE_EMBEDDED_USERNET").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+        )
+    }
+
     pub fn parse(s: &str) -> Self {
         let trimmed = s.trim();
         if let Some(target) = trimmed
@@ -72,7 +80,9 @@ impl NetworkMode {
     pub fn should_use_pasta(&self) -> bool {
         match self {
             Self::Pasta => true,
-            Self::Auto | Self::UserNet => PastaDriver::is_available(),
+            Self::Auto | Self::UserNet => {
+                PastaDriver::is_available() && !Self::force_embedded_usernet()
+            }
             _ => false,
         }
     }
@@ -81,7 +91,7 @@ impl NetworkMode {
     pub fn should_use_native_usernet(&self) -> bool {
         match self {
             Self::Bridge => true,
-            Self::UserNet => !PastaDriver::is_available(),
+            Self::UserNet => Self::force_embedded_usernet() || !PastaDriver::is_available(),
             Self::Auto => !PastaDriver::is_available(),
             _ => false,
         }

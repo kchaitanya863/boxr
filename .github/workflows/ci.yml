@@ -48,14 +48,28 @@ jobs:
       - name: Run Clippy Linter
         run: cargo clippy --all-targets -- -A clippy::all
 
+      - name: Install Linux rootless runtime deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2
+
       - name: Build boxr binary
         run: cargo build
 
       - name: Podman P0 CLI audit
         run: python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
 
+      - name: Podman parity blackbox (P0)
+        run: cargo test --test podman_parity_blackbox_test -- --test-threads=1
+
       - name: Run Test Suite
         run: cargo test --all --verbose -- --test-threads=1
+
+      - name: Black-Box QA (podman + runtime + network)
+        run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
+
+      - name: Black-Box QA (embedded usernet TAP)
+        run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
 
       - name: Run Black-Box QA (shell smoke)
         run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s negative
