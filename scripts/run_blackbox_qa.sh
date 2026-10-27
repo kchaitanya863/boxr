@@ -241,8 +241,7 @@ if section_enabled network || section_enabled dns; then
     test_step_neg "D none blocks external" "$BOXR_CMD run --rm --network none alpine wget -q --timeout=3 -O /dev/null http://8.8.8.8"
     test_step "E2 custom --dns" "$BOXR_CMD run --rm --dns 8.8.8.8 alpine cat /etc/resolv.conf | grep -q nameserver"
     if [[ "$(uname -s)" == "Linux" ]]; then
-        # Embedded usernet: verify TAP interface, routing, and gateway reachability (outbound TCP uses pasta/auto by default).
-        test_step "D usernet" "$BOXR_CMD run --rm --network usernet alpine ping -c 1 -W 2 10.0.2.2"
+        test_step "D usernet" "$BOXR_CMD run --rm --network usernet alpine wget -qO- http://example.com | head -1"
     else
         skip_step "D usernet" "Linux only"
         skip_step "D pasta" "Linux only"

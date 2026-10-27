@@ -1,9 +1,20 @@
 use super::packets::*;
 use crate::network::PortMapping;
 use anyhow::{Context, Result, anyhow};
-use std::net::Ipv4Addr;
+use std::collections::HashMap;
+use std::fs::File;
+use std::net::{Ipv4Addr, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TcpFlowKey {
+    src_port: u16,
+    dst_ip: Ipv4Addr,
+    dst_port: u16,
+}
 
 pub struct UserNetEngine {
     pub container_ip: Ipv4Addr,
@@ -11,17 +22,83 @@ pub struct UserNetEngine {
     pub dns_ip: Ipv4Addr,
     pub ports: Vec<PortMapping>,
     pub running: Arc<AtomicBool>,
+    #[allow(dead_code)]
+    bundle_path: Option<PathBuf>,
+    host_netns: Option<File>,
+    tcp_streams: Mutex<HashMap<TcpFlowKey, TcpStream>>,
 }
 
 impl UserNetEngine {
-    pub fn new(ports: &[PortMapping]) -> Self {
+    pub fn new(
+        bundle_path: Option<&Path>,
+        ports: &[PortMapping],
+        host_netns: Option<File>,
+    ) -> Self {
         Self {
             container_ip: DEFAULT_CONTAINER_IP,
             gateway_ip: DEFAULT_GATEWAY_IP,
             dns_ip: DEFAULT_DNS_IP,
             ports: ports.to_vec(),
             running: Arc::new(AtomicBool::new(true)),
+            bundle_path: bundle_path.map(Path::to_path_buf),
+            host_netns,
+            tcp_streams: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn is_outbound_ipv4(&self, ip: &Ipv4Header) -> bool {
+        ip.src_ip == self.container_ip
+            && ip.dst_ip != self.container_ip
+            && ip.dst_ip != self.gateway_ip
+            && ip.dst_ip != self.dns_ip
+    }
+
+    fn tcp_flow_key(tcp: &TcpHeader, ip: &Ipv4Header) -> TcpFlowKey {
+        TcpFlowKey {
+            src_port: tcp.src_port,
+            dst_ip: ip.dst_ip,
+            dst_port: tcp.dst_port,
+        }
+    }
+
+    fn build_tcp_reply(
+        eth: &EthernetHeader,
+        ip: &Ipv4Header,
+        reply_tcp: TcpHeader,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let reply_ip = Ipv4Header {
+            ihl: 5,
+            tos: 0,
+            total_length: (20 + 20 + payload.len()) as u16,
+            id: ip.id.wrapping_add(1),
+            flags_and_frag: 0x4000,
+            ttl: 64,
+            protocol: IP_PROTO_TCP,
+            checksum: 0,
+            src_ip: ip.dst_ip,
+            dst_ip: ip.src_ip,
+        };
+
+        let reply_eth = EthernetHeader {
+            dst_mac: eth.src_mac,
+            src_mac: VIRTUAL_GATEWAY_MAC,
+            ethertype: ETHERTYPE_IPV4,
+        };
+
+        let mut tcp_bytes = Vec::with_capacity(20 + payload.len());
+        reply_tcp.write_to(&mut tcp_bytes);
+        tcp_bytes.extend_from_slice(payload);
+
+        let csum =
+            compute_tcp_checksum(&reply_ip.src_ip, &reply_ip.dst_ip, IP_PROTO_TCP, &tcp_bytes);
+        tcp_bytes[16..18].copy_from_slice(&csum.to_be_bytes());
+
+        let mut out = Vec::with_capacity(14 + 20 + tcp_bytes.len());
+        reply_eth.write_to(&mut out);
+        reply_ip.write_to(&mut out);
+        out.extend_from_slice(&tcp_bytes);
+        out
     }
 
     /// Process a received raw Ethernet frame from the container TAP interface
@@ -72,172 +149,115 @@ impl UserNetEngine {
     }
 
     fn handle_tcp(&self, eth: &EthernetHeader, ip: &Ipv4Header, payload: &[u8]) -> Option<Vec<u8>> {
-        let (tcp, _) = TcpHeader::parse(payload)?;
+        let (tcp, tcp_data) = TcpHeader::parse(payload)?;
+        let outbound = self.is_outbound_ipv4(ip);
+        let flow = Self::tcp_flow_key(&tcp, ip);
 
-        // Intercept SYN: reply with SYN-ACK to establish TCP handshake with virtual gateway
-        if (tcp.flags & 0x02) != 0 {
-            let reply_seq = 1000u32;
-            let reply_ack = tcp.seq_num.wrapping_add(1);
-
-            let reply_tcp = TcpHeader {
-                src_port: tcp.dst_port,
-                dst_port: tcp.src_port,
-                seq_num: reply_seq,
-                ack_num: reply_ack,
-                data_offset: 20,
-                flags: 0x12, // SYN | ACK
-                window_size: 65535,
-                checksum: 0,
-                urgent_ptr: 0,
-            };
-
-            let reply_ip = Ipv4Header {
-                ihl: 5,
-                tos: 0,
-                total_length: 40,
-                id: ip.id.wrapping_add(1),
-                flags_and_frag: 0x4000,
-                ttl: 64,
-                protocol: IP_PROTO_TCP,
-                checksum: 0,
-                src_ip: ip.dst_ip,
-                dst_ip: ip.src_ip,
-            };
-
-            let reply_eth = EthernetHeader {
-                dst_mac: eth.src_mac,
-                src_mac: VIRTUAL_GATEWAY_MAC,
-                ethertype: ETHERTYPE_IPV4,
-            };
-
-            let mut tcp_bytes = Vec::with_capacity(20);
-            reply_tcp.write_to(&mut tcp_bytes);
-
-            let csum =
-                compute_tcp_checksum(&reply_ip.src_ip, &reply_ip.dst_ip, IP_PROTO_TCP, &tcp_bytes);
-            tcp_bytes[16..18].copy_from_slice(&csum.to_be_bytes());
-
-            let mut out = Vec::with_capacity(14 + 20 + 20);
-            reply_eth.write_to(&mut out);
-            reply_ip.write_to(&mut out);
-            out.extend_from_slice(&tcp_bytes);
-            return Some(out);
+        // Outbound SYN: dial from host network namespace and track the socket.
+        if outbound && (tcp.flags & 0x02) != 0 {
+            let target_addr =
+                std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, tcp.dst_port));
+            let connected = with_host_network(self.host_netns.as_ref(), || {
+                TcpStream::connect_timeout(&target_addr, std::time::Duration::from_secs(5))
+                    .context("usernet tcp connect")
+            });
+            if let Ok(stream) = connected {
+                let _ = stream.set_nodelay(true);
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
+                if let Ok(mut guard) = self.tcp_streams.lock() {
+                    guard.insert(flow, stream);
+                }
+                let reply_tcp = TcpHeader {
+                    src_port: tcp.dst_port,
+                    dst_port: tcp.src_port,
+                    seq_num: 1000,
+                    ack_num: tcp.seq_num.wrapping_add(1),
+                    data_offset: 20,
+                    flags: 0x12,
+                    window_size: 65535,
+                    checksum: 0,
+                    urgent_ptr: 0,
+                };
+                return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
+            }
+            return None;
         }
 
-        // Intercept FIN: reply with FIN-ACK
-        if (tcp.flags & 0x01) != 0 {
+        // FIN: tear down tracked flow
+        if outbound && (tcp.flags & 0x01) != 0 {
+            if let Ok(mut guard) = self.tcp_streams.lock() {
+                guard.remove(&flow);
+            }
             let reply_tcp = TcpHeader {
                 src_port: tcp.dst_port,
                 dst_port: tcp.src_port,
                 seq_num: tcp.ack_num,
                 ack_num: tcp.seq_num.wrapping_add(1),
                 data_offset: 20,
-                flags: 0x11, // FIN | ACK
+                flags: 0x11,
                 window_size: 65535,
                 checksum: 0,
                 urgent_ptr: 0,
             };
-
-            let reply_ip = Ipv4Header {
-                ihl: 5,
-                tos: 0,
-                total_length: 40,
-                id: ip.id.wrapping_add(1),
-                flags_and_frag: 0,
-                ttl: 64,
-                protocol: IP_PROTO_TCP,
-                checksum: 0,
-                src_ip: ip.dst_ip,
-                dst_ip: ip.src_ip,
-            };
-
-            let reply_eth = EthernetHeader {
-                dst_mac: eth.src_mac,
-                src_mac: VIRTUAL_GATEWAY_MAC,
-                ethertype: ETHERTYPE_IPV4,
-            };
-
-            let mut tcp_bytes = Vec::with_capacity(20);
-            reply_tcp.write_to(&mut tcp_bytes);
-            let csum =
-                compute_tcp_checksum(&reply_ip.src_ip, &reply_ip.dst_ip, IP_PROTO_TCP, &tcp_bytes);
-            tcp_bytes[16..18].copy_from_slice(&csum.to_be_bytes());
-
-            let mut out = Vec::with_capacity(14 + 40);
-            reply_eth.write_to(&mut out);
-            reply_ip.write_to(&mut out);
-            out.extend_from_slice(&tcp_bytes);
-            return Some(out);
+            return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
         }
 
-        // Forward outbound TCP data payload to host network and return response
-        let (_, tcp_data) = TcpHeader::parse(payload)?;
-        if !tcp_data.is_empty() {
-            let target_addr =
-                std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, tcp.dst_port));
-            if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-                &target_addr,
-                std::time::Duration::from_millis(500),
-            ) {
-                use std::io::{Read, Write};
-                let _ = stream.write_all(tcp_data);
-                let _ = stream.flush();
-                let mut resp_buf = [0u8; 16384];
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-                if let Ok(n) = stream.read(&mut resp_buf) {
-                    if n > 0 {
-                        let response_data = &resp_buf[..n];
-                        let reply_tcp = TcpHeader {
-                            src_port: tcp.dst_port,
-                            dst_port: tcp.src_port,
-                            seq_num: tcp.ack_num,
-                            ack_num: tcp.seq_num.wrapping_add(tcp_data.len() as u32),
-                            data_offset: 20,
-                            flags: 0x18, // PSH | ACK
-                            window_size: 65535,
-                            checksum: 0,
-                            urgent_ptr: 0,
-                        };
-
-                        let reply_ip = Ipv4Header {
-                            ihl: 5,
-                            tos: 0,
-                            total_length: (20 + 20 + response_data.len()) as u16,
-                            id: ip.id.wrapping_add(1),
-                            flags_and_frag: 0x4000,
-                            ttl: 64,
-                            protocol: IP_PROTO_TCP,
-                            checksum: 0,
-                            src_ip: ip.dst_ip,
-                            dst_ip: ip.src_ip,
-                        };
-
-                        let reply_eth = EthernetHeader {
-                            dst_mac: eth.src_mac,
-                            src_mac: VIRTUAL_GATEWAY_MAC,
-                            ethertype: ETHERTYPE_IPV4,
-                        };
-
-                        let mut tcp_bytes = Vec::with_capacity(20 + response_data.len());
-                        reply_tcp.write_to(&mut tcp_bytes);
-                        tcp_bytes.extend_from_slice(response_data);
-
-                        let csum = compute_tcp_checksum(
-                            &reply_ip.src_ip,
-                            &reply_ip.dst_ip,
-                            IP_PROTO_TCP,
-                            &tcp_bytes,
-                        );
-                        tcp_bytes[16..18].copy_from_slice(&csum.to_be_bytes());
-
-                        let mut out = Vec::with_capacity(14 + 20 + tcp_bytes.len());
-                        reply_eth.write_to(&mut out);
-                        reply_ip.write_to(&mut out);
-                        out.extend_from_slice(&tcp_bytes);
-                        return Some(out);
+        // Payload on established outbound flow
+        if outbound && !tcp_data.is_empty() {
+            use std::io::{Read, Write};
+            let mut guard = self.tcp_streams.lock().ok()?;
+            if !guard.contains_key(&flow) {
+                let target_addr =
+                    std::net::SocketAddr::V4(std::net::SocketAddrV4::new(ip.dst_ip, tcp.dst_port));
+                if let Ok(stream) = with_host_network(self.host_netns.as_ref(), || {
+                    TcpStream::connect_timeout(&target_addr, std::time::Duration::from_secs(5))
+                        .context("usernet tcp connect")
+                }) {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                    guard.insert(flow, stream);
+                }
+            }
+            if let Some(stream) = guard.get_mut(&flow) {
+                if stream.write_all(tcp_data).is_ok() {
+                    let _ = stream.flush();
+                    let mut resp_buf = [0u8; 16384];
+                    if let Ok(n) = stream.read(&mut resp_buf) {
+                        if n > 0 {
+                            let response_data = &resp_buf[..n];
+                            let reply_tcp = TcpHeader {
+                                src_port: tcp.dst_port,
+                                dst_port: tcp.src_port,
+                                seq_num: tcp.ack_num,
+                                ack_num: tcp.seq_num.wrapping_add(tcp_data.len() as u32),
+                                data_offset: 20,
+                                flags: 0x18,
+                                window_size: 65535,
+                                checksum: 0,
+                                urgent_ptr: 0,
+                            };
+                            return Some(Self::build_tcp_reply(eth, ip, reply_tcp, response_data));
+                        }
                     }
                 }
             }
+            return None;
+        }
+
+        // Legacy SYN-ACK for non-outbound probes (unit tests)
+        if (tcp.flags & 0x02) != 0 {
+            let reply_tcp = TcpHeader {
+                src_port: tcp.dst_port,
+                dst_port: tcp.src_port,
+                seq_num: 1000,
+                ack_num: tcp.seq_num.wrapping_add(1),
+                data_offset: 20,
+                flags: 0x12,
+                window_size: 65535,
+                checksum: 0,
+                urgent_ptr: 0,
+            };
+            return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
         }
 
         None
@@ -298,7 +318,7 @@ impl UserNetEngine {
         // Intercept DNS requests on port 53 sent to virtual gateway or DNS IP
         if (ip.dst_ip == self.gateway_ip || ip.dst_ip == self.dns_ip) && udp.dst_port == 53 {
             // Forward DNS query to host resolver
-            if let Ok(dns_reply) = forward_dns_query(udp_payload) {
+            if let Ok(dns_reply) = forward_dns_query(self.host_netns.as_ref(), udp_payload) {
                 return self.build_udp_reply(eth, ip, &udp, &dns_reply);
             }
         }
@@ -362,33 +382,54 @@ impl UserNetEngine {
     }
 }
 
-/// Forward DNS query buffer to standard host DNS servers and await response
-fn forward_dns_query(query: &[u8]) -> Result<Vec<u8>> {
-    use std::net::UdpSocket;
-    use std::time::Duration;
+#[cfg(target_os = "linux")]
+fn with_host_network<T, F: FnOnce() -> Result<T>>(host_netns: Option<&File>, f: F) -> Result<T> {
+    use nix::sched::{CloneFlags, setns};
 
-    let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket for DNS")?;
-    socket
-        .set_read_timeout(Some(Duration::from_millis(600)))
-        .context("Failed to set DNS read timeout")?;
-
-    // Try multiple standard upstream resolvers: local host resolver, Cloudflare, Google
-    let upstream_targets = [
-        "127.0.0.53:53",
-        "192.168.64.1:53",
-        "1.1.1.1:53",
-        "8.8.8.8:53",
-    ];
-    for target in upstream_targets {
-        if socket.send_to(query, target).is_ok() {
-            let mut buf = [0u8; 4096];
-            if let Ok((len, _)) = socket.recv_from(&mut buf) {
-                return Ok(buf[..len].to_vec());
+    if let Some(host_ns) = host_netns {
+        if let Ok(self_ns) = File::open("/proc/self/ns/net") {
+            if setns(host_ns, CloneFlags::CLONE_NEWNET).is_ok() {
+                let result = f();
+                let _ = setns(&self_ns, CloneFlags::CLONE_NEWNET);
+                return result;
             }
         }
     }
+    f()
+}
 
-    Err(anyhow!("All upstream DNS resolvers timed out"))
+#[cfg(not(target_os = "linux"))]
+fn with_host_network<T, F: FnOnce() -> Result<T>>(_host_netns: Option<&File>, f: F) -> Result<T> {
+    f()
+}
+
+/// Forward DNS query buffer to standard host DNS servers and await response
+fn forward_dns_query(host_netns: Option<&File>, query: &[u8]) -> Result<Vec<u8>> {
+    use std::net::UdpSocket;
+    use std::time::Duration;
+
+    with_host_network(host_netns, || {
+        let socket = UdpSocket::bind("0.0.0.0:0").context("Failed to bind UDP socket for DNS")?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(600)))
+            .context("Failed to set DNS read timeout")?;
+
+        let upstream_targets = [
+            "127.0.0.53:53",
+            "1.1.1.1:53",
+            "8.8.8.8:53",
+        ];
+        for target in upstream_targets {
+            if socket.send_to(query, target).is_ok() {
+                let mut buf = [0u8; 4096];
+                if let Ok((len, _)) = socket.recv_from(&mut buf) {
+                    return Ok(buf[..len].to_vec());
+                }
+            }
+        }
+
+        Err(anyhow!("All upstream DNS resolvers timed out"))
+    })
 }
 
 /// Linux-specific TAP Device Setup and IP/Route configuration
@@ -488,9 +529,14 @@ pub mod platform {
     }
 
     /// Run the pure-Rust user-mode TAP network engine in the current process
-    pub fn run_tap_network_loop(mut tap_file: File, ports: &[PortMapping]) {
+    pub fn run_tap_network_loop(
+        bundle_path: &Path,
+        mut tap_file: File,
+        ports: &[PortMapping],
+        host_netns: Option<File>,
+    ) {
         use std::io::{Read, Write};
-        let engine = UserNetEngine::new(ports);
+        let engine = UserNetEngine::new(Some(bundle_path), ports, host_netns);
         let mut buf = [0u8; 65536];
 
         loop {
@@ -532,7 +578,7 @@ pub mod platform {
 
         std::thread::spawn(move || {
             use std::io::{Read, Write};
-            let engine = UserNetEngine::new(&ports);
+            let engine = UserNetEngine::new(None, &ports, None);
             let mut buf = [0u8; 65536];
 
             while flag.load(std::sync::atomic::Ordering::Relaxed) {

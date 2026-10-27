@@ -95,6 +95,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         return Err(anyhow!("No bundle path specified for trampoline"));
     }
     let bundle_path = Path::new(&args[0]);
+    let _ = fs::write(
+        bundle_path.join("host_netns.pid"),
+        std::process::id().to_string(),
+    );
     let spec_path = bundle_path.join("config.json");
     if !spec_path.exists() {
         return Err(anyhow!("config.json not found in bundle {:?}", bundle_path));
@@ -240,6 +244,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 // 4. Child is now root in user namespace.
                 // First unshare network namespace if required, so we can configure networking
                 // with external helper commands (ip) before creating the container PID namespace.
+                let host_netns_for_tap = if requires_netns && network_mode.should_use_native_usernet() {
+                    std::fs::File::open("/proc/self/ns/net").ok()
+                } else {
+                    None
+                };
                 if requires_netns {
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWNET) {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
@@ -286,7 +295,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         // Fork background TAP engine worker before unsharing PID namespace
                         match unsafe { fork() } {
                             Ok(ForkResult::Child) => {
-                                platform::run_tap_network_loop(tap_file, &ports);
+                                platform::run_tap_network_loop(
+                                    bundle_path,
+                                    tap_file,
+                                    &ports,
+                                    host_netns_for_tap,
+                                );
                                 std::process::exit(0);
                             }
                             Ok(ForkResult::Parent { child: tap_child }) => {
@@ -395,6 +409,13 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         // Unshare network namespace first if required
         let mut tap_worker_pid = None;
         let mut fwd_helper_pid = None;
+        let host_netns_for_tap = if network_mode.requires_new_netns()
+            && network_mode.should_use_native_usernet()
+        {
+            std::fs::File::open("/proc/self/ns/net").ok()
+        } else {
+            None
+        };
         if network_mode.requires_new_netns() {
             unshare(CloneFlags::CLONE_NEWNET)
                 .context("Failed to unshare network namespace (requires CAP_NET_ADMIN or root)")?;
@@ -420,7 +441,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             unsafe {
                                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                             }
-                            platform::run_tap_network_loop(tap_file, &ports);
+                            platform::run_tap_network_loop(
+                                bundle_path,
+                                tap_file,
+                                &ports,
+                                host_netns_for_tap,
+                            );
                             std::process::exit(0);
                         }
                         Ok(ForkResult::Parent { child: tap_child }) => {

@@ -24,7 +24,7 @@ fn test_ethernet_header_roundtrip() {
 
 #[test]
 fn test_usernet_engine_arp_gateway_and_dns() {
-    let engine = UserNetEngine::new(&[]);
+    let engine = UserNetEngine::new(None, &[], None);
 
     // 1. ARP Request for Gateway
     let mut gw_frame = Vec::new();
@@ -98,7 +98,7 @@ fn test_usernet_engine_arp_gateway_and_dns() {
 
 #[test]
 fn test_usernet_engine_icmp_ping_gateway() {
-    let engine = UserNetEngine::new(&[]);
+    let engine = UserNetEngine::new(None, &[], None);
 
     let mut icmp_payload = vec![8, 0, 0, 0, 0xaa, 0xbb, 0x00, 0x05, 0x11, 0x22, 0x33, 0x44];
     let csum = compute_checksum(&icmp_payload);
@@ -160,7 +160,7 @@ fn test_udp_header_serialization() {
 
 #[test]
 fn test_usernet_engine_ignores_malformed_and_non_request_frames() {
-    let engine = UserNetEngine::new(&[]);
+    let engine = UserNetEngine::new(None, &[], None);
     assert!(engine.handle_incoming_frame(&[0x01, 0x02]).is_none());
 
     let mut unknown_eth = Vec::new();
@@ -197,7 +197,7 @@ fn test_usernet_engine_ignores_malformed_and_non_request_frames() {
 
 #[test]
 fn test_usernet_engine_icmp_non_gateway_destination_ignored() {
-    let engine = UserNetEngine::new(&[]);
+    let engine = UserNetEngine::new(None, &[], None);
     let icmp_payload = [8, 0, 0, 0, 0, 1, 0, 1];
     let ip = Ipv4Header {
         ihl: 5,
@@ -229,7 +229,7 @@ fn test_usernet_port_mappings_stored() {
         PortMapping::parse("8080:80").unwrap(),
         PortMapping::parse("127.0.0.1:3000:3000/tcp").unwrap(),
     ];
-    let engine = UserNetEngine::new(&ports);
+    let engine = UserNetEngine::new(None, &ports, None);
     assert_eq!(engine.ports.len(), 2);
     assert_eq!(engine.ports[0].host_port, 8080);
     assert_eq!(engine.ports[0].container_port, 80);

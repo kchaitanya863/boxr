@@ -72,7 +72,7 @@ impl NetworkMode {
     pub fn should_use_pasta(&self) -> bool {
         match self {
             Self::Pasta => true,
-            Self::Auto => PastaDriver::is_available(),
+            Self::Auto | Self::UserNet => PastaDriver::is_available(),
             _ => false,
         }
     }
@@ -80,7 +80,8 @@ impl NetworkMode {
     /// Determines whether native pure-Rust usernet should be activated
     pub fn should_use_native_usernet(&self) -> bool {
         match self {
-            Self::UserNet | Self::Bridge => true,
+            Self::Bridge => true,
+            Self::UserNet => !PastaDriver::is_available(),
             Self::Auto => !PastaDriver::is_available(),
             _ => false,
         }
@@ -292,7 +293,12 @@ mod tests {
         assert!(NetworkMode::UserNet.requires_new_netns());
 
         // Issue #414: usernet & bridge activate native usernet
-        assert!(NetworkMode::UserNet.should_use_native_usernet());
+        if PastaDriver::is_available() {
+            assert!(!NetworkMode::UserNet.should_use_native_usernet());
+            assert!(NetworkMode::UserNet.should_use_pasta());
+        } else {
+            assert!(NetworkMode::UserNet.should_use_native_usernet());
+        }
         assert!(NetworkMode::Bridge.should_use_native_usernet());
     }
 

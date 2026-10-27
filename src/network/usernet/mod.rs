@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn test_arp_request_and_reply_cycle() {
-        let engine = UserNetEngine::new(&[]);
+        let engine = UserNetEngine::new(None, &[], None);
         let arp = ArpPacket {
             htype: 1,
             ptype: 0x0800,
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn test_icmp_echo_ping_handling() {
-        let engine = UserNetEngine::new(&[]);
+        let engine = UserNetEngine::new(None, &[], None);
         let icmp_echo = [
             0x08, 0x00, // Type: 8 (Echo), Code: 0
             0xf7, 0xff, // Checksum placeholder
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn test_usernet_tcp_syn_and_handshake() {
-        let engine = UserNetEngine::new(&[]);
+        let engine = UserNetEngine::new(None, &[], None);
 
         let tcp_syn = TcpHeader {
             src_port: 54321,
@@ -201,7 +201,7 @@ mod tests {
             }
         });
 
-        let engine = UserNetEngine::new(&[]);
+        let engine = UserNetEngine::new(None, &[], None);
 
         let tcp_payload = b"GET / HTTP/1.1\r\n\r\n";
         let tcp_data = TcpHeader {
