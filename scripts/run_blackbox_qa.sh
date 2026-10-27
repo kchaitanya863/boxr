@@ -317,7 +317,7 @@ if section_enabled podman; then
     if [[ "${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" && "$(uname -s)" == "Linux" ]]; then
         # Bridge + FORCE uses the same embedded TAP stack as compose on Linux (passt bypassed).
         # Run after K3–K5 so rootless netns is warm; publish a port like compose services.
-        test_step "K6 embedded usernet gateway" "env BOXR_FORCE_EMBEDDED_USERNET=1 $BOXR_CMD run --rm --network bridge -p 18080:80 alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
+        test_step "K6 embedded usernet gateway" "$BOXR_CMD run --rm --network bridge -p 18080:80 alpine sh -c \"sleep 1; ping -c 1 -W 3 10.0.2.2\""
     fi
 fi
 
