@@ -236,15 +236,15 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     // Attach to existing container's network namespace (container:<target>)
                     let store = crate::storage::ContainerStore::new();
                     if let Some(target_rec) = store.find(target_cont) {
-                        let target_pid = target_rec.pid.or_else(|| {
-                            let p = std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
-                            fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<i32>().ok())
-                        });
+                        let pid_path =
+                            std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
+                        let target_pid = fs::read_to_string(pid_path)
+                            .ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok());
                         if let Some(t_pid) = target_pid {
                             let netns_path = format!("/proc/{}/ns/net", t_pid);
                             if let Ok(netns_file) = std::fs::File::open(&netns_path) {
-                                use std::os::unix::io::AsRawFd;
-                                let _ = nix::sched::setns(netns_file.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                                let _ = nix::sched::setns(&netns_file, CloneFlags::CLONE_NEWNET);
                             }
                         }
                     }
@@ -436,15 +436,15 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             // Root mode: attach to existing container's network namespace (container:<target>)
             let store = crate::storage::ContainerStore::new();
             if let Some(target_rec) = store.find(target_cont) {
-                let target_pid = target_rec.pid.or_else(|| {
-                    let p = std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
-                    fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<i32>().ok())
-                });
+                let pid_path =
+                    std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
+                let target_pid = fs::read_to_string(pid_path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok());
                 if let Some(t_pid) = target_pid {
                     let netns_path = format!("/proc/{}/ns/net", t_pid);
                     if let Ok(netns_file) = std::fs::File::open(&netns_path) {
-                        use std::os::unix::io::AsRawFd;
-                        let _ = nix::sched::setns(netns_file.as_raw_fd(), CloneFlags::CLONE_NEWNET);
+                        let _ = nix::sched::setns(&netns_file, CloneFlags::CLONE_NEWNET);
                     }
                 }
             }
