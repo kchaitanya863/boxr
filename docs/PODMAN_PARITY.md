@@ -28,7 +28,7 @@ Automated checks:
 | **volume exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **network exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **network reload** | full | partial | partial | partial | `podman_parity_blackbox_test`, `network/mod` | Refreshes bridge `/etc/hosts` + port wait |
-| **pod lifecycle** | partial | partial | partial | partial | `podman_parity_blackbox_test` | create → start → ps → rm |
+| **pod lifecycle** | partial | partial | partial | partial | `podman_parity_blackbox_test`, blackbox K12 | create → start → ps → rm |
 | **play kube** | partial | partial | partial | partial | `fixtures/podman/minimal-pod.yaml` | Pod + multi-doc YAML |
 | **generate spec** | partial | partial | partial | partial | `podman_parity_blackbox_test` | SpecGenerator JSON subset |
 | **quadlet** | partial | partial | partial | partial | `podman_parity_blackbox_test` | install + print round-trip |

@@ -335,6 +335,15 @@ if section_enabled podman; then
     printf 'artifact-parity' >"$ART_FILE"
     test_step "K11 artifact lifecycle" "$BOXR_CMD artifact add $ART_N \"$ART_FILE\" --type application/octet-stream && $BOXR_CMD artifact ls | grep -q $ART_N && $BOXR_CMD artifact rm $ART_N"
     rm -f "$ART_FILE" 2>/dev/null || true
+    POD="bb-pod-$(rand_id)"
+    PC="${POD}-c1"
+    test_step "K12 pod lifecycle" "$BOXR_CMD pod create --name $POD && $BOXR_CMD run -d --pod $POD --name $PC alpine:latest sleep 120 && $BOXR_CMD pod ps | grep -q $POD"
+    run_cmd "$BOXR_CMD pod rm -f $POD" 2>/dev/null || true
+    NET="bb-net-$(rand_id)"
+    NC="bb-netc-$(rand_id)"
+    test_step "K13 network reload" "$BOXR_CMD network create $NET && $BOXR_CMD network exists $NET && $BOXR_CMD run -d --name $NC alpine:latest sleep 120 && $BOXR_CMD network connect $NET $NC && $BOXR_CMD network reload $NC"
+    run_cmd "$BOXR_CMD rm -f $NC" 2>/dev/null || true
+    run_cmd "$BOXR_CMD network rm $NET" 2>/dev/null || true
 fi
 
 # --- Rust integration tests ---
