@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RegistryAuthArgs {
     /// Path of the authentication file
     #[arg(long = "authfile")]
@@ -8,6 +9,7 @@ pub struct RegistryAuthArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PullArgs {
     /// Set platform if server is multi-platform (e.g. linux/amd64, linux/arm64)
     #[arg(long = "platform")]
@@ -20,6 +22,7 @@ pub struct PullArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct SaveArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<String>,
@@ -27,6 +30,7 @@ pub struct SaveArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LoadArgs {
     #[arg(short = 'i', long = "input")]
     pub input: Option<String>,
@@ -35,6 +39,7 @@ pub struct LoadArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PushArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
@@ -42,6 +47,7 @@ pub struct PushArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LoginArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
@@ -55,6 +61,7 @@ pub struct LoginArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LogoutArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
@@ -62,6 +69,7 @@ pub struct LogoutArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct BuildArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
@@ -162,6 +170,7 @@ pub struct BuildArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct BuilderSubcommands {
     #[command(subcommand)]
     pub command: BuilderAction,
@@ -178,6 +187,7 @@ pub enum BuilderAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct BuilderPruneArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
@@ -190,6 +200,7 @@ pub struct BuilderPruneArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ComposeArgs {
     #[arg(short = 'f', long = "file", default_value = "docker-compose.yml")]
     pub file: String,
@@ -229,6 +240,7 @@ pub enum ComposeSubcommand {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeUpArgs {
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
@@ -267,6 +279,7 @@ pub struct ComposeUpArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeDownArgs {
     #[arg(short = 'v', long = "volumes")]
     pub volumes: bool,
@@ -279,6 +292,7 @@ pub struct ComposeDownArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposePsArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
@@ -295,6 +309,7 @@ pub struct ComposePsArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeLogsArgs {
     pub service: Option<String>,
     #[arg(short = 'f', long = "follow")]
@@ -314,6 +329,7 @@ pub struct ComposeLogsArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeRestartArgs {
     pub service: Option<String>,
     #[arg(long = "no-deps")]
@@ -321,6 +337,7 @@ pub struct ComposeRestartArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeExecArgs {
     pub service: String,
 
@@ -360,6 +377,7 @@ pub struct ComposeExecArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeBuildArgs {
     pub service: Option<String>,
     #[arg(long = "no-cache")]
@@ -375,11 +393,13 @@ pub struct ComposeBuildArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeServiceArgs {
     pub service: Option<String>,
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeRmArgs {
     #[arg(short = 'f', long = "force")]
     pub force: bool,
@@ -389,12 +409,14 @@ pub struct ComposeRmArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeCpArgs {
     pub src: String,
     pub dest: String,
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeRunArgs {
     pub service: String,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -402,12 +424,14 @@ pub struct ComposeRunArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposePortArgs {
     pub service: String,
     pub private_port: u16,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ImageSubcommands {
     #[command(subcommand)]
     pub command: ImageAction,
@@ -457,6 +481,7 @@ pub enum ImageAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImagePruneArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
@@ -469,6 +494,7 @@ pub struct ImagePruneArgs {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImagesArgs {
     /// Only show numeric IDs
     #[arg(short = 'q', long = "quiet")]
@@ -500,6 +526,7 @@ pub struct ImagesArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RmiArgs {
     /// Force removal of the image
     #[arg(short = 'f', long = "force")]
@@ -519,6 +546,7 @@ pub struct RmiArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ManifestSubcommands {
     #[command(subcommand)]
     pub command: ManifestAction,
@@ -557,6 +585,7 @@ pub enum ManifestAction {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct TagArgs {
     /// Source image
     pub source: String,
@@ -566,6 +595,7 @@ pub struct TagArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImportArgs {
     /// The URL or - to read from STDIN
     pub file: String,
@@ -584,6 +614,7 @@ pub struct ImportArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct HistoryArgs {
     /// Image to show history for
     pub image: String,
@@ -602,6 +633,7 @@ pub struct HistoryArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct SearchArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
@@ -623,6 +655,7 @@ pub struct SearchArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImageDiffArgs {
     /// Base image (or first image)
     pub image1: String,
@@ -636,6 +669,7 @@ pub struct ImageDiffArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImageScpArgs {
     /// Source image spec (e.g. [user@]host::image)
     pub source: String,
@@ -649,6 +683,7 @@ pub struct ImageScpArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImageSignArgs {
     /// Image to sign
     pub image: String,
@@ -663,6 +698,7 @@ pub struct ImageSignArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImageTreeArgs {
     /// Image to show tree for
     pub image: String,
@@ -673,6 +709,7 @@ pub struct ImageTreeArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ImageTrustSubcommands {
     #[command(subcommand)]
     pub command: ImageTrustAction,
@@ -702,6 +739,7 @@ pub enum ImageTrustAction {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UntagArgs {
     /// Image to untag
     pub image: String,

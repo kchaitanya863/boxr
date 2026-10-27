@@ -3,6 +3,7 @@ use clap::{Args, Subcommand};
 use super::image::RegistryAuthArgs;
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RunArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
@@ -423,6 +424,7 @@ pub struct RunArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct StopArgs {
     /// Seconds to wait before killing the container
     #[arg(short = 't', long = "time")]
@@ -437,6 +439,7 @@ pub struct StopArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct StartArgs {
     /// Attach container's STDOUT and STDERR and forward signals
     #[arg(short = 'a', long = "attach")]
@@ -463,6 +466,7 @@ pub struct StartArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LogsArgs {
     /// Follow log output
     #[arg(short = 'f', long = "follow")]
@@ -492,6 +496,7 @@ pub struct LogsArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ExecArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
@@ -534,6 +539,7 @@ pub struct ExecArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct InspectArgs {
     /// Format output using a custom template: 'json' or Go template
     #[arg(short = 'f', long = "format")]
@@ -552,6 +558,7 @@ pub struct InspectArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ContainerSubcommands {
     #[command(subcommand)]
     pub command: ContainerAction,
@@ -615,6 +622,7 @@ pub enum ContainerAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerPruneArgs {
     #[arg(short = 'f', long = "force")]
     pub force: bool,
@@ -623,6 +631,7 @@ pub struct ContainerPruneArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PsArgs {
     /// Show all containers (default shows just running)
     #[arg(short = 'a', long = "all")]
@@ -658,6 +667,7 @@ pub struct PsArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RmArgs {
     /// Force the removal of a running container
     #[arg(short = 'f', long = "force")]
@@ -688,12 +698,14 @@ pub struct RmArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct DiffArgs {
     /// Container to inspect changes on
     pub container: String,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct TopArgs {
     /// Container to inspect processes on
     pub container: String,
@@ -704,6 +716,7 @@ pub struct TopArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct CommitArgs {
     /// Commit message
     #[arg(short = 'm', long = "message")]
@@ -728,6 +741,7 @@ pub struct CommitArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PauseArgs {
     /// Containers to pause
     #[arg(required = true)]
@@ -735,6 +749,7 @@ pub struct PauseArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UnpauseArgs {
     /// Containers to unpause
     #[arg(required = true)]
@@ -742,6 +757,7 @@ pub struct UnpauseArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RenameArgs {
     /// Container to rename
     pub container: String,
@@ -751,6 +767,7 @@ pub struct RenameArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct WaitArgs {
     /// Containers to wait on
     #[arg(required = true)]
@@ -758,6 +775,7 @@ pub struct WaitArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct CpArgs {
     /// Source path (e.g. "my-container:/app/file" or "./local-file")
     pub src: String,
@@ -776,6 +794,7 @@ pub struct CpArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UpdateArgs {
     /// Memory limit
     #[arg(short = 'm', long = "memory")]
@@ -838,6 +857,7 @@ pub struct UpdateArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct AttachArgs {
     /// Do not attach STDIN
     #[arg(long = "no-stdin")]
@@ -848,6 +868,7 @@ pub struct AttachArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct KillArgs {
     /// Signal to send (e.g. SIGHUP, SIGTERM, SIGKILL)
     #[arg(short = 's', long = "signal")]
@@ -858,6 +879,7 @@ pub struct KillArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RestartArgs {
     /// Seconds to wait before killing the container
     #[arg(short = 't', long = "time", default_value_t = 10)]
@@ -871,6 +893,7 @@ pub struct RestartArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PortArgs {
     /// Container to inspect ports on
     pub container: String,
@@ -880,6 +903,7 @@ pub struct PortArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ExportArgs {
     /// Write to a file, instead of STDOUT
     #[arg(short = 'o', long = "output")]
@@ -890,6 +914,7 @@ pub struct ExportArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerCheckpointArgs {
     /// Container to checkpoint
     pub container: String,
@@ -908,6 +933,7 @@ pub struct ContainerCheckpointArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerRestoreArgs {
     /// Container to restore
     pub container: String,
@@ -922,6 +948,7 @@ pub struct ContainerRestoreArgs {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerCleanupArgs {
     /// Container to cleanup
     pub container: Option<String>,
@@ -936,6 +963,7 @@ pub struct ContainerCleanupArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerCloneArgs {
     /// Container to clone from
     pub source: String,
@@ -949,6 +977,7 @@ pub struct ContainerCloneArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerRunlabelArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
@@ -961,4 +990,25 @@ pub struct ContainerRunlabelArgs {
     /// Extra arguments passed to the label command
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub extra_args: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct MountArgs {
+    /// Container to mount
+    pub container: String,
+}
+
+#[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct UnmountArgs {
+    /// Container to unmount
+    pub container: String,
+}
+
+#[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct InitArgs {
+    /// Container to initialize
+    pub container: String,
 }

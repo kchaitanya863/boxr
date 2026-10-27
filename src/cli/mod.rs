@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod usage_errors;
 pub mod container;
 pub mod farm;
 pub mod image;
@@ -20,17 +21,58 @@ pub use secret::*;
 pub use system::*;
 pub use volumes_networks::*;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+
+/// Help layout expected by Podman `test/system/015-help.bats` (`grep -A1 '^Usage:'`).
+pub const PODMAN_LEAF_HELP: &str = "\
+{about-with-newline}\
+Usage:\n  \
+{usage}\n\
+\n\
+{all-args}\
+";
+
+/// Empty Podman stub commands (swarm, plugin, …) for help-test compatibility.
+#[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct StubCommandArgs {}
+
+/// `podman help [command]` (Podman BATS 015-help).
+#[derive(Args, Debug, Default)]
+#[command(
+    about = "Help about any command",
+    help_template = crate::cli::PODMAN_LEAF_HELP,
+    override_usage = "podman help [command] [options]"
+)]
+pub struct HelpArgs {
+    #[arg(value_name = "command")]
+    pub command: Vec<String>,
+}
+
+pub const PODMAN_GROUP_HELP: &str = "\
+{about-with-newline}\
+Usage:\n  \
+{usage}\n\
+\n\
+Available Commands:\n\
+{subcommands}\n\
+\n\
+Options:\n\
+{options}\
+";
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "boxr",
+    name = "podman",
+    bin_name = "podman",
     author = "Boxr Contributors",
     version,
-    about = "A fast, lightweight OCI container engine and runtime written in Rust",
-    long_about = "boxr is a complete Open Container Initiative (OCI) compliant container engine, image builder, compose orchestrator, and runtime written in Rust.",
+    about = "Manage pods, containers and images",
+    long_about = "Manage pods, containers and images",
     subcommand_required = true,
-    arg_required_else_help = false
+    arg_required_else_help = false,
+    disable_help_subcommand = true,
+    help_template = crate::cli::PODMAN_GROUP_HELP
 )]
 pub struct Cli {
     /// Path of the authentication file (Podman-compatible global flag)
@@ -42,6 +84,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Help about any command
+    Help(HelpArgs),
+
     /// Pull an image from an OCI registry (Docker Hub, GHCR, Quay, etc.)
     Pull(PullArgs),
 
@@ -217,32 +262,32 @@ pub enum Commands {
     Service(ServiceArgs),
 
     /// Manage Swarm (stub)
-    Swarm,
+    Swarm(StubCommandArgs),
 
     /// Manage plugins (stub)
-    Plugin,
+    Plugin(StubCommandArgs),
 
     /// Manage Swarm configs (stub)
-    Config,
+    Config(StubCommandArgs),
 
     /// Manage secrets
     Secret(SecretSubcommands),
 
     /// Manage Swarm nodes (stub)
-    Node,
+    Node(StubCommandArgs),
 
     /// Manage trust (stub)
-    Trust,
+    Trust(StubCommandArgs),
 
     /// Manage Podman-style virtual machines (macOS / Windows)
     Machine(MachineSubcommands),
 
     /// Mount a container's root filesystem and return the mount path
-    Mount { container: String },
+    Mount(MountArgs),
 
     /// Unmount a container's root filesystem
     #[command(alias = "umount")]
-    Unmount { container: String },
+    Unmount(UnmountArgs),
 
     /// Manage OCI artifacts
     Artifact(ArtifactSubcommands),
@@ -264,7 +309,7 @@ pub enum Commands {
     Kube(KubeSubcommands),
 
     /// Initialize a container
-    Init { container: String },
+    Init(InitArgs),
 
     /// Remove one or more tags from an image
     Untag(UntagArgs),

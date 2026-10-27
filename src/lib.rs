@@ -104,6 +104,9 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
     let command = cli.command;
 
     match command {
+        Commands::Help(args) => {
+            cli::usage_errors::run_help_command(&args.command);
+        }
         Commands::Pull(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             pull_image_with_platform(&args.image, args.platform.as_deref()).await?;
@@ -711,15 +714,15 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
         },
-        Commands::Swarm => {
+        Commands::Swarm(_) => {
             println!("Swarm mode is not enabled on this node");
             Ok(0)
         }
-        Commands::Plugin => {
+        Commands::Plugin(_) => {
             println!("boxr plugin management (stub)");
             Ok(0)
         }
-        Commands::Config => {
+        Commands::Config(_) => {
             println!("boxr config management (stub)");
             Ok(0)
         }
@@ -727,11 +730,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             handle_secret(args)?;
             Ok(0)
         }
-        Commands::Node => {
+        Commands::Node(_) => {
             println!("boxr node management (stub)");
             Ok(0)
         }
-        Commands::Trust => {
+        Commands::Trust(_) => {
             println!("boxr trust management (stub)");
             Ok(0)
         }
@@ -824,14 +827,14 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             handle_machine(args)?;
             Ok(0)
         }
-        Commands::Mount { container } => {
-            let path = mount::MountManager::new().mount_container(&container)?;
+        Commands::Mount(args) => {
+            let path = mount::MountManager::new().mount_container(&args.container)?;
             println!("{}", path);
             Ok(0)
         }
-        Commands::Unmount { container } => {
-            mount::MountManager::new().unmount_container(&container)?;
-            println!("{}", container);
+        Commands::Unmount(args) => {
+            mount::MountManager::new().unmount_container(&args.container)?;
+            println!("{}", args.container);
             Ok(0)
         }
         Commands::Artifact(args) => {
@@ -999,11 +1002,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Commands::Init { container } => {
+        Commands::Init(args) => {
             let store = ContainerStore::new();
             let c = store
-                .find(&container)
-                .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
+                .find(&args.container)
+                .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
             println!("{}", c.id);
             Ok(0)
         }
@@ -3449,35 +3452,27 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
 pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
     let store = VolumeStore::new();
     match args.command {
-        VolumeAction::Create {
-            name,
-            name_flag,
-            driver,
-            opts,
-            labels,
-            scope,
-            ..
-        } => {
+        VolumeAction::Create(args) => {
             let mut label_map = HashMap::new();
-            for l in labels {
+            for l in args.labels {
                 if let Some((k, v)) = l.split_once('=') {
                     label_map.insert(k.to_string(), v.to_string());
                 }
             }
             let mut opt_map = HashMap::new();
-            for o in opts {
+            for o in args.opts {
                 if let Some((k, v)) = o.split_once('=') {
                     opt_map.insert(k.to_string(), v.to_string());
                 } else {
                     opt_map.insert(o.to_string(), "".to_string());
                 }
             }
-            let resolved_name = name_flag.or(name);
+            let resolved_name = args.name_flag.or(args.name);
             let vol = store.create_with_options(
                 resolved_name.as_deref(),
-                &driver,
+                &args.driver,
                 Some(label_map),
-                scope.as_deref().unwrap_or("local"),
+                args.scope.as_deref().unwrap_or("local"),
                 Some(opt_map),
             )?;
             println!("{}", vol.name);

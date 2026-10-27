@@ -65,6 +65,19 @@ write_wrapper() {
 set -euo pipefail
 export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-$HOME/.boxr-bats}}"
 mkdir -p "\$BOXR_HOME"
+# Podman BATS expect '[options]' (lower case) in usage lines.
+podmanize_help() {
+  sed -e 's/^Usage: podman /Usage:\\n  podman /' \
+      -e 's/\\[OPTIONS\\]/[options]/g' \
+      -e 's/\\[ARGS\\]/[args]/g' \
+      -e 's/ podman \\([^ ]*\\) \\[options\\] <COMMAND>/ podman \\1 [command] [options]/g' \
+      -e 's/\\[options\\] <COMMAND>/[command] [options]/g' \
+      -e 's/podman help \\[options\\] \\[command\\]/podman help [command] [options]/g'
+}
+if [[ "\${1:-}" == "help" ]] || [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
+  "$BOXR_BIN" "\$@" | podmanize_help
+  exit "\${PIPESTATUS[0]}"
+fi
 exec "$BOXR_BIN" "\$@"
 EOF
   chmod +x "$WRAPPER"

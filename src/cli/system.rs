@@ -1,12 +1,14 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct DaemonArgs {
     #[arg(short = 's', long = "socket")]
     pub socket: Option<String>,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct SpecArgs {
     /// Path to bundle directory where config.json should be created (default: current directory)
     #[arg(short = 'b', long = "bundle")]
@@ -14,6 +16,7 @@ pub struct SpecArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct StatsArgs {
     /// Disable streaming stats and only pull the first result
     #[arg(long = "no-stream")]
@@ -33,6 +36,7 @@ pub struct StatsArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct EventsArgs {
     /// Show all events created since timestamp
     #[arg(long = "since")]
@@ -49,6 +53,7 @@ pub struct EventsArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct CompletionArgs {
     /// Target shell (bash, zsh, fish)
     #[arg(default_value = "zsh")]
@@ -60,6 +65,7 @@ pub struct CompletionArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct AliasArgs {
     /// Install wrapper script in ~/.boxr/bin/docker
     #[arg(long = "install")]
@@ -71,6 +77,7 @@ pub struct AliasArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ContextSubcommands {
     #[command(subcommand)]
     pub command: ContextAction,
@@ -119,12 +126,14 @@ pub enum ContextAction {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct SystemSubcommands {
     #[command(subcommand)]
     pub command: SystemAction,
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct SystemDfArgs {
     #[arg(short = 'f', long = "format")]
     pub format: Option<String>,
@@ -176,6 +185,7 @@ pub enum SystemAction {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ServiceArgs {
     #[command(subcommand)]
     pub action: ServiceAction,
@@ -196,6 +206,7 @@ pub enum ServiceAction {
 }
 
 #[derive(Args, Debug, Default, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct FormatArgs {
     /// Format output using a custom template: 'json' or Go template
     #[arg(short = 'f', long = "format")]
@@ -203,12 +214,14 @@ pub struct FormatArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct PodSubcommands {
     #[command(subcommand)]
     pub command: PodAction,
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PodLsArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
@@ -330,6 +343,7 @@ pub enum PodAction {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct PlaySubcommands {
     #[command(subcommand)]
     pub command: PlayAction,
@@ -348,6 +362,7 @@ pub enum PlayAction {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct GenerateSubcommands {
     #[command(subcommand)]
     pub command: GenerateAction,
@@ -376,6 +391,7 @@ pub enum GenerateAction {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UnshareArgs {
     /// Command to run inside new user namespace
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -383,6 +399,7 @@ pub struct UnshareArgs {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct AutoUpdateArgs {
     /// Only check for updates without pulling or restarting
     #[arg(long = "dry-run")]
@@ -396,6 +413,7 @@ pub struct AutoUpdateArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct HealthcheckSubcommands {
     #[command(subcommand)]
     pub command: HealthcheckAction,
@@ -411,6 +429,7 @@ pub enum HealthcheckAction {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PodLogsArgs {
     /// Pod to fetch logs from
     pub pod: String,
@@ -423,12 +442,14 @@ pub struct PodLogsArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct GenerateSpecArgs {
     /// Container name or ID to generate Specgen JSON for
     pub target: String,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct SystemConnectionSubcommands {
     #[command(subcommand)]
     pub command: SystemConnectionAction,
