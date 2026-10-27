@@ -3683,7 +3683,9 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             println!("Disconnected {} from {}", container, network);
         }
         NetworkAction::Reload { containers } => {
-            reload_container_networks(&containers)?;
+            for name in reload_container_networks(&containers)? {
+                println!("{}", name);
+            }
         }
         NetworkAction::Exists { name } => {
             ensure_network_exists(&name)?;
@@ -5896,12 +5898,13 @@ pub fn ensure_secret_exists(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn reload_container_networks(containers: &[String]) -> Result<()> {
+pub fn reload_container_networks(containers: &[String]) -> Result<Vec<String>> {
     if containers.is_empty() {
         return Err(anyhow!("requires at least one container name or ID"));
     }
     let store = ContainerStore::new();
     let net_store = NetworkStore::new();
+    let mut reloaded = Vec::with_capacity(containers.len());
     for query in containers {
         let container = store
             .find(query)
@@ -5922,9 +5925,9 @@ pub fn reload_container_networks(containers: &[String]) -> Result<()> {
                 std::time::Duration::from_secs(15),
             )?;
         }
-        println!("{}", container.name);
+        reloaded.push(container.name.clone());
     }
-    Ok(())
+    Ok(reloaded)
 }
 
 pub fn handle_machine(args: cli::MachineSubcommands) -> Result<()> {

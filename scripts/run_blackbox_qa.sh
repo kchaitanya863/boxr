@@ -125,17 +125,17 @@ test_step() {
     local name="$1"
     local cmd="$2"
     TOTAL_TESTS=$((TOTAL_TESTS + 1))
-    printf "  [..] %-60s " "$name"
+    printf "  [..] %-60s\n" "$name"
     local output exit_code=0
     output=$(run_cmd "$cmd" 2>&1) || exit_code=$?
     if [[ $exit_code -eq 0 ]]; then
         PASSED_TESTS=$((PASSED_TESTS + 1))
-        printf "\r  [${GREEN}PASS${NC}] %-60s\n" "$name"
+        printf "  [${GREEN}PASS${NC}] %-60s\n" "$name"
         [[ -n "$JUNIT_FILE" ]] && echo "<testcase name=\"${name}\" classname=\"blackbox\"/>" >> "$JUNIT_FILE.tmp"
         return 0
     fi
     FAILED_TESTS=$((FAILED_TESTS + 1))
-    printf "\r  [${RED}FAIL${NC}] %-60s (exit %d)\n" "$name" "$exit_code"
+    printf "  [${RED}FAIL${NC}] %-60s (exit %d)\n" "$name" "$exit_code"
     echo -e "${YELLOW}       $cmd${NC}"
     echo -e "${RED}       ${output}${NC}"
     [[ -n "$JUNIT_FILE" ]] && echo "<testcase name=\"${name}\" classname=\"blackbox\"><failure>${output}</failure></testcase>" >> "$JUNIT_FILE.tmp"
@@ -319,11 +319,9 @@ if section_enabled podman; then
     fi
     test_step "K7 image exists" "$BOXR_CMD pull alpine:latest >/dev/null && $BOXR_CMD image exists alpine:latest"
     SPEC_C="bb-spec-$(rand_id)"
-    test_step "K8 generate spec" "$BOXR_CMD run -d --name $SPEC_C alpine:latest sleep 120 && $BOXR_CMD generate spec $SPEC_C | grep -q alpine"
-    run_cmd "$BOXR_CMD rm -f $SPEC_C" 2>/dev/null || true
+    test_step "K8 generate spec" "$BOXR_CMD run -d --name $SPEC_C alpine:latest sleep 120 >/dev/null && $BOXR_CMD generate spec $SPEC_C | grep -q alpine && $BOXR_CMD rm -f $SPEC_C >/dev/null"
     CP_C="bb-cp-$(rand_id)"
-    test_step "K9 checkpoint restore" "$BOXR_CMD run -d --name $CP_C alpine:latest sleep 300 && $BOXR_CMD container checkpoint $CP_C && $BOXR_CMD stop $CP_C && $BOXR_CMD container restore $CP_C"
-    run_cmd "$BOXR_CMD rm -f $CP_C" 2>/dev/null || true
+    test_step "K9 checkpoint restore" "$BOXR_CMD run -d --name $CP_C alpine:latest sleep 300 >/dev/null && $BOXR_CMD container checkpoint $CP_C && $BOXR_CMD stop $CP_C && $BOXR_CMD container restore $CP_C && $BOXR_CMD rm -f $CP_C >/dev/null"
     VEX="bb-vex-$(rand_id)"
     VIM="bb-vim-$(rand_id)"
     VOL_TAR="$(mktemp "${TMPDIR:-/tmp}/boxr-vol.XXXXXX").tar"
@@ -337,15 +335,12 @@ if section_enabled podman; then
     rm -f "$ART_FILE" 2>/dev/null || true
     POD="bb-pod-$(rand_id)"
     PC="${POD}-c1"
-    test_step "K12 pod lifecycle" "$BOXR_CMD pod create --name $POD >/dev/null && $BOXR_CMD run -d --pod $POD --name $PC alpine:latest sleep 120 >/dev/null && $BOXR_CMD pod ps | grep -q $POD"
-    run_cmd "$BOXR_CMD pod rm -f $POD" 2>/dev/null || true
-    NET="bb-net-$(rand_id)"
-    NC="bb-netc-$(rand_id)"
-    test_step "K13 network reload" "$BOXR_CMD network create $NET >/dev/null && $BOXR_CMD network exists $NET >/dev/null && $BOXR_CMD run -d --name $NC alpine:latest sleep 120 >/dev/null && $BOXR_CMD network connect $NET $NC >/dev/null && $BOXR_CMD network reload $NC >/dev/null"
-    run_cmd "$BOXR_CMD rm -f $NC" 2>/dev/null || true
-    run_cmd "$BOXR_CMD network rm $NET" 2>/dev/null || true
+    test_step "K12 pod lifecycle" "$BOXR_CMD pod create --name $POD >/dev/null && $BOXR_CMD run -d --pod $POD --name $PC alpine:latest sleep 120 >/dev/null && $BOXR_CMD pod ps | grep -q $POD && $BOXR_CMD pod rm -f $POD >/dev/null"
     test_step "K14 auto-update dry-run" "$BOXR_CMD auto-update --dry-run"
     test_step "K15 system connection ls" "$BOXR_CMD system connection ls | grep -qE 'local|NAME'"
+    NET="bb-net-$(rand_id)"
+    NC="bb-netc-$(rand_id)"
+    test_step "K13 network reload" "$BOXR_CMD network create $NET >/dev/null && $BOXR_CMD network exists $NET >/dev/null && $BOXR_CMD run -d --name $NC alpine:latest sleep 120 >/dev/null && $BOXR_CMD network connect $NET $NC >/dev/null && $BOXR_CMD network reload $NC >/dev/null && $BOXR_CMD rm -f $NC >/dev/null && $BOXR_CMD network rm $NET >/dev/null"
 fi
 
 # --- Rust integration tests ---
