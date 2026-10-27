@@ -68,7 +68,13 @@ jobs:
       - name: Run Test Suite
         run: cargo test --all --verbose -- --test-threads=1
 
-      - name: Black-Box QA (podman + runtime + network)
+      - name: Black-Box QA (runtime + network)
+        run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s runtime
+
+      - name: Black-Box QA (network + DNS)
+        run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s network
+
+      - name: Black-Box QA (podman P0 shell)
         run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
 
       - name: Run Black-Box QA (shell smoke)
