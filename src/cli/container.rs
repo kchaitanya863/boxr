@@ -435,7 +435,7 @@ pub struct StopArgs {
     pub signal: Option<String>,
 
     /// Stop all running containers
-    #[arg(long = "all")]
+    #[arg(short = 'a', long = "all")]
     pub all: bool,
 
     /// Ignore errors when a container cannot be stopped
@@ -445,6 +445,10 @@ pub struct StopArgs {
     /// Suppress output
     #[arg(long = "noout")]
     pub noout: bool,
+
+    /// Read container ID from the given file
+    #[arg(long = "cidfile")]
+    pub cidfile: Option<String>,
 
     #[arg(value_name = "CONTAINER")]
     pub containers: Vec<String>,

@@ -273,6 +273,7 @@ pub async fn stop_container(
         query.t,
         Some(&state.home),
         true,
+        None,
     ) {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,

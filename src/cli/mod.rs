@@ -78,6 +78,9 @@ pub struct Cli {
     /// Path of the authentication file (Podman-compatible global flag)
     #[arg(global = true, long = "authfile")]
     pub authfile: Option<String>,
+    /// Suppress stdout from supported commands (Podman global flag)
+    #[arg(global = true, long = "noout")]
+    pub noout: bool,
     #[command(subcommand)]
     pub command: Commands,
 }

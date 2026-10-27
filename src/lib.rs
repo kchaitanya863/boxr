@@ -101,6 +101,7 @@ fn authfile_exit_125(global: Option<&str>, local: Option<&str>) -> Result<()> {
 pub async fn run_cli(cli: Cli) -> Result<i32> {
     ensure_directories()?;
     let global_auth = cli.authfile.as_deref();
+    let global_noout = cli.noout;
     authfile_exit_125(global_auth, None)?;
     let command = cli.command;
 
@@ -162,7 +163,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Stop(args) => {
-            stop_containers(&args)?;
+            let mut stop_args = args;
+            if global_noout {
+                stop_args.noout = true;
+            }
+            stop_containers(&stop_args)?;
             Ok(0)
         }
         Commands::Start(args) => {
@@ -2055,7 +2060,7 @@ pub(crate) fn get_process_tree_pids(root_pids: &[i32]) -> Vec<i32> {
 }
 
 pub fn stop_container(container: &str, signal: Option<&str>) -> Result<()> {
-    stop_container_with_home_and_timeout(container, signal, None, None, false)
+    stop_container_with_home_and_timeout(container, signal, None, None, false, None)
 }
 
 pub fn stop_container_with_home(
@@ -2063,7 +2068,7 @@ pub fn stop_container_with_home(
     signal: Option<&str>,
     home_opt: Option<&Path>,
 ) -> Result<()> {
-    stop_container_with_home_and_timeout(container, signal, None, home_opt, false)
+    stop_container_with_home_and_timeout(container, signal, None, home_opt, false, None)
 }
 
 pub fn stop_container_with_home_and_timeout(
@@ -2072,14 +2077,21 @@ pub fn stop_container_with_home_and_timeout(
     timeout_secs: Option<u64>,
     home_opt: Option<&Path>,
     quiet: bool,
+    output_label: Option<&str>,
 ) -> Result<()> {
     let store = match home_opt {
         Some(h) => ContainerStore::with_home(h.to_path_buf()),
         None => ContainerStore::new(),
     };
-    let c = store
-        .find(container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
+    let c = match store.find(container) {
+        Some(c) => c,
+        None => {
+            cli::usage_errors::exit_usage_error(format!(
+                "no container with name or ID \"{}\" found: no such container",
+                container
+            ));
+        }
+    };
 
     let sig_num = if let Some(s) = signal {
         runtime::kill::ContainerKiller::parse_signal(s).unwrap_or(libc::SIGTERM)
@@ -2088,6 +2100,7 @@ pub fn stop_container_with_home_and_timeout(
     };
 
     let mut used_sigkill = false;
+    let grace_secs = timeout_secs.unwrap_or(10);
 
     #[cfg(unix)]
     {
@@ -2123,7 +2136,6 @@ pub fn stop_container_with_home_and_timeout(
             workload_pids.clone()
         };
 
-        let grace_secs = timeout_secs.unwrap_or(10);
         let grace_ms = grace_secs * 1000;
         let iters = (grace_ms / 50).max(1);
         for pid in &stop_pids {
@@ -2185,53 +2197,64 @@ pub fn stop_container_with_home_and_timeout(
     let exit_code = if used_sigkill { 137 } else { 0 };
     store.update_status(&c.id, ContainerStatus::Exited(exit_code))?;
     let _ = guardrails::ProcessReaper::reap_stale_containers();
-    #[cfg(unix)]
     if used_sigkill {
         eprintln!(
-            "StopSignal SIGTERM failed to stop container {}, resorting to SIGKILL",
-            c.id
+            "StopSignal SIGTERM failed to stop container {} in {} seconds, resorting to SIGKILL",
+            c.name,
+            grace_secs
         );
     }
     if !quiet {
-        println!("{}", container);
+        println!("{}", output_label.unwrap_or(container));
     }
     Ok(())
 }
 
-fn parse_restart_policy_filter(value: &str) -> Result<health::RestartPolicy> {
-    health::parse_restart_policy(value)
-        .map_err(|_| anyhow!("{} invalid restart policy", value))
+fn parse_restart_policy_filter(value: &str) -> health::RestartPolicy {
+    match health::parse_restart_policy(value) {
+        Ok(p) => p,
+        Err(_) => {
+            cli::usage_errors::exit_usage_error(format!("{} invalid restart policy", value));
+        }
+    }
 }
 
-fn container_matches_restart_filter(
+fn container_matches_start_filters(
     c: &crate::storage::ContainerRecord,
     filters: &[String],
 ) -> Result<bool> {
-    let restart_filters: Vec<String> = filters
-        .iter()
-        .filter_map(|f| {
-            f.split_once('=')
-                .filter(|(k, _)| k.trim() == "restart-policy")
-                .map(|(_, v)| v.trim().to_string())
-        })
-        .collect();
-    if restart_filters.is_empty() {
+    if filters.is_empty() {
         return Ok(true);
     }
-    for v in restart_filters {
-        let want = parse_restart_policy_filter(&v)?;
-        let matches = match (&c.restart_policy, &want) {
-            (
-                health::RestartPolicy::OnFailure { .. },
-                health::RestartPolicy::OnFailure { .. },
-            ) => true,
-            (a, b) => a == b,
+    for f in filters {
+        let (key, value) = f
+            .split_once('=')
+            .map(|(k, v)| (k.trim(), v.trim()))
+            .ok_or_else(|| anyhow!("invalid filter: {}", f))?;
+        let matches = match key {
+            "restart-policy" => {
+                let want = parse_restart_policy_filter(value);
+                match (&c.restart_policy, &want) {
+                    (
+                        health::RestartPolicy::OnFailure { .. },
+                        health::RestartPolicy::OnFailure { .. },
+                    ) => true,
+                    (a, b) => a == b,
+                }
+            }
+            "exited" => {
+                let want_code = value
+                    .parse::<i32>()
+                    .map_err(|_| anyhow!("invalid exited filter: {}", value))?;
+                matches!(c.status, ContainerStatus::Exited(code) if code == want_code)
+            }
+            _ => true,
         };
-        if matches {
-            return Ok(true);
+        if !matches {
+            return Ok(false);
         }
     }
-    Ok(false)
+    Ok(true)
 }
 
 pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
@@ -2256,7 +2279,7 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
             let c = store
                 .find(name)
                 .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
-            if container_matches_restart_filter(&c, &args.filter)? {
+            if container_matches_start_filters(&c, &args.filter)? {
                 start_one(&store, name, name).await?;
             }
         }
@@ -2274,7 +2297,7 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
             ) {
                 continue;
             }
-            if !container_matches_restart_filter(&c, &args.filter)? {
+            if !container_matches_start_filters(&c, &args.filter)? {
                 continue;
             }
             start_one(&store, &c.name, &c.id).await?;
@@ -2293,12 +2316,47 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
         let rec = store
             .find(name)
             .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
-        start_one(&store, name, &rec.id).await?;
+        start_one(&store, name, name).await?;
     }
     Ok(())
 }
 
 pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
+    if let Some(path) = &args.cidfile {
+        match std::fs::read_to_string(path) {
+            Ok(id) => {
+                let id = id.trim();
+                if !id.is_empty() {
+                    let mut containers = args.containers.clone();
+                    containers.push(id.to_string());
+                    return stop_containers(&cli::StopArgs {
+                        time: args.time,
+                        signal: args.signal.clone(),
+                        all: args.all,
+                        ignore: args.ignore,
+                        noout: args.noout,
+                        cidfile: None,
+                        containers,
+                    });
+                }
+            }
+            Err(e) => {
+                if args.ignore {
+                    return Ok(());
+                }
+                let detail = if e.kind() == std::io::ErrorKind::NotFound {
+                    "no such file or directory".to_string()
+                } else {
+                    e.to_string()
+                };
+                cli::usage_errors::exit_usage_error(format!(
+                    "reading CIDFile: open {}: {}",
+                    path,
+                    detail
+                ));
+            }
+        }
+    }
     let timeout = match args.time {
         None => None,
         Some(-1) => None,
@@ -2307,25 +2365,32 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
         _ => None,
     };
     let store = ContainerStore::new();
-    let targets: Vec<String> = if args.all {
+    let targets: Vec<(String, String)> = if args.all {
         store
             .list()
             .into_iter()
             .filter(|c| matches!(c.status, ContainerStatus::Running))
-            .map(|c| c.name.clone())
+            .map(|c| (c.name.clone(), c.id.clone()))
             .collect()
     } else if args.containers.is_empty() {
         return Err(anyhow!("you must provide at least one container name or ID"));
     } else {
-        args.containers.clone()
+        args.containers
+            .iter()
+            .map(|input| (input.clone(), input.clone()))
+            .collect()
     };
-    for t in targets {
+    for (lookup, display) in targets {
+        if args.ignore && store.find(&lookup).is_none() {
+            continue;
+        }
         if let Err(e) = stop_container_with_home_and_timeout(
-            &t,
+            &lookup,
             args.signal.as_deref(),
             timeout,
             None,
             args.noout,
+            Some(&display),
         ) {
             if !args.ignore {
                 return Err(e);
@@ -4379,7 +4444,12 @@ pub fn remove_container_opts(container: &str, force: bool, remove_volumes: bool)
     let c = match store.find(container) {
         Some(c) => c,
         None if force => return Ok(()),
-        None => return Err(anyhow!("Container '{}' not found", container)),
+        None => {
+            return Err(anyhow!(
+                "no container with ID or name \"{}\" found: no such container",
+                container
+            ));
+        }
     };
 
     let is_active =
