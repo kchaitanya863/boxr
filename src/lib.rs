@@ -2678,7 +2678,9 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
     }
 
     if args.command.is_empty() {
-        return Err(anyhow!("Command cannot be empty for exec"));
+        cli::usage_errors::exit_usage_error(
+            "must provide a non-empty command to start an exec session",
+        );
     }
 
     let _term_guard = if args.interactive && args.tty && !args.detach {
@@ -3846,6 +3848,14 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 }
             }
             let resolved_name = args.name_flag.or(args.name);
+            if args.ignore {
+                if let Some(ref name) = resolved_name {
+                    if let Some(existing) = store.find(name) {
+                        println!("{}", existing.name);
+                        return Ok(());
+                    }
+                }
+            }
             let vol = store.create_with_options(
                 resolved_name.as_deref(),
                 &args.driver,
@@ -3863,11 +3873,7 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 }
             } else if let Some(fmt) = &ls_args.format {
                 for v in &vols {
-                    let mut line = fmt.clone();
-                    line = line.replace("{{.Name}}", &v.name);
-                    line = line.replace("{{.Driver}}", &v.driver);
-                    line = line.replace("{{.Scope}}", &v.scope);
-                    println!("{}", line);
+                    println!("{}", apply_volume_ls_format_template(fmt, v));
                 }
             } else {
                 if !ls_args.noheading {
@@ -4577,8 +4583,19 @@ pub fn rm_volumes(store: &VolumeStore, args: &cli::VolumeRmArgs) -> Result<()> {
         return Err(anyhow!("volume name is required"));
     }
     for name in names {
-        store.remove(&name)?;
-        println!("{}", name);
+        match store.remove_with_force(&name, args.force) {
+            Ok(_) => println!("{}", name),
+            Err(e) if args.force && e.to_string().contains("not found") => {}
+            Err(e) => {
+                if e.to_string().contains("not found") {
+                    return Err(anyhow!(
+                        "no volume with name \"{}\" found: no such volume",
+                        name
+                    ));
+                }
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
@@ -6343,6 +6360,24 @@ fn load_container_labels_from_bundle(bundle_path: &str) -> HashMap<String, Strin
         }
     }
     labels_map
+}
+
+fn apply_volume_ls_format_template(template: &str, v: &volume::VolumeRecord) -> String {
+    let labels_flat = ps_labels_string(&v.labels);
+    let mut line = template.to_string();
+    for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
+        if line.contains(pat) {
+            let quoted =
+                serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
+            line = line.replace(pat, &quoted);
+        }
+    }
+    line = line.replace("{{.Labels}}", &labels_flat);
+    line = line.replace("{{ .Labels }}", &labels_flat);
+    line = line.replace("{{.Name}}", &v.name);
+    line = line.replace("{{.Driver}}", &v.driver);
+    line = line.replace("{{.Scope}}", &v.scope);
+    line
 }
 
 fn ps_labels_string(labels: &HashMap<String, String>) -> String {

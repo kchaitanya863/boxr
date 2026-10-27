@@ -731,8 +731,27 @@ pub fn exec_in_bundle(
         let _ = cmd.spawn()?;
         return Ok(0);
     }
-    match cmd.status() {
-        Ok(status) => return Ok(status.code().unwrap_or(0)),
+    match cmd.output() {
+        Ok(output) => {
+            let code = output.status.code().unwrap_or(1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.is_empty() {
+                print!("{}", stdout);
+            }
+            let mut msg = stderr.trim().to_string();
+            if let Some(rest) = msg.strip_prefix("nsenter: failed to execute ") {
+                if let Some((_, reason)) = rest.rsplit_once(": ") {
+                    msg = reason.to_lowercase();
+                } else {
+                    msg = rest.to_lowercase();
+                }
+            }
+            if !msg.is_empty() {
+                eprintln!("{}", msg);
+            }
+            return Ok(code);
+        }
         Err(_) => {
             // Fallback: enter namespaces via /proc/<pid>/ns using setns if nsenter command is not installed
             use nix::sched::{CloneFlags, setns};

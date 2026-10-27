@@ -64,6 +64,9 @@ pub struct VolumeCreateArgs {
     /// Set metadata for a volume
     #[arg(long = "label")]
     pub labels: Vec<String>,
+    /// Do not fail if the volume already exists
+    #[arg(long = "ignore")]
+    pub ignore: bool,
     /// Cluster Volume availability (active, pause, drain)
     #[arg(long = "availability")]
     pub availability: Option<String>,
@@ -103,6 +106,9 @@ pub struct VolumeRmArgs {
     pub force: bool,
     #[arg(short = 'a', long = "all")]
     pub all: bool,
+    /// Accepted for Podman teardown compatibility (ignored for volumes)
+    #[arg(short = 't', long = "time", hide = true)]
+    pub time: Option<u32>,
     pub names: Vec<String>,
 }
 
