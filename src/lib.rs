@@ -98,10 +98,78 @@ fn authfile_exit_125(global: Option<&str>, local: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Podman global `--noout` / `--out` behavior for container ID emission.
+#[derive(Debug, Clone, Default)]
+pub struct CliOutputPolicy {
+    pub noout: bool,
+    pub out: Option<PathBuf>,
+}
+
+impl CliOutputPolicy {
+    pub fn from_cli(cli: &Cli) -> Self {
+        Self {
+            noout: cli.noout,
+            out: cli.out.as_deref().map(PathBuf::from),
+        }
+    }
+
+    pub fn suppress_stdout(&self) -> bool {
+        self.noout || self.out.is_some()
+    }
+
+    pub fn emit_container_id(&self, id: &str) -> Result<()> {
+        if self.noout {
+            return Ok(());
+        }
+        if let Some(path) = &self.out {
+            fs::write(path, id)?;
+            return Ok(());
+        }
+        println!("{}", id);
+        Ok(())
+    }
+}
+
+fn validate_workdir_in_rootfs(rootfs: &Path, cwd: &str) -> bool {
+    let rel = cwd.trim_start_matches('/');
+    let path = if rel.is_empty() {
+        rootfs.to_path_buf()
+    } else {
+        rootfs.join(rel)
+    };
+    path.is_dir()
+}
+
+fn workdir_allowed_on_container(
+    merged_rootfs: &Path,
+    cwd: &str,
+    mounts: &[volume::MountSpec],
+) -> bool {
+    if validate_workdir_in_rootfs(merged_rootfs, cwd) {
+        return true;
+    }
+    let cwd = cwd.trim_end_matches('/');
+    mounts.iter().any(|m| {
+        let dest = m.destination.trim_end_matches('/');
+        dest == cwd
+            || dest.starts_with(&format!("{}/", cwd))
+            || cwd.starts_with(&format!("{}/", dest))
+    })
+}
+
+fn fail_missing_workdir(cwd: &str, container_id: &str) -> Result<i32> {
+    eprintln!(
+        "Error: workdir \"{}\" does not exist on container {}",
+        cwd,
+        container_id
+    );
+    Ok(126)
+}
+
 pub async fn run_cli(cli: Cli) -> Result<i32> {
     ensure_directories()?;
     let global_auth = cli.authfile.as_deref();
-    let global_noout = cli.noout;
+    let output_policy = CliOutputPolicy::from_cli(&cli);
     authfile_exit_125(global_auth, None)?;
     let command = cli.command;
 
@@ -116,13 +184,13 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Run(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
-            let code = run_container(args).await?;
+            let code = run_container_with_output(args, output_policy).await?;
             Ok(code)
         }
         Commands::Create(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             let id = create_only_container(args).await?;
-            println!("{}", id);
+            output_policy.emit_container_id(&id)?;
             Ok(0)
         }
         Commands::Restart(args) => {
@@ -164,7 +232,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Stop(args) => {
             let mut stop_args = args;
-            if global_noout {
+            if output_policy.noout {
                 stop_args.noout = true;
             }
             stop_containers(&stop_args)?;
@@ -247,13 +315,13 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         Commands::Container(args) => match args.command {
             cli::ContainerAction::Run(run_args) => {
                 authfile_exit_125(global_auth, run_args.registry_auth.authfile.as_deref())?;
-                let code = run_container(run_args).await?;
+                let code = run_container_with_output(run_args, output_policy).await?;
                 Ok(code)
             }
             cli::ContainerAction::Create(create_args) => {
                 authfile_exit_125(global_auth, create_args.registry_auth.authfile.as_deref())?;
                 let id = create_only_container(create_args).await?;
-                println!("{}", id);
+                output_policy.emit_container_id(&id)?;
                 Ok(0)
             }
             cli::ContainerAction::Start(start_args) => {
@@ -781,7 +849,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Rm(args) => {
-            rm_containers(&args)?;
+            rm_containers(&args, output_policy.suppress_stdout())?;
             Ok(0)
         }
         Commands::Rmi(args) => {
@@ -1356,6 +1424,13 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<()> {
 }
 
 pub async fn run_container(mut args: RunArgs) -> Result<i32> {
+    run_container_with_output(args, CliOutputPolicy::default()).await
+}
+
+pub async fn run_container_with_output(
+    mut args: RunArgs,
+    output_policy: CliOutputPolicy,
+) -> Result<i32> {
     let restart_policy = health::parse_restart_policy(&args.restart)?;
     if args.rm && !matches!(restart_policy, health::RestartPolicy::No) {
         return Err(anyhow!(
@@ -1390,9 +1465,9 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
         parse_duration_flag(timeout, "--health-timeout")?;
     }
 
-    let parsed_ports = parse_ports(&args.ports)?;
+    let mut parsed_ports = parse_ports(&args.ports)?;
     validate_network_name(&args.network, None)?;
-    guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
+    guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
     guardrails::PortCollisionGuard::ensure_no_conflicts(&parsed_ports)?;
 
     // Resolve volume mounts
@@ -1503,6 +1578,14 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
             let uid = u.parse::<u32>().unwrap_or(0);
             spec.process.user.uid = uid;
         }
+    }
+    if !spec
+        .process
+        .env
+        .iter()
+        .any(|e| e.starts_with("HOME="))
+    {
+        spec.process.env.push("HOME=/".to_string());
     }
 
     if args.read_only {
@@ -1823,6 +1906,14 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     }
     spec.save_to_bundle(&bundle_dir)?;
 
+    if !workdir_allowed_on_container(
+        &cow_bundle.merged_dir,
+        &spec.process.cwd,
+        &parsed_mounts,
+    ) {
+        return fail_missing_workdir(&spec.process.cwd, &container_id);
+    }
+
     let restart_policy = health::parse_restart_policy(&args.restart)?;
     let mut health_cfg = health::HealthConfig::default();
     if !args.no_healthcheck {
@@ -1888,7 +1979,7 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     }
 
     if args.detach {
-        println!("{}", container_id);
+        output_policy.emit_container_id(&container_id)?;
     }
 
     EventManager::record(ContainerEvent::new(
@@ -2730,7 +2821,21 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
 
     let mut results = Vec::new();
 
-    for target in &args.targets {
+    let targets: Vec<String> = if args.latest {
+        let mut list = c_store.list();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list.first()
+            .map(|c| vec![c.id.clone()])
+            .unwrap_or_default()
+    } else {
+        args.targets.clone()
+    };
+
+    if targets.is_empty() && !args.latest {
+        return Err(anyhow!("you must provide at least one name or id"));
+    }
+
+    for target in &targets {
         let mut matched = false;
 
         if only_type.is_empty() || only_type == "container" {
@@ -4507,7 +4612,11 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn rm_container_resolving_depend(target: &str, args: &cli::RmArgs) -> Result<()> {
+fn rm_container_resolving_depend(
+    target: &str,
+    args: &cli::RmArgs,
+    quiet_stdout: bool,
+) -> Result<()> {
     let store = ContainerStore::new();
     let rec = match store.find(target) {
         Some(c) => c,
@@ -4530,10 +4639,12 @@ fn rm_container_resolving_depend(target: &str, args: &cli::RmArgs) -> Result<()>
         }
     } else {
         for dep in dependent_container_ids(&store, &rec) {
-            rm_container_resolving_depend(&dep, args)?;
+            rm_container_resolving_depend(&dep, args, quiet_stdout)?;
         }
     }
-    if let Err(e) = remove_container_opts(target, args.force, args.volumes) {
+    if let Err(e) =
+        remove_container_opts_inner(target, args.force, args.volumes, !quiet_stdout)
+    {
         if args.ignore || args.force {
             return Ok(());
         }
@@ -4547,11 +4658,11 @@ fn rm_container_resolving_depend(target: &str, args: &cli::RmArgs) -> Result<()>
     Ok(())
 }
 
-pub fn rm_containers(args: &cli::RmArgs) -> Result<()> {
+pub fn rm_containers(args: &cli::RmArgs, quiet_stdout: bool) -> Result<()> {
     if args.all {
         let store = ContainerStore::new();
         for c in store.list() {
-            if let Err(e) = rm_container_resolving_depend(&c.name, args) {
+            if let Err(e) = rm_container_resolving_depend(&c.name, args, quiet_stdout) {
                 if !args.ignore {
                     return Err(e);
                 }
@@ -4563,7 +4674,7 @@ pub fn rm_containers(args: &cli::RmArgs) -> Result<()> {
         return Err(anyhow!("you must provide at least one container name or ID"));
     }
     for c in &args.containers {
-        if let Err(e) = rm_container_resolving_depend(c, args) {
+        if let Err(e) = rm_container_resolving_depend(c, args, quiet_stdout) {
             if args.ignore || args.force {
                 continue;
             }
@@ -4819,8 +4930,8 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
 
     validate_network_name(&args.network, home_opt)?;
 
-    let parsed_ports = parse_ports(&args.ports)?;
-    guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
+    let mut parsed_ports = parse_ports(&args.ports)?;
+    guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
 
     let vol_store = match home_opt {
         Some(h) => VolumeStore::with_home(h.to_path_buf()),
@@ -4899,6 +5010,14 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
             let uid = u.parse::<u32>().unwrap_or(0);
             spec.process.user.uid = uid;
         }
+    }
+    if !spec
+        .process
+        .env
+        .iter()
+        .any(|e| e.starts_with("HOME="))
+    {
+        spec.process.env.push("HOME=/".to_string());
     }
 
     if args.read_only {

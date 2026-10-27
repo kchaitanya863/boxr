@@ -81,6 +81,9 @@ pub struct Cli {
     /// Suppress stdout from supported commands (Podman global flag)
     #[arg(global = true, long = "noout")]
     pub noout: bool,
+    /// Write container ID to a file instead of stdout (Podman global flag)
+    #[arg(global = true, long = "out", value_name = "FILE")]
+    pub out: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }

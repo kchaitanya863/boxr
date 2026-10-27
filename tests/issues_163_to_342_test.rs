@@ -280,6 +280,7 @@ fn test_issue_164_images_accepts_invalid_filter_keys_without_returning_an_error(
         no_trunc: false,
         tree: false,
         format: None,
+        sort: None,
         filter: vec!["unknown_filter=xyz".to_string()],
     };
     let res = boxr::list_images(args);

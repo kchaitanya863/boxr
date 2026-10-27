@@ -148,24 +148,37 @@ impl DiskGuard {
 /// Host Port Collision Guard
 pub struct PortCollisionGuard;
 
+/// Podman prints a warning and drops port mappings on host/none/container network modes.
+pub fn warn_discard_incompatible_ports(
+    network: &str,
+    ports: &mut Vec<crate::network::PortMapping>,
+) {
+    if ports.is_empty() {
+        return;
+    }
+    let mode = crate::network::pasta::NetworkMode::parse(network);
+    let label = match mode {
+        crate::network::pasta::NetworkMode::Host => Some("host"),
+        crate::network::pasta::NetworkMode::None => Some("none"),
+        crate::network::pasta::NetworkMode::Container(_) => Some("container"),
+        _ => None,
+    };
+    if let Some(label) = label {
+        eprintln!(
+            "Port mappings have been discarded because \"{}\" network namespace mode does not support them",
+            label
+        );
+        ports.clear();
+    }
+}
+
 /// Reject published ports on network modes where forwarding is meaningless.
 pub fn validate_network_port_compatibility(
     network: &str,
     ports: &[crate::network::PortMapping],
 ) -> Result<()> {
-    if ports.is_empty() {
-        return Ok(());
-    }
-    let mode = crate::network::pasta::NetworkMode::parse(network);
-    if matches!(
-        mode,
-        crate::network::pasta::NetworkMode::None | crate::network::pasta::NetworkMode::Host
-    ) {
-        return Err(anyhow!(
-            "published ports are not supported with --network {}",
-            network
-        ));
-    }
+    let mut copy = ports.to_vec();
+    warn_discard_incompatible_ports(network, &mut copy);
     Ok(())
 }
 

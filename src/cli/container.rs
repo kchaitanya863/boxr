@@ -577,7 +577,10 @@ pub struct InspectArgs {
     #[arg(long = "type")]
     pub obj_type: Option<String>,
 
-    #[arg(required = true)]
+    /// Display the latest created container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     pub targets: Vec<String>,
 }
 

@@ -591,6 +591,7 @@ fn test_issue_130_inspect_multiple_targets() {
         format: None,
         size: false,
         obj_type: None,
+        latest: false,
     };
     assert_eq!(args.targets.len(), 2);
 }
@@ -659,6 +660,7 @@ fn test_issue_135_inspect_type_invalid_error() {
         format: None,
         size: false,
         obj_type: Some("invalid_type_name".to_string()),
+        latest: false,
     };
 
     let res = boxr::inspect_target(&args);
