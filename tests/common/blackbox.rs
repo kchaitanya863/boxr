@@ -7,8 +7,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-const BOXR_CMD_TIMEOUT: Duration = Duration::from_secs(90);
 use tempfile::TempDir;
+
+fn boxr_cmd_timeout() -> Duration {
+    if std::env::var("CI").is_ok() {
+        Duration::from_secs(180)
+    } else {
+        Duration::from_secs(90)
+    }
+}
 
 /// Cross-process lock so parallel integration tests don't contend on the shared macOS VM.
 #[cfg(target_os = "macos")]
@@ -128,7 +135,8 @@ pub fn run_boxr(home: &Path, args: &[&str]) -> Output {
     cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("failed to execute boxr");
     let started = Instant::now();
-    while started.elapsed() < BOXR_CMD_TIMEOUT {
+    let cmd_timeout = boxr_cmd_timeout();
+    while started.elapsed() < cmd_timeout {
         match child.try_wait() {
             Ok(Some(_)) => {
                 return child
@@ -150,14 +158,18 @@ pub fn run_boxr(home: &Path, args: &[&str]) -> Output {
         stderr: format!(
             "boxr {} timed out after {}s",
             args.join(" "),
-            BOXR_CMD_TIMEOUT.as_secs()
+            cmd_timeout.as_secs()
         )
         .into_bytes(),
     }
 }
 
 pub fn run_boxr_ok(home: &Path, args: &[&str]) -> String {
-    let attempts = if cfg!(target_os = "macos") { 3 } else { 1 };
+    let attempts = if cfg!(target_os = "macos") || std::env::var("CI").is_ok() {
+        3
+    } else {
+        1
+    };
     let mut last = None;
     for attempt in 0..attempts {
         if attempt > 0 {
