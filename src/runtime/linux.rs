@@ -205,6 +205,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     let _ = pc.wait();
                 }
 
+                if let Ok(code) = &status {
+                    let _ = fs::write(bundle_path.join("boxr-exitcode"), code.to_string());
+                }
                 status
             }
             ForkResult::Child => {
@@ -546,6 +549,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     let _ = waitpid(relay_pid, None);
                 }
 
+                if let Ok(code) = &status {
+                    let _ = fs::write(bundle_path.join("boxr-exitcode"), code.to_string());
+                }
                 status
             }
             ForkResult::Child => {

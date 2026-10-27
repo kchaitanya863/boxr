@@ -698,7 +698,7 @@ pub struct RmArgs {
     pub link: bool,
 
     /// Remove all containers
-    #[arg(long = "all")]
+    #[arg(short = 'a', long = "all")]
     pub all: bool,
 
     /// Seconds to wait before killing a container (0 = immediate)

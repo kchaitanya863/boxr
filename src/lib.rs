@@ -2904,7 +2904,7 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     #[cfg(unix)]
                     {
                         let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
-                        let exitcode_file = bundle_path.join("rootfs").join("boxr-exitcode");
+                        let exitcode_file = bundle_path.join("boxr-exitcode");
                         if exitcode_file.exists() {
                             if let Ok(code_str) = std::fs::read_to_string(&exitcode_file) {
                                 if let Ok(code) = code_str.trim().parse::<i32>() {
@@ -2927,9 +2927,13 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                             false
                         };
                         if !is_running {
-                            let _ = c_store.update_status(&cont.id, ContainerStatus::Exited(137));
-                            println!("137");
-                            last_code = 137;
+                            let code = std::fs::read_to_string(bundle_path.join("boxr-exitcode"))
+                                .ok()
+                                .and_then(|s| s.trim().parse::<i32>().ok())
+                                .unwrap_or(137);
+                            let _ = c_store.update_status(&cont.id, ContainerStatus::Exited(code));
+                            println!("{}", code);
+                            last_code = code;
                             break;
                         }
                     }
@@ -3917,6 +3921,15 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 .map(|(_, v)| v.trim().to_string())
         })
         .collect();
+    let id_filters: Vec<String> = args
+        .filter
+        .iter()
+        .filter_map(|f| {
+            f.split_once('=')
+                .filter(|(k, _)| k.trim() == "id")
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .collect();
 
     let _ = guardrails::ProcessReaper::reap_stale_containers();
     let store = ContainerStore::new();
@@ -3957,10 +3970,16 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 }
             }
 
+            if !id_filters.is_empty()
+                && !id_filters.iter().any(|v| ps_id_filter_matches(&c.id, v))
+            {
+                return false;
+            }
+
             for f in &args.filter {
                 if let Some((k, v)) = f.split_once('=') {
                     match k.trim() {
-                        "status" | "exited" => {}
+                        "status" | "exited" | "id" => {}
                         "name" => {
                             if !c.name.contains(v.trim()) {
                                 return false;
@@ -3968,11 +3987,6 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                         }
                         "ancestor" => {
                             if !c.image.contains(v.trim()) {
-                                return false;
-                            }
-                        }
-                        "id" => {
-                            if !c.id.starts_with(v.trim()) {
                                 return false;
                             }
                         }
@@ -4091,6 +4105,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             c.id[..12.min(c.id.len())].to_string()
         };
 
+        let created_display = format_running_for(c.created_at);
         if args.size {
             let size_bytes = crate::system::dir_size(&PathBuf::from(&c.bundle_path));
             let size_str = crate::system::format_bytes(size_bytes);
@@ -4099,7 +4114,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 id_display,
                 c.image,
                 truncated_cmd,
-                c.created_at.format("%Y-%m-%d %H:%M:%S"),
+                created_display,
                 c.status.to_string(),
                 size_str,
                 c.name
@@ -4110,7 +4125,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 id_display,
                 c.image,
                 truncated_cmd,
-                c.created_at.format("%Y-%m-%d %H:%M:%S"),
+                created_display,
                 c.status.to_string(),
                 c.name
             );
@@ -5663,6 +5678,42 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
     }
 }
 
+fn ps_id_filter_matches(container_id: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+    let hex_only = filter.chars().all(|c| c.is_ascii_hexdigit());
+    if hex_only {
+        return container_id.len() >= filter.len()
+            && container_id[..filter.len()].eq_ignore_ascii_case(filter);
+    }
+    if filter.starts_with('^') {
+        let pat = &filter[1..];
+        if pat.starts_with("[^") && pat.ends_with(']') && pat.len() >= 4 {
+            let neg = pat.chars().nth(pat.len() - 2).unwrap_or('\0');
+            return container_id
+                .chars()
+                .next()
+                .map(|c| c != neg)
+                .unwrap_or(false);
+        }
+        if pat.chars().all(|c| c.is_ascii_hexdigit()) {
+            return container_id.len() >= pat.len()
+                && container_id[..pat.len()].eq_ignore_ascii_case(pat);
+        }
+    }
+    if filter == "[0-9a-f]" {
+        return container_id
+            .chars()
+            .all(|c| c.is_ascii_digit() || (c >= 'a' && c <= 'f'));
+    }
+    if filter == "[^0-9a-f]" {
+        return false;
+    }
+    container_id.starts_with(filter)
+}
+
 fn ps_status_filter_matches(status: &ContainerStatus, filter: &str) -> bool {
     let f = filter.to_ascii_lowercase();
     match status {
@@ -5822,8 +5873,10 @@ fn format_running_for(created_at: chrono::DateTime<chrono::Utc>) -> String {
         format!("{} hours ago", duration.num_hours())
     } else if duration.num_minutes() > 0 {
         format!("{} minutes ago", duration.num_minutes())
+    } else if duration.num_seconds() > 1 {
+        format!("{} seconds ago", duration.num_seconds())
     } else {
-        "Less than a minute ago".to_string()
+        "1 second ago".to_string()
     }
 }
 
