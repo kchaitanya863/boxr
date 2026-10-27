@@ -36,6 +36,11 @@ fn boxr_cmd(bin: &PathBuf) -> Command {
 
 // -----------------------------------------------------------------------------
 // Top 30 Popular Containerized Softwares: Specifications & Regression Matrix
+//
+// These tests validate YAML *parsing* via `ComposeProject::from_str` (static specs).
+// For Docker/Podman replacement parity (CLI `compose up SERVICE`, `.env`, and
+// `${VAR:-default}` interpolation), see `tests/compose_docker_replacement_test.rs`
+// and `tests/docker_parity_test.rs`.
 // -----------------------------------------------------------------------------
 
 /// 1. NGINX - High-Performance Web Server & Reverse Proxy

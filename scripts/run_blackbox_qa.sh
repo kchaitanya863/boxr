@@ -204,6 +204,14 @@ if section_enabled compose; then
     test_step "B minimal-dns up" "$BOXR_CMD compose -f \"$COMPOSE_FIX/minimal-dns.yml\" up -d"
     test_step "B minimal-dns ps" "$BOXR_CMD compose -f \"$COMPOSE_FIX/minimal-dns.yml\" ps"
     run_cmd "$BOXR_CMD compose -f \"$COMPOSE_FIX/minimal-dns.yml\" down -v" 2>/dev/null || true
+    REPLACEMENT_STACK="$COMPOSE_FIX/docker-replacement-stack/docker-compose.yml"
+    if [[ -f "$REPLACEMENT_STACK" ]]; then
+        test_step "B9 compose up service target (.env + \${VAR:-default})" "$BOXR_CMD compose -f \"$REPLACEMENT_STACK\" up --build -d web"
+        test_step "B9 compose ps web" "$BOXR_CMD compose -f \"$REPLACEMENT_STACK\" ps | grep -q replacement-web"
+        run_cmd "$BOXR_CMD compose -f \"$REPLACEMENT_STACK\" down -v" 2>/dev/null || true
+    else
+        skip_step "B9 docker-replacement-stack" "fixture not found"
+    fi
     test_step_neg "B8 compose cycle" "$BOXR_CMD compose -f \"$COMPOSE_FIX/cycle.yml\" up -d"
 fi
 

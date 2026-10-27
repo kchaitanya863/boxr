@@ -1,0 +1,45 @@
+# Realistic Docker/Podman replacement stack (patterns from production compose files).
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: replacement-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  api:
+    image: alpine:3.20
+    container_name: replacement-api
+    command: ["sleep", "600"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/app}
+      API_KEY: ${API_KEY:-dev-key}
+      JWT_SECRET: ${JWT_SECRET:-default-jwt-secret-minimum-256-bits-long!}
+    depends_on:
+      db:
+        condition: service_started
+        required: false
+    ports:
+      - "${API_PORT:-8080}:8080"
+
+  web:
+    image: nginx:alpine
+    container_name: replacement-web
+    depends_on:
+      api:
+        condition: service_started
+        required: false
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+
+networks:
+  default:
+    name: replacement-net

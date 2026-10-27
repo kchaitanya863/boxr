@@ -60,6 +60,7 @@ Examples:
 | [tests/common/blackbox.rs](../tests/common/blackbox.rs) | Shared helpers (`isolated_home`, `run_boxr`, …) |
 | [tests/blackbox_*_test.rs](../tests/) | Rust integration tests by domain |
 | [tests/fixtures/compose/](../tests/fixtures/compose/) | Compose YAML fixtures |
+| [tests/compose_docker_replacement_test.rs](../tests/compose_docker_replacement_test.rs) | Docker/Podman replacement compose (CLI service args, `.env`, `${VAR:-default}`) |
 
 ## Isolated state
 
@@ -84,7 +85,7 @@ Both the shell harness and Rust tests use a temporary `BOXR_HOME` per run. Heavy
 | Section | IDs | Focus |
 |---------|-----|-------|
 | A | runtime | /tmp 1777, shm, devices, apt, postgres, nginx, read-only, init, daemon |
-| B | compose | fullstack-compose, minimal-dns, cycles |
+| B | compose | fullstack-compose, minimal-dns, docker-replacement-stack, cycles |
 | C | volumes | CRUD, bind ro/rw, chown/chmod, cp |
 | D/E | network, dns | publish, none, custom DNS, bridge names |
 | F | security | user, read-only, privileged, env isolation |

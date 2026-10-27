@@ -1283,15 +1283,6 @@ services:
     }
 
     #[test]
-    fn test_load_spice_box_compose_file() {
-        let path = Path::new("/Users/knaragam/projects/spice-box/docker-compose.yml");
-        if !path.exists() {
-            return;
-        }
-        ComposeProject::load(path).expect("spice-box compose should load");
-    }
-
-    #[test]
     fn test_compose_interpolate_env_file_before_parse() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(".env"), "HOST_PORT=9090\n").unwrap();

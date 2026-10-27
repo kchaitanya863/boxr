@@ -358,6 +358,52 @@ services:
     assert!(out.status.success());
 }
 
+/// Docker Parity: `compose up [SERVICE...]` and `${VAR:-default}` / `.env` (replacement CLI).
+#[test]
+fn test_docker_parity_compose_service_target_and_env_substitution() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
+    let bin = boxr_bin();
+    if !bin.exists() {
+        return;
+    }
+
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compose/docker-replacement-stack/docker-compose.yml");
+
+    let (_guard, home) = blackbox::isolated_home();
+    blackbox::pull_if_needed(&home, "alpine:3.20");
+    blackbox::pull_if_needed(&home, "nginx:alpine");
+    blackbox::pull_if_needed(&home, "postgres:16-alpine");
+
+    let out = run_isolated(
+        &home,
+        &[
+            "compose",
+            "-f",
+            fixture.to_str().unwrap(),
+            "up",
+            "--build",
+            "-d",
+            "web",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "compose up must accept service names: {}",
+        stderr
+    );
+    assert!(out.status.success(), "compose up failed: {}", stderr);
+
+    let _ = run_isolated(
+        &home,
+        &["compose", "-f", fixture.to_str().unwrap(), "down", "-v"],
+    );
+}
+
 /// Docker Parity Test: System disk usage and prune commands
 #[test]
 fn test_docker_parity_system_df_and_prune() {
