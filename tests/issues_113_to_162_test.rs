@@ -702,7 +702,7 @@ fn test_issue_138_tag_empty_repo_rejected() {
 
     let args = TagArgs {
         source: "alpine:latest".to_string(),
-        target: ":v1".to_string(),
+        targets: vec![":v1".to_string()],
     };
 
     let res = boxr::tag_image(&args);

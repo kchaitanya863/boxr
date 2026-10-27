@@ -590,8 +590,9 @@ pub struct TagArgs {
     /// Source image
     pub source: String,
 
-    /// Target image and tag
-    pub target: String,
+    /// Target image and tag (one or more)
+    #[arg(required = true)]
+    pub targets: Vec<String>,
 }
 
 #[derive(Args, Debug)]

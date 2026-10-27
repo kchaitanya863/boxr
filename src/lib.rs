@@ -411,8 +411,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 let src = store
                     .find(&clone_args.source)
                     .ok_or_else(|| anyhow!("Container '{}' not found", clone_args.source))?;
-                let rand_bytes: [u8; 6] = rand_bytes();
-                let new_id = hex::encode(rand_bytes);
+                let new_id = new_container_id();
                 let home = storage::boxr_home();
                 let new_bundle = home.join("containers").join(&new_id);
                 let src_bundle = PathBuf::from(&src.bundle_path);
@@ -1094,6 +1093,13 @@ fn image_data_still_referenced(store: &ImageStore, removed: &ImageRecord) -> boo
     })
 }
 
+fn pull_user_message(msg: impl AsRef<str>) {
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        eprintln!("{}", msg.as_ref());
+    }
+}
+
 pub async fn pull_image_with_platform(
     image_str: &str,
     target_platform: Option<&str>,
@@ -1102,13 +1108,13 @@ pub async fn pull_image_with_platform(
     let mut client = RegistryClient::new();
 
     if let Some(plat) = target_platform {
-        println!(
+        pull_user_message(format!(
             "Pulling from {} (platform: {})",
             reference.display_name(),
             plat
-        );
+        ));
     } else {
-        println!("Pulling from {}", reference.display_name());
+        pull_user_message(format!("Pulling from {}", reference.display_name()));
     }
 
     let (manifest, manifest_digest, manifest_bytes) = client
@@ -1119,7 +1125,7 @@ pub async fn pull_image_with_platform(
     } else {
         &manifest_digest
     };
-    println!("Manifest: {}", short_digest);
+    pull_user_message(format!("Manifest: {}", short_digest));
 
     // If this exact image (same manifest digest) is already present locally,
     // there is nothing to download (issue #403).
@@ -1128,10 +1134,10 @@ pub async fn pull_image_with_platform(
         if let Some(existing) =
             find_up_to_date_image(&store, image_str, target_platform, &manifest_digest)
         {
-            println!(
+            pull_user_message(format!(
                 "Status: Image is up to date for {}",
                 reference.display_name()
-            );
+            ));
             return Ok(existing);
         }
     }
@@ -1180,7 +1186,7 @@ pub async fn pull_image_with_platform(
     fs::write(image_dir.join("manifest.json"), &manifest_bytes)?;
     fs::write(image_dir.join("config.json"), serde_json::to_vec(&config)?)?;
 
-    println!("Extracting image layers to rootfs...");
+    pull_user_message("Extracting image layers to rootfs...");
     for layer_desc in &manifest.layers {
         let safe_name = layer_desc.digest.replace(':', "_");
         let layer_file = layers_dir.join(format!("{}.tar", safe_name));
@@ -1222,8 +1228,8 @@ pub async fn pull_image_with_platform(
     let store = ImageStore::new();
     store.add(record.clone())?;
 
-    println!("Digest: {}", manifest_digest);
-    println!("Status: Downloaded image for {}", reference.display_name());
+    pull_user_message(format!("Digest: {}", manifest_digest));
+    pull_user_message(format!("Status: Downloaded image for {}", reference.display_name()));
     Ok(record)
 }
 
@@ -1331,6 +1337,35 @@ fn apply_capabilities_and_security(
     });
 }
 
+async fn prepare_run_pod(args: &mut RunArgs) -> Result<()> {
+    let pod_spec = match &args.pod {
+        Some(p) => p.clone(),
+        None => return Ok(()),
+    };
+
+    if let Some(new_name) = pod_spec.strip_prefix("new:") {
+        if new_name.is_empty() {
+            return Err(anyhow!("invalid pod ID"));
+        }
+        let store = pod::PodStore::new();
+        let pod = store.create_with_config(pod::PodConfig {
+            name: Some(new_name.to_string()),
+            ..Default::default()
+        })?;
+        let _ = ensure_pod_infra_container(&pod).await?;
+        args.pod = Some(pod.name.clone());
+        return Ok(());
+    }
+
+    let pod_store = pod::PodStore::new();
+    let pod_rec = pod_store
+        .find(&pod_spec)
+        .ok_or_else(|| anyhow!("Pod '{}' not found", pod_spec))?;
+    let infra_target = ensure_pod_infra_container(&pod_rec).await?;
+    pod::apply_pod_to_run_args(&pod_rec, &infra_target, args);
+    Ok(())
+}
+
 pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     let restart_policy = health::parse_restart_policy(&args.restart)?;
     if args.rm && !matches!(restart_policy, health::RestartPolicy::No) {
@@ -1344,9 +1379,13 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
         Some(record) if validate_image_record(&record) => record,
         _ => {
             if let Some(plat) = &args.platform {
-                println!("Unable to find image '{}' ({}) locally", args.image, plat);
+                pull_user_message(format!(
+                    "Unable to find image '{}' ({}) locally",
+                    args.image,
+                    plat
+                ));
             } else {
-                println!("Unable to find image '{}' locally", args.image);
+                pull_user_message(format!("Unable to find image '{}' locally", args.image));
             }
             pull_image_with_platform(&args.image, args.platform.as_deref()).await?
         }
@@ -1375,21 +1414,13 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     }
 
     // Generate container ID and name
-    let random_bytes: [u8; 6] = rand_bytes();
-    let container_id = hex::encode(random_bytes);
+    let container_id = new_container_id();
     let container_name = args
         .name
         .clone()
         .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
 
-    if let Some(pod_name) = &args.pod {
-        let pod_store = pod::PodStore::new();
-        let pod_rec = pod_store
-            .find(pod_name)
-            .ok_or_else(|| anyhow!("Pod '{}' not found", pod_name))?;
-        let infra_target = ensure_pod_infra_container(&pod_rec).await?;
-        pod::apply_pod_to_run_args(&pod_rec, &infra_target, &mut args);
-    }
+    prepare_run_pod(&mut args).await?;
 
     let home = storage::boxr_home();
     let bundle_dir = home.join("containers").join(&container_id);
@@ -1827,7 +1858,7 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     let record = ContainerRecord {
         id: container_id.clone(),
         name: container_name.clone(),
-        image: format!("{}:{}", image_record.reference, image_record.tag),
+        image: args.image.clone(),
         command: spec.process.args.clone(),
         created_at: Utc::now(),
         status: initial_status,
@@ -1840,10 +1871,7 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     };
 
     let mut event_attrs = HashMap::new();
-    event_attrs.insert(
-        "image".to_string(),
-        format!("{}:{}", image_record.reference, image_record.tag),
-    );
+    event_attrs.insert("image".to_string(), args.image.clone());
     event_attrs.insert("name".to_string(), container_name.clone());
 
     EventManager::record(ContainerEvent::new(
@@ -3871,6 +3899,25 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
         }
     }
 
+    let status_filters: Vec<String> = args
+        .filter
+        .iter()
+        .filter_map(|f| {
+            f.split_once('=')
+                .filter(|(k, _)| k.trim() == "status")
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .collect();
+    let exited_filters: Vec<String> = args
+        .filter
+        .iter()
+        .filter_map(|f| {
+            f.split_once('=')
+                .filter(|(k, _)| k.trim() == "exited")
+                .map(|(_, v)| v.trim().to_string())
+        })
+        .collect();
+
     let _ = guardrails::ProcessReaper::reap_stale_containers();
     let store = ContainerStore::new();
     let containers = store.list();
@@ -3878,7 +3925,11 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
     let mut filtered: Vec<_> = containers
         .into_iter()
         .filter(|c| {
-            let matches_status = if args.latest || args.last.is_some() || args.all {
+            let show_non_running = args.all
+                || args.latest
+                || args.last.is_some()
+                || status_filters.iter().any(|s| s.to_ascii_lowercase() != "running");
+            let matches_status = if show_non_running {
                 true
             } else {
                 matches!(c.status, ContainerStatus::Running)
@@ -3887,21 +3938,29 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 return false;
             }
 
+            if !status_filters.is_empty()
+                && !status_filters
+                    .iter()
+                    .any(|v| ps_status_filter_matches(&c.status, v))
+            {
+                return false;
+            }
+
+            for ef in &exited_filters {
+                match &c.status {
+                    ContainerStatus::Exited(code) => {
+                        if code.to_string() != *ef {
+                            return false;
+                        }
+                    }
+                    _ => return false,
+                }
+            }
+
             for f in &args.filter {
                 if let Some((k, v)) = f.split_once('=') {
                     match k.trim() {
-                        "status" => {
-                            let status_str = match c.status {
-                                ContainerStatus::Running => "running",
-                                ContainerStatus::Exited(_) => "exited",
-                                ContainerStatus::Created => "created",
-                                ContainerStatus::Paused => "paused",
-                                ContainerStatus::Failed(_) => "failed",
-                            };
-                            if status_str != v.trim() {
-                                return false;
-                            }
-                        }
+                        "status" | "exited" => {}
                         "name" => {
                             if !c.name.contains(v.trim()) {
                                 return false;
@@ -3925,8 +3984,18 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
         })
         .collect();
 
-    // Sort by created_at descending (latest first)
-    filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    match args.sort.as_deref() {
+        Some("names") | Some("name") => {
+            filtered.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        Some("created") => {
+            filtered.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        }
+        Some("id") => {
+            filtered.sort_by(|a, b| a.id.cmp(&b.id));
+        }
+        _ => filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+    }
 
     if args.latest {
         filtered.truncate(1);
@@ -3960,7 +4029,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             let cmd_display = if c.command.is_empty() {
                 String::new()
             } else {
-                format!("\"{}\"", c.command.join(" "))
+                c.command.join(" ")
             };
             let size_str = crate::system::format_bytes(crate::system::dir_size(&PathBuf::from(
                 &c.bundle_path,
@@ -4008,7 +4077,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
         let cmd_display = if c.command.is_empty() {
             "".to_string()
         } else {
-            format!("\"{}\"", c.command.join(" "))
+            c.command.join(" ")
         };
         let truncated_cmd = if cmd_display.len() > 18 && !args.no_trunc {
             format!("{}...", &cmd_display[..15])
@@ -4067,7 +4136,12 @@ pub fn rm_containers(args: &cli::RmArgs) -> Result<()> {
         return Err(anyhow!("you must provide at least one container name or ID"));
     }
     for c in &args.containers {
-        remove_container_opts(c, args.force, args.volumes)?;
+        if let Err(e) = remove_container_opts(c, args.force, args.volumes) {
+            if args.ignore || args.force {
+                continue;
+            }
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -4094,9 +4168,11 @@ pub fn remove_container(container: &str, force: bool) -> Result<()> {
 
 pub fn remove_container_opts(container: &str, force: bool, remove_volumes: bool) -> Result<()> {
     let store = ContainerStore::new();
-    let c = store
-        .find(container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
+    let c = match store.find(container) {
+        Some(c) => c,
+        None if force => return Ok(()),
+        None => return Err(anyhow!("Container '{}' not found", container)),
+    };
 
     let is_active =
         matches!(c.status, ContainerStatus::Running) || matches!(c.status, ContainerStatus::Paused);
@@ -4234,14 +4310,7 @@ pub fn prune_images(all: bool) -> Result<()> {
 }
 
 pub async fn create_only_container(mut args: RunArgs) -> Result<String> {
-    if let Some(pod_name) = &args.pod {
-        let pod_store = pod::PodStore::new();
-        let pod_rec = pod_store
-            .find(pod_name)
-            .ok_or_else(|| anyhow!("Pod '{}' not found", pod_name))?;
-        let infra_target = ensure_pod_infra_container(&pod_rec).await?;
-        pod::apply_pod_to_run_args(&pod_rec, &infra_target, &mut args);
-    }
+    prepare_run_pod(&mut args).await?;
     create_only_container_with_home(args, None).await
 }
 
@@ -4268,9 +4337,13 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         Some(record) if validate_image_record(&record) => record,
         _ => {
             if let Some(plat) = &args.platform {
-                println!("Unable to find image '{}' ({}) locally", args.image, plat);
+                pull_user_message(format!(
+                    "Unable to find image '{}' ({}) locally",
+                    args.image,
+                    plat
+                ));
             } else {
-                println!("Unable to find image '{}' locally", args.image);
+                pull_user_message(format!("Unable to find image '{}' locally", args.image));
             }
             pull_image_with_platform(&args.image, args.platform.as_deref()).await?
         }
@@ -4300,8 +4373,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         parsed_mounts.push(vol_store.resolve_mount(v)?);
     }
 
-    let random_bytes: [u8; 6] = rand_bytes();
-    let container_id = hex::encode(random_bytes);
+    let container_id = new_container_id();
     let container_name = args
         .name
         .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
@@ -4935,38 +5007,40 @@ pub fn tag_image(args: &cli::TagArgs) -> Result<()> {
         .find(&args.source)
         .ok_or_else(|| anyhow!("Image '{}' not found", args.source))?;
 
-    // Normalize the target through ImageReference so qualified spellings
-    // (e.g. docker.io/library/foo:bar) store canonical registry/repo/tag
-    // and stay findable by any equivalent spelling.
-    let target_ref = crate::oci::reference::ImageReference::parse(&args.target)
-        .map_err(|e| anyhow!("invalid target reference '{}': {}", args.target, e))?;
+    for target in &args.targets {
+        // Normalize the target through ImageReference so qualified spellings
+        // (e.g. docker.io/library/foo:bar) store canonical registry/repo/tag
+        // and stay findable by any equivalent spelling.
+        let target_ref = crate::oci::reference::ImageReference::parse(target)
+            .map_err(|e| anyhow!("invalid target reference '{}': {}", target, e))?;
 
-    // ImageReference::parse normalizes ":v1" to repository "library/"; keep
-    // the historical rejection of an empty repository name.
-    let repo_name = target_ref
-        .repository
-        .strip_prefix("library/")
-        .unwrap_or(&target_ref.repository);
-    if repo_name.trim().is_empty() {
-        return Err(anyhow!(
-            "invalid reference format: repository name cannot be empty"
-        ));
+        // ImageReference::parse normalizes ":v1" to repository "library/"; keep
+        // the historical rejection of an empty repository name.
+        let repo_name = target_ref
+            .repository
+            .strip_prefix("library/")
+            .unwrap_or(&target_ref.repository);
+        if repo_name.trim().is_empty() {
+            return Err(anyhow!(
+                "invalid reference format: repository name cannot be empty"
+            ));
+        }
+
+        let record = ImageRecord {
+            id: src.id.clone(),
+            reference: target_ref.repository.clone(),
+            tag: target_ref.tag.clone(),
+            registry: target_ref.registry.clone(),
+            manifest_digest: src.manifest_digest.clone(),
+            config_digest: src.config_digest.clone(),
+            size_bytes: src.size_bytes,
+            created_at: Utc::now(),
+            rootfs_path: src.rootfs_path.clone(),
+            config: src.config.clone(),
+        };
+
+        store.add(record)?;
     }
-
-    let record = ImageRecord {
-        id: src.id.clone(),
-        reference: target_ref.repository.clone(),
-        tag: target_ref.tag.clone(),
-        registry: target_ref.registry.clone(),
-        manifest_digest: src.manifest_digest.clone(),
-        config_digest: src.config_digest.clone(),
-        size_bytes: src.size_bytes,
-        created_at: Utc::now(),
-        rootfs_path: src.rootfs_path.clone(),
-        config: src.config.clone(),
-    };
-
-    store.add(record)?;
     Ok(())
 }
 
@@ -5589,9 +5663,29 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
     }
 }
 
+fn ps_status_filter_matches(status: &ContainerStatus, filter: &str) -> bool {
+    let f = filter.to_ascii_lowercase();
+    match status {
+        ContainerStatus::Running => f == "running",
+        ContainerStatus::Created => f == "created",
+        ContainerStatus::Paused => f == "paused",
+        ContainerStatus::Exited(_) => f == "exited" || f == "stopped",
+        ContainerStatus::Failed(_) => f == "failed" || f == "stopped",
+    }
+}
+
 fn validate_ps_filter_key(key: &str) -> Result<()> {
     const VALID: &[&str] = &[
-        "status", "name", "ancestor", "id", "label", "publish", "expose", "network", "volume",
+        "status",
+        "name",
+        "ancestor",
+        "id",
+        "label",
+        "publish",
+        "expose",
+        "network",
+        "volume",
+        "exited",
     ];
     if !VALID.contains(&key) {
         return Err(anyhow!("Invalid filter '{}'", key));
@@ -6828,6 +6922,21 @@ pub fn rand_bytes() -> [u8; 6] {
     let hash = hasher.finalize();
     bytes.copy_from_slice(&hash[..6]);
     bytes
+}
+
+/// Podman-compatible 64-character lowercase hex container ID.
+pub fn new_container_id() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(rand_bytes());
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes(),
+    );
+    hex::encode(hasher.finalize())
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

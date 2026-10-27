@@ -665,6 +665,10 @@ pub struct PsArgs {
     #[arg(short = 'f', long = "filter")]
     pub filter: Vec<String>,
 
+    /// Sort by name, id, or created (Podman-compatible)
+    #[arg(long = "sort")]
+    pub sort: Option<String>,
+
     /// Do not print headers
     #[arg(long = "noheading")]
     pub noheading: bool,
