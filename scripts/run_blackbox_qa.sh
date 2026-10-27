@@ -341,7 +341,7 @@ if section_enabled podman; then
     run_cmd "$BOXR_CMD pod rm -f $POD" 2>/dev/null || true
     NET="bb-net-$(rand_id)"
     NC="bb-netc-$(rand_id)"
-    test_step "K13 network reload" "$BOXR_CMD network create $NET && $BOXR_CMD network exists $NET && $BOXR_CMD run -d --name $NC alpine:latest sleep 120 && $BOXR_CMD network connect $NET $NC && $BOXR_CMD network reload $NC"
+    test_step "K13 network reload" "$BOXR_CMD network create $NET && $BOXR_CMD network exists $NET && $BOXR_CMD run -d --name $NC alpine:latest sleep 120 >/dev/null && $BOXR_CMD network connect $NET $NC >/dev/null && $BOXR_CMD network reload $NC >/dev/null"
     run_cmd "$BOXR_CMD rm -f $NC" 2>/dev/null || true
     run_cmd "$BOXR_CMD network rm $NET" 2>/dev/null || true
 fi
