@@ -337,13 +337,15 @@ if section_enabled podman; then
     rm -f "$ART_FILE" 2>/dev/null || true
     POD="bb-pod-$(rand_id)"
     PC="${POD}-c1"
-    test_step "K12 pod lifecycle" "$BOXR_CMD pod create --name $POD && $BOXR_CMD run -d --pod $POD --name $PC alpine:latest sleep 120 && $BOXR_CMD pod ps | grep -q $POD"
+    test_step "K12 pod lifecycle" "$BOXR_CMD pod create --name $POD >/dev/null && $BOXR_CMD run -d --pod $POD --name $PC alpine:latest sleep 120 >/dev/null && $BOXR_CMD pod ps | grep -q $POD"
     run_cmd "$BOXR_CMD pod rm -f $POD" 2>/dev/null || true
     NET="bb-net-$(rand_id)"
     NC="bb-netc-$(rand_id)"
-    test_step "K13 network reload" "$BOXR_CMD network create $NET && $BOXR_CMD network exists $NET && $BOXR_CMD run -d --name $NC alpine:latest sleep 120 >/dev/null && $BOXR_CMD network connect $NET $NC >/dev/null && $BOXR_CMD network reload $NC >/dev/null"
+    test_step "K13 network reload" "$BOXR_CMD network create $NET >/dev/null && $BOXR_CMD network exists $NET >/dev/null && $BOXR_CMD run -d --name $NC alpine:latest sleep 120 >/dev/null && $BOXR_CMD network connect $NET $NC >/dev/null && $BOXR_CMD network reload $NC >/dev/null"
     run_cmd "$BOXR_CMD rm -f $NC" 2>/dev/null || true
     run_cmd "$BOXR_CMD network rm $NET" 2>/dev/null || true
+    test_step "K14 auto-update dry-run" "$BOXR_CMD auto-update --dry-run"
+    test_step "K15 system connection ls" "$BOXR_CMD system connection ls | grep -qE 'local|NAME'"
 fi
 
 # --- Rust integration tests ---
