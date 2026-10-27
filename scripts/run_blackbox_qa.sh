@@ -118,6 +118,13 @@ section_enabled() {
     [[ "$SECTION" == "all" || "$SECTION" == "$name" ]]
 }
 
+# Probe rootless-style user+net namespace (matches boxr trampoline). Skip embedded
+# usernet QA when the runner refuses unshare (common after long CI jobs on GHA).
+linux_user_netns_ok() {
+    [[ "$(uname -s)" == "Linux" ]] || return 1
+    unshare --user --map-root-user --net -- sh -c 'true' 2>/dev/null
+}
+
 test_step() {
     local name="$1"
     local cmd="$2"
