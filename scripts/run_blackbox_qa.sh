@@ -89,6 +89,9 @@ BOXR_CMD="${REMOTE_HOST:+docker}"
 BOXR_CMD="${BOXR_CMD:-$BIN}"
 
 # Isolated BOXR_HOME
+# Match Rust blackbox helpers: stray DOCKER_HOST breaks rootless runs on some CI hosts.
+unset DOCKER_HOST
+
 BOXR_HOME_TMP="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bb-qa.XXXXXX")"
 export BOXR_HOME="$BOXR_HOME_TMP"
 REAL_HOME="${HOME}/.boxr"
@@ -127,12 +130,12 @@ linux_user_netns_ok() {
 
 embedded_usernet_smoke_ok() {
     [[ "$(uname -s)" == "Linux" ]] || return 1
-    env BOXR_FORCE_EMBEDDED_USERNET=1 "$BOXR_CMD" pull -q alpine:latest >/dev/null 2>&1 || true
+    "$BOXR_CMD" pull -q alpine:latest >/dev/null 2>&1 || true
     local err
-    if env BOXR_FORCE_EMBEDDED_USERNET=1 "$BOXR_CMD" run --rm --network none alpine true >/dev/null 2>&1; then
+    if "$BOXR_CMD" run --rm --network none alpine true >/dev/null 2>&1; then
         return 0
     fi
-    err="$(env BOXR_FORCE_EMBEDDED_USERNET=1 "$BOXR_CMD" run --rm --network none alpine true 2>&1)" || true
+    err="$("$BOXR_CMD" run --rm --network none alpine true 2>&1)" || true
     if [[ "$err" == *"EPERM"* ]] || [[ "$err" == *"unshare network namespace"* ]]; then
         return 1
     fi
