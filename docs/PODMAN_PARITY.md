@@ -14,7 +14,7 @@ Track **Podman-compatible** CLI and behavior for `boxr`. Status meanings:
 Automated checks:
 
 - `python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr`
-- `cargo test --test podman_parity_blackbox_test -- --test-threads=1`
+- `cargo test --test podman_parity_blackbox_test --test podman_upstream_parity_test -- --test-threads=1`
 - `./scripts/run_blackbox_qa.sh -s podman -b ./target/debug/boxr`
 
 ## Matrix
@@ -28,7 +28,7 @@ Automated checks:
 | **volume exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **network exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **network reload** | full | partial | partial | partial | `podman_parity_blackbox_test`, blackbox K13, `network/mod` | Refreshes bridge `/etc/hosts` + port wait |
-| **pod lifecycle** | partial | partial | partial | partial | `podman_parity_blackbox_test`, blackbox K12 | create → start → ps → rm |
+| **pod lifecycle** | partial | partial | partial | partial | `podman_upstream_parity_test`, `podman_parity_blackbox_test`, K12 | pause/unpause, stop/start/restart, stats, top, logs, prune, clone |
 | **play kube** | partial | partial | partial | partial | `fixtures/podman/minimal-pod.yaml` | Pod + multi-doc YAML |
 | **generate spec** | partial | partial | partial | partial | `podman_parity_blackbox_test` | SpecGenerator JSON subset |
 | **quadlet** | partial | partial | partial | partial | `podman_parity_blackbox_test` | install + print round-trip |

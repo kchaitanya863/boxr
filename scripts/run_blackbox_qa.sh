@@ -298,6 +298,11 @@ if section_enabled podman; then
     PODMAN_FIX="$REPO_ROOT/tests/fixtures/podman"
     COMPOSE_STACK="$REPO_ROOT/tests/fixtures/compose/docker-replacement-stack/docker-compose.yml"
     test_step "K1 container exists missing" "! $BOXR_CMD container exists bb-missing-$(rand_id)"
+    SEC_N="bb-sec-$(rand_id)"
+    SEC_FILE="$(mktemp "${TMPDIR:-/tmp}/boxr-sec.XXXXXX")"
+    printf 'parity-secret' >"$SEC_FILE"
+    test_step "K16 secret create+exists+rm" "$BOXR_CMD secret create --name $SEC_N -f \"$SEC_FILE\" && $BOXR_CMD secret exists $SEC_N && $BOXR_CMD secret rm $SEC_N"
+    rm -f "$SEC_FILE" 2>/dev/null || true
     VID="bb-vol-$(rand_id)"
     test_step "K2 volume create+exists" "$BOXR_CMD volume create $VID && $BOXR_CMD volume exists $VID"
     run_cmd "$BOXR_CMD volume rm $VID >/dev/null 2>&1" || true
@@ -352,7 +357,7 @@ fi
 if [[ $RUN_RUST -eq 1 && ( "$SECTION" == "all" || "$SECTION" == "rust" ) ]]; then
     echo -e "\n${BOLD}Rust blackbox_* integration tests${NC}"
     if [[ -d "$REPO_ROOT" ]] && command -v cargo &>/dev/null; then
-        test_step "cargo blackbox tests" "cd \"$REPO_ROOT\" && cargo test --test 'blackbox_runtime_test' --test 'blackbox_volumes_test' --test 'blackbox_networking_test' --test 'blackbox_security_test' --test 'blackbox_resources_test' --test 'blackbox_negative_test' --test 'podman_parity_blackbox_test' -- --test-threads=1"
+        test_step "cargo blackbox tests" "cd \"$REPO_ROOT\" && cargo test --test 'blackbox_runtime_test' --test 'blackbox_volumes_test' --test 'blackbox_networking_test' --test 'blackbox_security_test' --test 'blackbox_resources_test' --test 'blackbox_negative_test' --test 'podman_parity_blackbox_test' --test 'podman_upstream_parity_test' -- --test-threads=1"
     else
         skip_step "cargo blackbox tests" "cargo not available"
     fi
