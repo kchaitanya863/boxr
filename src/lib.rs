@@ -87,19 +87,35 @@ use storage::{
 };
 use volume::VolumeStore;
 
+fn authfile_exit_125(global: Option<&str>, local: Option<&str>) -> Result<()> {
+    for p in [local, global].into_iter().flatten().collect::<std::collections::HashSet<_>>() {
+        if let Err(e) = auth::validate_authfile(p) {
+            eprintln!("Error: {}", e);
+            std::process::exit(125);
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_cli(cli: Cli) -> Result<i32> {
     ensure_directories()?;
+    let global_auth = cli.authfile.as_deref();
+    authfile_exit_125(global_auth, None)?;
+    let command = cli.command;
 
-    match cli.command {
+    match command {
         Commands::Pull(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             pull_image_with_platform(&args.image, args.platform.as_deref()).await?;
             Ok(0)
         }
         Commands::Run(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             let code = run_container(args).await?;
             Ok(code)
         }
         Commands::Create(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             let id = create_only_container(args).await?;
             println!("{}", id);
             Ok(0)
@@ -129,6 +145,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Search(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             search_hub(&args).await?;
             Ok(0)
         }
@@ -169,6 +186,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Build(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             build_image(args).await?;
             Ok(0)
         }
@@ -187,10 +205,12 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Push(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             auth::RegistryPusher::push(&args.image).await?;
             Ok(0)
         }
         Commands::Login(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             let server = args.server.as_deref().unwrap_or("docker.io");
             let username = args.username.unwrap_or_else(|| {
                 eprint!("Username: ");
@@ -209,6 +229,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Logout(args) => {
+            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
             let server = args.server.as_deref().unwrap_or("docker.io");
             auth::CredentialStore::new().logout(server)?;
             println!("Logout Succeeded for {}", server);
@@ -224,10 +245,12 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Container(args) => match args.command {
             cli::ContainerAction::Run(run_args) => {
+                authfile_exit_125(global_auth, run_args.registry_auth.authfile.as_deref())?;
                 let code = run_container(run_args).await?;
                 Ok(code)
             }
             cli::ContainerAction::Create(create_args) => {
+                authfile_exit_125(global_auth, create_args.registry_auth.authfile.as_deref())?;
                 let id = create_only_container(create_args).await?;
                 println!("{}", id);
                 Ok(0)
@@ -427,6 +450,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ContainerAction::Runlabel(rl_args) => {
+                authfile_exit_125(global_auth, rl_args.registry_auth.authfile.as_deref())?;
                 let store = ImageStore::new();
                 let img = store
                     .find(&rl_args.image)
@@ -765,9 +789,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Rm(args) => {
-            for c in &args.containers {
-                remove_container_opts(c, args.force, args.volumes)?;
-            }
+            rm_containers(&args)?;
             Ok(0)
         }
         Commands::Rmi(args) => {
@@ -3500,9 +3522,8 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&[compat])?);
             }
         }
-        VolumeAction::Rm { name } => {
-            store.remove(&name)?;
-            println!("{}", name);
+        VolumeAction::Rm(rm_args) => {
+            rm_volumes(&store, &rm_args)?;
         }
         VolumeAction::Prune(prune_args) => {
             let pruned = store.prune_with_options(prune_args.all, &prune_args.filter)?;
@@ -4011,6 +4032,43 @@ pub fn list_containers(args: PsArgs) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn rm_containers(args: &cli::RmArgs) -> Result<()> {
+    if args.all {
+        let store = ContainerStore::new();
+        for c in store.list() {
+            if let Err(e) = remove_container_opts(&c.name, args.force, args.volumes) {
+                if !args.ignore {
+                    return Err(e);
+                }
+            }
+        }
+        return Ok(());
+    }
+    if args.containers.is_empty() {
+        return Err(anyhow!("you must provide at least one container name or ID"));
+    }
+    for c in &args.containers {
+        remove_container_opts(c, args.force, args.volumes)?;
+    }
+    Ok(())
+}
+
+pub fn rm_volumes(store: &VolumeStore, args: &cli::VolumeRmArgs) -> Result<()> {
+    let names: Vec<String> = if args.all {
+        store.list().iter().map(|v| v.name.clone()).collect()
+    } else {
+        args.names.clone()
+    };
+    if names.is_empty() && !args.all {
+        return Err(anyhow!("volume name is required"));
+    }
+    for name in names {
+        store.remove(&name)?;
+        println!("{}", name);
+    }
     Ok(())
 }
 
@@ -6171,6 +6229,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         .unwrap_or_else(|| "alpine:latest".to_string());
 
     let infra_args = cli::RunArgs {
+        registry_auth: Default::default(),
         interactive: false,
         tty: false,
         detach: true,
@@ -6353,10 +6412,29 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             };
             print_pod_table(&pods, &ls_args);
         }
-        PodAction::Rm { force, pods } => {
-            for pod in pods {
-                let removed = store.remove_with_force(&pod, force)?;
-                println!("{}", removed.id);
+        PodAction::Rm {
+            force,
+            all,
+            ignore,
+            pods,
+            time: _,
+        } => {
+            let targets: Vec<String> = if all {
+                store.list().into_iter().map(|p| p.name).collect()
+            } else {
+                pods
+            };
+            if targets.is_empty() && !all {
+                return Err(anyhow!("you must provide at least one pod name or ID"));
+            }
+            for pod in targets {
+                if let Err(e) = store.remove_with_force(&pod, force) {
+                    if !ignore {
+                        return Err(e);
+                    }
+                } else {
+                    println!("{}", pod);
+                }
             }
         }
         PodAction::Inspect { format, pods } => {

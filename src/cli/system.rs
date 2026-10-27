@@ -269,6 +269,12 @@ pub enum PodAction {
     Rm {
         #[arg(short = 'f', long = "force")]
         force: bool,
+        #[arg(short = 't', long = "time", value_name = "SECONDS")]
+        time: Option<u32>,
+        #[arg(long = "all")]
+        all: bool,
+        #[arg(long = "ignore")]
+        ignore: bool,
         pods: Vec<String>,
     },
     /// Display detailed information on one or more pods

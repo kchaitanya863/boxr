@@ -60,9 +60,7 @@ pub enum VolumeAction {
         format: Option<String>,
         name: String,
     },
-    Rm {
-        name: String,
-    },
+    Rm(VolumeRmArgs),
     Prune(VolumePruneArgs),
     /// Export volume data to a tar archive
     Export(VolumeExportArgs),
@@ -90,6 +88,15 @@ pub enum VolumeAction {
     Exists {
         name: String,
     },
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct VolumeRmArgs {
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+    pub names: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]

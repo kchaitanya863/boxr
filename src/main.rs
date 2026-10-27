@@ -60,8 +60,20 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let cli = boxr::cli::Cli::parse();
-        let code = boxr::run_cli(cli).await?;
+        let cli = match boxr::cli::Cli::try_parse() {
+            Ok(c) => c,
+            Err(e) => {
+                e.print().ok();
+                std::process::exit(125);
+            }
+        };
+        let code = match boxr::run_cli(cli).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
         std::process::exit(code);
     })
 }

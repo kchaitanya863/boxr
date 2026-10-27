@@ -97,6 +97,7 @@ fn dummy_image_record(repo: &str, tag: &str, home: &Path) -> ImageRecord {
 
 fn default_run_args(image: &str) -> RunArgs {
     RunArgs {
+        registry_auth: Default::default(),
         interactive: false,
         tty: false,
         detach: false,

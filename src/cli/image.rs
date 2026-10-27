@@ -1,10 +1,20 @@
 use clap::{Args, Subcommand};
 
+#[derive(Args, Debug, Clone, Default)]
+pub struct RegistryAuthArgs {
+    /// Path of the authentication file
+    #[arg(long = "authfile")]
+    pub authfile: Option<String>,
+}
+
 #[derive(Args, Debug, Clone)]
 pub struct PullArgs {
     /// Set platform if server is multi-platform (e.g. linux/amd64, linux/arm64)
     #[arg(long = "platform")]
     pub platform: Option<String>,
+
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
 
     pub image: String,
 }
@@ -26,11 +36,15 @@ pub struct LoadArgs {
 
 #[derive(Args, Debug)]
 pub struct PushArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     pub image: String,
 }
 
 #[derive(Args, Debug)]
 pub struct LoginArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     #[arg(short = 'u', long = "username")]
     pub username: Option<String>,
     #[arg(short = 'p', long = "password")]
@@ -42,11 +56,15 @@ pub struct LoginArgs {
 
 #[derive(Args, Debug)]
 pub struct LogoutArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     pub server: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     #[arg(short = 't', long = "tag")]
     pub tags: Vec<String>,
 
@@ -585,6 +603,8 @@ pub struct HistoryArgs {
 
 #[derive(Args, Debug)]
 pub struct SearchArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     /// Max number of search results
     #[arg(long = "limit", default_value_t = 25)]
     pub limit: usize,

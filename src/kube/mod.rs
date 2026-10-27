@@ -172,6 +172,7 @@ impl KubeManager {
             println!("Creating pod container: {}", container_name);
 
             let run_args = RunArgs {
+                registry_auth: Default::default(),
                 interactive: false,
                 tty: false,
                 detach: true,

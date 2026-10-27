@@ -1,7 +1,11 @@
 use clap::{Args, Subcommand};
 
+use super::image::RegistryAuthArgs;
+
 #[derive(Args, Debug, Clone)]
 pub struct RunArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
@@ -667,8 +671,19 @@ pub struct RmArgs {
     #[arg(short = 'l', long = "link")]
     pub link: bool,
 
+    /// Remove all containers
+    #[arg(long = "all")]
+    pub all: bool,
+
+    /// Seconds to wait before killing a container (0 = immediate)
+    #[arg(short = 't', long = "time", value_name = "SECONDS")]
+    pub time: Option<u32>,
+
+    /// Ignore errors when a container cannot be removed
+    #[arg(long = "ignore")]
+    pub ignore: bool,
+
     /// Container IDs or names to remove
-    #[arg(required = true)]
     pub containers: Vec<String>,
 }
 
@@ -935,6 +950,8 @@ pub struct ContainerCloneArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct ContainerRunlabelArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     /// Label key to execute
     pub label: String,
 

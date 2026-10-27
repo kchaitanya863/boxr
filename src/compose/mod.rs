@@ -531,6 +531,7 @@ impl ComposeProject {
             }
 
             let run_args = RunArgs {
+                registry_auth: Default::default(),
                 interactive: false,
                 tty: false,
                 detach,
@@ -938,6 +939,7 @@ impl ComposeProject {
         add_host.dedup();
 
         Ok(RunArgs {
+            registry_auth: Default::default(),
             interactive: false,
             tty: false,
             detach,

@@ -44,6 +44,35 @@ Edit `tests/podman_bats/manifest.txt` to add patterns (e.g. `160-volumes`). Matc
 
 Logs land in `.cache/podman-bats-results/run-*.log`. **Failures are expected** while matrix rows in [PODMAN_PARITY.md](PODMAN_PARITY.md) remain partial; the harness exists to measure improvement over time.
 
+Summarize a log:
+
+```bash
+grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
+```
+
+Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails (for future gating).
+
+## E2E (Ginkgo)
+
+```bash
+chmod +x scripts/run_podman_e2e_conformance.sh
+./scripts/run_podman_e2e_conformance.sh
+```
+
+Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=...` in a shallow Podman clone. First run installs ginkgo via upstream Makefile.
+
+## boxr fixes for upstream tests (ongoing)
+
+| Area | Status |
+|------|--------|
+| CLI usage exit **125** | Implemented (`try_parse`, `subcommand_required`) |
+| `rm` / `pod rm` / `volume rm` bulk flags | `--all`, `-f`, `-a` (see `RmArgs`, `VolumeRmArgs`) |
+| `--authfile` | Global + pull/run/build/login/… |
+| BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash` |
+| Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
+
+**100% pass** of upstream suites is not realistic until `info`, logging, networking, and storage output match Podman; the harness measures progress.
+
 ## Related
 
 - Rust smokes: `tests/podman_upstream_parity_test.rs`

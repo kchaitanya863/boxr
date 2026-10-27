@@ -28,9 +28,14 @@ use clap::{Parser, Subcommand};
     author = "Boxr Contributors",
     version,
     about = "A fast, lightweight OCI container engine and runtime written in Rust",
-    long_about = "boxr is a complete Open Container Initiative (OCI) compliant container engine, image builder, compose orchestrator, and runtime written in Rust."
+    long_about = "boxr is a complete Open Container Initiative (OCI) compliant container engine, image builder, compose orchestrator, and runtime written in Rust.",
+    subcommand_required = true,
+    arg_required_else_help = false
 )]
 pub struct Cli {
+    /// Path of the authentication file (Podman-compatible global flag)
+    #[arg(global = true, long = "authfile")]
+    pub authfile: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }

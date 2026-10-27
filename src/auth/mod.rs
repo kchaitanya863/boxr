@@ -683,3 +683,29 @@ mod tests {
         );
     }
 }
+
+/// Podman-compatible check for `--authfile` (exit 125 when missing).
+pub fn validate_authfile(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    if !p.exists() {
+        return Err(anyhow!(
+            "credential file is not accessible: faccessat {}: no such file or directory",
+            path
+        ));
+    }
+    let meta = fs::metadata(p)?;
+    if !meta.is_file() {
+        return Err(anyhow!(
+            "credential file is not accessible: faccessat {}: no such file or directory",
+            path
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_authfile_opt(path: Option<&str>) -> Result<()> {
+    if let Some(p) = path {
+        validate_authfile(p)?;
+    }
+    Ok(())
+}

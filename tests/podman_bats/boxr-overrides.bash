@@ -1,6 +1,5 @@
 # -*- bash -*-
 # Appended to Podman test/system/helpers.bash when running BATS against boxr.
-# Overrides teardown helpers and TLS generation for boxr + OpenSSL 3.x.
 
 IMAGE=${IMAGE:-alpine:3.20}
 PODMAN_TEST_IMAGE_FQN=${PODMAN_TEST_IMAGE_FQN:-alpine:3.20}
@@ -17,29 +16,24 @@ function gen-cert-pair {
     "$@"
 }
 
+# boxr has no skopeo cache path; pull via the CLI under test.
+function _prefetch() {
+    local want=$1
+    run_podman '?' image exists "$want"
+    if [[ $status -eq 0 ]]; then
+        return
+    fi
+    run_podman pull "$want"
+}
+
 function clean_setup() {
-    _run_podman_quiet ps -aq
-    if [[ ${#lines[@]} -gt 0 && -n "${lines[0]}" ]]; then
-        _run_podman_quiet rm -f "${lines[@]}"
-    fi
-
-    _run_podman_quiet pod ps -q
-    if [[ ${#lines[@]} -gt 0 && -n "${lines[0]}" ]]; then
-        _run_podman_quiet pod rm -f "${lines[@]}"
-    fi
-
-    _run_podman_quiet network ls -q
-    if [[ ${#lines[@]} -gt 0 && -n "${lines[0]}" ]]; then
-        for n in "${lines[@]}"; do
-            [[ "$n" == "bridge" ]] && continue
-            _run_podman_quiet network rm "$n"
-        done
-    fi
-
-    _run_podman_quiet volume ls -q
-    if [[ ${#lines[@]} -gt 0 && -n "${lines[0]}" ]]; then
-        for v in "${lines[@]}"; do
-            _run_podman_quiet volume rm "$v"
-        done
-    fi
+    local actions=(
+        "pod rm --all --force"
+        "rm --all --force"
+        "network prune --force"
+        "volume rm -a -f"
+    )
+    for action in "${actions[@]}"; do
+        _run_podman_quiet $action
+    done
 }

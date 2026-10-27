@@ -574,6 +574,7 @@ mod tests {
             network: None,
         };
         let mut args = crate::cli::RunArgs {
+            registry_auth: Default::default(),
             interactive: false,
             tty: false,
             detach: true,

@@ -124,6 +124,7 @@ pub async fn create_container(
     }
 
     let run_args = crate::cli::RunArgs {
+        registry_auth: Default::default(),
         interactive: false,
         tty: false,
         detach: true,
