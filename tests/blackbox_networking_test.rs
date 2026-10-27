@@ -47,9 +47,15 @@ fn test_d4_port_collision_rejected() {
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
-    let port = 19500 + suffix.len() as u16;
+    let port = 19500
+        + suffix
+            .chars()
+            .take(4)
+            .fold(0u16, |a, c| a * 10 + c.to_digit(10).unwrap_or(1))
+            % 400;
     let c1 = format!("bb-collide-1-{}", suffix);
     let c2 = format!("bb-collide-2-{}", suffix);
+    let _ = run_boxr(&home, &["rm", "-f", &c1, &c2]);
     run_boxr_ok(
         &home,
         &[

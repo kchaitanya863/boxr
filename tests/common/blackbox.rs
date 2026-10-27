@@ -9,6 +9,12 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+fn container_name_from_args(args: &[&str]) -> Option<&str> {
+    args.iter()
+        .position(|a| *a == "--name")
+        .and_then(|i| args.get(i + 1).copied())
+}
+
 fn boxr_cmd_timeout() -> Duration {
     if std::env::var("CI").is_ok() {
         Duration::from_secs(180)
@@ -179,7 +185,16 @@ pub fn run_boxr_ok(home: &Path, args: &[&str]) -> String {
         if out.status.success() {
             return String::from_utf8_lossy(&out.stdout).to_string();
         }
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let retryable = stderr.contains("timed out after");
         last = Some(out);
+        if attempt + 1 < attempts && retryable {
+            if let Some(name) = container_name_from_args(args) {
+                let _ = run_boxr(home, &["rm", "-f", name]);
+            }
+            continue;
+        }
+        break;
     }
     let out = last.expect("run_boxr_ok called without attempts");
     assert!(
