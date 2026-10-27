@@ -3144,7 +3144,9 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
     match args.command {
         ComposeSubcommand::Up(opts) => {
             let build = opts.build && !opts.no_build;
-            project.up(opts.detach, build).await?;
+            project
+                .up(opts.detach, build, &opts.services, opts.no_deps)
+                .await?;
         }
         ComposeSubcommand::Down(opts) => {
             project.down(opts.volumes)?;

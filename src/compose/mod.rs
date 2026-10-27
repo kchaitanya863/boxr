@@ -1,3 +1,5 @@
+mod interpolate;
+
 use crate::builder::{BuildOptions, ImageBuilder};
 use crate::cli::RunArgs;
 use crate::network::NetworkStore;
@@ -30,10 +32,71 @@ pub struct ComposeNetworkConfig {
     pub driver: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BuildConfig {
+    Path(String),
+    Spec(ServiceBuildSpec),
+}
+
+impl BuildConfig {
+    pub fn context_path(&self) -> String {
+        match self {
+            BuildConfig::Path(p) => p.clone(),
+            BuildConfig::Spec(s) => s.context.clone().unwrap_or_else(|| ".".to_string()),
+        }
+    }
+
+    pub fn dockerfile_name(&self) -> String {
+        match self {
+            BuildConfig::Path(_) => "Dockerfile".to_string(),
+            BuildConfig::Spec(s) => s.dockerfile.clone().unwrap_or_else(|| "Dockerfile".to_string()),
+        }
+    }
+
+    pub fn build_args(&self) -> HashMap<String, String> {
+        match self {
+            BuildConfig::Path(_) => HashMap::new(),
+            BuildConfig::Spec(s) => s.args.clone().unwrap_or_default(),
+        }
+    }
+
+    pub fn target(&self) -> Option<String> {
+        match self {
+            BuildConfig::Path(_) => None,
+            BuildConfig::Spec(s) => s.target.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ServiceBuildSpec {
+    pub context: Option<String>,
+    pub dockerfile: Option<String>,
+    pub args: Option<HashMap<String, String>>,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DependsOnConfig {
+    List(Vec<String>),
+    Map(HashMap<String, serde_yaml::Value>),
+}
+
+impl DependsOnConfig {
+    pub fn dependency_names(&self) -> Vec<String> {
+        match self {
+            DependsOnConfig::List(names) => names.clone(),
+            DependsOnConfig::Map(map) => map.keys().cloned().collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServiceConfig {
     pub image: Option<String>,
-    pub build: Option<String>,
+    pub build: Option<BuildConfig>,
     pub container_name: Option<String>,
     pub env_file: Option<CommandOrList>,
     pub command: Option<CommandOrList>,
@@ -41,7 +104,7 @@ pub struct ServiceConfig {
     pub environment: Option<EnvironmentConfig>,
     pub ports: Option<Vec<String>>,
     pub volumes: Option<Vec<String>>,
-    pub depends_on: Option<Vec<String>>,
+    pub depends_on: Option<DependsOnConfig>,
     pub networks: Option<Vec<String>>,
     pub restart: Option<String>,
 }
@@ -97,22 +160,43 @@ impl ComposeProject {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read compose file at {:?}", path))?;
+        let compose_path = if path.is_relative() {
+            std::env::current_dir()
+                .with_context(|| "Failed to determine current directory for compose file")?
+                .join(path)
+        } else {
+            path.to_path_buf()
+        };
 
-        let compose: ComposeFile =
-            serde_yaml::from_str(&content).context("Failed to parse YAML compose file")?;
+        let content = fs::read_to_string(&compose_path)
+            .with_context(|| format!("Failed to read compose file at {:?}", compose_path))?;
 
-        let project_name = path
+        let project_dir = compose_path
             .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("compose")
-            .to_string();
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let env = interpolate::project_env(project_dir);
+
+        let mut root: serde_yaml::Value =
+            serde_yaml::from_str(&content).context("Failed to parse YAML compose file")?;
+        interpolate::interpolate_yaml(&mut root, &env)?;
+        let compose: ComposeFile =
+            serde_yaml::from_value(root).context("Failed to parse YAML compose file")?;
+
+        let project_name = std::env::var("COMPOSE_PROJECT_NAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                project_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "compose".to_string());
 
         Ok(Self {
             name: project_name,
-            compose_file_path: path.to_path_buf(),
+            compose_file_path: compose_path,
             compose,
         })
     }
@@ -151,15 +235,15 @@ impl ComposeProject {
 
             if let Some(cfg) = self.compose.services.get(service) {
                 if let Some(deps) = &cfg.depends_on {
-                    for dep in deps {
-                        if !self.compose.services.contains_key(dep) {
+                    for dep in deps.dependency_names() {
+                        if !self.compose.services.contains_key(&dep) {
                             return Err(anyhow!(
                                 "Service '{}' depends on undefined service '{}'",
                                 service,
                                 dep
                             ));
                         }
-                        self.visit_service(dep, visited, visiting, order)?;
+                        self.visit_service(&dep, visited, visiting, order)?;
                     }
                 }
             }
@@ -193,8 +277,86 @@ impl ComposeProject {
         Ok(created)
     }
 
-    pub async fn up(&self, detach: bool, build: bool) -> Result<()> {
+    /// Resolve which services `compose up` should start (Docker parity: includes dependencies).
+    pub fn services_for_up(&self, requested: &[String], no_deps: bool) -> Result<Vec<String>> {
         let order = self.dependency_order()?;
+        if requested.is_empty() {
+            return Ok(order);
+        }
+        for name in requested {
+            if !self.compose.services.contains_key(name) {
+                return Err(anyhow!("no such service: {}", name));
+            }
+        }
+        if no_deps {
+            let want: HashSet<_> = requested.iter().cloned().collect();
+            return Ok(order.into_iter().filter(|s| want.contains(s)).collect());
+        }
+
+        let mut needed = HashSet::new();
+        let mut stack = requested.to_vec();
+        while let Some(svc) = stack.pop() {
+            if !needed.insert(svc.clone()) {
+                continue;
+            }
+            if let Some(cfg) = self.compose.services.get(&svc) {
+                if let Some(deps) = &cfg.depends_on {
+                    for dep in deps.dependency_names() {
+                        stack.push(dep);
+                    }
+                }
+            }
+        }
+
+        Ok(order.into_iter().filter(|s| needed.contains(s)).collect())
+    }
+
+    async fn resolve_service_image(
+        &self,
+        root_dir: &Path,
+        svc_name: &str,
+        svc: &ServiceConfig,
+        build: bool,
+    ) -> Result<String> {
+        if let Some(build_cfg) = &svc.build {
+            if build || svc.image.is_none() {
+                let context_path = root_dir.join(build_cfg.context_path());
+                let dockerfile_path = context_path.join(build_cfg.dockerfile_name());
+                let built_tag = format!("{}_{}:latest", self.name, svc_name);
+                let record = ImageBuilder::new()
+                    .build(BuildOptions {
+                        context_dir: context_path,
+                        dockerfile_path,
+                        tag: Some(built_tag),
+                        no_cache: false,
+                        build_args: build_cfg.build_args(),
+                        target: build_cfg.target(),
+                        add_host: Vec::new(),
+                        memory: None,
+                        shm_size: None,
+                        quiet: false,
+                    })
+                    .await?;
+                return Ok(record.reference);
+            }
+        }
+        if let Some(img) = &svc.image {
+            return Ok(img.clone());
+        }
+        Err(anyhow!(
+            "Service '{}' must specify either image or build",
+            svc_name
+        ))
+    }
+
+    pub async fn up(
+        &self,
+        detach: bool,
+        build: bool,
+        services: &[String],
+        no_deps: bool,
+    ) -> Result<()> {
+        let order = self.services_for_up(services, no_deps)?;
         println!(
             "Starting compose project '{}' (service order: {:?})",
             self.name, order
@@ -258,38 +420,9 @@ impl ComposeProject {
                 .clone()
                 .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
 
-            // Determine image
-            let image_name = if let Some(build_path_str) = &svc.build {
-                if build || svc.image.is_none() {
-                    let build_path = root_dir.join(build_path_str);
-                    let builder = ImageBuilder::new();
-                    let built_tag = format!("{}_{}:latest", self.name, svc_name);
-                    let record = builder
-                        .build(BuildOptions {
-                            context_dir: build_path.clone(),
-                            dockerfile_path: build_path.join("Dockerfile"),
-                            tag: Some(built_tag.clone()),
-                            no_cache: false,
-                            build_args: std::collections::HashMap::new(),
-                            target: None,
-                            add_host: Vec::new(),
-                            memory: None,
-                            shm_size: None,
-                            quiet: false,
-                        })
-                        .await?;
-                    record.reference
-                } else {
-                    svc.image.clone().unwrap()
-                }
-            } else if let Some(img) = &svc.image {
-                img.clone()
-            } else {
-                return Err(anyhow!(
-                    "Service '{}' must specify either image or build",
-                    svc_name
-                ));
-            };
+            let image_name = self
+                .resolve_service_image(root_dir, &svc_name, svc, build)
+                .await?;
 
             let mut env_vec = Vec::new();
 
@@ -610,9 +743,9 @@ impl ComposeProject {
     pub async fn build(&self, no_cache: bool, quiet: bool) -> Result<()> {
         let root_dir = self.compose_file_path.parent().unwrap_or(Path::new("."));
         for (svc_name, svc) in &self.compose.services {
-            if let Some(build_ctx) = &svc.build {
-                let ctx_path = root_dir.join(build_ctx);
-                let dockerfile = ctx_path.join("Dockerfile");
+            if let Some(build_cfg) = &svc.build {
+                let ctx_path = root_dir.join(build_cfg.context_path());
+                let dockerfile = ctx_path.join(build_cfg.dockerfile_name());
                 if dockerfile.exists() {
                     let builder = ImageBuilder::new();
                     let tag = svc
@@ -625,8 +758,8 @@ impl ComposeProject {
                             dockerfile_path: dockerfile,
                             tag: Some(tag),
                             no_cache,
-                            build_args: HashMap::new(),
-                            target: None,
+                            build_args: build_cfg.build_args(),
+                            target: build_cfg.target(),
                             add_host: Vec::new(),
                             memory: None,
                             shm_size: None,
@@ -1147,5 +1280,70 @@ services:
 
         // Clean up
         let _ = net_store.remove_with_force(net_name, true);
+    }
+
+    #[test]
+    fn test_load_spice_box_compose_file() {
+        let path = Path::new("/Users/knaragam/projects/spice-box/docker-compose.yml");
+        if !path.exists() {
+            return;
+        }
+        ComposeProject::load(path).expect("spice-box compose should load");
+    }
+
+    #[test]
+    fn test_compose_interpolate_env_file_before_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), "HOST_PORT=9090\n").unwrap();
+        fs::write(
+            dir.path().join("docker-compose.yml"),
+            r#"
+services:
+  web:
+    image: nginx
+    ports:
+      - "${HOST_PORT:-8080}:80"
+"#,
+        )
+        .unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let project = ComposeProject::load(Path::new("docker-compose.yml")).unwrap();
+        std::env::set_current_dir(prev).unwrap();
+        let ports = project.compose.services["web"].ports.as_ref().unwrap();
+        assert_eq!(ports[0], "9090:80");
+    }
+
+    #[test]
+    fn test_compose_build_spec_and_map_depends_on_parse() {
+        let yaml = r#"
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080/api
+    depends_on:
+      backend:
+        condition: service_healthy
+        required: false
+  backend:
+    image: alpine:latest
+"#;
+        let project = ComposeProject::from_str(yaml, "spice-box").unwrap();
+        let frontend = &project.compose.services["frontend"];
+        let build = frontend.build.as_ref().unwrap();
+        assert_eq!(build.context_path(), "./frontend");
+        assert_eq!(build.dockerfile_name(), "Dockerfile");
+        assert_eq!(
+            build.build_args().get("NEXT_PUBLIC_API_URL").map(String::as_str),
+            Some("http://localhost:8080/api")
+        );
+
+        let order = project
+            .services_for_up(&["frontend".to_string()], false)
+            .unwrap();
+        assert_eq!(order, vec!["backend", "frontend"]);
     }
 }

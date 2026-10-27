@@ -2545,6 +2545,24 @@ fn test_issue_320_missing_option_flag_timestamps_on_boxr_compose_up() {
     let _ = cli;
 }
 
+#[test]
+fn test_compose_up_accepts_service_names_after_flags() {
+    use boxr::cli::Cli;
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["boxr", "compose", "up", "--build", "-d", "frontend"]).unwrap();
+    match cli.command {
+        boxr::cli::Commands::Compose(boxr::cli::ComposeArgs {
+            command: boxr::cli::ComposeSubcommand::Up(up),
+            ..
+        }) => {
+            assert!(up.build);
+            assert!(up.detach);
+            assert_eq!(up.services, vec!["frontend".to_string()]);
+        }
+        _ => panic!("expected compose up"),
+    }
+}
+
 // Issue #321: [Docker Drift] Missing option flag '--remove-orphans' on 'boxr compose down'
 #[test]
 fn test_issue_321_missing_option_flag_remove_orphans_on_boxr_compose_down() {

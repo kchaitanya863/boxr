@@ -244,6 +244,8 @@ pub struct ComposeUpArgs {
     pub wait: bool,
     #[arg(long = "timestamps")]
     pub timestamps: bool,
+    /// Service names to create and start (default: all services)
+    pub services: Vec<String>,
 }
 
 #[derive(Args, Debug, Default)]
