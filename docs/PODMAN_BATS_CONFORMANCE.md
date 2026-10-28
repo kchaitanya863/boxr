@@ -62,7 +62,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
 | 075-exec | 9 | 1 | **additional groups** — on this Linux profile `/proc/<pid>/setgroups` stays `deny` after `gid_map` (parent `allow` write does not stick; `newuidmap` fallback same). Init/exec inherit host supplementary GIDs (shown as `65534` in the user ns); `exec --user root:root id -G` must be exactly `0`. boxr prefers `write_proc_mappings` (deny→map→allow) before `newuidmap`; full fix needs setgroups `allow` after maps (kernel/uidmap policy). |
-| 160-volumes | 24 | 1 | **--userns=keep-id** (multi-line `uid_map` via `newuidmap` + idmapped binds; `subuid overflow` on full keep-id map in this VM) |
+| 160-volumes | 24 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
 | **Total** | **153** | **2** | plus skips |
 
 Earlier scorecard (`bats-manifest-v2.log`) predated stopping-loop and volume-import fixes; use v3 for current counts.

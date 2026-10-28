@@ -2649,7 +2649,8 @@ fn bind_mount_path(source: &Path, target: &Path, idmap: bool) -> Result<()> {
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
     )
-    .map_err(|e| anyhow!("bind mount {:?} -> {:?}: {}", source, target, e))
+    .map_err(|e| anyhow!("bind mount {:?} -> {:?}: {}", source, target, e))?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
