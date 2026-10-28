@@ -1611,22 +1611,65 @@ struct ExecCredentials {
     supplementary_gids: Vec<u32>,
 }
 
-fn apply_exec_user_credentials(creds: &ExecCredentials) {
+fn parse_supplementary_groups_from_status(pid: i32) -> Vec<u32> {
+    let path = format!("/proc/{pid}/status");
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("Groups:") {
+            return rest
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn apply_exec_supplementary_groups(init_pid: i32, creds: Option<&ExecCredentials>) {
+    let _ = fs::write("/proc/self/setgroups", "allow");
+    if let Some(c) = creds {
+        if c.reset_supplementary_groups {
+            let mut gids: Vec<nix::unistd::Gid> = c
+                .supplementary_gids
+                .iter()
+                .map(|g| nix::unistd::Gid::from_raw(*g))
+                .collect();
+            if gids.is_empty() {
+                gids.push(nix::unistd::Gid::from_raw(c.gid));
+            }
+            let _ = nix::unistd::setgroups(&gids);
+            return;
+        }
+        if c.uid == 0 {
+            let gids = parse_supplementary_groups_from_status(init_pid);
+            let raw: Vec<nix::unistd::Gid> = gids
+                .iter()
+                .map(|g| nix::unistd::Gid::from_raw(*g))
+                .collect();
+            let _ = nix::unistd::setgroups(&raw);
+        } else {
+            let _ = nix::unistd::setgroups(&[]);
+        }
+    } else {
+        let gids = parse_supplementary_groups_from_status(init_pid);
+        let raw: Vec<nix::unistd::Gid> = gids
+            .iter()
+            .map(|g| nix::unistd::Gid::from_raw(*g))
+            .collect();
+        let _ = nix::unistd::setgroups(&raw);
+    }
+}
+
+fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32) {
     let gid = nix::unistd::Gid::from_raw(creds.gid);
     let uid = nix::unistd::Uid::from_raw(creds.uid);
     let root_gid = nix::unistd::Gid::from_raw(0);
     let root_uid = nix::unistd::Uid::from_raw(0);
     let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
     let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
-    if creds.reset_supplementary_groups {
-        let _ = fs::write("/proc/self/setgroups", "allow");
-        let raw: Vec<nix::unistd::Gid> = creds
-            .supplementary_gids
-            .iter()
-            .map(|g| nix::unistd::Gid::from_raw(*g))
-            .collect();
-        let _ = nix::unistd::setgroups(&raw);
-    }
+    apply_exec_supplementary_groups(init_pid, Some(creds));
     let _ = nix::unistd::setresgid(gid, gid, gid);
     let _ = nix::unistd::setresuid(uid, uid, uid);
 }
@@ -1686,6 +1729,13 @@ pub fn exec_in_bundle(
     let override_creds = exec_creds
         .as_ref()
         .filter(|c| c.reset_supplementary_groups || c.uid != 0 || c.gid != 0);
+    let same_userns = match (
+        fs::read_link("/proc/self/ns/user"),
+        fs::read_link(format!("/proc/{pid}/ns/user")),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
     if override_creds.is_some() {
         return exec_in_bundle_via_setns(
             bundle_path,
@@ -1707,13 +1757,6 @@ pub fn exec_in_bundle(
     // one. When boxr runs as root it creates no user namespace, and the
     // kernel refuses setns() into the initial user namespace (EPERM), so an
     // unconditional -U breaks `boxr exec` for every root-started container.
-    let same_userns = match (
-        fs::read_link("/proc/self/ns/user"),
-        fs::read_link(format!("/proc/{pid}/ns/user")),
-    ) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false, // unknown: keep historical behavior (pass -U)
-    };
     cmd.args(["-t", &pid.to_string()]);
     if !same_userns {
         cmd.arg("-U");
@@ -1936,12 +1979,27 @@ fn exec_in_bundle_via_setns(
                     None::<&str>,
                 );
             }
+            // After joining the container mount/PID namespaces, ensure /proc reflects
+            // the container (075-exec reads /proc/self/status and /proc/1/status).
+            let _ = nix::mount::mount(
+                Some("proc"),
+                "/proc",
+                Some("proc"),
+                nix::mount::MsFlags::MS_NOSUID
+                    | nix::mount::MsFlags::MS_NODEV
+                    | nix::mount::MsFlags::MS_NOEXEC,
+                None::<&str>,
+            );
             if !preserve_fds.is_empty() {
                 clear_close_on_exec(preserve_fds);
                 close_fds_except(preserve_fds);
             }
+            // Container init is PID 1 after joining the container PID namespace.
+            let init_pid = 1;
             if let Some(creds) = exec_creds {
-                apply_exec_user_credentials(creds);
+                apply_exec_user_credentials(creds, init_pid);
+            } else {
+                apply_exec_supplementary_groups(init_pid, None);
             }
             let binary = &command[0];
             let binary_c = match CString::new(binary.as_str()) {
