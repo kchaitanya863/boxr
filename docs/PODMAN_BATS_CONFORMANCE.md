@@ -61,7 +61,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
-| 075-exec | 9 | 1 | **additional groups** (`setgroups` / mapped 65534 supp GIDs; needs Podman-style id mapping + exec cred pipeline) |
+| 075-exec | 9 | 1 | **additional groups** — rootless `/proc/<pid>/setgroups` stays `deny` after mapping-parent writes; init inherits host supplementary GIDs as unmapped `65534`; `exec --user root:root id -G` needs exactly `0` (exec-userns socket + setns sync paths in progress in `src/runtime/linux.rs`) |
 | 160-volumes | 24 | 1 | **--userns=keep-id** (multi-line `uid_map` via `newuidmap` + idmapped binds; `subuid overflow` on full keep-id map in this VM) |
 | **Total** | **153** | **2** | plus skips |
 

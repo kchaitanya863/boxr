@@ -246,6 +246,54 @@ fn run_timeout_secs(spec: &Spec) -> Option<u64> {
         .and_then(|s| s.parse().ok())
 }
 
+fn wait_grandchild_serving_exec_userns(
+    grandchild: Pid,
+    bundle_path: &Path,
+    timeout_secs: Option<u64>,
+) -> i32 {
+    use std::io::ErrorKind;
+    use std::os::unix::net::UnixListener;
+
+    let sock_path = exec_userns_socket_path(bundle_path);
+    let _ = fs::remove_file(&sock_path);
+    let listener = match UnixListener::bind(&sock_path) {
+        Ok(l) => l,
+        Err(_) => {
+            return wait_grandchild_with_optional_timeout(grandchild, bundle_path, timeout_secs);
+        }
+    };
+    let _ = listener.set_nonblocking(true);
+    let init_pid = grandchild.as_raw();
+    let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+    let code = loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                handle_exec_userns_connection(stream, init_pid, bundle_path);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+            Err(_) => {}
+        }
+        match waitpid(grandchild, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, code)) => break code,
+            Ok(WaitStatus::Signaled(_, sig, _)) => break 128 + sig as i32,
+            Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::EINTR) => {}
+            Ok(_) => break 1,
+            Err(_) => break 1,
+        }
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                let _ = nix::sys::signal::kill(grandchild, nix::sys::signal::Signal::SIGKILL);
+                let _ = waitpid(grandchild, None);
+                write_container_exit_code(bundle_path, 255);
+                break 255;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    let _ = fs::remove_file(sock_path);
+    code
+}
+
 fn wait_grandchild_with_optional_timeout(
     grandchild: Pid,
     bundle_path: &Path,
@@ -1274,6 +1322,12 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     std::process::exit(1);
                 }
 
+                // Drop host supplementary groups before forking init so the child does not
+                // inherit a long list of unmapped 65534 entries (075-exec / id -G).
+                become_effective_container_root();
+                let _ = fs::write("/proc/self/setgroups", "allow");
+                let _ = nix::unistd::setgroups(&[]);
+
                 // Fork so workload becomes PID 1 inside the new PID namespace.
                 let (mut gc_parent_sock, mut gc_child_sock) = UnixStream::pair()
                     .context("Failed to create UnixStream pair for init setgroups sync")?;
@@ -1288,14 +1342,14 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         let _ = gc_parent_sock.read_exact(&mut ready);
                         become_effective_container_root();
                         let _ = fs::write("/proc/self/setgroups", "allow");
-                        let _ = fs::write(
-                            format!("/proc/{}/setgroups", grandchild.as_raw()),
-                            "allow",
+                        let _ = crate::security::RootlessUserConfig::allow_setgroups_from_userns(
+                            grandchild.as_raw(),
+                            grandchild.as_raw(),
                         );
                         let _ = gc_parent_sock.write_all(b"done");
                         drop(gc_parent_sock);
                         let timeout_secs = run_timeout_secs(&spec);
-                        let status = wait_grandchild_with_optional_timeout(
+                        let status = wait_grandchild_serving_exec_userns(
                             grandchild,
                             bundle_path,
                             timeout_secs,
@@ -1327,15 +1381,15 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                         }
                         drop(gc_parent_sock);
+                        let _ = gc_child_sock.write_all(b"ready");
+                        let mut done = [0u8; 4];
+                        let _ = gc_child_sock.read_exact(&mut done);
+                        drop(gc_child_sock);
                         #[cfg(target_os = "linux")]
                         {
                             let _ = fs::write("/proc/self/setgroups", "allow");
                             let _ = nix::unistd::setgroups(&[]);
                         }
-                        let _ = gc_child_sock.write_all(b"ready");
-                        let mut done = [0u8; 4];
-                        let _ = gc_child_sock.read_exact(&mut done);
-                        drop(gc_child_sock);
                         if let Err(err) =
                             run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
                         {
@@ -1723,12 +1777,296 @@ fn bundle_supplementary_gids(bundle_path: &Path) -> Vec<u32> {
 }
 
 /// Resolved on the host before entering the container mount namespace (rootfs lookups).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ExecCredentials {
     uid: u32,
     gid: u32,
     /// Explicit `user:group` replaces supplementary groups (Podman 075-exec).
     reset_supplementary_groups: bool,
     supplementary_gids: Vec<u32>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExecUsernsJob {
+    command: Vec<String>,
+    env: Vec<String>,
+    workdir: Option<String>,
+    exec_creds: Option<ExecCredentials>,
+    umask: Option<u32>,
+    /// When set, worker redirects stdout/stderr here for the host client to read.
+    output_capture: Option<String>,
+}
+
+fn exec_userns_socket_path(bundle_path: &Path) -> PathBuf {
+    let id = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ctr");
+    let short = if id.len() > 16 { &id[..16] } else { id };
+    PathBuf::from(format!("/tmp/boxr-exec-{short}.sock"))
+}
+
+fn exec_join_init_namespaces(init_pid: i32, mnt_only: bool) -> Result<()> {
+    use nix::sched::{setns, CloneFlags};
+    if mnt_only {
+        let ns_path = format!("/proc/{init_pid}/ns/mnt");
+        if let Ok(f) = std::fs::File::open(&ns_path) {
+            let _ = setns(&f, CloneFlags::CLONE_NEWNS);
+        }
+        return Ok(());
+    }
+    for (name, flag) in [
+        ("ipc", CloneFlags::CLONE_NEWIPC),
+        ("uts", CloneFlags::CLONE_NEWUTS),
+        ("net", CloneFlags::CLONE_NEWNET),
+        ("pid", CloneFlags::CLONE_NEWPID),
+    ] {
+        let ns_path = format!("/proc/{init_pid}/ns/{name}");
+        if let Ok(f) = std::fs::File::open(&ns_path) {
+            let _ = setns(&f, flag);
+        }
+    }
+    Ok(())
+}
+
+fn exec_run_worker_in_holder_context(
+    bundle_path: &Path,
+    init_pid: i32,
+    job: &ExecUsernsJob,
+) -> Result<i32> {
+    let rootfs = bundle_path.join("rootfs");
+    let command = exec_rootfs_command(&rootfs, &job.command);
+    let capture_fd = job.output_capture.as_ref().and_then(|cap| {
+        fs::File::create(cap).ok().map(|f| {
+            use std::os::unix::io::AsRawFd;
+            f.as_raw_fd()
+        })
+    });
+    if let Some(u) = job.umask {
+        unsafe {
+            libc::umask(u as libc::mode_t);
+        }
+    }
+    for e in &job.env {
+        if let Some((k, v)) = e.split_once('=') {
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+    if let Some(creds) = &job.exec_creds {
+        apply_exec_user_credentials(creds, init_pid);
+    } else {
+        become_effective_container_root();
+        apply_exec_supplementary_groups(init_pid, None);
+    }
+    // Mount namespace only when a container workdir requires the container root view.
+    if let Some(wd) = job.workdir.as_deref() {
+        exec_join_init_namespaces(init_pid, true)?;
+        let _ = chdir(Path::new(wd.trim_start_matches('/')));
+    }
+    let _ = init_pid;
+    if let Some(fd) = capture_fd {
+        unsafe {
+            libc::dup2(fd, libc::STDOUT_FILENO);
+            libc::dup2(fd, libc::STDERR_FILENO);
+            libc::close(fd);
+        }
+    }
+    let binary = &command[0];
+    let binary_c = CString::new(binary.as_str()).context("exec binary")?;
+    let args_c: Vec<CString> = command
+        .iter()
+        .filter_map(|s| CString::new(s.as_str()).ok())
+        .collect();
+    let _ = nix::unistd::execvp(&binary_c, &args_c);
+    Err(anyhow!("execvp failed"))
+}
+
+fn handle_exec_userns_connection(
+    mut stream: std::os::unix::net::UnixStream,
+    init_pid: i32,
+    bundle_path: &Path,
+) {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return;
+    }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > 1024 * 1024 {
+        return;
+    }
+    let mut payload = vec![0u8; len];
+    if stream.read_exact(&mut payload).is_err() {
+        return;
+    }
+    let job: ExecUsernsJob = match serde_json::from_slice(&payload) {
+        Ok(j) => j,
+        Err(_) => {
+            let _ = stream.write_all(&(-1i32).to_le_bytes());
+            let _ = stream.write_all(&0u32.to_le_bytes());
+            return;
+        }
+    };
+    let (read_fd, write_fd) = match nix::unistd::pipe() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = stream.write_all(&125i32.to_le_bytes());
+            let _ = stream.write_all(&0u32.to_le_bytes());
+            return;
+        }
+    };
+    let (mut sync_parent, mut sync_child) = match UnixStream::pair() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = stream.write_all(&125i32.to_le_bytes());
+            let _ = stream.write_all(&0u32.to_le_bytes());
+            return;
+        }
+    };
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child: worker }) => {
+            drop(write_fd);
+            drop(sync_child);
+            let mut ready = [0u8; 5];
+            if sync_parent.read_exact(&mut ready).is_err() {
+                let _ = nix::sys::signal::kill(worker, nix::sys::signal::Signal::SIGKILL);
+                let _ = waitpid(worker, None);
+                let _ = stream.write_all(&125i32.to_le_bytes());
+                let _ = stream.write_all(&0u32.to_le_bytes());
+                return;
+            }
+            become_effective_container_root();
+            let _ = fs::write("/proc/self/setgroups", "allow");
+            let _ = fs::write(
+                format!("/proc/{}/setgroups", worker.as_raw()),
+                "allow",
+            );
+            let _ = sync_parent.write_all(b"done");
+            let exit_code = match waitpid(worker, None) {
+                Ok(WaitStatus::Exited(_, code)) => code,
+                Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+                _ => 1,
+            };
+            let mut output = Vec::new();
+            {
+                use std::io::Read;
+                let mut f = fs::File::from(read_fd);
+                let _ = f.read_to_end(&mut output);
+            }
+            let _ = stream.write_all(&exit_code.to_le_bytes());
+            let _ = stream.write_all(&(output.len() as u32).to_le_bytes());
+            let _ = stream.write_all(&output);
+        }
+        Ok(ForkResult::Child) => {
+            drop(read_fd);
+            drop(sync_parent);
+            let _ = fs::write("/proc/self/setgroups", "allow");
+            let _ = nix::unistd::setgroups(&[]);
+            let _ = sync_child.write_all(b"ready");
+            let mut done = [0u8; 4];
+            if sync_child.read_exact(&mut done).is_err() {
+                std::process::exit(125);
+            }
+            drop(sync_child);
+            become_effective_container_root();
+            let _ = fs::write("/proc/self/setgroups", "allow");
+            let _ = nix::unistd::setgroups(&[]);
+            use std::os::unix::io::AsRawFd;
+            unsafe {
+                libc::dup2(write_fd.as_raw_fd(), libc::STDOUT_FILENO);
+                libc::dup2(write_fd.as_raw_fd(), libc::STDERR_FILENO);
+            }
+            drop(write_fd);
+            if exec_run_worker_in_holder_context(bundle_path, init_pid, &job).is_err() {
+                std::process::exit(127);
+            }
+            std::process::exit(0);
+        }
+        Err(_) => {
+            let _ = stream.write_all(&125i32.to_le_bytes());
+            let _ = stream.write_all(&0u32.to_le_bytes());
+        }
+    }
+}
+
+fn run_exec_userns_socket_server(bundle_path: &Path, init_pid: i32) -> Result<()> {
+    use std::io::ErrorKind;
+    use std::os::unix::net::UnixListener;
+
+    let sock_path = exec_userns_socket_path(bundle_path);
+    let _ = fs::remove_file(&sock_path);
+    let listener = UnixListener::bind(&sock_path).context("bind exec-userns.sock")?;
+    listener
+        .set_nonblocking(true)
+        .context("exec-userns.sock nonblocking")?;
+    while unsafe { libc::kill(init_pid, 0) == 0 } {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                handle_exec_userns_connection(stream, init_pid, bundle_path);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => break,
+        }
+    }
+    let _ = fs::remove_file(sock_path);
+    Ok(())
+}
+
+fn exec_in_bundle_via_userns_socket(
+    bundle_path: &Path,
+    init_pid: i32,
+    command: &[String],
+    env: &[String],
+    workdir: Option<&str>,
+    exec_creds: Option<&ExecCredentials>,
+    umask: Option<u32>,
+) -> Result<i32> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let id = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ctr");
+    let short = if id.len() > 16 { &id[..16] } else { id };
+    let job = ExecUsernsJob {
+        command: command.to_vec(),
+        env: env.to_vec(),
+        workdir: workdir.map(str::to_string),
+        exec_creds: exec_creds.cloned(),
+        umask,
+        output_capture: None,
+    };
+    let payload = serde_json::to_vec(&job)?;
+    let sock_path = exec_userns_socket_path(bundle_path);
+    let mut stream =
+        UnixStream::connect(&sock_path).context("connect exec-userns.sock (is container running?)")?;
+    stream.write_all(&(payload.len() as u32).to_le_bytes())?;
+    stream.write_all(&payload)?;
+    let mut code_buf = [0u8; 4];
+    stream
+        .read_exact(&mut code_buf)
+        .context("exec-userns.sock response")?;
+    let mut out_len = [0u8; 4];
+    stream
+        .read_exact(&mut out_len)
+        .context("exec-userns.sock output length")?;
+    let n = u32::from_le_bytes(out_len) as usize;
+    if n > 0 {
+        let mut out = vec![0u8; n];
+        stream
+            .read_exact(&mut out)
+            .context("exec-userns.sock output")?;
+        let _ = std::io::stdout().write_all(&out);
+        let _ = std::io::stdout().flush();
+    }
+    let _ = init_pid;
+    Ok(i32::from_le_bytes(code_buf))
 }
 
 fn parse_supplementary_groups_from_status(pid: i32) -> Vec<u32> {
@@ -1866,6 +2204,20 @@ pub fn exec_in_bundle(
         _ => false,
     };
     if override_creds.is_some() {
+        let sock = exec_userns_socket_path(bundle_path);
+        if sock.exists() {
+            if let Ok(code) = exec_in_bundle_via_userns_socket(
+                bundle_path,
+                pid,
+                &command,
+                env,
+                workdir,
+                exec_creds.as_ref(),
+                umask,
+            ) {
+                return Ok(code);
+            }
+        }
         return exec_in_bundle_via_setns(
             bundle_path,
             pid,
