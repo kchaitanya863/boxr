@@ -2121,6 +2121,12 @@ pub async fn run_container_with_output(
             );
         }
     }
+    if let Some(cidfile) = &args.cidfile {
+        annotations.insert("boxr.cidfile".to_string(), cidfile.clone());
+    }
+    if let Some(pidfile) = &args.conmon_pidfile {
+        annotations.insert("boxr.conmon_pidfile".to_string(), pidfile.clone());
+    }
     spec.annotations = Some(annotations);
 
     fs::create_dir_all(&bundle_dir)?;
@@ -3511,6 +3517,10 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     }
                     found_pid
                 };
+                let conmon_pid = fs::read_to_string(bundle_path.join("conmon.pid"))
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .unwrap_or(0);
 
                 // Real network endpoints
                 let mut ip_address = "172.17.0.2".to_string();
@@ -3623,6 +3633,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "OOMKilled": false,
                         "Dead": false,
                         "Pid": pid,
+                        "ConmonPid": conmon_pid,
                         "ExitCode": match c.status {
                             ContainerStatus::Exited(code) => code,
                             _ => 0,
@@ -5418,6 +5429,19 @@ fn remove_container_opts_inner(
         }
     }
 
+    let bundle_path = PathBuf::from(&c.bundle_path);
+    if let Ok(content) = fs::read_to_string(bundle_path.join("config.json")) {
+        if let Ok(spec) = serde_json::from_str::<Spec>(&content) {
+            if let Some(cidfile) = spec
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("boxr.cidfile"))
+            {
+                let _ = fs::remove_file(cidfile);
+            }
+        }
+    }
+
     let removed = store.remove(container)?;
     let net_store = network::NetworkStore::new();
     let _ = net_store.cleanup_container_endpoints(&removed.id, &removed.name);
@@ -6786,7 +6810,7 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
             "Version": env!("CARGO_PKG_VERSION"),
             "ApiVersion": "1.45",
             "GitCommit": "main",
-            "GoVersion": env!("RUSTC_VERSION"),
+            "GoVersion": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
             "Os": std::env::consts::OS,
             "Arch": std::env::consts::ARCH
         },
@@ -6795,7 +6819,7 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
             "ApiVersion": "1.45",
             "MinAPIVersion": "1.24",
             "GitCommit": "main",
-            "GoVersion": env!("RUSTC_VERSION"),
+            "GoVersion": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
             "Os": std::env::consts::OS,
             "Arch": std::env::consts::ARCH
         }
@@ -6813,7 +6837,10 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
     println!("Client: Boxr Engine");
     println!(" Version:           {}", env!("CARGO_PKG_VERSION"));
     println!(" API version:       1.45");
-    println!(" Rustc version:     {}", env!("RUSTC_VERSION"));
+    println!(
+        " Rustc version:     {}",
+        option_env!("RUSTC_VERSION").unwrap_or("unknown")
+    );
     println!(" Git commit:        main");
     println!(" Built:             2026-09-14");
     println!(
@@ -8075,6 +8102,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         labels: vec!["boxr.pod.infra=true".to_string()],
         dns: Vec::new(),
         cidfile: None,
+        conmon_pidfile: None,
         cpus: None,
         pids_limit: None,
         rootless: true,

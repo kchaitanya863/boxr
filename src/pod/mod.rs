@@ -591,6 +591,7 @@ mod tests {
             labels: vec![],
             dns: vec![],
             cidfile: None,
+            conmon_pidfile: None,
             cpus: None,
             pids_limit: None,
             rootless: true,

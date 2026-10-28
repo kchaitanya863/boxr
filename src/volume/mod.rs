@@ -412,8 +412,13 @@ impl VolumeStore {
 
         let (source_str, dest_str, read_only) = match parts.len() {
             1 => {
-                // Anonymous volume
-                ("", parts[0], false)
+                if parts[0].starts_with('/') {
+                    // Podman: `-v /host/path` bind-mounts to the same path in the container.
+                    (parts[0], parts[0], false)
+                } else {
+                    // Anonymous volume at destination
+                    ("", parts[0], false)
+                }
             }
             2 => (parts[0], parts[1], false),
             3 => {
@@ -466,9 +471,18 @@ impl VolumeStore {
 
             let canonical_source = if host_path.exists() {
                 host_path.canonicalize()?
+            } else if fs::create_dir_all(&host_path).is_ok() {
+                host_path.canonicalize().unwrap_or(host_path)
             } else {
-                fs::create_dir_all(&host_path)?;
-                host_path.canonicalize()?
+                // Rootless Podman: missing bind sources get an empty stub dir under boxr home.
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(source_str.as_bytes());
+                let stub = crate::storage::boxr_home()
+                    .join("bind-stubs")
+                    .join(hex::encode(hasher.finalize()));
+                fs::create_dir_all(&stub)?;
+                stub
             };
 
             Ok(MountSpec {

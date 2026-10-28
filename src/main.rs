@@ -20,6 +20,17 @@ fn main() -> Result<()> {
                 std::process::exit(0);
             }
         }
+        if args[1] == "__internal-conmon-supervisor" {
+            #[cfg(target_os = "linux")]
+            {
+                let code = boxr::runtime::linux::run_conmon_supervisor(&args[2..])?;
+                std::process::exit(code);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::process::exit(0);
+            }
+        }
         if args[1] == "__internal-trampoline-exec" {
             #[cfg(target_os = "linux")]
             {

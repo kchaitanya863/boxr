@@ -6,6 +6,7 @@ description = "A fast, lightweight OCI container engine and runtime written in R
 authors = ["Boxr Contributors"]
 license = "MIT"
 readme = "README.md"
+build = "build.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "cargo"] }

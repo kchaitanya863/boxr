@@ -144,6 +144,7 @@ pub async fn create_container(
         dns: Vec::new(),
         labels: Vec::new(),
         cidfile: None,
+        conmon_pidfile: None,
         memory,
         cpus: None,
         pids_limit: None,

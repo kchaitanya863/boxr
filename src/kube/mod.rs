@@ -189,6 +189,7 @@ impl KubeManager {
                 labels: Vec::new(),
                 dns: Vec::new(),
                 cidfile: None,
+                conmon_pidfile: None,
                 cpus: None,
                 pids_limit: None,
                 rootless: true,

@@ -145,6 +145,7 @@ fn default_run_args(image: &str) -> RunArgs {
         labels: Vec::new(),
         dns: Vec::new(),
         cidfile: None,
+        conmon_pidfile: None,
         cpus: None,
         pids_limit: None,
         rootless: true,

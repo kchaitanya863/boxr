@@ -72,7 +72,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **~46+/81** in isolation: **`-t=false`**, **keep-id `$HOME`**, **invalid name → 125**, **defaultenv**; still red: conmon-pidfile, preserve-fds, containers.conf, buildah/skopeo, … |
+| `030-run.bats` | **~48+/81**: **conmon-pidfile/cidfile** (shim `bundle/conmon` + `State.ConmonPid`), **keep-id `$HOME`** (incl. bad bind mounts), **`-t=false`**, invalid name **125**, **defaultenv**; still red: journald (needs host journal), preserve-fds, `--rootfs`, buildah/skopeo, … |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |

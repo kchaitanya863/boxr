@@ -74,6 +74,10 @@ pub struct RunArgs {
     #[arg(long = "cidfile")]
     pub cidfile: Option<String>,
 
+    /// Write the conmon process ID to the file (Podman-compatible)
+    #[arg(long = "conmon-pidfile")]
+    pub conmon_pidfile: Option<String>,
+
     /// Set environment variables from a file
     #[arg(long = "env-file")]
     pub env_file: Option<String>,

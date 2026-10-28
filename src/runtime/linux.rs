@@ -230,6 +230,160 @@ fn configure_stdio(
     Ok(())
 }
 
+fn conmon_pidfile_from_spec(spec: &Spec) -> Option<String> {
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.conmon_pidfile"))
+        .cloned()
+}
+
+fn prepare_conmon_shim(bundle_path: &Path, spec: &Spec, exe: &Path) -> Result<PathBuf> {
+    let conmon = bundle_path.join("conmon");
+    fs::copy(exe, &conmon).context("copy conmon shim")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&conmon, fs::Permissions::from_mode(0o755))?;
+    }
+    if let Some(pf) = conmon_pidfile_from_spec(spec) {
+        fs::write(bundle_path.join("conmon-pidfile.path"), pf)?;
+    }
+    if let Some(ann) = &spec.annotations {
+        if let Some(ld) = ann.get("boxr.log_driver") {
+            fs::write(bundle_path.join("log-driver.txt"), ld)?;
+        }
+        if let Some(cap) = ann.get("boxr.journald_capture") {
+            fs::write(bundle_path.join("journald-capture.path"), cap)?;
+        }
+    }
+    Ok(conmon)
+}
+
+#[cfg(target_os = "linux")]
+fn journal_line(line: &str) {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int};
+    unsafe extern "C" {
+        fn sd_journal_send(fmt: *const c_char, ...) -> c_int;
+    }
+    let msg = CString::new(line).unwrap_or_default();
+    let key = CString::new("MESSAGE=").unwrap();
+    unsafe {
+        sd_journal_send(
+            key.as_ptr(),
+            msg.as_ptr(),
+            std::ptr::null::<c_char>(),
+        );
+    }
+}
+
+fn tee_reader_to_journal<R: std::io::Read>(
+    pipe: R,
+    capture: Option<PathBuf>,
+    stream: &str,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    let mut reader = BufReader::new(pipe);
+    let mut file = capture.and_then(|p| {
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+    });
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        journal_line(trimmed);
+        if let Some(f) = &mut file {
+            let _ = writeln!(f, "{} {}", stream, trimmed);
+        }
+        line.clear();
+    }
+}
+
+/// Podman-compatible conmon parent: executable path ends with `conmon`, writes pidfile + ConmonPid.
+pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
+    if args.is_empty() {
+        return Err(anyhow!("missing bundle path for conmon supervisor"));
+    }
+    let bundle_path = Path::new(&args[0]);
+    let conmon_pid = std::process::id() as i32;
+    fs::write(bundle_path.join("conmon.pid"), conmon_pid.to_string())?;
+    if let Ok(path) = fs::read_to_string(bundle_path.join("conmon-pidfile.path")) {
+        let path = path.trim();
+        if !path.is_empty() {
+            if let Some(parent) = Path::new(path).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            fs::write(path, conmon_pid.to_string())?;
+        }
+    }
+
+    let detach = bundle_path.join("conmon-detach.flag").exists();
+    let log_driver = fs::read_to_string(bundle_path.join("log-driver.txt"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let journald = log_driver == "journald";
+    let capture_path = fs::read_to_string(bundle_path.join("journald-capture.path"))
+        .ok()
+        .map(PathBuf::from);
+
+    let conmon_bin = bundle_path.join("conmon");
+    let mut cmd = std::process::Command::new(&conmon_bin);
+    cmd.arg("__internal-trampoline").arg(bundle_path);
+    cmd.stdin(Stdio::null());
+
+    if detach {
+        let log_file = fs::File::create(bundle_path.join("logs.txt"))?;
+        let err_file = log_file.try_clone()?;
+        cmd.stdout(log_file).stderr(err_file);
+    } else if journald {
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    }
+
+    let mut child = cmd
+        .spawn()
+        .context("spawn trampoline from conmon supervisor")?;
+    let child_pid = child.id() as i32;
+    fs::write(bundle_path.join("vm.pid"), child_pid.to_string())?;
+    fs::write(bundle_path.join("pid"), child_pid.to_string())?;
+    if let Some(cont_id) = bundle_path.file_name().and_then(|s| s.to_str()) {
+        if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(cont_id) {
+            let _ = cgroup_mgr.add_process(child_pid);
+        }
+    }
+
+    if journald && !detach {
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let cap = capture_path.clone();
+        let h_out = stdout.map(|pipe| {
+            thread::spawn(move || tee_reader_to_journal(pipe, cap, "stdout"))
+        });
+        let h_err = stderr.map(|pipe| {
+            thread::spawn(move || tee_reader_to_journal(pipe, capture_path, "stderr"))
+        });
+        let status = child.wait()?;
+        if let Some(h) = h_out {
+            let _ = h.join();
+        }
+        if let Some(h) = h_err {
+            let _ = h.join();
+        }
+        return Ok(status.code().unwrap_or(1));
+    }
+
+    let status = child.wait()?;
+    Ok(status.code().unwrap_or(1))
+}
+
 pub fn execute_bundle(
     bundle_path: &Path,
     _spec: &Spec,
@@ -258,6 +412,37 @@ pub fn execute_bundle(
     }
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
+
+    if conmon_pidfile_from_spec(_spec).is_some() {
+        let conmon = prepare_conmon_shim(bundle_path, _spec, &exe)?;
+        if detach {
+            let _ = fs::write(bundle_path.join("conmon-detach.flag"), "1");
+        }
+        let mut cmd = std::process::Command::new(&conmon);
+        cmd.arg("__internal-conmon-supervisor")
+            .arg(bundle_path)
+            .stdin(Stdio::null());
+        if detach {
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                cmd.process_group(0);
+            }
+            let _child = cmd.spawn().context("spawn conmon supervisor")?;
+            let wait_start = std::time::Instant::now();
+            while !bundle_path.join("conmon.pid").exists()
+                && wait_start.elapsed() < std::time::Duration::from_secs(30)
+            {
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
+            return Ok(0);
+        }
+        let status = cmd
+            .status()
+            .context("run conmon supervisor (foreground)")?;
+        return Ok(status.code().unwrap_or(1));
+    }
 
     if detach {
         let log_file = fs::File::create(bundle_path.join("logs.txt"))?;
