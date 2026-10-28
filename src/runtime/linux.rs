@@ -1140,7 +1140,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
         // Host supplementary groups leak into the user namespace as unmapped 65534
         // entries; drop them before fork so init/exec `id -G` is not polluted (075-exec).
-        let _ = nix::unistd::setgroups(&[]);
+        set_supplementary_group_list(&[]);
 
         match unsafe { fork() }? {
             ForkResult::Parent { child } => {
@@ -1248,7 +1248,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 });
                 let _ = fs::write("/proc/self/setgroups", "allow");
                 // Drop host supplementary groups; unmapped GIDs show up as 65534 in the new user ns (075-exec).
-                let _ = nix::unistd::setgroups(&[]);
+                set_supplementary_group_list(&[]);
                 // Host TCP/DNS relay must start before CLONE_NEWNET (TAP worker cannot setns to host).
                 let mut usernet_relay_pid = None;
                 if network_mode.should_use_native_usernet() && !use_pasta {
@@ -1434,8 +1434,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         drop(gc_child_sock);
                         #[cfg(target_os = "linux")]
                         {
-                            let _ = fs::write("/proc/self/setgroups", "allow");
-                            let _ = nix::unistd::setgroups(&[]);
+                            become_effective_container_root();
+                            set_supplementary_group_list(
+                                spec.process.user.additional_gids.as_deref().unwrap_or(&[]),
+                            );
                         }
                         if let Err(err) =
                             run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
@@ -1985,7 +1987,10 @@ fn handle_exec_userns_connection(
             }
             become_effective_container_root();
             let _ = fs::write("/proc/self/setgroups", "allow");
-            let _ = fs::write(format!("/proc/{}/setgroups", worker.as_raw()), "allow");
+            let _ = crate::security::RootlessUserConfig::allow_setgroups_from_userns(
+                init_pid,
+                worker.as_raw(),
+            );
             let _ = sync_parent.write_all(b"done");
             let exit_code = match waitpid(worker, None) {
                 Ok(WaitStatus::Exited(_, code)) => code,
@@ -2131,11 +2136,41 @@ fn parse_supplementary_groups_from_status(pid: i32) -> Vec<u32> {
     Vec::new()
 }
 
+fn parse_supplementary_groups_from_container_init() -> Vec<u32> {
+    parse_supplementary_groups_from_status(1)
+}
+
 fn become_effective_container_root() {
     let root_gid = nix::unistd::Gid::from_raw(0);
     let root_uid = nix::unistd::Uid::from_raw(0);
     let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
     let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
+}
+
+/// Apply supplementary GIDs while euid is 0 in the container user namespace (075-exec).
+fn set_supplementary_group_list(gids: &[u32]) {
+    let _ = fs::write("/proc/self/setgroups", "allow");
+    crate::security::RootlessUserConfig::try_enable_setgroups_after_mapping();
+    let rc = unsafe {
+        if gids.is_empty() {
+            libc::setgroups(0, std::ptr::null())
+        } else {
+            let raw: Vec<libc::gid_t> = gids.iter().map(|g| *g as libc::gid_t).collect();
+            libc::setgroups(raw.len(), raw.as_ptr())
+        }
+    };
+    if rc != 0 {
+        let _ = fs::write("/proc/self/setgroups", "allow");
+        crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe { libc::getpid() });
+        let _ = unsafe {
+            if gids.is_empty() {
+                libc::setgroups(0, std::ptr::null())
+            } else {
+                let raw: Vec<libc::gid_t> = gids.iter().map(|g| *g as libc::gid_t).collect();
+                libc::setgroups(raw.len(), raw.as_ptr())
+            }
+        };
+    }
 }
 
 fn rootfs_setup_container_uid(spec: &Spec) -> Option<u32> {
@@ -2159,38 +2194,25 @@ fn assume_credentials_for_rootfs_setup(spec: &Spec) {
 }
 
 fn apply_exec_supplementary_groups(init_pid: i32, creds: Option<&ExecCredentials>) {
-    let _ = fs::write("/proc/self/setgroups", "allow");
+    let init_groups = || {
+        if init_pid == 1 {
+            parse_supplementary_groups_from_container_init()
+        } else {
+            parse_supplementary_groups_from_status(init_pid)
+        }
+    };
     if let Some(c) = creds {
         if c.reset_supplementary_groups {
-            let gids: Vec<nix::unistd::Gid> = c
-                .supplementary_gids
-                .iter()
-                .map(|g| nix::unistd::Gid::from_raw(*g))
-                .collect();
-            // Explicit user:group clears inherited groups; --group-add supplies extras only.
-            if nix::unistd::setgroups(&gids).is_err() {
-                let _ = fs::write("/proc/self/setgroups", "allow");
-                let _ = nix::unistd::setgroups(&gids);
-            }
+            set_supplementary_group_list(&c.supplementary_gids);
             return;
         }
         if c.uid == 0 {
-            let gids = parse_supplementary_groups_from_status(init_pid);
-            let raw: Vec<nix::unistd::Gid> = gids
-                .iter()
-                .map(|g| nix::unistd::Gid::from_raw(*g))
-                .collect();
-            let _ = nix::unistd::setgroups(&raw);
+            set_supplementary_group_list(&init_groups());
         } else {
-            let _ = nix::unistd::setgroups(&[]);
+            set_supplementary_group_list(&[]);
         }
     } else {
-        let gids = parse_supplementary_groups_from_status(init_pid);
-        let raw: Vec<nix::unistd::Gid> = gids
-            .iter()
-            .map(|g| nix::unistd::Gid::from_raw(*g))
-            .collect();
-        let _ = nix::unistd::setgroups(&raw);
+        set_supplementary_group_list(&init_groups());
     }
 }
 
@@ -2307,7 +2329,10 @@ pub fn exec_in_bundle(
     if !same_userns {
         cmd.arg("-U");
     }
-    cmd.args(["-m", "-p", "-u", "--preserve-credentials"]);
+    cmd.args(["-m", "-p", "-u"]);
+    if same_userns {
+        cmd.arg("--preserve-credentials");
+    }
     if let Some(wd) = workdir {
         cmd.arg(format!("--wd={}", wd));
     }
@@ -2618,7 +2643,6 @@ fn exec_in_bundle_via_setns(
                 libc::getpid()
             });
             let _ = fs::write("/proc/self/setgroups", "allow");
-            let _ = nix::unistd::setgroups(&[]);
             let command = exec_rootfs_command(&rootfs, command);
             if let Some(creds) = exec_creds {
                 apply_exec_user_credentials(creds, init_pid);
@@ -2856,15 +2880,7 @@ fn run_container_child(
     #[cfg(target_os = "linux")]
     {
         assume_credentials_for_rootfs_setup(spec);
-        let _ = fs::write("/proc/self/setgroups", "allow");
-        let _ = nix::unistd::setgroups(&[]);
-        if let Some(gids) = &spec.process.user.additional_gids {
-            let raw: Vec<nix::unistd::Gid> = gids
-                .iter()
-                .map(|g| nix::unistd::Gid::from_raw(*g))
-                .collect();
-            let _ = nix::unistd::setgroups(&raw);
-        }
+        set_supplementary_group_list(spec.process.user.additional_gids.as_deref().unwrap_or(&[]));
         crate::security::RootlessUserConfig::try_enable_setgroups_after_mapping();
     }
 
@@ -3423,15 +3439,8 @@ fn run_container_child(
         }
     }
 
-    let _ = fs::write("/proc/self/setgroups", "allow");
-    let _ = nix::unistd::setgroups(&[]);
-    if let Some(gids) = &spec.process.user.additional_gids {
-        let raw_gids: Vec<nix::unistd::Gid> = gids
-            .iter()
-            .map(|g| nix::unistd::Gid::from_raw(*g))
-            .collect();
-        let _ = nix::unistd::setgroups(&raw_gids);
-    }
+    become_effective_container_root();
+    set_supplementary_group_list(spec.process.user.additional_gids.as_deref().unwrap_or(&[]));
 
     #[cfg(target_os = "linux")]
     if let Some(caps) = &spec.process.capabilities {
@@ -3501,10 +3510,6 @@ fn run_container_child(
 
     if spec.process.terminal {
         attach_stdio_to_bundle_pty(bundle_path);
-    }
-
-    if rootfs_setup_container_uid(spec).is_some() {
-        become_effective_container_root();
     }
 
     if spec.process.user.gid != 0 {

@@ -283,6 +283,39 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     }
 
     #[cfg(target_os = "linux")]
+    fn apply_newidmap_mappings(pid: i32, uid_maps: &[IdMapping], gid_maps: &[IdMapping]) -> bool {
+        if !Self::has_newidmap_binaries() {
+            return false;
+        }
+        let mut uid_args = vec![pid.to_string()];
+        for m in uid_maps {
+            uid_args.push(m.container_id.to_string());
+            uid_args.push(m.host_id.to_string());
+            uid_args.push(m.size.to_string());
+        }
+        let mut gid_args = vec![pid.to_string()];
+        for m in gid_maps {
+            gid_args.push(m.container_id.to_string());
+            gid_args.push(m.host_id.to_string());
+            gid_args.push(m.size.to_string());
+        }
+        let uid_status = std::process::Command::new("newuidmap")
+            .args(&uid_args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let gid_status = std::process::Command::new("newgidmap")
+            .args(&gid_args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        matches!(
+            (uid_status, gid_status),
+            (Ok(u_st), Ok(g_st)) if u_st.success() && g_st.success()
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn apply_id_mappings(
         pid: i32,
         uid_maps: &[IdMapping],
@@ -293,38 +326,18 @@ using single-ID mapping only (images requiring chown/--user may fail)"
             uid_mappings: uid_maps.to_vec(),
             gid_mappings: gid_maps.to_vec(),
         };
+        // Prefer newuidmap/newgidmap first: direct procfs mapping leaves setgroups at "deny"
+        // on some hosts when allow cannot be restored (075-exec supplementary groups).
+        if Self::apply_newidmap_mappings(pid, uid_maps, gid_maps) {
+            Self::reenable_setgroups_for_pid(pid);
+            return Ok(());
+        }
         if cfg.write_proc_mappings(pid).is_ok() {
             return Ok(());
         }
-        if Self::has_newidmap_binaries() {
-            let mut uid_args = vec![pid.to_string()];
-            for m in uid_maps {
-                uid_args.push(m.container_id.to_string());
-                uid_args.push(m.host_id.to_string());
-                uid_args.push(m.size.to_string());
-            }
-            let mut gid_args = vec![pid.to_string()];
-            for m in gid_maps {
-                gid_args.push(m.container_id.to_string());
-                gid_args.push(m.host_id.to_string());
-                gid_args.push(m.size.to_string());
-            }
-            let uid_status = std::process::Command::new("newuidmap")
-                .args(&uid_args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            let gid_status = std::process::Command::new("newgidmap")
-                .args(&gid_args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
-                if u_st.success() && g_st.success() {
-                    Self::reenable_setgroups_for_pid(pid);
-                    return Ok(());
-                }
-            }
+        if Self::apply_newidmap_mappings(pid, uid_maps, gid_maps) {
+            Self::reenable_setgroups_for_pid(pid);
+            return Ok(());
         }
         cfg.write_proc_mappings(pid)
     }
