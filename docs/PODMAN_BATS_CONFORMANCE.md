@@ -129,7 +129,7 @@ Podman test **075-exec** requires `podman exec --user root:root … id -G` to pr
 On typical rootless boxr hosts (`newuidmap` / `newgidmap`, subuid/subgid):
 
 1. The mapping child writes **`deny`** to `/proc/self/setgroups` before `gid_map` (required by the kernel).
-2. The parent re-enables **`allow`** on the **mapping child PID** after maps (`RootlessUserConfig::write_setgroups_allow` / `newuidmap` path).
+2. The parent re-enables **`allow`** on the **mapping child PID** after maps (`RootlessUserConfig::enable_setgroups_for_pid`: direct `/proc/<pid>/setgroups` write, then **`allow_setgroups_from_userns`** fallback).
 3. boxr drops host supplementary groups before forking the mapping child, re-enables **`allow`** on **container init** after the PID-namespace fork, and uses a **setns user → setgroups sync → setns pid** exec path with **`allow_setgroups_from_userns`**.
 
 **Environment blockers (Cloud Agent / hardened hosts):**
