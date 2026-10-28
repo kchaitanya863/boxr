@@ -111,6 +111,7 @@ fn default_run_args(image: &str) -> RunArgs {
         volumes: Vec::new(),
         workdir: None,
         memory: None,
+        kernel_memory: None,
         labels: Vec::new(),
         dns: Vec::new(),
         cidfile: None,
@@ -483,6 +484,7 @@ async fn test_issue_125_build_target_nonexistent_fails() {
         no_cache: true,
         add_host: Vec::new(),
         memory: None,
+        kernel_memory: None,
         shm_size: None,
         quiet: false,
     };
@@ -527,6 +529,7 @@ async fn test_issue_127_dockerfile_copy_multiple_sources_to_non_dir_fails() {
         no_cache: true,
         add_host: Vec::new(),
         memory: None,
+        kernel_memory: None,
         shm_size: None,
         quiet: false,
     };
@@ -558,6 +561,7 @@ async fn test_issue_128_dockerfile_without_from_fails() {
         no_cache: true,
         add_host: Vec::new(),
         memory: None,
+        kernel_memory: None,
         shm_size: None,
         quiet: false,
     };

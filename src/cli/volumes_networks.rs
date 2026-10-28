@@ -10,6 +10,7 @@ pub struct VolumeSubcommands {
 #[derive(clap::Subcommand, Debug)]
 pub enum VolumeAction {
     Create(VolumeCreateArgs),
+    #[command(alias = "list")]
     Ls(VolumeLsArgs),
     Inspect {
         #[arg(short = 'f', long = "format")]
@@ -121,7 +122,7 @@ pub struct VolumeLsArgs {
     pub filter: Vec<String>,
     #[arg(long = "format")]
     pub format: Option<String>,
-    #[arg(long = "noheading")]
+    #[arg(short = 'n', long = "noheading")]
     pub noheading: bool,
 }
 

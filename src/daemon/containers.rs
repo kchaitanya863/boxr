@@ -146,6 +146,7 @@ pub async fn create_container(
         cidfile: None,
         conmon_pidfile: None,
         memory,
+        kernel_memory: None,
         cpus: None,
         pids_limit: None,
         rootless: true,

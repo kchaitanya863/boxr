@@ -27,6 +27,7 @@ futures-util = "0.3"
 serde_yaml = "0.9.34"
 axum = "0.8.9"
 libc = "0.2"
+regex = "1.11"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

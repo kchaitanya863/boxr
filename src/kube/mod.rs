@@ -186,6 +186,7 @@ impl KubeManager {
                 ports: ports_vec,
                 volumes: Vec::new(),
                 memory: None,
+                kernel_memory: None,
                 labels: Vec::new(),
                 dns: Vec::new(),
                 cidfile: None,

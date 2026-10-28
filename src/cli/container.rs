@@ -62,6 +62,10 @@ pub struct RunArgs {
     #[arg(short = 'm', long = "memory")]
     pub memory: Option<String>,
 
+    /// Kernel memory limit (deprecated noop; Podman prints a warning)
+    #[arg(long = "kernel-memory")]
+    pub kernel_memory: Option<String>,
+
     /// Set metadata on container (format: <key>=<value>)
     #[arg(short = 'l', long = "label")]
     pub labels: Vec<String>,

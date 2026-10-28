@@ -142,6 +142,7 @@ fn default_run_args(image: &str) -> RunArgs {
         volumes: Vec::new(),
         workdir: None,
         memory: None,
+        kernel_memory: None,
         labels: Vec::new(),
         dns: Vec::new(),
         cidfile: None,

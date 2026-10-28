@@ -3,6 +3,53 @@ pub use ops::VolumeOps;
 
 use crate::storage::boxr_home;
 use anyhow::{Result, anyhow};
+
+/// Podman-compatible volume name filter (`name=volume_1.+` uses regex).
+pub fn volume_name_filter_matches(name: &str, pattern: &str) -> bool {
+    let pattern = pattern.trim();
+    if pattern.is_empty() {
+        return true;
+    }
+    if name == pattern {
+        return true;
+    }
+    if pattern
+        .chars()
+        .any(|c| ".+*?[](){}|^$\\".contains(c))
+    {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            return re.is_match(name);
+        }
+    }
+    name.contains(pattern)
+}
+
+fn is_volume_mount_option_token(token: &str) -> bool {
+    matches!(
+        token,
+        "ro" | "rw" | "z" | "Z" | "O" | "U" | "copyup" | "noexec" | "exec" | "nosuid" | "suid"
+            | "nodev" | "dev" | "private" | "rprivate" | "shared" | "rshared" | "slave"
+            | "rslave" | "nocopy"
+    )
+}
+
+/// Destination path and read-only flag from `dest:z,ro` / `dest:ro` style volume suffixes.
+pub fn parse_volume_dest_and_options(rest: &str) -> (String, bool) {
+    let mut read_only = rest.split(',').any(|p| p.trim() == "ro");
+    let head = rest.split(',').next().unwrap_or(rest).trim();
+    let dest = if let Some((path, opt)) = head.rsplit_once(':') {
+        let opt = opt.trim();
+        if !path.is_empty() && path.starts_with('/') && is_volume_mount_option_token(opt) {
+            read_only = read_only || opt == "ro";
+            path.trim().to_string()
+        } else {
+            head.to_string()
+        }
+    } else {
+        head.to_string()
+    };
+    (dest, read_only)
+}
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -275,7 +322,7 @@ impl VolumeStore {
     pub fn matches_filter(vol: &VolumeRecord, filter: &str) -> bool {
         if let Some((key, value)) = filter.split_once('=') {
             match key {
-                "name" => vol.name == value,
+                "name" => volume_name_filter_matches(&vol.name, value),
                 "driver" => vol.driver == value,
                 "label" => {
                     if let Some((lk, lv)) = value.split_once('=') {
@@ -402,30 +449,14 @@ impl VolumeStore {
             return Err(anyhow!("Volume specification cannot be empty"));
         }
 
-        let parts: Vec<&str> = trimmed.split(':').collect();
-        if parts.is_empty() || parts.len() > 3 {
-            return Err(anyhow!(
-                "Invalid volume format '{}', expected [source:]destination[:mode]",
-                spec_str
-            ));
-        }
-
-        let (source_str, dest_str, read_only) = match parts.len() {
-            1 => {
-                if parts[0].starts_with('/') {
-                    // Podman: `-v /host/path` bind-mounts to the same path in the container.
-                    (parts[0], parts[0], false)
-                } else {
-                    // Anonymous volume at destination
-                    ("", parts[0], false)
-                }
-            }
-            2 => (parts[0], parts[1], false),
-            3 => {
-                let ro = parts[2] == "ro";
-                (parts[0], parts[1], ro)
-            }
-            _ => unreachable!(),
+        let (source_str, dest_str, read_only) = if let Some(idx) = trimmed.find(':') {
+            let source_str = trimmed[..idx].to_string();
+            let (dest_str, read_only) = parse_volume_dest_and_options(&trimmed[idx + 1..]);
+            (source_str, dest_str, read_only)
+        } else if trimmed.starts_with('/') {
+            (trimmed.to_string(), trimmed.to_string(), false)
+        } else {
+            (String::new(), trimmed.to_string(), false)
         };
 
         if dest_str.trim().is_empty() {
@@ -466,7 +497,7 @@ impl VolumeStore {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
                 PathBuf::from(source_str.replacen('~', &home, 1))
             } else {
-                PathBuf::from(source_str)
+                PathBuf::from(&source_str)
             };
 
             let canonical_source = if host_path.exists() {
@@ -477,7 +508,7 @@ impl VolumeStore {
                 // Rootless Podman: missing bind sources get an empty stub dir under boxr home.
                 use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
-                hasher.update(source_str.as_bytes());
+                hasher.update(source_str.as_str().as_bytes());
                 let stub = crate::storage::boxr_home()
                     .join("bind-stubs")
                     .join(hex::encode(hasher.finalize()));
@@ -493,9 +524,9 @@ impl VolumeStore {
             })
         } else {
             // Named volume
-            let record = match self.find(source_str) {
+            let record = match self.find(&source_str) {
                 Some(v) => v,
-                None => self.create(Some(source_str), None)?,
+                None => self.create(Some(&source_str), None)?,
             };
             Ok(MountSpec {
                 source: PathBuf::from(record.mountpoint),

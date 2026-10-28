@@ -588,6 +588,7 @@ mod tests {
             ports: vec![],
             volumes: vec![],
             memory: None,
+            kernel_memory: None,
             labels: vec![],
             dns: vec![],
             cidfile: None,

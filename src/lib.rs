@@ -300,6 +300,101 @@ fn validate_log_driver(driver: &str) -> Result<()> {
     }
 }
 
+fn add_container_record(store: &ContainerStore, record: ContainerRecord) -> Result<()> {
+    match store.add(record) {
+        Err(e) if e.to_string().contains("already in use") => {
+            cli::usage_errors::exit_usage_error(e.to_string());
+        }
+        other => other,
+    }
+}
+
+fn volume_mount_destination(spec: &str) -> String {
+    let trimmed = spec.trim();
+    if let Some(idx) = trimmed.find(':') {
+        crate::volume::parse_volume_dest_and_options(&trimmed[idx + 1..]).0
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn volume_mount_source_label(spec: &str) -> String {
+    let trimmed = spec.trim();
+    trimmed
+        .split(':')
+        .next()
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+fn tmpfs_mount_destination(spec: &str) -> String {
+    let trimmed = spec.trim();
+    if let Some((dest, _)) = trimmed.split_once(':') {
+        dest.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn record_mount_destination_if_unique(
+    seen: &mut HashMap<String, String>,
+    dest: &str,
+    src_key: &str,
+) {
+    if let Some(prev_src) = seen.get(dest) {
+        if prev_src != src_key {
+            cli::usage_errors::exit_usage_error(format!(
+                "{}: duplicate mount destination",
+                dest
+            ));
+        }
+    } else {
+        seen.insert(dest.to_string(), src_key.to_string());
+    }
+}
+
+fn validate_unique_volume_destinations(volumes: &[String], tmpfs: &[String]) -> Result<()> {
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for spec in volumes {
+        let dest = volume_mount_destination(spec);
+        let src = volume_mount_source_label(spec);
+        record_mount_destination_if_unique(&mut seen, &dest, &src);
+    }
+    for spec in tmpfs {
+        let dest = tmpfs_mount_destination(spec);
+        record_mount_destination_if_unique(&mut seen, &dest, spec);
+    }
+    Ok(())
+}
+
+fn validate_device_cgroup_rules_rootless(args: &RunArgs) {
+    if args.device_cgroup_rule.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if unsafe { libc::getuid() } != 0 {
+            cli::usage_errors::exit_usage_error(
+                "device cgroup rules are not supported in rootless mode or in a user namespace",
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        cli::usage_errors::exit_usage_error(
+            "device cgroup rules are not supported in rootless mode or in a user namespace",
+        );
+    }
+}
+
+fn warn_kernel_memory_noop(args: &RunArgs) {
+    if args.kernel_memory.is_some() {
+        eprintln!(
+            "The --kernel-memory flag is no longer supported. This flag is a noop."
+        );
+    }
+}
+
 fn validate_container_name_cli(name: &str) {
     let normalized = ContainerStore::normalize_container_name(name);
     if normalized.is_empty()
@@ -1818,6 +1913,9 @@ pub async fn run_container_with_output(
     let mut parsed_ports = parse_ports(&args.ports)?;
     validate_network_name(&args.network, None)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
+    validate_device_cgroup_rules_rootless(&args);
+    warn_kernel_memory_noop(&args);
+    validate_unique_volume_destinations(&args.volumes, &args.tmpfs)?;
 
     // Resolve volume mounts
     let vol_store = VolumeStore::new();
@@ -2389,7 +2487,7 @@ pub async fn run_container_with_output(
         &container_name,
         event_attrs.clone(),
     ));
-    container_store.add(record)?;
+    add_container_record(&container_store, record)?;
 
     if let Err(e) =
         guardrails::PortCollisionGuard::ensure_no_conflicts_excluding(
@@ -5126,6 +5224,11 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                                 return false;
                             }
                         }
+                        "volume" => {
+                            if !ps_volume_filter_matches(c, v.trim()) {
+                                return false;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -5606,6 +5709,9 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     }
 
     validate_network_name(&args.network, home_opt)?;
+    validate_device_cgroup_rules_rootless(&args);
+    warn_kernel_memory_noop(&args);
+    validate_unique_volume_destinations(&args.volumes, &args.tmpfs)?;
 
     let mut parsed_ports = parse_ports(&args.ports)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
@@ -6216,7 +6322,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         event_attrs,
     ));
 
-    container_store.add(record)?;
+    add_container_record(&container_store, record)?;
 
     if network::resolved_bridge_network_name(&args.network).is_some() {
         let _ = network::connect_container_to_bridge_network(
@@ -7095,6 +7201,35 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
             p.containers.len()
         );
     }
+}
+
+fn container_mount_destinations(record: &storage::ContainerRecord) -> Vec<String> {
+    let bundle_path = PathBuf::from(&record.bundle_path);
+    let mounts_json = bundle_path.join("mounts.json");
+    if mounts_json.exists() {
+        if let Ok(content) = fs::read_to_string(&mounts_json) {
+            if let Ok(mounts) = serde_json::from_str::<Vec<volume::MountSpec>>(&content) {
+                return mounts.into_iter().map(|m| m.destination).collect();
+            }
+        }
+    }
+    let config_path = bundle_path.join("config.json");
+    if let Ok(content) = fs::read_to_string(&config_path) {
+        if let Ok(spec) = serde_json::from_str::<oci::runtime::Spec>(&content) {
+            return spec.mounts.into_iter().map(|m| m.destination).collect();
+        }
+    }
+    Vec::new()
+}
+
+fn ps_volume_filter_matches(record: &storage::ContainerRecord, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+    container_mount_destinations(record)
+        .iter()
+        .any(|dest| dest == filter || ps_name_filter_matches(dest, filter))
 }
 
 fn ps_name_filter_matches(name: &str, filter: &str) -> bool {
@@ -8099,6 +8234,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
             .collect(),
         volumes: Vec::new(),
         memory: None,
+        kernel_memory: None,
         labels: vec!["boxr.pod.infra=true".to_string()],
         dns: Vec::new(),
         cidfile: None,
