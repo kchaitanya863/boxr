@@ -50,21 +50,24 @@ Summarize a log:
 grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 ```
 
-**Curated manifest (Oct 2026, `bats-manifest-v2.log`, pre–stopping-loop/volume-import commits on 030):**
+**Curated manifest (Oct 2026, `bats-manifest-v3.log`, latest boxr on Linux rootless VM):**
 
-| File | ok | not ok |
-|------|-----|--------|
-| 015-help | 1 | 0 |
-| 020-tag | 2 | 0 |
-| 030-run | 79 | 2 (stopping loop fixed in `547d118`; host env leak out of scope) |
-| 040-ps | 8 | 0 |
-| 045-start | 8 | 0 |
-| 050-stop | 9 | 0 |
-| 055-rm | 10 | 0 |
-| 075-exec | 9 | 1 (additional groups) |
-| 160-volumes | 24 | 2 (keep-id; import fixed in `fe93483`) |
+| File | ok | not ok | notes |
+|------|-----|--------|--------|
+| 015-help | 1 | 0 | |
+| 020-tag | 2 | 0 | |
+| 030-run | 80 | 1 | **host env leak** (skopeo + Podman `containers-storage:`; out of scope) |
+| 040-ps | 8 | 0 | |
+| 045-start | 8 | 0 | |
+| 050-stop | 9 | 0 | |
+| 055-rm | 10 | 0 | |
+| 075-exec | 9 | 1 | **additional groups** (`/proc/setgroups` stays `deny` in this rootless VM; init inherits mapped host supp GIDs as 65534) |
+| 160-volumes | 24 | 1 | **--userns=keep-id** (idmapped binds / subuid limits) |
+| **Total** | **152** | **3** | plus skips |
 
-Re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest for authoritative counts (`bats-manifest-v3.log` in progress).
+Earlier scorecard (`bats-manifest-v2.log`) predated stopping-loop and volume-import fixes; use v3 for current counts.
+
+Re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest for authoritative counts.
 
 Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails (for future gating).
 

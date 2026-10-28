@@ -1152,6 +1152,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
                 // 4. Child is now root in user namespace.
                 let _ = fs::write("/proc/self/setgroups", "allow");
+                // Drop host supplementary groups; unmapped GIDs show up as 65534 in the new user ns (075-exec).
+                let _ = nix::unistd::setgroups(&[]);
                 // Host TCP/DNS relay must start before CLONE_NEWNET (TAP worker cannot setns to host).
                 let mut usernet_relay_pid = None;
                 if network_mode.should_use_native_usernet() && !use_pasta {
@@ -1273,15 +1275,22 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // Fork so workload becomes PID 1 inside the new PID namespace.
+                let (mut gc_parent_sock, mut gc_child_sock) = UnixStream::pair()
+                    .context("Failed to create UnixStream pair for init setgroups sync")?;
                 match unsafe { fork() } {
                     Ok(ForkResult::Parent { child: grandchild }) => {
+                        drop(gc_child_sock);
                         let _ = fs::write(
                             bundle_path.join("container.pid"),
                             grandchild.as_raw().to_string(),
                         );
+                        let mut ready = [0u8; 5];
+                        let _ = gc_parent_sock.read_exact(&mut ready);
                         crate::security::RootlessUserConfig::reenable_setgroups_for_pid(
                             grandchild.as_raw(),
                         );
+                        let _ = gc_parent_sock.write_all(b"done");
+                        drop(gc_parent_sock);
                         let timeout_secs = run_timeout_secs(&spec);
                         let status = wait_grandchild_with_optional_timeout(
                             grandchild,
@@ -1314,7 +1323,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         unsafe {
                             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                         }
-                        let _ = fs::write("/proc/self/setgroups", "allow");
+                        drop(gc_parent_sock);
+                        let _ = gc_child_sock.write_all(b"ready");
+                        let mut done = [0u8; 4];
+                        let _ = gc_child_sock.read_exact(&mut done);
+                        drop(gc_child_sock);
                         if let Err(err) =
                             run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
                         {
@@ -1726,6 +1739,13 @@ fn parse_supplementary_groups_from_status(pid: i32) -> Vec<u32> {
     Vec::new()
 }
 
+fn become_effective_container_root() {
+    let root_gid = nix::unistd::Gid::from_raw(0);
+    let root_uid = nix::unistd::Uid::from_raw(0);
+    let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
+    let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
+}
+
 fn apply_exec_supplementary_groups(init_pid: i32, creds: Option<&ExecCredentials>) {
     let _ = fs::write("/proc/self/setgroups", "allow");
     if let Some(c) = creds {
@@ -1766,9 +1786,9 @@ fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32) {
     let root_uid = nix::unistd::Uid::from_raw(0);
     let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
     let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
-    apply_exec_supplementary_groups(init_pid, Some(creds));
     let _ = nix::unistd::setresgid(gid, gid, gid);
     let _ = nix::unistd::setresuid(uid, uid, uid);
+    apply_exec_supplementary_groups(init_pid, Some(creds));
 }
 
 pub fn bundle_process_is_alive(bundle_path: &Path) -> bool {
@@ -2009,28 +2029,22 @@ fn exec_in_bundle_via_setns(
     use std::io::Read;
     use std::os::unix::net::UnixStream;
 
-    let needs_setgroups_sync = exec_creds.is_some();
-    let sync_pair = if needs_setgroups_sync {
-        Some(
-            UnixStream::pair()
-                .context("Failed to create UnixStream pair for exec setgroups sync")?,
-        )
-    } else {
-        None
-    };
+    // Always sync with the parent after joining the container user namespace so
+    // we can write setgroups allow before matching init supplementary groups (075-exec).
+    let sync_pair = UnixStream::pair()
+        .context("Failed to create UnixStream pair for exec setgroups sync")?;
 
     match unsafe { fork() }? {
         ForkResult::Parent { child } => {
-            if let Some((mut parent_sock, _)) = sync_pair {
-                let mut ready = [0u8; 5];
-                parent_sock
-                    .read_exact(&mut ready)
-                    .context("exec child did not signal namespace join")?;
-                crate::security::RootlessUserConfig::reenable_setgroups_for_pid(child.as_raw());
-                parent_sock
-                    .write_all(b"done")
-                    .context("Failed to notify exec child after setgroups allow")?;
-            }
+            let (mut parent_sock, _) = sync_pair;
+            let mut ready = [0u8; 5];
+            parent_sock
+                .read_exact(&mut ready)
+                .context("exec child did not signal namespace join")?;
+            crate::security::RootlessUserConfig::reenable_setgroups_for_pid(child.as_raw());
+            parent_sock
+                .write_all(b"done")
+                .context("Failed to notify exec child after setgroups allow")?;
             if detach {
                 if let Some(path) = exec_pid_path {
                     let _ = fs::write(path, pid.to_string());
@@ -2074,50 +2088,28 @@ fn exec_in_bundle_via_setns(
             }
         }
         ForkResult::Child => {
-            if needs_setgroups_sync {
-                // Drop host supplementary groups before joining the container user
-                // namespace (setgroups is often EPERM after setns when /proc/pid/setgroups is deny).
-                let _ = fs::write("/proc/self/setgroups", "allow");
-                let _ = nix::unistd::setgroups(&[]);
-            }
-            if let Some((_, mut child_sock)) = sync_pair {
-                for (name, flag) in [
-                    ("user", CloneFlags::CLONE_NEWUSER),
-                    ("ipc", CloneFlags::CLONE_NEWIPC),
-                    ("uts", CloneFlags::CLONE_NEWUTS),
-                    ("net", CloneFlags::CLONE_NEWNET),
-                    ("mnt", CloneFlags::CLONE_NEWNS),
-                    ("pid", CloneFlags::CLONE_NEWPID),
-                ] {
-                    let ns_path = format!("/proc/{}/ns/{}", pid, name);
-                    if let Ok(f) = std::fs::File::open(&ns_path) {
-                        let _ = setns(&f, flag);
-                    }
-                }
-                child_sock
-                    .write_all(b"ready")
-                    .ok();
-                let mut done = [0u8; 4];
-                let _ = child_sock.read_exact(&mut done);
-                drop(child_sock);
-            } else {
-                let enter_ns = |name: &str, flag: CloneFlags| {
-                    let ns_path = format!("/proc/{}/ns/{}", pid, name);
-                    if let Ok(f) = std::fs::File::open(&ns_path) {
-                        let _ = setns(&f, flag);
-                    }
-                };
-                for (name, flag) in [
-                    ("user", CloneFlags::CLONE_NEWUSER),
-                    ("ipc", CloneFlags::CLONE_NEWIPC),
-                    ("uts", CloneFlags::CLONE_NEWUTS),
-                    ("net", CloneFlags::CLONE_NEWNET),
-                    ("mnt", CloneFlags::CLONE_NEWNS),
-                    ("pid", CloneFlags::CLONE_NEWPID),
-                ] {
-                    enter_ns(name, flag);
+            // Drop host supplementary groups before joining the container user
+            // namespace (setgroups is often EPERM after setns when /proc/pid/setgroups is deny).
+            let _ = fs::write("/proc/self/setgroups", "allow");
+            let _ = nix::unistd::setgroups(&[]);
+            let (_, mut child_sock) = sync_pair;
+            for (name, flag) in [
+                ("user", CloneFlags::CLONE_NEWUSER),
+                ("ipc", CloneFlags::CLONE_NEWIPC),
+                ("uts", CloneFlags::CLONE_NEWUTS),
+                ("net", CloneFlags::CLONE_NEWNET),
+                ("mnt", CloneFlags::CLONE_NEWNS),
+                ("pid", CloneFlags::CLONE_NEWPID),
+            ] {
+                let ns_path = format!("/proc/{}/ns/{}", pid, name);
+                if let Ok(f) = std::fs::File::open(&ns_path) {
+                    let _ = setns(&f, flag);
                 }
             }
+            child_sock.write_all(b"ready").ok();
+            let mut done = [0u8; 4];
+            let _ = child_sock.read_exact(&mut done);
+            drop(child_sock);
             if let Some(wd) = workdir {
                 let _ = chdir(Path::new(wd));
             } else {
@@ -2161,9 +2153,12 @@ fn exec_in_bundle_via_setns(
             }
             // Container init is PID 1 after joining the container PID namespace.
             let init_pid = 1;
+            become_effective_container_root();
             crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe {
                 libc::getpid()
             });
+            let _ = fs::write("/proc/self/setgroups", "allow");
+            let _ = nix::unistd::setgroups(&[]);
             if let Some(creds) = exec_creds {
                 apply_exec_user_credentials(creds, init_pid);
             } else {
@@ -2393,22 +2388,16 @@ fn run_container_child(
 
     #[cfg(target_os = "linux")]
     {
+        become_effective_container_root();
         let _ = fs::write("/proc/self/setgroups", "allow");
-        let mut supp: Vec<nix::unistd::Gid> = spec
-            .process
-            .user
-            .additional_gids
-            .as_ref()
-            .map(|gids| {
-                gids.iter()
-                    .map(|g| nix::unistd::Gid::from_raw(*g))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if supp.is_empty() {
-            supp.push(nix::unistd::Gid::from_raw(spec.process.user.gid));
+        let _ = nix::unistd::setgroups(&[]);
+        if let Some(gids) = &spec.process.user.additional_gids {
+            let raw: Vec<nix::unistd::Gid> = gids
+                .iter()
+                .map(|g| nix::unistd::Gid::from_raw(*g))
+                .collect();
+            let _ = nix::unistd::setgroups(&raw);
         }
-        let _ = nix::unistd::setgroups(&supp);
     }
 
     if let Some(ann) = &spec.annotations {
@@ -2965,6 +2954,16 @@ fn run_container_child(
         }
     }
 
+    let _ = fs::write("/proc/self/setgroups", "allow");
+    let _ = nix::unistd::setgroups(&[]);
+    if let Some(gids) = &spec.process.user.additional_gids {
+        let raw_gids: Vec<nix::unistd::Gid> = gids
+            .iter()
+            .map(|g| nix::unistd::Gid::from_raw(*g))
+            .collect();
+        let _ = nix::unistd::setgroups(&raw_gids);
+    }
+
     #[cfg(target_os = "linux")]
     if let Some(caps) = &spec.process.capabilities {
         if let Some(bounding) = &caps.bounding {
@@ -3022,15 +3021,6 @@ fn run_container_child(
         }
     }
 
-    let _ = fs::write("/proc/self/setgroups", "allow");
-    let _ = nix::unistd::setgroups(&[]);
-    if let Some(gids) = &spec.process.user.additional_gids {
-        let raw_gids: Vec<nix::unistd::Gid> = gids
-            .iter()
-            .map(|g| nix::unistd::Gid::from_raw(*g))
-            .collect();
-        let _ = nix::unistd::setgroups(&raw_gids);
-    }
     if let Some(u) = spec.process.umask {
         unsafe {
             libc::umask(u as libc::mode_t);
