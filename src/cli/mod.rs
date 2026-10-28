@@ -45,6 +45,10 @@ fn expand_combined_short_flags(arg: &str) -> Vec<String> {
     if body.len() > 1 && body.chars().all(|c| RUN_EXEC_FLAGS.contains(&c)) {
         return body.chars().map(|c| format!("-{}", c)).collect();
     }
+    const BULK_RM_FLAGS: &[char] = &['a', 'f', 't', 'v'];
+    if body.len() > 1 && body.chars().all(|c| BULK_RM_FLAGS.contains(&c)) {
+        return body.chars().map(|c| format!("-{}", c)).collect();
+    }
     vec![arg.to_string()]
 }
 
@@ -53,12 +57,23 @@ const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
     "--runroot",
     "--tmpdir",
     "--storage-driver",
+    "--storage-opt",
     "--conmon",
     "--network-config-dir",
     "--cgroup-manager",
     "--events-backend",
     "--transient-store",
+    "--runtime",
+    "--log-level",
+    "--syslog",
 ];
+
+fn is_podman_global_flag_token(a: &str) -> bool {
+    if PODMAN_GLOBAL_VALUE_FLAGS.iter().any(|f| *f == a) {
+        return true;
+    }
+    a.starts_with("--log-level=") || a.starts_with("--syslog=")
+}
 
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
@@ -82,8 +97,12 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
-        if PODMAN_GLOBAL_VALUE_FLAGS.contains(&a.as_str()) {
-            i += 2;
+        if is_podman_global_flag_token(a) {
+            if a.contains('=') {
+                i += 1;
+            } else {
+                i += 2;
+            }
             continue;
         }
         out.extend(expand_combined_short_flags(a));
