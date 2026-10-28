@@ -2254,6 +2254,12 @@ pub async fn run_container_with_output(
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
+    if let Some(u) = &args.user {
+        if let Some((uid, gid)) = resolve_user_spec_in_rootfs(&cow_bundle.merged_dir, u) {
+            spec.process.user.uid = uid;
+            spec.process.user.gid = gid;
+        }
+    }
     if let Some(img) = image_ref {
         apply_image_config_volume_mounts(
             img,
@@ -4542,6 +4548,28 @@ fn log_opt_max_size_mb(log_opts: &[String]) -> Option<String> {
     None
 }
 
+fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Option<(u32, u32)> {
+    let spec = spec.trim();
+    if let Some((u, g)) = spec.split_once(':') {
+        let uid = u.parse().ok()?;
+        let gid = g.parse().ok()?;
+        return Some((uid, gid));
+    }
+    if let Ok(uid) = spec.parse::<u32>() {
+        return Some((uid, uid));
+    }
+    let content = fs::read_to_string(rootfs.join("etc/passwd")).ok()?;
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 4 && parts[0] == spec {
+            let uid = parts[2].parse().ok()?;
+            let gid = parts[3].parse().ok()?;
+            return Some((uid, gid));
+        }
+    }
+    None
+}
+
 fn find_host_passwd_line(host_passwd: &str, spec: &str) -> Option<String> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -6660,6 +6688,12 @@ async fn create_only_container_after_pod_prep(
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
+    if let Some(u) = &args.user {
+        if let Some((uid, gid)) = resolve_user_spec_in_rootfs(&cow_bundle.merged_dir, u) {
+            spec.process.user.uid = uid;
+            spec.process.user.gid = gid;
+        }
+    }
     apply_image_config_volume_mounts(
         &image_record,
         &args,

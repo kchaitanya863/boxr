@@ -796,9 +796,9 @@ pub struct RmArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
 
-    /// Seconds to wait before killing a container (0 = immediate)
-    #[arg(short = 't', long = "time", value_name = "SECONDS")]
-    pub time: Option<u32>,
+    /// Seconds to wait before killing a container (0 = immediate, -1 = no limit)
+    #[arg(short = 't', long = "time", value_name = "SECONDS", allow_hyphen_values = true)]
+    pub time: Option<i32>,
 
     /// Ignore errors when a container cannot be removed
     #[arg(long = "ignore")]

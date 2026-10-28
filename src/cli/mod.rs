@@ -34,7 +34,6 @@ const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
     "--runroot",
     "--tmpdir",
     "--storage-driver",
-    "--runtime",
     "--conmon",
     "--network-config-dir",
     "--cgroup-manager",
