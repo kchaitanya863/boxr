@@ -322,6 +322,79 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         cfg.write_proc_mappings(pid)
     }
 
+    /// Shift a host path to container uid/gid 0 on disk using the same ID maps as the container.
+    #[cfg(target_os = "linux")]
+    pub fn chown_path_as_mapped_root(
+        path: &Path,
+        uid_maps: &[IdMapping],
+        gid_maps: &[IdMapping],
+    ) -> Result<()> {
+        use nix::sched::{unshare, CloneFlags};
+        use nix::sys::wait::{waitpid, WaitStatus};
+        use nix::unistd::{fork, setresgid, setresuid, ForkResult, Gid, Uid};
+        use std::ffi::CString;
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        fn chown_visit(path: &Path) -> Result<()> {
+            let cstr = CString::new(path.to_string_lossy().as_ref())
+                .with_context(|| format!("invalid path {:?}", path))?;
+            let rc = unsafe { libc::chown(cstr.as_ptr(), 0, 0) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ENOENT) {
+                    return Err(anyhow::anyhow!("chown {:?}: {}", path, err));
+                }
+            }
+            if path.is_dir() {
+                for entry in fs::read_dir(path).with_context(|| format!("read_dir {:?}", path))? {
+                    let entry = entry?;
+                    chown_visit(&entry.path())?;
+                }
+            }
+            Ok(())
+        }
+
+        let (mut parent_sock, mut child_sock) = UnixStream::pair()?;
+        match unsafe { fork() }? {
+            ForkResult::Parent { child } => {
+                drop(child_sock);
+                let mut sync_buf = [0u8; 5];
+                parent_sock.read_exact(&mut sync_buf)?;
+                Self::apply_id_mappings(child.as_raw(), uid_maps, gid_maps)?;
+                parent_sock.write_all(b"done")?;
+                drop(parent_sock);
+                match waitpid(child, None)? {
+                    WaitStatus::Exited(_, 0) => Ok(()),
+                    WaitStatus::Exited(_, code) => Err(anyhow::anyhow!(
+                        "chown_path_as_mapped_root helper exited with {}",
+                        code
+                    )),
+                    WaitStatus::Signaled(_, sig, _) => Err(anyhow::anyhow!(
+                        "chown_path_as_mapped_root helper signaled with {}",
+                        sig
+                    )),
+                    _ => Err(anyhow::anyhow!("chown_path_as_mapped_root helper wait failed")),
+                }
+            }
+            ForkResult::Child => {
+                drop(parent_sock);
+                unshare(CloneFlags::CLONE_NEWUSER)?;
+                let _ = fs::write("/proc/self/setgroups", "deny");
+                child_sock.write_all(b"ready")?;
+                let mut done = [0u8; 4];
+                child_sock.read_exact(&mut done)?;
+                drop(child_sock);
+                let root_gid = Gid::from_raw(0);
+                let root_uid = Uid::from_raw(0);
+                setresgid(root_gid, root_gid, root_gid).context("setresgid in chown helper")?;
+                setresuid(root_uid, root_uid, root_uid).context("setresuid in chown helper")?;
+                chown_visit(path)?;
+                std::process::exit(0);
+            }
+        }
+    }
+
     /// Configure UID and GID mapping for a target PID in Linux /proc/<pid>
     #[cfg(target_os = "linux")]
     pub fn write_proc_mappings(&self, pid: i32) -> Result<()> {

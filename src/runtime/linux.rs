@@ -1397,7 +1397,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         if let Err(err) =
                             run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
                         {
-                            eprintln!("Container child failed: {:?}", err);
+                            eprintln!("Container child failed: {err:#}");
                             std::process::exit(1);
                         }
                         std::process::exit(0);
@@ -1545,7 +1545,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if let Err(err) =
                     run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
                 {
-                    eprintln!("Container child failed: {:?}", err);
+                    eprintln!("Container child failed: {err:#}");
                     std::process::exit(1);
                 }
                 std::process::exit(0);
@@ -2844,7 +2844,8 @@ fn run_container_child(
         None::<&str>,
         MsFlags::MS_REC | MsFlags::MS_PRIVATE,
         None::<&str>,
-    )?;
+    )
+    .context("MS_PRIVATE on /")?;
 
     // Bind mount rootfs to itself so it is an active mountpoint (requirement for pivot_root)
     mount(
@@ -2853,7 +2854,8 @@ fn run_container_child(
         None::<&str>,
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
-    )?;
+    )
+    .with_context(|| format!("MS_BIND rootfs {:?}", rootfs))?;
 
     // Mount proc, sysfs, dev inside rootfs
     let proc_path = rootfs.join("proc");

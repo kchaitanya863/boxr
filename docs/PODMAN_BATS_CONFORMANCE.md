@@ -56,7 +56,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 |------|-----|--------|--------|
 | 015-help | 1 | 0 | |
 | 020-tag | 2 | 0 | |
-| 030-run | 80 | 1 | **`--uidmap` /etc/hosts** — custom maps point container root at a subuid while overlay rootfs stays owned by the invoking user; setup hits **EACCES** until rootfs is shifted like Podman storage (separate from 075/160). |
+| 030-run | 80 | 1 | **`--uidmap` /etc/hosts** — custom maps set container root to a subuid; rootfs must be owned on disk at that subuid before pivot/mount. boxr attempts `chown_path_as_mapped_root` (userns + same maps + `chown 0:0`); on this VM host policy denies retargeting a 1000-owned overlay (`EPERM`), so setup fails at `MS_PRIVATE`/`MS_BIND`. Pre-seeds `etc/hosts` when maps are set (helps when shift succeeds). |
 | 040-ps | 8 | 0 | |
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |

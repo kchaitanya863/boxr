@@ -2118,8 +2118,9 @@ pub async fn run_container_with_output(
 
     fs::create_dir_all(&bundle_dir)?;
     let cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
+    shift_merged_rootfs_for_run_id_maps(&args, &cow_bundle.merged_dir)?;
     #[cfg(unix)]
-    if args.image.contains("libpod/testimage") {
+    if args.image.contains("libpod/testimage") && args.uidmap.is_empty() {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(
             &cow_bundle.merged_dir,
@@ -2395,6 +2396,15 @@ pub async fn run_container_with_output(
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     apply_run_id_maps(&args, &mut spec, &mut annotations)?;
+    if !args.uidmap.is_empty() {
+        let host_label = spec.hostname.as_deref().filter(|h| !h.is_empty());
+        seed_bundle_etc_hosts(
+            &bundle_dir,
+            &cow_bundle.merged_dir,
+            host_label,
+            &args.add_host,
+        )?;
+    }
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     if let Some(u) = &args.user {
@@ -5422,6 +5432,81 @@ fn apply_run_id_maps(
     Ok(())
 }
 
+fn shift_merged_rootfs_for_run_id_maps(args: &RunArgs, merged_rootfs: &Path) -> Result<()> {
+    if args.uidmap.is_empty() {
+        return Ok(());
+    }
+    let uid_maps: Vec<security::IdMapping> = args
+        .uidmap
+        .iter()
+        .filter_map(|s| parse_id_map(s))
+        .collect();
+    if uid_maps.is_empty() {
+        return Ok(());
+    }
+    let gid_maps: Vec<security::IdMapping> = if args.gidmap.is_empty() {
+        uid_maps.clone()
+    } else {
+        args.gidmap
+            .iter()
+            .filter_map(|s| parse_id_map(s))
+            .collect()
+    };
+    let _ = std::process::Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(merged_rootfs)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if let Err(e) = security::RootlessUserConfig::chown_path_as_mapped_root(
+        merged_rootfs,
+        &uid_maps,
+        &gid_maps,
+    ) {
+        eprintln!(
+            "boxr: warning: could not shift rootfs ownership for --uidmap/--gidmap ({e}); \
+custom maps may fail when container root maps off the invoking user (see PODMAN_BATS_CONFORMANCE.md)"
+        );
+    }
+    Ok(())
+}
+
+/// Write `/etc/hosts` on the bundle before trampoline when `--uidmap` shifts container root
+/// off the invoking user (rootless setup cannot always update hosts after pivot).
+pub(crate) fn seed_bundle_etc_hosts(
+    bundle_dir: &Path,
+    merged_rootfs: &Path,
+    hostname: Option<&str>,
+    add_host: &[String],
+) -> Result<()> {
+    let mut hosts_content =
+        String::from("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n");
+    if let Some(h) = hostname {
+        if !h.is_empty() {
+            hosts_content.push_str(&format!("127.0.0.1 {h}\n"));
+        }
+    }
+    for entry in add_host {
+        if let Some((host, ip)) = entry.split_once(':') {
+            if !host.is_empty() {
+                hosts_content.push_str(&format!("{} {}\n", ip.trim(), host.trim()));
+            }
+        }
+    }
+    let hosts_path = merged_rootfs.join("etc/hosts");
+    if let Some(parent) = hosts_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&hosts_path, &hosts_content)?;
+    let upper_hosts = bundle_dir.join("upper/etc/hosts");
+    if let Some(parent) = upper_hosts.parent() {
+        fs::create_dir_all(parent)?;
+        fs::write(&upper_hosts, &hosts_content)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn id_maps_from_spec(spec: &Spec) -> Option<(Vec<security::IdMapping>, Vec<security::IdMapping>)> {
     let ann = spec.annotations.as_ref()?;
     let uid_json = ann.get("boxr.uid_maps")?;
@@ -7153,6 +7238,7 @@ async fn create_only_container_after_pod_prep(
 
     let base_rootfs = PathBuf::from(&image_record.rootfs_path);
     let cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
+    shift_merged_rootfs_for_run_id_maps(&args, &cow_bundle.merged_dir)?;
 
     let cmd_override = if !args.command.is_empty() {
         Some(args.command.as_slice())
@@ -7622,6 +7708,15 @@ async fn create_only_container_after_pod_prep(
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     apply_run_id_maps(&args, &mut spec, &mut annotations)?;
+    if !args.uidmap.is_empty() {
+        let host_label = spec.hostname.as_deref().filter(|h| !h.is_empty());
+        seed_bundle_etc_hosts(
+            &bundle_dir,
+            &cow_bundle.merged_dir,
+            host_label,
+            &args.add_host,
+        )?;
+    }
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     if let Some(u) = &args.user {
