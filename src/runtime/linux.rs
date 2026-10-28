@@ -550,17 +550,21 @@ fn scrub_conmon_parent_env(cmd: &mut std::process::Command) {
 
 #[cfg(target_os = "linux")]
 fn journal_line(line: &str) {
-    use std::ffi::CString;
-    use std::os::raw::{c_char, c_int};
     use std::os::unix::net::UnixDatagram;
 
-    unsafe extern "C" {
-        fn sd_journal_send(fmt: *const c_char, ...) -> c_int;
-    }
-    let entry = CString::new(format!("MESSAGE={}", line)).unwrap_or_default();
-    let sent = unsafe { sd_journal_send(entry.as_ptr(), std::ptr::null::<c_char>()) };
-    if sent >= 0 {
-        return;
+    #[cfg(boxr_has_systemd)]
+    {
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_int};
+
+        unsafe extern "C" {
+            fn sd_journal_send(fmt: *const c_char, ...) -> c_int;
+        }
+        let entry = CString::new(format!("MESSAGE={}", line)).unwrap_or_default();
+        let sent = unsafe { sd_journal_send(entry.as_ptr(), std::ptr::null::<c_char>()) };
+        if sent >= 0 {
+            return;
+        }
     }
     // Fallback: journald's /dev/log accepts classic syslog payloads with peer PID.
     if let Ok(sock) = UnixDatagram::unbound() {
