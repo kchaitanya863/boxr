@@ -499,6 +499,9 @@ pub struct ImagePruneArgs {
     #[arg(short = 'f', long = "force")]
     pub force: bool,
 
+    #[arg(long = "external")]
+    pub external: bool,
+
     #[arg(long = "filter")]
     pub filter: Vec<String>,
 }

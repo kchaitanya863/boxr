@@ -1018,7 +1018,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Prune(prune_args) => {
-                prune_images(prune_args.all)?;
+                prune_images(prune_args.all, prune_args.external)?;
                 Ok(0)
             }
             cli::ImageAction::Exists { image } => {
@@ -3163,6 +3163,42 @@ pub fn stop_container_with_home(
     stop_container_with_home_and_timeout(container, signal, None, home_opt, false, None)
 }
 
+fn resolve_stop_exit_code(
+    store: &ContainerStore,
+    id: &str,
+    bundle_path: &std::path::Path,
+    used_sigkill: bool,
+) -> i32 {
+    if used_sigkill {
+        return 137;
+    }
+    if let Some(rec) = store.find(id) {
+        if let ContainerStatus::Exited(code) = rec.status {
+            if code == 137 {
+                return 137;
+            }
+        }
+    }
+    if let Ok(code_str) = std::fs::read_to_string(bundle_path.join("boxr-exitcode")) {
+        if let Ok(code) = code_str.trim().parse::<i32>() {
+            // Trampoline may record 128+signal even when the workload trapped and exited 0.
+            if code == 143 || code == 130 {
+                return 0;
+            }
+            return code;
+        }
+    }
+    if let Some(rec) = store.find(id) {
+        if let ContainerStatus::Exited(code) = rec.status {
+            if code == 143 || code == 130 {
+                return 0;
+            }
+            return code;
+        }
+    }
+    0
+}
+
 pub fn stop_container_with_home_and_timeout(
     container: &str,
     signal: Option<&str>,
@@ -3300,7 +3336,22 @@ pub fn stop_container_with_home_and_timeout(
             }
         }
     }
-    let exit_code = if used_sigkill { 137 } else { 0 };
+    let bundle_path = std::path::PathBuf::from(&c.bundle_path);
+    let mut exit_code = resolve_stop_exit_code(&store, &c.id, &bundle_path, used_sigkill);
+    if let Some(rec) = store.find(&c.id) {
+        if let ContainerStatus::Exited(existing) = rec.status {
+            if existing == 137 {
+                exit_code = 137;
+            }
+        }
+    }
+    if used_sigkill {
+        eprintln!(
+            "StopSignal SIGTERM failed to stop container {} in {} seconds, resorting to SIGKILL",
+            c.name,
+            grace_secs
+        );
+    }
     if let Err(e) = store.update_status(&c.id, ContainerStatus::Exited(exit_code)) {
         if store.find(&c.id).is_none() {
             // Detached watcher may have already finalized --rm/--rmi cleanup.
@@ -3309,13 +3360,6 @@ pub fn stop_container_with_home_and_timeout(
         return Err(e);
     }
     let _ = guardrails::ProcessReaper::reap_stale_containers();
-    if used_sigkill {
-        eprintln!(
-            "StopSignal SIGTERM failed to stop container {} in {} seconds, resorting to SIGKILL",
-            c.name,
-            grace_secs
-        );
-    }
     if !quiet {
         println!("{}", output_label.unwrap_or(container));
     }
@@ -6055,6 +6099,36 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 "CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "NAMES"
             );
         }
+        let externals = storage::external::list_storage_containers()?;
+        for ext in &externals {
+            if args.quiet {
+                let id_display = if args.no_trunc {
+                    ext.id.clone()
+                } else {
+                    ext.id[..12.min(ext.id.len())].to_string()
+                };
+                println!("{}", id_display);
+                continue;
+            }
+            if args.format.is_some() {
+                continue;
+            }
+            let id_display = if args.no_trunc {
+                ext.id.clone()
+            } else {
+                ext.id[..12.min(ext.id.len())].to_string()
+            };
+            let created_display = format_created_from_unix(ext.created_unix);
+            println!(
+                "{:<14} {:<24} {:<20} {:<20} {:<16} {:<16}",
+                id_display,
+                ext.image,
+                "buildah",
+                created_display,
+                "Storage",
+                ext.name
+            );
+        }
         return Ok(());
     }
 
@@ -6304,6 +6378,19 @@ fn rm_container_resolving_depend(
     let store = ContainerStore::new();
     let rec = match store.find(target) {
         Some(c) => c,
+        None if storage::external::find_storage_container(target).is_some() => {
+            if let Err(e) =
+                remove_container_opts_inner(target, args.force, args.volumes, !quiet_stdout)
+            {
+                let msg = e.to_string();
+                if msg.contains("container state improper") {
+                    eprintln!("Error: {}", msg);
+                    std::process::exit(2);
+                }
+                return Err(e);
+            }
+            return Ok(());
+        }
         None if args.force => return Ok(()),
         None => {
             return Err(anyhow!(
@@ -6421,15 +6508,31 @@ fn remove_container_opts_inner(
     let store = ContainerStore::new();
     let c = match store.find(container) {
         Some(c) => c,
-        None if storage::external::external_name_taken(container) => {
-            storage::external::remove_external_name(container)?;
-            if print_removed {
-                println!("{}", container);
-            }
-            return Ok(());
-        }
-        None if force => return Ok(()),
         None => {
+            if let Some(ext) = storage::external::find_storage_container(container) {
+                if ext.mounted && !force {
+                    let short = ext.id[..12.min(ext.id.len())].to_string();
+                    return Err(anyhow!(
+                        "container {} is mounted and cannot be removed without using force: container state improper",
+                        short
+                    ));
+                }
+                storage::external::remove_storage_container(container)?;
+                if print_removed {
+                    println!("{}", container);
+                }
+                return Ok(());
+            }
+            if storage::external::external_name_taken(container) {
+                storage::external::remove_external_name(container)?;
+                if print_removed {
+                    println!("{}", container);
+                }
+                return Ok(());
+            }
+            if force {
+                return Ok(());
+            }
             return Err(anyhow!(
                 "no container with ID or name \"{}\" found: no such container",
                 container
@@ -6577,7 +6680,17 @@ pub fn prune_containers() -> Result<()> {
     Ok(())
 }
 
-pub fn prune_images(all: bool) -> Result<()> {
+pub fn prune_images(all: bool, external: bool) -> Result<()> {
+    if external {
+        if let Some(image) = storage::external::prune_one_external_container()? {
+            let id = image
+                .strip_prefix("sha256:")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| image.clone());
+            println!("deleted: sha256:{}", id);
+        }
+        return Ok(());
+    }
     let i_store = ImageStore::new();
     let c_store = ContainerStore::new();
     let images = i_store.list();
@@ -8421,6 +8534,12 @@ fn format_image_size(size_bytes: u64) -> String {
     } else {
         format!("{:.2} MB", size_mb)
     }
+}
+
+fn format_created_from_unix(ts: u64) -> String {
+    let created_at = chrono::DateTime::<chrono::Utc>::from_timestamp(ts as i64, 0)
+        .unwrap_or_else(chrono::Utc::now);
+    format_running_for(created_at)
 }
 
 fn format_running_for(created_at: chrono::DateTime<chrono::Utc>) -> String {

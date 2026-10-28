@@ -182,6 +182,12 @@ impl ContainerStore {
             if let Some(c) = data.containers.iter_mut().find(|c| {
                 c.id == q || c.id.starts_with(&q) || c.name == q
             }) {
+                // SIGKILL during `podman stop` (separate process) must not be downgraded.
+                if matches!(c.status, ContainerStatus::Exited(137))
+                    && !matches!(status, ContainerStatus::Exited(137))
+                {
+                    return Ok(());
+                }
                 c.status = status;
                 self.save_unlocked(&data)?;
                 Ok(())
