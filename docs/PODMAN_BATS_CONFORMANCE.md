@@ -71,7 +71,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash` |
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
-| `030-run.bats` | **noout/out**, port warnings, **HOME=/**, workdir, **`--timeout`**, **containerenv**, **defaultenv**, **inspect image fields**, **`--log-driver k8s-file`** + **`inspect -l` LogConfig.Path**; many flags still red |
+| `030-run.bats` | **noout/out**, workdir, timeout, containerenv, defaultenv, inspect image fields, **log-driver table**, **docker-archive:** transport, k8s-file big output; many flags still red |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |

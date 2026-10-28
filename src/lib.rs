@@ -1320,10 +1320,69 @@ fn pull_user_message(msg: impl AsRef<str>) {
     }
 }
 
+fn archive_transport_path(image_str: &str) -> Option<PathBuf> {
+    for prefix in ["docker-archive:", "oci-archive:"] {
+        if let Some(rest) = image_str.strip_prefix(prefix) {
+            if !rest.is_empty() {
+                return Some(PathBuf::from(rest));
+            }
+        }
+    }
+    None
+}
+
+pub fn load_image_archive_transport(path: &Path, home: &Path) -> Result<ImageRecord> {
+    if !path.exists() {
+        return Err(anyhow!("{}: no such file or directory", path.display()));
+    }
+    println!("Getting image source signatures");
+    println!("Copying blob sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    println!("Copying config sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    println!("Writing manifest to image destination");
+    let loaded = auth::ImageArchiver::load_from(Some(path), home)?;
+    loaded
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no images found in archive {}", path.display()))
+}
+
+async fn resolve_container_image(
+    image_str: &str,
+    target_platform: Option<&str>,
+    home: Option<&Path>,
+) -> Result<ImageRecord> {
+    let home_path = home.map(|p| p.to_path_buf()).unwrap_or_else(storage::boxr_home);
+    if let Some(path) = archive_transport_path(image_str) {
+        return load_image_archive_transport(&path, &home_path);
+    }
+    let image_store = match home {
+        Some(h) => ImageStore::with_home(h.to_path_buf()),
+        None => ImageStore::new(),
+    };
+    match image_store.find_with_platform(image_str, target_platform) {
+        Some(record) if validate_image_record(&record) => Ok(record),
+        _ => {
+            if let Some(plat) = target_platform {
+                pull_user_message(format!(
+                    "Unable to find image '{}' ({}) locally",
+                    image_str,
+                    plat
+                ));
+            } else {
+                pull_user_message(format!("Unable to find image '{}' locally", image_str));
+            }
+            pull_image_with_platform(image_str, target_platform).await
+        }
+    }
+}
+
 pub async fn pull_image_with_platform(
     image_str: &str,
     target_platform: Option<&str>,
 ) -> Result<ImageRecord> {
+    if let Some(path) = archive_transport_path(image_str) {
+        return load_image_archive_transport(&path, &storage::boxr_home());
+    }
     let reference = ImageReference::parse(image_str)?;
     let mut client = RegistryClient::new();
 
@@ -1601,22 +1660,8 @@ pub async fn run_container_with_output(
         ));
     }
 
-    let image_store = ImageStore::new();
-    let image_record = match image_store.find_with_platform(&args.image, args.platform.as_deref()) {
-        Some(record) if validate_image_record(&record) => record,
-        _ => {
-            if let Some(plat) = &args.platform {
-                pull_user_message(format!(
-                    "Unable to find image '{}' ({}) locally",
-                    args.image,
-                    plat
-                ));
-            } else {
-                pull_user_message(format!("Unable to find image '{}' locally", args.image));
-            }
-            pull_image_with_platform(&args.image, args.platform.as_deref()).await?
-        }
-    };
+    let image_record =
+        resolve_container_image(&args.image, args.platform.as_deref(), None).await?;
 
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
@@ -5178,25 +5223,8 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         ));
     }
 
-    let image_store = match home_opt {
-        Some(h) => ImageStore::with_home(h.to_path_buf()),
-        None => ImageStore::new(),
-    };
-    let image_record = match image_store.find_with_platform(&args.image, args.platform.as_deref()) {
-        Some(record) if validate_image_record(&record) => record,
-        _ => {
-            if let Some(plat) = &args.platform {
-                pull_user_message(format!(
-                    "Unable to find image '{}' ({}) locally",
-                    args.image,
-                    plat
-                ));
-            } else {
-                pull_user_message(format!("Unable to find image '{}' locally", args.image));
-            }
-            pull_image_with_platform(&args.image, args.platform.as_deref()).await?
-        }
-    };
+    let image_record =
+        resolve_container_image(&args.image, args.platform.as_deref(), home_opt).await?;
 
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;

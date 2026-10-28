@@ -364,6 +364,20 @@ impl ImageStore {
                 history: Vec::new(),
             });
 
+        let bundle_config = PathBuf::from(&container.bundle_path).join("config.json");
+        if let Ok(content) = fs::read_to_string(&bundle_config) {
+            if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content) {
+                let run_args = spec.process.args;
+                if !run_args.is_empty() {
+                    let exec = base_config
+                        .config
+                        .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+                    exec.entrypoint = Some(run_args);
+                    exec.cmd = None;
+                }
+            }
+        }
+
         if let Some(auth) = author {
             if let Some(cfg) = &mut base_config.config {
                 let mut labels = cfg.labels.take().unwrap_or_default();
