@@ -77,6 +77,7 @@ use events::{ContainerEvent, EventManager};
 use network::{NetworkStore, PortMapping};
 use oci::distribution::RegistryClient;
 use oci::image::unpack_layer;
+use oci::registry_options::{registry_options_from_cli, RegistryOptionsGuard};
 use oci::reference::ImageReference;
 use oci::runtime::Spec;
 use runtime::{exec_in_bundle, execute_bundle};
@@ -98,6 +99,13 @@ fn authfile_exit_125(global: Option<&str>, local: Option<&str>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn registry_auth_scope(auth: &cli::image::RegistryAuthArgs) -> RegistryOptionsGuard {
+    RegistryOptionsGuard::install(registry_options_from_cli(
+        auth.cert_dir.as_deref(),
+        auth.creds.as_deref(),
+    ))
 }
 
 /// Podman global `--noout` / `--out` behavior for container ID emission.
@@ -594,11 +602,13 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Pull(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            let _reg = registry_auth_scope(&args.registry_auth);
             pull_image_with_platform(&args.image, args.platform.as_deref()).await?;
             Ok(0)
         }
         Commands::Run(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            let _reg = registry_auth_scope(&args.registry_auth);
             let conf_flags = runtime_flags_from_containers_conf();
             validate_runtime_flags(&runtime_flags)?;
             validate_runtime_flags(&conf_flags)?;
@@ -609,6 +619,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Create(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            let _reg = registry_auth_scope(&args.registry_auth);
             let mut args = args;
             args.conmon_syslog = cli.syslog;
             let id = create_only_container(args).await?;
@@ -697,7 +708,8 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Push(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
-            auth::RegistryPusher::push(&args.image).await?;
+            let _reg = registry_auth_scope(&args.registry_auth);
+            auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await?;
             Ok(0)
         }
         Commands::Login(args) => {
@@ -944,11 +956,19 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Pull(pull_args) => {
+                authfile_exit_125(global_auth, pull_args.registry_auth.authfile.as_deref())?;
+                let _reg = registry_auth_scope(&pull_args.registry_auth);
                 pull_image_with_platform(&pull_args.image, pull_args.platform.as_deref()).await?;
                 Ok(0)
             }
             cli::ImageAction::Push(push_args) => {
-                auth::RegistryPusher::push(&push_args.image).await?;
+                authfile_exit_125(global_auth, push_args.registry_auth.authfile.as_deref())?;
+                let _reg = registry_auth_scope(&push_args.registry_auth);
+                auth::RegistryPusher::push(
+                    &push_args.source,
+                    push_args.destination.as_deref(),
+                )
+                .await?;
                 Ok(0)
             }
             cli::ImageAction::Tag(tag_args) => {
@@ -1643,7 +1663,13 @@ async fn resolve_container_image(
         Some(record) if validate_image_record(&record) => {
             if pull == Some("always") {
                 println!("Trying to pull {}...", image_str);
-                pull_image_with_platform(image_str, target_platform).await
+                match pull_image_with_platform(image_str, target_platform).await {
+                    Ok(r) => Ok(r),
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(125);
+                    }
+                }
             } else {
                 Ok(record)
             }
@@ -1654,7 +1680,13 @@ async fn resolve_container_image(
             }
             _ => {
                 println!("Trying to pull {}...", image_str);
-                pull_image_with_platform(image_str, target_platform).await
+                match pull_image_with_platform(image_str, target_platform).await {
+                    Ok(r) => Ok(r),
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(125);
+                    }
+                }
             }
         },
     }
@@ -1802,7 +1834,7 @@ pub async fn pull_image_with_platform(
 }
 
 pub async fn push_image(image_str: &str) -> Result<()> {
-    auth::RegistryPusher::push(image_str).await
+    auth::RegistryPusher::push(image_str, None).await
 }
 
 fn apply_capabilities_and_security(

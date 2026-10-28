@@ -6,6 +6,14 @@ pub struct RegistryAuthArgs {
     /// Path of the authentication file
     #[arg(long = "authfile")]
     pub authfile: Option<String>,
+
+    /// Path to a directory with TLS certificates for registry access
+    #[arg(long = "cert-dir")]
+    pub cert_dir: Option<String>,
+
+    /// Username:password for registry operations
+    #[arg(long = "creds")]
+    pub creds: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -45,7 +53,10 @@ pub struct LoadArgs {
 pub struct PushArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
-    pub image: String,
+    /// Source image
+    pub source: String,
+    /// Destination name on the registry (optional)
+    pub destination: Option<String>,
 }
 
 #[derive(Args, Debug)]

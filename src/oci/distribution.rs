@@ -77,11 +77,32 @@ impl ImageDistribution for RegistryClient {
     }
 }
 
+fn registry_connect_host(registry: &str) -> String {
+    if registry.starts_with("localhost:") {
+        registry.replacen("localhost", "127.0.0.1", 1)
+    } else if registry == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        registry.to_string()
+    }
+}
+
 impl RegistryClient {
     pub fn new() -> Self {
+        let opts = crate::oci::registry_options::registry_options_snapshot();
+        let mut builder = Client::builder()
+            .user_agent("boxr/0.1.0")
+            .tls_built_in_root_certs(true);
+        if let Some(dir) = &opts.cert_dir {
+            if let Ok(certs) = crate::oci::registry_options::load_extra_root_certs(dir) {
+                for cert in certs {
+                    builder = builder.add_root_certificate(cert);
+                }
+            }
+            builder = builder.danger_accept_invalid_hostnames(true);
+        }
         Self {
-            client: Client::builder()
-                .user_agent("boxr/0.1.0")
+            client: builder
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             token: None,
@@ -89,13 +110,31 @@ impl RegistryClient {
         }
     }
 
+    fn inline_credentials(&self) -> Option<(String, String)> {
+        crate::oci::registry_options::registry_options_snapshot().inline_creds
+    }
+
+    fn store_credentials(
+        &self,
+        reference: &ImageReference,
+    ) -> Option<(String, String)> {
+        if let Some(c) = self.inline_credentials() {
+            return Some(c);
+        }
+        crate::auth::CredentialStore::new().get_credentials(&reference.registry)
+    }
+
     /// Authenticate against registry if needed (e.g. Docker Hub auth token or private registry).
     pub async fn authenticate(&mut self, reference: &ImageReference) -> Result<()> {
-        let cred_store = crate::auth::CredentialStore::new();
-        let creds = cred_store.get_credentials(&reference.registry);
+        let creds = self.store_credentials(reference);
 
-        let ping_url = format!("https://{}/v2/", reference.registry);
-        let resp = self.client.get(&ping_url).send().await?;
+        let ping_url = format!("https://{}/v2/", registry_connect_host(&reference.registry));
+        let resp = self
+            .client
+            .get(&ping_url)
+            .send()
+            .await
+            .map_err(|e| anyhow!("registry ping {}: {:#}", ping_url, e))?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -217,14 +256,13 @@ impl RegistryClient {
 
     /// Authenticate for push operations (pull,push scope).
     pub async fn authenticate_push(&mut self, reference: &ImageReference) -> Result<()> {
-        let cred_store = crate::auth::CredentialStore::new();
-        let creds = cred_store.get_credentials(&reference.registry);
+        let creds = self.store_credentials(reference);
         if let Some((u, p)) = &creds {
             let encoded = crate::auth::custom_base64_encode(&format!("{}:{}", u, p));
             self.basic_auth = Some(encoded);
         }
 
-        let ping_url = format!("https://{}/v2/", reference.registry);
+        let ping_url = format!("https://{}/v2/", registry_connect_host(&reference.registry));
         let mut req = self.client.get(&ping_url);
         if let Some(auth) = &self.basic_auth {
             if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
@@ -279,7 +317,7 @@ impl RegistryClient {
     ) -> Result<()> {
         let check_url = format!(
             "https://{}/v2/{}/blobs/{}",
-            reference.registry, reference.repository, digest
+            registry_connect_host(&reference.registry), reference.repository, digest
         );
         let head = self
             .client
@@ -293,7 +331,7 @@ impl RegistryClient {
 
         let upload_url = format!(
             "https://{}/v2/{}/blobs/uploads/",
-            reference.registry, reference.repository
+            registry_connect_host(&reference.registry), reference.repository
         );
         let post = self
             .client
@@ -384,7 +422,7 @@ impl RegistryClient {
 
         let put_url = format!(
             "https://{}/v2/{}/manifests/{}",
-            reference.registry, reference.repository, reference.tag
+            registry_connect_host(&reference.registry), reference.repository, reference.tag
         );
         let mut headers = self.auth_headers();
         headers.insert(
@@ -441,7 +479,7 @@ impl RegistryClient {
 
         let url = format!(
             "https://{}/v2/{}/manifests/{}",
-            reference.registry, reference.repository, tag_or_digest
+            registry_connect_host(&reference.registry), reference.repository, tag_or_digest
         );
 
         let mut headers = self.auth_headers();
@@ -565,7 +603,7 @@ impl RegistryClient {
     ) -> Result<ImageConfig> {
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
-            reference.registry, reference.repository, config_descriptor.digest
+            registry_connect_host(&reference.registry), reference.repository, config_descriptor.digest
         );
 
         let resp = self
@@ -614,7 +652,7 @@ impl RegistryClient {
 
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
-            reference.registry, reference.repository, descriptor.digest
+            registry_connect_host(&reference.registry), reference.repository, descriptor.digest
         );
 
         let resp = self

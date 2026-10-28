@@ -80,10 +80,11 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `rm` / `pod rm` / `volume rm` bulk flags | `--all`, `-f`, `-a`, combined `-fa` / `-fat` via `preprocess_argv`; `pod rm` accepts **`-a`** |
 | `--authfile` | Global + pull/run/build/login/… |
 | BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash` |
+| `--cert-dir` / `--creds` | Parsed on pull/run/create/push; custom CA PEMs loaded from `--cert-dir` (TLS to BATS local registry still WIP) |
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **~79/81** isolated: **stopping loop**, **log-opt/containers.conf**, **no-hostname**, **inspect Args/Path** green; remaining reds often **cert-dir** (local registry), **host env leak** (needs **skopeo** in harness); **8 skips** |
+| `030-run.bats` | **~79/81** isolated: stopping loop, log-opt, no-hostname, inspect Args/Path green; **cert-dir** (TLS to local test registry), **host env leak** (needs skopeo + Podman `containers-storage` transport) remain red; **8 skips** |
 | `040-ps.bats` | **8/8** isolated |
 | `045-start.bats` | **8/8** isolated |
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr (`StopSignal SIGTERM failed to stop container … resorting to SIGKILL`, including **`in N seconds`** when `-t N` is set) |

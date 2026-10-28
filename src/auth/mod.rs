@@ -526,14 +526,21 @@ pub struct RegistryPusher;
 
 impl RegistryPusher {
     /// Push an image to an OCI / Docker registry
-    pub async fn push(image_query: &str) -> Result<()> {
+    pub async fn push(image_query: &str, destination: Option<&str>) -> Result<()> {
         let store = ImageStore::new();
         let image = store
             .find(image_query)
             .ok_or_else(|| anyhow!("Image '{}' not found locally", image_query))?;
 
-        let reference = ImageReference::parse(&format!("{}:{}", image.reference, image.tag))?;
-        let creds = CredentialStore::new().get_credentials(&reference.registry);
+        let reference = if let Some(dest) = destination {
+            ImageReference::parse(dest)?
+        } else {
+            ImageReference::parse(&format!("{}:{}", image.reference, image.tag))?
+        };
+        let creds = crate::oci::registry_options::registry_options_snapshot()
+            .inline_creds
+            .clone()
+            .or_else(|| CredentialStore::new().get_credentials(&reference.registry));
 
         println!(
             "Pushing image {} to {}",
