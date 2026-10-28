@@ -2182,6 +2182,14 @@ pub async fn run_container_with_output(
         apply_namespace_to_linux(linux, &mut annotations, "pid", &args.pid)?;
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    apply_image_config_volume_mounts(
+        &image_record,
+        &args,
+        &vol_store,
+        &cow_bundle.merged_dir,
+        &mut parsed_mounts,
+        &mut spec,
+    )?;
     if args.unsetenv_all {
         annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
@@ -4351,14 +4359,132 @@ pub fn kill_container(args: &cli::KillArgs) -> Result<()> {
     runtime::kill::ContainerKiller::kill(&cont, args.signal.as_deref())
 }
 
+fn image_volume_mode_from_containers_conf() -> Option<String> {
+    let path = std::env::var("CONTAINERS_CONF_OVERRIDE").ok()?;
+    let content = fs::read_to_string(&path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("image_volume_mode") {
+            let rest = rest.trim_start_matches('=').trim();
+            let mode = rest.trim_matches('"').trim();
+            if !mode.is_empty() {
+                return Some(mode.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn effective_image_volume_mode(args: &RunArgs) -> Option<String> {
+    if let Some(m) = &args.image_volume {
+        if !m.is_empty() {
+            return Some(m.clone());
+        }
+    }
+    image_volume_mode_from_containers_conf()
+}
+
+fn image_config_volume_paths(image_record: &ImageRecord) -> Vec<String> {
+    image_record
+        .config
+        .config
+        .as_ref()
+        .and_then(|c| c.volumes.as_ref())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn strip_image_volume_path_from_rootfs(merged_rootfs: &Path, dest: &str) {
+    let rel = dest.trim_start_matches('/');
+    let path: PathBuf = if rel.is_empty() {
+        merged_rootfs.to_path_buf()
+    } else {
+        merged_rootfs.join(rel)
+    };
+    if path.is_dir() {
+        let _ = fs::remove_dir_all(&path);
+    } else if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+}
+
+fn apply_image_config_volume_mounts(
+    image_record: &ImageRecord,
+    args: &RunArgs,
+    vol_store: &VolumeStore,
+    merged_rootfs: &Path,
+    parsed_mounts: &mut Vec<volume::MountSpec>,
+    spec: &mut Spec,
+) -> Result<()> {
+    let mode = match effective_image_volume_mode(args) {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let user_dests: std::collections::HashSet<String> = parsed_mounts
+        .iter()
+        .map(|m| m.destination.trim_end_matches('/').to_string())
+        .collect();
+    for dest in image_config_volume_paths(image_record) {
+        let dest_norm = dest.trim_end_matches('/').to_string();
+        if user_dests.contains(&dest_norm) || user_dests.contains(&dest) {
+            continue;
+        }
+        match mode.as_str() {
+            "ignore" => strip_image_volume_path_from_rootfs(merged_rootfs, &dest),
+            "tmpfs" => {
+                spec.mounts.push(oci::runtime::Mount {
+                    destination: dest.clone(),
+                    mount_type: "tmpfs".to_string(),
+                    source: "tmpfs".to_string(),
+                    options: Some(vec!["rw".to_string(), "nosuid".to_string(), "nodev".to_string()]),
+                });
+            }
+            "anonymous" | "bind" => {
+                let vol = vol_store.create(None, None)?;
+                parsed_mounts.push(volume::MountSpec {
+                    source: PathBuf::from(vol.mountpoint),
+                    destination: dest.clone(),
+                    is_volume: true,
+                    volume_name: Some(vol.name),
+                    ..Default::default()
+                });
+            }
+            other => {
+                return Err(anyhow!(
+                    "invalid image volume mode \"{}\": required value bind, tmpfs, or ignore",
+                    other
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_dockerfile_in_context(context_dir: &Path, file: &str) -> PathBuf {
+    let candidate = if Path::new(file).is_absolute() {
+        PathBuf::from(file)
+    } else {
+        context_dir.join(file)
+    };
+    if candidate.exists() {
+        return candidate;
+    }
+    if file == "Dockerfile" {
+        let containerfile = context_dir.join("Containerfile");
+        if containerfile.exists() {
+            return containerfile;
+        }
+    }
+    candidate
+}
+
 pub async fn build_image(args: BuildArgs) -> Result<()> {
     let builder = builder::ImageBuilder::new();
     let context_dir = PathBuf::from(&args.path).canonicalize()?;
-    let dockerfile_path = if Path::new(&args.file).is_absolute() {
-        PathBuf::from(&args.file)
-    } else {
-        context_dir.join(&args.file)
-    };
+    let dockerfile_path = resolve_dockerfile_in_context(&context_dir, &args.file);
 
     let mut build_args = std::collections::HashMap::new();
     for ba in &args.build_args {
@@ -6220,6 +6346,14 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         }
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    apply_image_config_volume_mounts(
+        &image_record,
+        &args,
+        &vol_store,
+        &cow_bundle.merged_dir,
+        &mut parsed_mounts,
+        &mut spec,
+    )?;
     if args.security_opt.iter().any(|s| s == "seccomp=unconfined") {
         if let Some(l) = &mut spec.linux {
             l.seccomp = None;
@@ -8405,6 +8539,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
             })
             .collect(),
         volumes: Vec::new(),
+        image_volume: None,
         memory: None,
         kernel_memory: None,
         labels: vec!["boxr.pod.infra=true".to_string()],

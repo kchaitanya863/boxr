@@ -635,12 +635,27 @@ impl ImageBuilder {
                 digest: None,
             },
         );
+        let name_only = full_tag
+            .split('@')
+            .next()
+            .unwrap_or(&full_tag)
+            .split(':')
+            .next()
+            .unwrap_or(&full_tag);
+        let (registry, reference) = if !name_only.contains('/') {
+            (
+                "localhost".to_string(),
+                name_only.to_string(),
+            )
+        } else {
+            (parsed_tag.registry.clone(), parsed_tag.repository.clone())
+        };
 
         let record = ImageRecord {
             id: random_id[..12].to_string(),
-            reference: parsed_tag.repository,
+            reference,
             tag: parsed_tag.tag,
-            registry: parsed_tag.registry,
+            registry,
             manifest_digest: image_id.clone(),
             config_digest: image_id.clone(),
             size_bytes: 1024 * 1024,

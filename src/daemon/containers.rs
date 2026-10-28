@@ -137,6 +137,7 @@ pub async fn create_container(
         systemd: None,
         ports,
         volumes,
+        image_volume: None,
         workdir: payload.working_dir,
         user: payload.user,
         hostname: None,

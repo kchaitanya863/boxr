@@ -185,6 +185,7 @@ impl KubeManager {
                 systemd: None,
                 ports: ports_vec,
                 volumes: Vec::new(),
+                image_volume: None,
                 memory: None,
                 kernel_memory: None,
                 labels: Vec::new(),

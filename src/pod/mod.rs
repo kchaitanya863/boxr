@@ -587,6 +587,7 @@ mod tests {
             systemd: None,
             ports: vec![],
             volumes: vec![],
+            image_volume: None,
             memory: None,
             kernel_memory: None,
             labels: vec![],

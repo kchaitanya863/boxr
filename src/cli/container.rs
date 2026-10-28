@@ -55,6 +55,10 @@ pub struct RunArgs {
     #[arg(short = 'v', long = "volume")]
     pub volumes: Vec<String>,
 
+    /// How to handle image-defined VOLUME paths (tmpfs, anonymous, bind, ignore)
+    #[arg(long = "image-volume")]
+    pub image_volume: Option<String>,
+
     /// Working directory inside the container
     #[arg(short = 'w', long = "workdir")]
     pub workdir: Option<String>,

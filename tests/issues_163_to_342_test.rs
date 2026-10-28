@@ -141,6 +141,7 @@ fn default_run_args(image: &str) -> RunArgs {
         systemd: None,
         ports: Vec::new(),
         volumes: Vec::new(),
+        image_volume: None,
         workdir: None,
         memory: None,
         kernel_memory: None,
