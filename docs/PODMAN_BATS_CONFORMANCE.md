@@ -56,14 +56,14 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 |------|-----|--------|--------|
 | 015-help | 1 | 0 | |
 | 020-tag | 2 | 0 | |
-| 030-run | 81 | 0 | **host env leak** green (`skopeo-stub` + early image `Env` validation before pod infra) |
+| 030-run | 80 | 1 | **`--uidmap` /etc/hosts** — custom maps point container root at a subuid while overlay rootfs stays owned by the invoking user; setup hits **EACCES** until rootfs is shifted like Podman storage (separate from 075/160). |
 | 040-ps | 8 | 0 | |
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
 | 075-exec | 9 | 1 | **additional groups** — on this Linux profile `/proc/<pid>/setgroups` stays `deny` after `gid_map` (parent `allow` write does not stick; `newuidmap` fallback same). Init/exec inherit host supplementary GIDs (shown as `65534` in the user ns); `exec --user root:root id -G` must be exactly `0`. boxr prefers `write_proc_mappings` (deny→map→allow) before `newuidmap`; full fix needs setgroups `allow` after maps (kernel/uidmap policy). |
 | 160-volumes | 24 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
-| **Total** | **153** | **2** | plus skips |
+| **Total** | **152** | **3** | plus skips |
 
 Earlier scorecard (`bats-manifest-v2.log`) predated stopping-loop and volume-import fixes; use v3 for current counts.
 

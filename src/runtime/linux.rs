@@ -1101,6 +1101,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         let (mut parent_sock, mut child_sock) = UnixStream::pair()
             .context("Failed to create UnixStream pair for user namespace sync")?;
 
+        // Host supplementary groups leak into the user namespace as unmapped 65534
+        // entries; drop them before fork so init/exec `id -G` is not polluted (075-exec).
+        let _ = nix::unistd::setgroups(&[]);
+
         match unsafe { fork() }? {
             ForkResult::Parent { child } => {
                 drop(child_sock);
@@ -2173,6 +2177,9 @@ pub fn exec_in_bundle(
         clear_close_on_exec(preserve_fds);
     }
     let pid = wait_for_live_container_pid(bundle_path)?;
+
+    // Drop host supplementary groups before exec fork (075-exec).
+    let _ = nix::unistd::setgroups(&[]);
 
     let umask = bundle_process_umask(bundle_path);
     let command = if let Some(u) = umask {
