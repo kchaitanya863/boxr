@@ -469,9 +469,18 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         fs::write(proc_dir.join("gid_map"), gid_content)
             .context("Failed to write gid_map in /proc")?;
 
-        Self::write_setgroups_allow(pid).context("Failed to enable setgroups after gid_map")?;
+        Self::enable_setgroups_for_pid(pid).context("Failed to enable setgroups after gid_map")?;
 
         Ok(())
+    }
+
+    /// Write `allow` to `/proc/<pid>/setgroups`, falling back to a user-ns helper when direct writes fail.
+    #[cfg(target_os = "linux")]
+    fn enable_setgroups_for_pid(pid: i32) -> Result<()> {
+        if Self::write_setgroups_allow(pid).is_ok() {
+            return Ok(());
+        }
+        Self::allow_setgroups_from_userns(pid, pid)
     }
 
     #[cfg(target_os = "linux")]
@@ -494,7 +503,7 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     /// Re-enable supplementary groups for a process in a rootless user namespace (075-exec parity).
     #[cfg(target_os = "linux")]
     pub fn reenable_setgroups_for_pid(pid: i32) {
-        let _ = Self::write_setgroups_allow(pid);
+        let _ = Self::enable_setgroups_for_pid(pid);
     }
 
     /// Join `anchor_pid`'s user namespace as namespaced root and write `allow` for `target_pid`.

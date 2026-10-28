@@ -1203,6 +1203,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // 4. Child is now root in user namespace.
+                crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe {
+                    libc::getpid()
+                });
                 let _ = fs::write("/proc/self/setgroups", "allow");
                 // Drop host supplementary groups; unmapped GIDs show up as 65534 in the new user ns (075-exec).
                 let _ = nix::unistd::setgroups(&[]);
