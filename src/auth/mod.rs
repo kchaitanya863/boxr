@@ -551,7 +551,7 @@ impl RegistryPusher {
             println!("Authenticated as: {}", user);
         }
 
-        let mut client = crate::oci::distribution::RegistryClient::new();
+        let mut client = crate::oci::distribution::RegistryClient::for_registry(&reference.registry);
         let digest = client.push_image(&image, &reference).await?;
         println!("Digest: {}", digest);
         println!("Successfully pushed {}:{}", image.reference, image.tag);
