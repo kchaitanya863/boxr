@@ -34,9 +34,7 @@ Environment:
 | `MANIFEST` | `tests/podman_bats/manifest.txt` | BATS filename patterns |
 | `PODMAN_TESTS_REF` | `main` | Git ref for clone |
 
-Each run uses a fresh `BOXR_HOME` under `/tmp` (via `boxr-podman-wrapper.sh`).
-
-**Important:** `./scripts/run_podman_bats_conformance.sh` reuses **one** `BOXR_HOME` for every pattern in `manifest.txt`. Long runs (especially `030-run`) leak images/containers and can make later files (`040-ps`, `045-start`, …) look red. For accurate progress, run each pattern with a **fresh** `BOXR_HOME` (see isolated summary in `/opt/cursor/artifacts/bats-manifest-isolated.log`).
+Each pattern in `./scripts/run_podman_bats_conformance.sh` gets its own fresh `BOXR_HOME` (via `boxr-podman-wrapper.sh`).
 
 ## Curated manifest (isolated, Linux rootless VM)
 
@@ -85,14 +83,14 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **75/81** ok in isolated run (`bats-manifest-isolated.log`): **6 red** — stopping loop (Stopping state), no-hostname, log size max, cert-dir, host env leak, inspect Args/Path; **8 skips** (journald, idmap, …) |
+| `030-run.bats` | **~77/81** ok in isolated runs: **log-opt / `containers.conf` `log_size_max`** and **`--no-hostname`** green; remaining reds include stopping loop, cert-dir, host env leak (needs **skopeo** in harness), inspect Args/Path if any; **8 skips** (journald, idmap, …) |
 | `040-ps.bats` | **8/8** isolated |
 | `045-start.bats` | **8/8** isolated |
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr (`StopSignal SIGTERM failed to stop container … resorting to SIGKILL`, including **`in N seconds`** when `-t N` is set) |
 | `055-rm.bats` | **10/10** isolated (prior runs; re-verify if agent hangs on full file) |
 | `075-exec.bats` | **9/10** isolated: **red: additional groups** — rootless supplementary GIDs / `setgroups(2)` parity (see gap below) |
-| `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `--userns=keep-id` (+ one other; see log) |
-| `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah, containers.conf); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
+| `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `volume import test`, `--userns=keep-id` (idmap; see gap below) |
+| `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
 | `--runtime-flag` | Global flag; unknown values exit **126** (BATS `030-run` global runtime option) |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |

@@ -108,9 +108,6 @@ run_manifest() {
     exit 1
   fi
 
-  export BOXR_HOME
-  BOXR_HOME="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bats.XXXXXX")"
-  export BOXR_BATS_HOME="$BOXR_HOME"
   export PODMAN="$WRAPPER"
   export QUADLET="${QUADLET:-/bin/false}"
 
@@ -119,7 +116,6 @@ run_manifest() {
   install -m 0755 "$REPO_ROOT/tests/podman_bats/buildah-stub.sh" "$buildah_stub_dir/buildah"
   export PATH="$buildah_stub_dir:$PATH"
 
-  echo "BOXR_HOME=$BOXR_HOME"
   echo "PODMAN=$PODMAN"
   echo "Podman tests: $SRC_DIR"
 
@@ -127,7 +123,10 @@ run_manifest() {
   local log="$RESULTS_DIR/run-$(date +%Y%m%d-%H%M%S).log"
   local failed=0
   for pat in "${patterns[@]}"; do
-    echo "======== BATS pattern: $pat ========" | tee -a "$log"
+    export BOXR_HOME
+    BOXR_HOME="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bats.XXXXXX")"
+    export BOXR_BATS_HOME="$BOXR_HOME"
+    echo "======== BATS pattern: $pat (BOXR_HOME=$BOXR_HOME) ========" | tee -a "$log"
     if ! hack/bats --rootless "$pat" 2>&1 | tee -a "$log"; then
       failed=1
     fi
