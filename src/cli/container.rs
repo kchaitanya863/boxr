@@ -10,7 +10,7 @@ pub struct RunArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
-    /// Allocate a pseudo-TTY
+    /// Allocate a pseudo-TTY (`-t`; use `-t=false` / `-t=true` for explicit values).
     #[arg(short = 't', long = "tty", action = clap::ArgAction::SetTrue)]
     pub tty: bool,
 
@@ -551,6 +551,9 @@ pub struct RunArgs {
 impl RunArgs {
     /// Whether `-t` / `--tty` requests a pseudo-TTY (default false).
     pub fn allocate_tty(&self) -> bool {
+        if crate::cli::RUN_TTY_EXPLICIT_FALSE.get() == Some(&true) {
+            return false;
+        }
         self.tty
     }
 

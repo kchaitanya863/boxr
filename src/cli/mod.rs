@@ -26,6 +26,7 @@ use std::sync::OnceLock;
 
 /// When argv contains `--rm=false`, clap would otherwise treat `--rm` as a boolean flag.
 pub static RUN_RM_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
+pub static RUN_TTY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run --read-only=false` (clap `SetTrue` cannot represent this).
 pub static READ_ONLY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
@@ -81,6 +82,82 @@ fn is_podman_global_flag_token(a: &str) -> bool {
     a.starts_with("--log-level=") || a.starts_with("--syslog=")
 }
 
+/// Index of the first Podman subcommand token (skip flags before it).
+fn podman_subcommand_index(argv: &[String]) -> usize {
+    const SUBCOMMANDS: &[&str] = &[
+        "help",
+        "pull",
+        "run",
+        "create",
+        "restart",
+        "port",
+        "tag",
+        "export",
+        "import",
+        "history",
+        "search",
+        "info",
+        "version",
+        "stop",
+        "start",
+        "logs",
+        "ps",
+        "inspect",
+        "rm",
+        "kill",
+        "wait",
+        "pause",
+        "unpause",
+        "commit",
+        "cp",
+        "exec",
+        "attach",
+        "stats",
+        "top",
+        "update",
+        "mount",
+        "unmount",
+        "generate",
+        "init",
+        "login",
+        "logout",
+        "push",
+        "build",
+        "manifest",
+        "volume",
+        "network",
+        "pod",
+        "container",
+        "image",
+        "system",
+        "events",
+        "farm",
+        "artifact",
+        "machine",
+        "kube",
+        "compose",
+        "quadlet",
+        "update",
+        "unshare",
+        "checkpoint",
+        "healthcheck",
+        "secret",
+        "trust",
+        "diff",
+        "rename",
+    ];
+    for i in 1..argv.len() {
+        let a = argv[i].as_str();
+        if a.starts_with('-') {
+            continue;
+        }
+        if SUBCOMMANDS.contains(&a) {
+            return i;
+        }
+    }
+    argv.len()
+}
+
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     if argv.len() == 2 && argv[1] == "-v" {
         return vec![argv[0].clone(), "version".to_string()];
@@ -88,6 +165,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut rm_false = false;
     let mut read_only_false = false;
+    let subcommand_idx = podman_subcommand_index(&argv);
     let mut i = 0;
     while i < argv.len() {
         let a = &argv[i];
@@ -120,7 +198,17 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
-        if is_podman_global_flag_token(a) {
+        if a == "-t=false" || a == "--tty=false" {
+            let _ = RUN_TTY_EXPLICIT_FALSE.set(true);
+            i += 1;
+            continue;
+        }
+        if a == "-t=true" || a == "--tty=true" {
+            out.push("-t".to_string());
+            i += 1;
+            continue;
+        }
+        if is_podman_global_flag_token(a) && i < subcommand_idx {
             if a.contains('=') {
                 i += 1;
             } else {

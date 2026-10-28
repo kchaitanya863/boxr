@@ -1602,6 +1602,8 @@ fn find_image_with_shortname(
         format!("localhost/{}", repo),
         format!("{}:{}", repo, tag),
         format!("docker.io/library/{}:{}", repo, tag),
+        format!("quay.io/libpod/{}:{}", repo, tag),
+        format!("libpod/{}:{}", repo, tag),
     ] {
         if let Some(rec) = store.find_with_platform(&candidate, platform) {
             return Some(rec);
