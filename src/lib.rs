@@ -4773,8 +4773,14 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
         }
         VolumeAction::Prune(prune_args) => {
             let pruned = store.prune_with_options(prune_args.all, &prune_args.filter)?;
-            if !pruned.is_empty() {
-                println!("Deleted Volumes:");
+            if pruned.is_empty() {
+                if !prune_args.force && !prune_args.all {
+                    println!(
+                        "WARNING! This will remove all anonymous volumes not used by at least one container."
+                    );
+                    println!("No dangling anonymous volumes found");
+                }
+            } else {
                 for p in pruned {
                     println!("{}", p);
                 }

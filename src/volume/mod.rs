@@ -106,6 +106,9 @@ pub struct VolumeRecord {
     pub scope: String,
     #[serde(default)]
     pub options: HashMap<String, String>,
+    /// True when created without an explicit user-provided name (`podman volume create`).
+    #[serde(default)]
+    pub anonymous: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -222,6 +225,7 @@ impl VolumeStore {
     ) -> Result<VolumeRecord> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
+            let user_provided_name = matches!(name, Some(n) if !n.trim().is_empty());
             let vol_name = match name {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
                 _ => format!(
@@ -266,9 +270,9 @@ impl VolumeStore {
                     .ok_or_else(|| anyhow!("bind volume requires device option"))?;
                 let device_path = PathBuf::from(device);
                 if !device_path.exists() {
-                    return Err(anyhow!(
-                        "bind device path '{}' does not exist",
-                        device_path.display()
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "invalid volume option device for driver 'local': faccessat {}: no such file or directory",
+                        device
                     ));
                 }
                 device_path
@@ -303,6 +307,7 @@ impl VolumeStore {
                 labels: labels.unwrap_or_default(),
                 scope: scope.to_string(),
                 options: options.unwrap_or_default(),
+                anonymous: !user_provided_name,
             };
 
             data.volumes.push(record.clone());
@@ -398,35 +403,59 @@ impl VolumeStore {
         }
     }
 
-    pub fn prune_with_options(&self, all: bool, filters: &[String]) -> Result<Vec<String>> {
+    fn collect_used_volume_names(&self) -> std::collections::HashSet<String> {
         let home = self
             .index_file
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
         let c_store = crate::storage::ContainerStore::with_home(home);
-        let containers = c_store.list();
         let mut used_volume_names = std::collections::HashSet::new();
-
-        for c in containers {
+        let volumes = self.list();
+        for c in c_store.list() {
             let bundle_path = PathBuf::from(&c.bundle_path);
+            let mounts_json = bundle_path.join("mounts.json");
+            if mounts_json.exists() {
+                if let Ok(content) = fs::read_to_string(&mounts_json) {
+                    if let Ok(mounts) = serde_json::from_str::<Vec<MountSpec>>(&content) {
+                        for m in mounts {
+                            if !m.is_volume {
+                                continue;
+                            }
+                            let src = m.source.to_string_lossy();
+                            for v in &volumes {
+                                if src.contains(&format!("volumes/{}/_data", v.name))
+                                    || src.contains(&format!("/volumes/{}/", v.name))
+                                {
+                                    used_volume_names.insert(v.name.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let config_file = bundle_path.join("config.json");
             if let Ok(content) = fs::read_to_string(&config_file) {
                 if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content) {
                     for m in spec.mounts {
                         let m_src = m.source;
-                        for v in self.list() {
+                        for v in &volumes {
                             if m_src.contains(&format!("volumes/{}/_data", v.name))
                                 || m_src.contains(&format!("volumes/{}", v.name))
                                 || m_src.ends_with(&v.name)
                             {
-                                used_volume_names.insert(v.name);
+                                used_volume_names.insert(v.name.clone());
                             }
                         }
                     }
                 }
             }
         }
+        used_volume_names
+    }
+
+    pub fn prune_with_options(&self, all: bool, filters: &[String]) -> Result<Vec<String>> {
+        let used_volume_names = self.collect_used_volume_names();
 
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
@@ -434,10 +463,17 @@ impl VolumeStore {
             data.volumes.retain(|v| {
                 let unused = !used_volume_names.contains(&v.name);
                 let matches = Self::matches_filters(v, filters);
-                if unused && matches && (all || v.labels.is_empty()) {
-                    let vol_dir = self.volumes_dir.join(&v.name);
-                    if vol_dir.exists() {
-                        let _ = fs::remove_dir_all(vol_dir);
+                let eligible = if all {
+                    unused && matches
+                } else {
+                    unused && matches && v.anonymous
+                };
+                if eligible {
+                    if v.options.get("type").map(|t| t.as_str()) != Some("bind") {
+                        let vol_dir = self.volumes_dir.join(&v.name);
+                        if vol_dir.exists() {
+                            let _ = fs::remove_dir_all(vol_dir);
+                        }
                     }
                     pruned.push(v.name.clone());
                     false
@@ -451,53 +487,7 @@ impl VolumeStore {
     }
 
     pub fn prune(&self) -> Result<Vec<String>> {
-        let home = self
-            .index_file
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let c_store = crate::storage::ContainerStore::with_home(home);
-        let containers = c_store.list();
-        let mut used_volume_names = std::collections::HashSet::new();
-
-        for c in containers {
-            let bundle_path = PathBuf::from(&c.bundle_path);
-            let config_file = bundle_path.join("config.json");
-            if let Ok(content) = fs::read_to_string(&config_file) {
-                if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content) {
-                    for m in spec.mounts {
-                        let m_src = m.source;
-                        for v in self.list() {
-                            if m_src.contains(&format!("volumes/{}/_data", v.name))
-                                || m_src.contains(&format!("volumes/{}", v.name))
-                                || m_src.ends_with(&v.name)
-                            {
-                                used_volume_names.insert(v.name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            let mut data = self.load_unlocked();
-            let mut pruned = Vec::new();
-            data.volumes.retain(|v| {
-                if !used_volume_names.contains(&v.name) {
-                    let vol_dir = self.volumes_dir.join(&v.name);
-                    if vol_dir.exists() {
-                        let _ = fs::remove_dir_all(vol_dir);
-                    }
-                    pruned.push(v.name.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            self.save_unlocked(&data)?;
-            Ok(pruned)
-        })
+        self.prune_with_options(false, &[])
     }
 
     /// Parse a volume flag string:
@@ -772,8 +762,8 @@ mod tests {
         };
         c_store.add(c_record).unwrap();
 
-        // Prune: only unused-vol must be deleted, used-vol must be preserved!
-        let pruned = store.prune().unwrap();
+        // Prune -a: only unused-vol must be deleted, used-vol must be preserved!
+        let pruned = store.prune_with_options(true, &[]).unwrap();
         assert_eq!(pruned, vec!["unused-vol".to_string()]);
         assert!(store.find("used-vol").is_some());
         assert!(store.find("unused-vol").is_none());
@@ -823,7 +813,7 @@ mod tests {
         assert!(
             res.unwrap_err()
                 .to_string()
-                .contains("volume is in use by container")
+                .contains("volume is being used")
         );
 
         // Removing with force=true must succeed
