@@ -131,9 +131,7 @@ On typical rootless boxr hosts (`newuidmap` / `newgidmap`, subuid/subgid):
 1. The mapping child writes **`deny`** to `/proc/self/setgroups` before `gid_map` (required by the kernel).
 2. The parent re-enables **`allow`** on the **mapping child PID** after `newuidmap`/`newgidmap` (`RootlessUserConfig::reenable_setgroups_for_pid`).
 3. boxr also re-enables **`allow`** on the **container init (PID 1) host PID** immediately after the PID-namespace fork.
-4. The PID-1 process still may not shrink supplementary groups via `setgroups(2)` on some hosts ( **`id -G`** lists repeated **`65534`** ); **`exec --user root:root`** therefore stays red on **`075-exec`** case 10 until full runc/Podman-style credential application is ported.
-
-Verified locally: `boxr run --rm … cat /proc/1/setgroups` → **`allow`** after the init fix; **`id -G`** after **`exec --user root:root`** may still include mapped **`65534`** entries on this VM. **`setns(CLONE_NEWNS)` into the container mount namespace drops the container user namespace** on Linux, so the credential-override exec path cannot stay in the user namespace while also joining `mnt` (unlike `nsenter -U -m`, which uses a different join sequence). Fixing case 10 likely needs init-as-mapping-child (no inner PID-1 fork) plus mount-less exec/`chroot` or runc-equivalent join order. **9/10** on `075-exec.bats` is the current ceiling here.
+4. Exec **`--user root:root`** uses a dedicated **`setns(CLONE_NEWUSER)` → setgroups sync → `setns(CLONE_NEWPID)`** path (mount **`setns` drops the user namespace** on this kernel, so **`nsenter -m` is not used there). The exec process runs the container binary via an absolute **`rootfs/…`** path while host **`/proc`** still exposes **`setgroups`**. **`allow_setgroups_from_userns`** plus **`setgroups(2)`** shrink inherited groups but **`id -G`** still prints **`0 65534`** here (one unmapped supplementary GID), so case 10 remains red until **`setgroups allow`** sticks on the exec PID the way runc/conmon does on Podman CI.
 
 ### Known gap: `160-volumes` keep-id bind `stat` (rootless)
 

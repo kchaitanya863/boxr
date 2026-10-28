@@ -2024,6 +2024,40 @@ pub fn exec_in_bundle(
     }
 }
 
+fn exec_join_user_namespace(container_pid: i32) -> Result<()> {
+    use nix::sched::{setns, CloneFlags};
+
+    let user_f = std::fs::File::open(format!("/proc/{container_pid}/ns/user"))
+        .context("open container user namespace")?;
+    setns(&user_f, CloneFlags::CLONE_NEWUSER).context("setns user")?;
+    if !Path::new("/proc/self/setgroups").exists() {
+        return Err(anyhow!("exec did not enter container user namespace"));
+    }
+    Ok(())
+}
+
+fn exec_join_pid_namespace(container_pid: i32) -> Result<()> {
+    use nix::sched::{setns, CloneFlags};
+
+    let pid_f = std::fs::File::open(format!("/proc/{container_pid}/ns/pid"))
+        .context("open container pid namespace")?;
+    setns(&pid_f, CloneFlags::CLONE_NEWPID).context("setns pid")?;
+    Ok(())
+}
+
+fn exec_rootfs_command(rootfs: &Path, command: &[String]) -> Vec<String> {
+    if command.is_empty() {
+        return command.to_vec();
+    }
+    let mut out = command.to_vec();
+    let bin = command[0].trim_start_matches('/');
+    let abs = rootfs.join(bin);
+    if abs.is_file() {
+        out[0] = abs.to_string_lossy().into_owned();
+    }
+    out
+}
+
 fn exec_in_bundle_via_setns(
     bundle_path: &Path,
     pid: i32,
@@ -2057,6 +2091,7 @@ fn exec_in_bundle_via_setns(
                 pid,
                 child.as_raw(),
             );
+            crate::security::RootlessUserConfig::reenable_setgroups_for_pid(child.as_raw());
             parent_sock
                 .write_all(b"done")
                 .context("Failed to notify exec child after setgroups allow")?;
@@ -2108,27 +2143,22 @@ fn exec_in_bundle_via_setns(
             let _ = fs::write("/proc/self/setgroups", "allow");
             let _ = nix::unistd::setgroups(&[]);
             let (_, mut child_sock) = sync_pair;
-            for (name, flag) in [
-                ("user", CloneFlags::CLONE_NEWUSER),
-                ("ipc", CloneFlags::CLONE_NEWIPC),
-                ("uts", CloneFlags::CLONE_NEWUTS),
-                ("net", CloneFlags::CLONE_NEWNET),
-                ("mnt", CloneFlags::CLONE_NEWNS),
-                ("pid", CloneFlags::CLONE_NEWPID),
-            ] {
-                let ns_path = format!("/proc/{}/ns/{}", pid, name);
-                if let Ok(f) = std::fs::File::open(&ns_path) {
-                    let _ = setns(&f, flag);
-                }
+            if exec_join_user_namespace(pid).is_err() {
+                std::process::exit(125);
             }
             child_sock.write_all(b"ready").ok();
             let mut done = [0u8; 4];
             let _ = child_sock.read_exact(&mut done);
             drop(child_sock);
+            if exec_join_pid_namespace(pid).is_err() {
+                std::process::exit(125);
+            }
+            let rootfs = bundle_path.join("rootfs");
             if let Some(wd) = workdir {
-                let _ = chdir(Path::new(wd));
-            } else {
-                let _ = chdir(Path::new("/"));
+                let wd_path = rootfs.join(wd.trim_start_matches('/'));
+                if wd_path.is_dir() {
+                    let _ = chdir(&wd_path);
+                }
             }
             if let Some(u) = umask {
                 unsafe {
@@ -2142,38 +2172,19 @@ fn exec_in_bundle_via_setns(
                     }
                 }
             }
-            if !Path::new("/proc/self").exists() {
-                let _ = nix::mount::mount(
-                    Some("proc"),
-                    "/proc",
-                    Some("proc"),
-                    nix::mount::MsFlags::empty(),
-                    None::<&str>,
-                );
-            }
-            // After joining the container mount/PID namespaces, ensure /proc reflects
-            // the container (075-exec reads /proc/self/status and /proc/1/status).
-            let _ = nix::mount::mount(
-                Some("proc"),
-                "/proc",
-                Some("proc"),
-                nix::mount::MsFlags::MS_NOSUID
-                    | nix::mount::MsFlags::MS_NODEV
-                    | nix::mount::MsFlags::MS_NOEXEC,
-                None::<&str>,
-            );
             if !preserve_fds.is_empty() {
                 clear_close_on_exec(preserve_fds);
                 close_fds_except(preserve_fds);
             }
-            // Container init is PID 1 after joining the container PID namespace.
-            let init_pid = 1;
+            // Init is PID 1 in the container PID namespace; host proc still resolves status.
+            let init_pid = pid;
             become_effective_container_root();
             crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe {
                 libc::getpid()
             });
             let _ = fs::write("/proc/self/setgroups", "allow");
             let _ = nix::unistd::setgroups(&[]);
+            let command = exec_rootfs_command(&rootfs, command);
             if let Some(creds) = exec_creds {
                 apply_exec_user_credentials(creds, init_pid);
             } else {
