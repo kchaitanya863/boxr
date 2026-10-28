@@ -2090,6 +2090,7 @@ pub async fn run_container_with_output(
 
     let mut parsed_ports = parse_ports(&args.ports)?;
     validate_network_name(&args.network, None)?;
+    guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
     validate_device_cgroup_rules_rootless(&args);
     warn_kernel_memory_noop(&args);
@@ -7187,6 +7188,7 @@ async fn create_only_container_after_pod_prep(
     validate_unique_volume_destinations(&args.volumes, &args.tmpfs)?;
 
     let mut parsed_ports = parse_ports(&args.ports)?;
+    guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
 
     let vol_store = match home_opt {
