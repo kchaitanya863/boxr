@@ -70,6 +70,11 @@ fn test_d4_port_collision_rejected() {
             "60",
         ],
     );
+    assert!(
+        wait_container_running(&home, &c1, Duration::from_secs(45)),
+        "first container {} did not reach running state before collision check",
+        c1
+    );
     let out = run_boxr(
         &home,
         &[
@@ -86,7 +91,11 @@ fn test_d4_port_collision_rejected() {
     );
     cleanup_container(&home, &c1);
     cleanup_container(&home, &c2);
-    assert!(!out.status.success(), "expected port collision error");
+    assert!(
+        !out.status.success(),
+        "expected port collision error, got success: {}",
+        combined_output(&out)
+    );
 }
 
 #[test]
