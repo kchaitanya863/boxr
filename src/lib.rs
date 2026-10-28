@@ -3830,7 +3830,7 @@ pub fn container_logs(args: &LogsArgs) -> Result<()> {
     } else if log_path.exists() {
         fs::read_to_string(&log_path)?
     } else {
-        println!("No logs available for container {}", args.container);
+        // Podman: no output when the container has never produced logs (e.g. `create` only).
         return Ok(());
     };
 
@@ -5076,6 +5076,14 @@ fn apply_log_config_annotations(
     bundle_dir: &Path,
     container_id: &str,
 ) -> Result<()> {
+    if args.log_driver.is_empty() && !annotations.contains_key("boxr.log_driver") {
+        annotations.insert("boxr.log_driver".to_string(), "k8s-file".to_string());
+        let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+        annotations.insert(
+            "boxr.log_path".to_string(),
+            log_path.to_string_lossy().to_string(),
+        );
+    }
     if let Some(size) = log_opt_max_size_display(&args.log_opt) {
         annotations.insert("boxr.log_max_size".to_string(), size);
         if args.log_driver.is_empty() {

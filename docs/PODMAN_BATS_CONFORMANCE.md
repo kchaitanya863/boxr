@@ -63,7 +63,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 055-rm | 10 | 0 | |
 | 075-exec | 9 | 1 | **additional groups** — on this Linux profile `/proc/<pid>/setgroups` stays `deny` after `gid_map` (parent `allow` write does not stick; `newuidmap` fallback same). Init/exec inherit host supplementary GIDs (shown as `65534` in the user ns); `exec --user root:root id -G` must be exactly `0`. boxr prefers `write_proc_mappings` (deny→map→allow) before `newuidmap`; full fix needs setgroups `allow` after maps (kernel/uidmap policy). |
 | 160-volumes | 25 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
-| **Total** | **153** | **2** | plus skips |
+| **Total** | **153** | **2** | plus skips (075-exec setgroups, 160-volumes keep-id on some hosts) |
 
 Authoritative log: `.cache/podman-bats-results/run-20261028-130514.log` (153 ok / 2 not ok). Earlier scorecards predated `--uidmap` rootfs-setup identity; re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest.
 

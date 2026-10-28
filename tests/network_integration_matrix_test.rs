@@ -161,8 +161,8 @@ fn test_matrix_host_and_none_reject_published_ports() {
         cleanup_container(&home, &ctr);
         let combined = combined_output(&out);
         assert!(
-            !out.status.success() && combined.contains("published ports are not supported"),
-            "network={} should reject -p: {}",
+            out.status.success() && combined.contains("Port mappings have been discarded"),
+            "network={} should warn and run without -p (Podman parity): {}",
             net,
             combined
         );

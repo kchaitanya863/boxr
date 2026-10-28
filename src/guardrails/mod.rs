@@ -172,22 +172,13 @@ pub fn warn_discard_incompatible_ports(
     }
 }
 
-/// Reject published ports on network modes where forwarding is meaningless.
+/// Warn (Podman-compatible) when `-p` is ignored on host/none/container network modes.
+/// Callers should invoke `warn_discard_incompatible_ports` to clear mappings before run.
 pub fn validate_network_port_compatibility(
     network: &str,
     ports: &[crate::network::PortMapping],
 ) -> Result<()> {
-    if ports.is_empty() {
-        return Ok(());
-    }
-    let mut copy = ports.to_vec();
-    warn_discard_incompatible_ports(network, &mut copy);
-    if copy.is_empty() {
-        return Err(anyhow!(
-            "published ports are not supported for network mode \"{}\"",
-            network.trim()
-        ));
-    }
+    let _ = (network, ports);
     Ok(())
 }
 

@@ -97,7 +97,7 @@ fn test_installation_custom_network_registration() {
     cleanup_network(&home, &net);
 }
 
-/// `--network none` with `-p` must be rejected in both installation modes.
+/// `--network none` with `-p` warns and discards mappings (Podman parity).
 #[test]
 fn test_installation_none_plus_ports_rejected() {
     let label = installation_label();
@@ -124,8 +124,8 @@ fn test_installation_none_plus_ports_rejected() {
     cleanup_container(&home, &ctr);
     let combined = combined_output(&out);
     assert!(
-        !out.status.success() && combined.contains("published ports are not supported"),
-        "[{}] expected none+p rejection, got: {}",
+        out.status.success() && combined.contains("Port mappings have been discarded"),
+        "[{}] expected none+p warning and success, got: {}",
         label,
         combined
     );
