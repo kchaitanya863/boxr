@@ -6179,20 +6179,19 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     label_map.insert(k.to_string(), v.to_string());
                 }
             }
-            if let Some(existing) = store.find(&name) {
-                println!("{}", existing.id);
-            } else {
-                let net = store.create_with_options(
-                    &name,
-                    &driver,
-                    subnet.as_deref(),
-                    gateway.as_deref(),
-                    internal,
-                    attachable,
-                    label_map,
-                )?;
-                println!("{}", net.id);
+            if store.find(&name).is_some() {
+                return Err(anyhow!("Network '{}' already exists", name.trim()));
             }
+            let net = store.create_with_options(
+                &name,
+                &driver,
+                subnet.as_deref(),
+                gateway.as_deref(),
+                internal,
+                attachable,
+                label_map,
+            )?;
+            println!("{}", net.id);
         }
         NetworkAction::Ls(ls_args) => {
             let nets = store.list();
