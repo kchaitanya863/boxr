@@ -39,11 +39,14 @@ impl ResourceLimits {
         };
 
         let val: i64 = num_str.parse().context("Invalid memory limit string")?;
-        if val <= 0 {
+        if val < 0 {
             return Err(anyhow::anyhow!(
-                "Memory limit must be greater than 0, got '{}'",
+                "Memory limit must be non-negative, got '{}'",
                 input
             ));
+        }
+        if val == 0 {
+            return Ok(0);
         }
         Ok(val * multiplier)
     }
@@ -153,6 +156,9 @@ impl CgroupV2Manager {
 
         // Apply memory limits (cgroups v2 and v1)
         if let Some(mem) = limits.memory_max_bytes {
+            if mem == 0 {
+                return Ok(());
+            }
             let _ = fs::write(self.cgroup_path.join("memory.max"), mem.to_string());
             let _ = fs::write(
                 self.cgroup_path.join("memory.limit_in_bytes"),

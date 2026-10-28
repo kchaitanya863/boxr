@@ -566,7 +566,9 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Run(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            let conf_flags = runtime_flags_from_containers_conf();
             validate_runtime_flags(&runtime_flags)?;
+            validate_runtime_flags(&conf_flags)?;
             let code = run_container_with_output(args, output_policy).await?;
             Ok(code)
         }
@@ -2078,8 +2080,8 @@ pub async fn run_container_with_output(
     };
 
     let mut spec = Spec::new_default(image_cfg, cmd_override, env_override);
-    if rootfs_only && args.command.is_empty() && spec.process.args.is_empty() {
-        spec.process.args.push(String::new());
+    if rootfs_only && args.command.is_empty() {
+        spec.process.args = vec![String::new()];
     }
 
     if let Some(h) = &args.hostname {
@@ -4437,9 +4439,19 @@ pub fn kill_container(args: &cli::KillArgs) -> Result<()> {
     runtime::kill::ContainerKiller::kill(&cont, args.signal.as_deref())
 }
 
+fn containers_conf_content() -> Option<String> {
+    for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
+        if let Ok(path) = std::env::var(var) {
+            if let Ok(content) = fs::read_to_string(&path) {
+                return Some(content);
+            }
+        }
+    }
+    None
+}
+
 fn containers_conf_toml_value(key: &str) -> Option<String> {
-    let path = std::env::var("CONTAINERS_CONF_OVERRIDE").ok()?;
-    let content = fs::read_to_string(&path).ok()?;
+    let content = containers_conf_content()?;
     for line in content.lines() {
         let line = line.trim();
         if line.starts_with('#') || line.is_empty() {
@@ -4454,6 +4466,72 @@ fn containers_conf_toml_value(key: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn configured_oci_runtime_name() -> String {
+    if let Some(rt) = containers_conf_toml_value("runtime") {
+        let rt = rt.trim_matches('"');
+        if !rt.is_empty() {
+            return Path::new(rt)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(rt)
+                .to_string();
+        }
+    }
+    "crun".to_string()
+}
+
+fn runtime_flags_from_containers_conf() -> Vec<String> {
+    let content = match containers_conf_content() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let runtime = configured_oci_runtime_name();
+    let mut flags = Vec::new();
+    let mut in_flags_section = false;
+    let mut collecting = false;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_flags_section = line == "[engine.runtimes_flags]";
+            collecting = false;
+            continue;
+        }
+        if !in_flags_section {
+            continue;
+        }
+        if !collecting {
+            let (key, rest) = match line.split_once('=') {
+                Some(p) => p,
+                None => continue,
+            };
+            if key.trim() != runtime {
+                continue;
+            }
+            collecting = true;
+            for part in rest.split('"') {
+                let flag = part.trim().trim_matches(|c| c == ',' || c == '[' || c == ']');
+                if !flag.is_empty() && !flag.chars().all(|c| c.is_whitespace()) {
+                    flags.push(flag.to_string());
+                }
+            }
+            if line.contains(']') {
+                break;
+            }
+            continue;
+        }
+        for part in line.split('"') {
+            let flag = part.trim().trim_matches(|c| c == ',' || c == '[' || c == ']');
+            if !flag.is_empty() && !flag.chars().all(|c| c.is_whitespace()) {
+                flags.push(flag.to_string());
+            }
+        }
+        if line.contains(']') {
+            break;
+        }
+    }
+    flags
 }
 
 fn image_volume_mode_from_containers_conf() -> Option<String> {
@@ -7110,6 +7188,7 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
 
     if let Some(fmt) = &args.format {
         let graph_root = storage::boxr_home().display().to_string();
+        let oci_runtime = configured_oci_runtime_name();
         let info_json = serde_json::json!({
             "Containers": containers.len(),
             "ContainersRunning": running,
@@ -7123,8 +7202,15 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
             "OSType": os_type,
             "OperatingSystem": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             "DockerRootDir": graph_root,
+            "Host": {
+                "OCIRuntime": {
+                    "Name": oci_runtime,
+                    "Path": format!("/usr/bin/{}", oci_runtime)
+                }
+            },
             "Store": {
-                "GraphRoot": graph_root
+                "GraphRoot": graph_root,
+                "GraphDriverName": "overlay"
             }
         });
         if fmt == "json" || fmt == "{{json .}}" {

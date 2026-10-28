@@ -152,6 +152,14 @@ pub struct BuildArgs {
     #[arg(long = "squash")]
     pub squash: bool,
 
+    /// Accepted for Podman BATS compatibility (boxr does not layer-cache builds)
+    #[arg(long = "layers")]
+    pub layers: Option<String>,
+
+    /// Add Linux capabilities during build (accepted; applied at run time in boxr)
+    #[arg(long = "cap-add")]
+    pub cap_add: Vec<String>,
+
     #[arg(long = "disable-content-trust")]
     pub disable_content_trust: bool,
 

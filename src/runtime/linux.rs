@@ -22,6 +22,12 @@ fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
         libc::EACCES | libc::EISDIR | libc::ENOTDIR => 126,
         _ => 1,
     };
+    if executable.is_empty() && errno == libc::ENOENT {
+        eprintln!(
+            "Error: cannot find `` in $PATH: No such file or directory: OCI runtime attempted to invoke a command that was not found"
+        );
+        std::process::exit(127);
+    }
     let detail: &str = match errno {
         libc::ENOENT => "no such file or directory",
         libc::EACCES => "permission denied",
@@ -31,6 +37,21 @@ fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
     };
     eprintln!("Error: OCI runtime error: exec failed: {}: {}", executable, detail);
     std::process::exit(exit_code);
+}
+
+/// Podman recreates /etc/mtab when the image removed it (BATS 030-run).
+fn ensure_etc_mtab_symlink(rootfs: &Path) {
+    let mtab = rootfs.join("etc/mtab");
+    if mtab.exists() {
+        return;
+    }
+    let etc = rootfs.join("etc");
+    let _ = fs::create_dir_all(&etc);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let _ = symlink("/proc/mounts", &mtab);
+    }
 }
 
 fn prepare_bind_mount_target(rootfs: &Path, destination: &str, source: &Path) -> std::path::PathBuf {
@@ -1743,6 +1764,8 @@ fn run_container_child(
             libc::sethostname(host_c.as_ptr(), host_c.as_bytes().len());
         }
     }
+
+    ensure_etc_mtab_symlink(rootfs);
 
     // Ensure root filesystem is private
     mount(
