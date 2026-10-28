@@ -9,10 +9,10 @@ use nix::unistd::Pid;
 use nix::unistd::{ForkResult, chdir, fork, pivot_root};
 use std::ffi::CString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Write;
 use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
-use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -74,7 +74,8 @@ fn apply_spec_namespace_joins(spec: &Spec) -> NamespaceJoinState {
     let mut state = NamespaceJoinState::default();
     if let Some(linux) = &spec.linux {
         for ns in &linux.namespaces {
-            if let (Some(path), Some(flag)) = (ns.path.as_deref(), namespace_clone_flag(&ns.ns_type))
+            if let (Some(path), Some(flag)) =
+                (ns.path.as_deref(), namespace_clone_flag(&ns.ns_type))
             {
                 setns_file_path(path, flag);
                 match ns.ns_type.as_str() {
@@ -145,7 +146,10 @@ fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
         libc::ENOTDIR => "not a directory",
         _ => "failed to execute",
     };
-    eprintln!("Error: OCI runtime error: exec failed: {}: {}", executable, detail);
+    eprintln!(
+        "Error: OCI runtime error: exec failed: {}: {}",
+        executable, detail
+    );
     std::process::exit(exit_code);
 }
 
@@ -164,7 +168,11 @@ fn ensure_etc_mtab_symlink(rootfs: &Path) {
     }
 }
 
-fn prepare_bind_mount_target(rootfs: &Path, destination: &str, source: &Path) -> std::path::PathBuf {
+fn prepare_bind_mount_target(
+    rootfs: &Path,
+    destination: &str,
+    source: &Path,
+) -> std::path::PathBuf {
     let clean_dest = destination.trim_start_matches('/');
     let target = rootfs.join(clean_dest);
     if source.is_file() {
@@ -306,9 +314,8 @@ fn wait_grandchild_with_optional_timeout(
             _ => 1,
         };
     }
-    let deadline = timeout_secs.map(|s| {
-        std::time::Instant::now() + std::time::Duration::from_secs(s)
-    });
+    let deadline =
+        timeout_secs.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
     loop {
         match waitpid(grandchild, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Exited(_, code)) => return code,
@@ -439,11 +446,7 @@ fn close_fds_except(keep: &[u32]) {
         }
     }
     let max_fd = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
-    let max_fd = if max_fd > 0 {
-        max_fd as i32
-    } else {
-        1024
-    };
+    let max_fd = if max_fd > 0 { max_fd as i32 } else { 1024 };
     for fd in 0..max_fd {
         if keep_set.contains(&fd) {
             continue;
@@ -491,7 +494,10 @@ fn configure_stdio(
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let file = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
         cmd.stderr(file);
     } else {
         cmd.stderr(Stdio::null());
@@ -563,11 +569,7 @@ fn journal_line(line: &str) {
     }
 }
 
-fn tee_reader_to_journal<R: std::io::Read>(
-    pipe: R,
-    capture: Option<PathBuf>,
-    stream: &str,
-) {
+fn tee_reader_to_journal<R: std::io::Read>(pipe: R, capture: Option<PathBuf>, stream: &str) {
     tee_journald_capture_stream(pipe, capture, stream, false);
 }
 
@@ -615,18 +617,15 @@ fn flush_deferred_bundle_rmdir(bundle_path: &Path) {
     }
 }
 
-fn wait_for_detached_conmon_start(
-    bundle_path: &Path,
-    supervisor: &mut Child,
-) -> Result<()> {
+fn wait_for_detached_conmon_start(bundle_path: &Path, supervisor: &mut Child) -> Result<()> {
     let container_id = bundle_path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
     let store = ContainerStore::new();
-    let expect_auto_cleanup = crate::bundle_auto_remove(bundle_path)
-        || crate::bundle_auto_remove_image(bundle_path);
+    let expect_auto_cleanup =
+        crate::bundle_auto_remove(bundle_path) || crate::bundle_auto_remove_image(bundle_path);
     let wait_start = Instant::now();
     while wait_start.elapsed() < Duration::from_secs(30) {
         if bundle_path.join("conmon.pid").exists() {
@@ -729,16 +728,9 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
             }
             let status = child.wait()?;
             let exit_code = status.code().unwrap_or(1);
-            let _ = fs::write(
-                bundle_path.join("boxr-exitcode"),
-                exit_code.to_string(),
-            );
+            let _ = fs::write(bundle_path.join("boxr-exitcode"), exit_code.to_string());
             if container_id.is_empty()
-                || !crate::detached_container_process_exited(
-                    &container_id,
-                    bundle_path,
-                    exit_code,
-                )
+                || !crate::detached_container_process_exited(&container_id, bundle_path, exit_code)
             {
                 flush_deferred_bundle_rmdir(bundle_path);
                 return Ok(exit_code);
@@ -762,12 +754,10 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let cap = capture_path.clone();
-        let h_out = stdout.map(|pipe| {
-            thread::spawn(move || tee_reader_to_journal(pipe, cap, "stdout"))
-        });
-        let h_err = stderr.map(|pipe| {
-            thread::spawn(move || tee_reader_to_journal(pipe, capture_path, "stderr"))
-        });
+        let h_out =
+            stdout.map(|pipe| thread::spawn(move || tee_reader_to_journal(pipe, cap, "stdout")));
+        let h_err = stderr
+            .map(|pipe| thread::spawn(move || tee_reader_to_journal(pipe, capture_path, "stderr")));
         let status = child.wait()?;
         if let Some(h) = h_out {
             let _ = h.join();
@@ -823,9 +813,10 @@ pub fn execute_bundle(
             let _ = fs::write(bundle_path.join("conmon-detach.flag"), "1");
         }
         let mut cmd = std::process::Command::new(&conmon);
-        let syslog_shim = _spec.annotations.as_ref().is_some_and(|a| {
-            a.get("boxr.conmon_syslog") == Some(&"1".to_string())
-        });
+        let syslog_shim = _spec
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.get("boxr.conmon_syslog") == Some(&"1".to_string()));
         #[cfg(unix)]
         if syslog_shim {
             use std::os::unix::process::CommandExt;
@@ -990,7 +981,9 @@ pub fn execute_bundle(
 /// Outlives the `podman run -d` CLI process; handles restart policy and `--rm`.
 pub fn run_detached_wait(args: &[String]) -> Result<i32> {
     if args.len() < 2 {
-        return Err(anyhow!("detached-wait: need bundle_path and trampoline_pid"));
+        return Err(anyhow!(
+            "detached-wait: need bundle_path and trampoline_pid"
+        ));
     }
     let bundle_path = Path::new(&args[0]);
     let mut pid = args[1]
@@ -1115,21 +1108,20 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     .context("Failed to read sync from container child (unshare failed)")?;
 
                 // 2. Configure UID and GID mapping for child PID in parent namespace
-                let mapping_res = if let Some((uid_maps, gid_maps)) =
-                    crate::id_maps_from_spec(&spec)
-                {
-                    crate::security::RootlessUserConfig::apply_id_mappings(
-                        child.as_raw(),
-                        &uid_maps,
-                        &gid_maps,
-                    )
-                } else {
-                    let userns_mode = userns_mapping_mode_from_spec(&spec);
-                    crate::security::RootlessUserConfig::setup_child_mappings_with_mode(
-                        child.as_raw(),
-                        userns_mode,
-                    )
-                };
+                let mapping_res =
+                    if let Some((uid_maps, gid_maps)) = crate::id_maps_from_spec(&spec) {
+                        crate::security::RootlessUserConfig::apply_id_mappings(
+                            child.as_raw(),
+                            &uid_maps,
+                            &gid_maps,
+                        )
+                    } else {
+                        let userns_mode = userns_mapping_mode_from_spec(&spec);
+                        crate::security::RootlessUserConfig::setup_child_mappings_with_mode(
+                            child.as_raw(),
+                            userns_mode,
+                        )
+                    };
                 mapping_res.context("Failed to setup rootless UID/GID mappings")?;
 
                 // 3. Notify child that mapping is complete
@@ -1519,11 +1511,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     child.as_raw().to_string(),
                 );
                 let timeout_secs = run_timeout_secs(&spec);
-                let code = wait_grandchild_with_optional_timeout(
-                    child,
-                    bundle_path,
-                    timeout_secs,
-                );
+                let code = wait_grandchild_with_optional_timeout(child, bundle_path, timeout_secs);
                 let status = Ok(code);
 
                 if let Some(tap_pid) = tap_worker_pid {
@@ -1545,9 +1533,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 status
             }
             ForkResult::Child => {
-                if let Err(err) =
-                    run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
-                {
+                if let Err(err) = run_container_child(&abs_rootfs, bundle_path, &spec, &mounts) {
                     eprintln!("Container child failed: {err:#}");
                     std::process::exit(1);
                 }
@@ -1766,12 +1752,15 @@ fn resolve_exec_uid_gid(bundle_path: &Path, user: &str) -> Option<(u32, u32)> {
         } else if g == "root" {
             0
         } else {
-            lookup_group_gid(&rootfs, g).or_else(|| lookup_passwd_ids(&rootfs, g).map(|(_, gid)| gid))?
+            lookup_group_gid(&rootfs, g)
+                .or_else(|| lookup_passwd_ids(&rootfs, g).map(|(_, gid)| gid))?
         }
     } else if user_field == "root" {
         0
     } else {
-        lookup_passwd_ids(&rootfs, user_field).map(|(_, g)| g).unwrap_or(uid)
+        lookup_passwd_ids(&rootfs, user_field)
+            .map(|(_, g)| g)
+            .unwrap_or(uid)
     };
     Some((uid, gid))
 }
@@ -1814,7 +1803,7 @@ fn exec_userns_socket_path(bundle_path: &Path) -> PathBuf {
 }
 
 fn exec_join_init_namespaces(init_pid: i32, mnt_only: bool) -> Result<()> {
-    use nix::sched::{setns, CloneFlags};
+    use nix::sched::{CloneFlags, setns};
     if mnt_only {
         let ns_path = format!("/proc/{init_pid}/ns/mnt");
         if let Ok(f) = std::fs::File::open(&ns_path) {
@@ -1947,10 +1936,7 @@ fn handle_exec_userns_connection(
             }
             become_effective_container_root();
             let _ = fs::write("/proc/self/setgroups", "allow");
-            let _ = fs::write(
-                format!("/proc/{}/setgroups", worker.as_raw()),
-                "allow",
-            );
+            let _ = fs::write(format!("/proc/{}/setgroups", worker.as_raw()), "allow");
             let _ = sync_parent.write_all(b"done");
             let exit_code = match waitpid(worker, None) {
                 Ok(WaitStatus::Exited(_, code)) => code,
@@ -2051,8 +2037,8 @@ fn exec_in_bundle_via_userns_socket(
     };
     let payload = serde_json::to_vec(&job)?;
     let sock_path = exec_userns_socket_path(bundle_path);
-    let mut stream =
-        UnixStream::connect(&sock_path).context("connect exec-userns.sock (is container running?)")?;
+    let mut stream = UnixStream::connect(&sock_path)
+        .context("connect exec-userns.sock (is container running?)")?;
     stream.write_all(&(payload.len() as u32).to_le_bytes())?;
     stream.write_all(&payload)?;
     let mut code_buf = [0u8; 4];
@@ -2100,7 +2086,11 @@ fn become_effective_container_root() {
 }
 
 fn rootfs_setup_container_uid(spec: &Spec) -> Option<u32> {
-    spec.annotations.as_ref().and_then(|a| a.get("boxr.rootfs_setup_uid"))?.parse().ok()
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.rootfs_setup_uid"))?
+        .parse()
+        .ok()
 }
 
 /// Use the auxiliary rootfs-owner ID (65534→host) for pivot/mount when `--uidmap` shifts uid 0.
@@ -2171,12 +2161,7 @@ pub fn bundle_process_is_alive(bundle_path: &Path) -> bool {
 fn wrap_command_for_umask(command: &[String], umask: u32) -> Vec<String> {
     let umask_oct = format!("{:04o}", umask);
     let script = format!("umask {}; exec \"$@\"", umask_oct);
-    let mut wrapped = vec![
-        "sh".to_string(),
-        "-c".to_string(),
-        script,
-        "sh".to_string(),
-    ];
+    let mut wrapped = vec!["sh".to_string(), "-c".to_string(), script, "sh".to_string()];
     wrapped.extend(command.iter().cloned());
     wrapped
 }
@@ -2403,7 +2388,7 @@ pub fn exec_in_bundle(
 }
 
 fn exec_join_user_namespace(container_pid: i32) -> Result<()> {
-    use nix::sched::{setns, CloneFlags};
+    use nix::sched::{CloneFlags, setns};
 
     let user_f = std::fs::File::open(format!("/proc/{container_pid}/ns/user"))
         .context("open container user namespace")?;
@@ -2415,7 +2400,7 @@ fn exec_join_user_namespace(container_pid: i32) -> Result<()> {
 }
 
 fn exec_join_pid_namespace(container_pid: i32) -> Result<()> {
-    use nix::sched::{setns, CloneFlags};
+    use nix::sched::{CloneFlags, setns};
 
     let pid_f = std::fs::File::open(format!("/proc/{container_pid}/ns/pid"))
         .context("open container pid namespace")?;
@@ -2455,8 +2440,8 @@ fn exec_in_bundle_via_setns(
 
     // Always sync with the parent after joining the container user namespace so
     // we can write setgroups allow before matching init supplementary groups (075-exec).
-    let sync_pair = UnixStream::pair()
-        .context("Failed to create UnixStream pair for exec setgroups sync")?;
+    let sync_pair =
+        UnixStream::pair().context("Failed to create UnixStream pair for exec setgroups sync")?;
 
     match unsafe { fork() }? {
         ForkResult::Parent { child } => {
@@ -2465,22 +2450,16 @@ fn exec_in_bundle_via_setns(
             parent_sock
                 .read_exact(&mut ready)
                 .context("exec child did not signal user namespace join")?;
-            crate::security::RootlessUserConfig::allow_setgroups_from_userns(
-                pid,
-                child.as_raw(),
-            )
-            .context("setgroups allow after user setns")?;
+            crate::security::RootlessUserConfig::allow_setgroups_from_userns(pid, child.as_raw())
+                .context("setgroups allow after user setns")?;
             parent_sock
                 .write_all(b"done")
                 .context("Failed to notify exec child after user setgroups allow")?;
             parent_sock
                 .read_exact(&mut ready)
                 .context("exec child did not signal pid namespace join")?;
-            crate::security::RootlessUserConfig::allow_setgroups_from_userns(
-                pid,
-                child.as_raw(),
-            )
-            .context("setgroups allow after pid setns")?;
+            crate::security::RootlessUserConfig::allow_setgroups_from_userns(pid, child.as_raw())
+                .context("setgroups allow after pid setns")?;
             parent_sock
                 .write_all(b"done")
                 .context("Failed to notify exec child after pid setgroups allow")?;
@@ -2599,8 +2578,15 @@ fn exec_in_bundle_via_setns(
 fn open_detach_pty() -> Option<(std::fs::File, String)> {
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
-    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) }
-        != 0
+    if unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } != 0
     {
         return None;
     }
@@ -3090,8 +3076,7 @@ fn run_container_child(
 
     for m in &spec.mounts {
         if m.mount_type == "bind" {
-            let target =
-                prepare_bind_mount_target(rootfs, &m.destination, Path::new(&m.source));
+            let target = prepare_bind_mount_target(rootfs, &m.destination, Path::new(&m.source));
             if let Ok(canon_target) = target.canonicalize() {
                 if !canon_target.starts_with(&canon_rootfs) {
                     return Err(anyhow!(

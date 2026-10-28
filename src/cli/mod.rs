@@ -1,5 +1,4 @@
 pub mod artifact;
-pub mod usage_errors;
 pub mod container;
 pub mod farm;
 pub mod image;
@@ -8,6 +7,7 @@ pub mod machine;
 pub mod quadlet;
 pub mod secret;
 pub mod system;
+pub mod usage_errors;
 pub mod volumes_networks;
 
 pub use artifact::*;

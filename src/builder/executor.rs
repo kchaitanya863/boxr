@@ -643,10 +643,7 @@ impl ImageBuilder {
             .next()
             .unwrap_or(&full_tag);
         let (registry, reference) = if !name_only.contains('/') {
-            (
-                "localhost".to_string(),
-                name_only.to_string(),
-            )
+            ("localhost".to_string(), name_only.to_string())
         } else {
             (parsed_tag.registry.clone(), parsed_tag.repository.clone())
         };

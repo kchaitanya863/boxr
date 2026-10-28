@@ -206,9 +206,21 @@ fn test_pod_stop_start_restart() {
     let home = &ctx.home;
     let (pod, _cname) = pod_with_sleeping_container(home);
 
-    assert!(blackbox::run_boxr(home, &["pod", "stop", &pod]).status.success());
-    assert!(blackbox::run_boxr(home, &["pod", "start", &pod]).status.success());
-    assert!(blackbox::run_boxr(home, &["pod", "restart", &pod]).status.success());
+    assert!(
+        blackbox::run_boxr(home, &["pod", "stop", &pod])
+            .status
+            .success()
+    );
+    assert!(
+        blackbox::run_boxr(home, &["pod", "start", &pod])
+            .status
+            .success()
+    );
+    assert!(
+        blackbox::run_boxr(home, &["pod", "restart", &pod])
+            .status
+            .success()
+    );
     let _ = blackbox::run_boxr(home, &["pod", "rm", "-f", &pod]);
 }
 
@@ -253,7 +265,11 @@ fn test_pod_prune_removes_stopped_pod() {
     };
     let home = &ctx.home;
     let (pod, _cname) = pod_with_sleeping_container(home);
-    assert!(blackbox::run_boxr(home, &["pod", "stop", &pod]).status.success());
+    assert!(
+        blackbox::run_boxr(home, &["pod", "stop", &pod])
+            .status
+            .success()
+    );
     let prune = blackbox::run_boxr(home, &["pod", "prune", "-f"]);
     assert!(prune.status.success());
     assert!(
@@ -324,7 +340,15 @@ fn test_generate_systemd_stdout() {
     assert!(
         blackbox::run_boxr(
             home,
-            &["run", "-d", "--name", &name, "alpine:latest", "sleep", "120"],
+            &[
+                "run",
+                "-d",
+                "--name",
+                &name,
+                "alpine:latest",
+                "sleep",
+                "120"
+            ],
         )
         .status
         .success()
@@ -515,23 +539,12 @@ fn test_container_clone_run_starts_target() {
     assert!(
         blackbox::run_boxr(
             home,
-            &[
-                "run",
-                "-d",
-                "--name",
-                &src,
-                "alpine:latest",
-                "sleep",
-                "300",
-            ],
+            &["run", "-d", "--name", &src, "alpine:latest", "sleep", "300",],
         )
         .status
         .success()
     );
-    let clone = blackbox::run_boxr(
-        home,
-        &["container", "clone", "--run", &src, &dst],
-    );
+    let clone = blackbox::run_boxr(home, &["container", "clone", "--run", &src, &dst]);
     assert!(
         clone.status.success(),
         "{}",

@@ -1,6 +1,6 @@
 //! Buildah / Podman "external" storage containers (BATS parity).
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -72,14 +72,12 @@ pub fn list_external_names() -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let content = fs::read_to_string(path)?;
-    Ok(
-        content
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect(),
-    )
+    Ok(content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 pub fn external_name_taken(name: &str) -> bool {

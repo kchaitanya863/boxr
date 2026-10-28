@@ -119,17 +119,13 @@ struct DockerImageHealthcheck {
 impl From<DockerImageHealthcheck> for crate::health::HealthConfig {
     fn from(h: DockerImageHealthcheck) -> Self {
         let ns_to_secs = |ns: Option<u64>, default: u64| -> u64 {
-            ns.map(|n| (n / 1_000_000_000).max(1))
-                .unwrap_or(default)
+            ns.map(|n| (n / 1_000_000_000).max(1)).unwrap_or(default)
         };
         crate::health::HealthConfig {
             test: h.test,
             interval_secs: ns_to_secs(h.interval_ns, 30),
             timeout_secs: ns_to_secs(h.timeout_ns, 30),
-            start_period_secs: h
-                .start_period_ns
-                .map(|n| n / 1_000_000_000)
-                .unwrap_or(0),
+            start_period_secs: h.start_period_ns.map(|n| n / 1_000_000_000).unwrap_or(0),
             retries: h.retries.unwrap_or(3),
         }
     }

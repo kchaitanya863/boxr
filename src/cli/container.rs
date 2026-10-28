@@ -611,14 +611,8 @@ impl RunArgs {
     pub fn attach_stdin_emits_container_id(&self) -> bool {
         !self.detach
             && !self.attach.is_empty()
-            && self
-                .attach
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case("stdin"))
-            && !self
-                .attach
-                .iter()
-                .any(|a| a.eq_ignore_ascii_case("stdout"))
+            && self.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin"))
+            && !self.attach.iter().any(|a| a.eq_ignore_ascii_case("stdout"))
     }
 }
 
@@ -955,7 +949,12 @@ pub struct RmArgs {
     pub all: bool,
 
     /// Seconds to wait before killing a container (0 = immediate, -1 = no limit)
-    #[arg(short = 't', long = "time", value_name = "SECONDS", allow_hyphen_values = true)]
+    #[arg(
+        short = 't',
+        long = "time",
+        value_name = "SECONDS",
+        allow_hyphen_values = true
+    )]
     pub time: Option<i32>,
 
     /// Ignore errors when a container cannot be removed

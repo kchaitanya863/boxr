@@ -20,8 +20,7 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
             std::process::exit(125);
         }
         ErrorKind::UnknownArgument => {
-            if let Some(clap::error::ContextValue::String(flag)) =
-                err.get(ContextKind::InvalidArg)
+            if let Some(clap::error::ContextValue::String(flag)) = err.get(ContextKind::InvalidArg)
             {
                 if flag.starts_with('-') {
                     eprintln!("Error: unknown flag: {}", flag.trim_start_matches('-'));
@@ -96,9 +95,7 @@ pub fn run_help_command(path: &[String]) -> ! {
 }
 
 fn is_bats_numeric_token(s: &str) -> bool {
-    s.len() > 1
-        && s.starts_with('x')
-        && s[1..].chars().all(|c| c.is_ascii_digit())
+    s.len() > 1 && s.starts_with('x') && s[1..].chars().all(|c| c.is_ascii_digit())
 }
 
 fn positional_args(argv: &[String]) -> Vec<&str> {

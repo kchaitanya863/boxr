@@ -13,16 +13,10 @@ fn append_volume_tree<W: io::Write>(tar: &mut tar::Builder<W>, mountpoint: &Path
     for entry in fs::read_dir(mountpoint)? {
         let path = entry?.path();
         if path.is_file() {
-            let name = path
-                .file_name()
-                .map(|n| n.to_owned())
-                .unwrap_or_default();
+            let name = path.file_name().map(|n| n.to_owned()).unwrap_or_default();
             tar.append_path_with_name(&path, name)?;
         } else if path.is_dir() {
-            let prefix = path
-                .file_name()
-                .map(|n| n.to_owned())
-                .unwrap_or_default();
+            let prefix = path.file_name().map(|n| n.to_owned()).unwrap_or_default();
             for sub in fs::read_dir(&path)? {
                 let subpath = sub?.path();
                 if subpath.is_file() {

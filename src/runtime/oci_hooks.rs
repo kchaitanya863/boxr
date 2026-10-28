@@ -43,11 +43,7 @@ fn run_settings_json(path: &Path, stage: &str) -> Result<()> {
     let stages = v
         .get("stages")
         .and_then(|s| s.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str())
-                .collect::<Vec<_>>()
-        })
+        .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
     if !stages.iter().any(|s| *s == stage) {
         return Ok(());

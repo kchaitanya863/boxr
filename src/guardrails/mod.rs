@@ -196,9 +196,7 @@ impl PortCollisionGuard {
         let containers: Vec<_> = store
             .list()
             .into_iter()
-            .filter(|c| {
-                exclude_container.is_none_or(|ex| c.id != ex && c.name != ex)
-            })
+            .filter(|c| exclude_container.is_none_or(|ex| c.id != ex && c.name != ex))
             .collect();
         Self::ensure_no_conflicts_with_containers(requested_ports, &containers)
     }

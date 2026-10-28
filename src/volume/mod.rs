@@ -95,10 +95,7 @@ pub fn volume_name_filter_matches(name: &str, pattern: &str) -> bool {
     if name == pattern {
         return true;
     }
-    if pattern
-        .chars()
-        .any(|c| ".+*?[](){}|^$\\".contains(c))
-    {
+    if pattern.chars().any(|c| ".+*?[](){}|^$\\".contains(c)) {
         if let Ok(re) = regex::Regex::new(pattern) {
             return re.is_match(name);
         }
@@ -109,9 +106,25 @@ pub fn volume_name_filter_matches(name: &str, pattern: &str) -> bool {
 fn is_volume_mount_option_token(token: &str) -> bool {
     matches!(
         token,
-        "ro" | "rw" | "z" | "Z" | "O" | "U" | "copyup" | "noexec" | "exec" | "nosuid" | "suid"
-            | "nodev" | "dev" | "private" | "rprivate" | "shared" | "rshared" | "slave"
-            | "rslave" | "nocopy"
+        "ro" | "rw"
+            | "z"
+            | "Z"
+            | "O"
+            | "U"
+            | "copyup"
+            | "noexec"
+            | "exec"
+            | "nosuid"
+            | "suid"
+            | "nodev"
+            | "dev"
+            | "private"
+            | "rprivate"
+            | "shared"
+            | "rshared"
+            | "slave"
+            | "rslave"
+            | "nocopy"
     )
 }
 
@@ -533,10 +546,8 @@ impl VolumeStore {
                         crate::storage::ContainerStatus::Running
                             | crate::storage::ContainerStatus::Paused
                     ) {
-                        let _ = c_store.update_status(
-                            &c.id,
-                            crate::storage::ContainerStatus::Exited(0),
-                        );
+                        let _ = c_store
+                            .update_status(&c.id, crate::storage::ContainerStatus::Exited(0));
                     }
                     let _ = c_store.remove(&c.id);
                 }
@@ -675,24 +686,25 @@ impl VolumeStore {
             return Err(anyhow!("Volume specification cannot be empty"));
         }
 
-        let (source_str, dest_str, read_only, noexec, chown_u) = if let Some(idx) = trimmed.find(':') {
-            let source_str = trimmed[..idx].to_string();
-            let (dest_str, read_only, noexec, chown_u) =
-                parse_volume_dest_and_options(&trimmed[idx + 1..]);
-            (source_str, dest_str, read_only, noexec, chown_u)
-        } else if trimmed.starts_with('/') {
-            // Podman/Docker: `-v /container/path` creates an anonymous volume at that path.
-            let vol = self.create(None, None)?;
-            return Ok(MountSpec {
-                source: PathBuf::from(vol.mountpoint),
-                destination: trimmed.to_string(),
-                is_volume: true,
-                volume_name: Some(vol.name),
-                ..Default::default()
-            });
-        } else {
-            (String::new(), trimmed.to_string(), false, false, false)
-        };
+        let (source_str, dest_str, read_only, noexec, chown_u) =
+            if let Some(idx) = trimmed.find(':') {
+                let source_str = trimmed[..idx].to_string();
+                let (dest_str, read_only, noexec, chown_u) =
+                    parse_volume_dest_and_options(&trimmed[idx + 1..]);
+                (source_str, dest_str, read_only, noexec, chown_u)
+            } else if trimmed.starts_with('/') {
+                // Podman/Docker: `-v /container/path` creates an anonymous volume at that path.
+                let vol = self.create(None, None)?;
+                return Ok(MountSpec {
+                    source: PathBuf::from(vol.mountpoint),
+                    destination: trimmed.to_string(),
+                    is_volume: true,
+                    volume_name: Some(vol.name),
+                    ..Default::default()
+                });
+            } else {
+                (String::new(), trimmed.to_string(), false, false, false)
+            };
 
         if dest_str.trim().is_empty() {
             return Err(anyhow!("Volume destination path cannot be empty"));
@@ -783,7 +795,12 @@ impl VolumeStore {
         }
     }
 
-    pub fn set_volume_copy_flags(&self, name: &str, needs_copy_up: bool, needs_chown: bool) -> Result<()> {
+    pub fn set_volume_copy_flags(
+        &self,
+        name: &str,
+        needs_copy_up: bool,
+        needs_chown: bool,
+    ) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             if let Some(v) = data.volumes.iter_mut().find(|v| v.name == name) {

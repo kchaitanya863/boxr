@@ -1,5 +1,5 @@
 use super::{
-    check_container_health, HealthCheckResult, HealthConfig, HealthOnFailureAction, HealthStatus,
+    HealthCheckResult, HealthConfig, HealthOnFailureAction, HealthStatus, check_container_health,
 };
 use crate::storage::{ContainerStatus, ContainerStore};
 use anyhow::{Context, Result};
@@ -76,8 +76,8 @@ pub fn spawn_detached_health_supervisor(
 }
 
 pub fn run_internal_health_supervisor(bundle_path: &Path) -> Result<()> {
-    let raw = std::fs::read_to_string(spec_path(bundle_path))
-        .context("read health-supervisor.json")?;
+    let raw =
+        std::fs::read_to_string(spec_path(bundle_path)).context("read health-supervisor.json")?;
     let spec: HealthSupervisorSpec =
         serde_json::from_str(&raw).context("parse health-supervisor.json")?;
     run_supervisor_loop(
@@ -116,12 +116,9 @@ fn run_supervisor_loop(
         }
         let start_period_active =
             started.elapsed() < Duration::from_secs(health_cfg.start_period_secs);
-        if let Err(e) = check_container_health(
-            bundle_path,
-            &health_cfg,
-            &mut result,
-            start_period_active,
-        ) {
+        if let Err(e) =
+            check_container_health(bundle_path, &health_cfg, &mut result, start_period_active)
+        {
             eprintln!("health check error for {}: {}", container_name, e);
             result.failing_streak += 1;
             result.status = if result.failing_streak >= health_cfg.retries && !start_period_active {
@@ -147,8 +144,7 @@ fn run_supervisor_loop(
                     break;
                 }
                 HealthOnFailureAction::Kill => {
-                    let _ =
-                        crate::runtime::kill::ContainerKiller::kill(&cont, Some("KILL"));
+                    let _ = crate::runtime::kill::ContainerKiller::kill(&cont, Some("KILL"));
                     break;
                 }
                 HealthOnFailureAction::Restart => {

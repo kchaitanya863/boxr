@@ -120,7 +120,10 @@ impl RootlessUserConfig {
                 continue;
             }
             let name_or_id = parts[0].trim();
-            let matches_name = user_name.as_deref().map(|u| u == name_or_id).unwrap_or(false);
+            let matches_name = user_name
+                .as_deref()
+                .map(|u| u == name_or_id)
+                .unwrap_or(false);
             let matches_id = name_or_id == uid_str;
             if !matches_name && !matches_id {
                 continue;
@@ -280,7 +283,11 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     }
 
     #[cfg(target_os = "linux")]
-    pub fn apply_id_mappings(pid: i32, uid_maps: &[IdMapping], gid_maps: &[IdMapping]) -> Result<()> {
+    pub fn apply_id_mappings(
+        pid: i32,
+        uid_maps: &[IdMapping],
+        gid_maps: &[IdMapping],
+    ) -> Result<()> {
         let cfg = RootlessUserConfig {
             enabled: true,
             uid_mappings: uid_maps.to_vec(),
@@ -373,9 +380,9 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         uid_maps: &[IdMapping],
         gid_maps: &[IdMapping],
     ) -> Result<()> {
-        use nix::sched::{unshare, CloneFlags};
-        use nix::sys::wait::{waitpid, WaitStatus};
-        use nix::unistd::{fork, setresgid, setresuid, ForkResult, Gid, Uid};
+        use nix::sched::{CloneFlags, unshare};
+        use nix::sys::wait::{WaitStatus, waitpid};
+        use nix::unistd::{ForkResult, Gid, Uid, fork, setresgid, setresuid};
         use std::ffi::CString;
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
@@ -418,7 +425,9 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                         "chown_path_as_mapped_root helper signaled with {}",
                         sig
                     )),
-                    _ => Err(anyhow::anyhow!("chown_path_as_mapped_root helper wait failed")),
+                    _ => Err(anyhow::anyhow!(
+                        "chown_path_as_mapped_root helper wait failed"
+                    )),
                 }
             }
             ForkResult::Child => {
@@ -510,9 +519,9 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     /// Required when the caller lives in the initial user namespace (host `boxr exec` parent).
     #[cfg(target_os = "linux")]
     pub fn allow_setgroups_from_userns(anchor_pid: i32, target_pid: i32) -> Result<()> {
-        use nix::sched::{setns, CloneFlags};
+        use nix::sched::{CloneFlags, setns};
         use nix::sys::wait::waitpid;
-        use nix::unistd::{fork, ForkResult, Gid, Uid};
+        use nix::unistd::{ForkResult, Gid, Uid, fork};
 
         match unsafe { fork() }? {
             ForkResult::Parent { child } => {

@@ -69,8 +69,7 @@ fn main() -> Result<()> {
         }
         if args[1] == "unshare" {
             let sub = &args[2..];
-            let wants_help = sub.is_empty()
-                || sub.iter().any(|a| a == "--help" || a == "-h");
+            let wants_help = sub.is_empty() || sub.iter().any(|a| a == "--help" || a == "-h");
             if !wants_help {
                 #[cfg(target_os = "linux")]
                 {

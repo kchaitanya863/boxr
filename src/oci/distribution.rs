@@ -83,9 +83,7 @@ fn registry_connect_host(registry: &str) -> &str {
 
 fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
     let opts = crate::oci::registry_options::registry_options_snapshot();
-    let mut builder = Client::builder()
-        .user_agent("boxr/0.1.0")
-        .no_proxy();
+    let mut builder = Client::builder().user_agent("boxr/0.1.0").no_proxy();
     if let Some(reg) = registry_for_resolve {
         if let Some(port) = reg.strip_prefix("localhost:") {
             if let Ok(addr) = format!("127.0.0.1:{}", port).parse() {
@@ -107,9 +105,7 @@ fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
     } else {
         builder = builder.tls_built_in_root_certs(true);
     }
-    builder
-        .build()
-        .expect("build registry HTTP client")
+    builder.build().expect("build registry HTTP client")
 }
 
 impl RegistryClient {
@@ -134,10 +130,7 @@ impl RegistryClient {
         crate::oci::registry_options::registry_options_snapshot().inline_creds
     }
 
-    fn store_credentials(
-        &self,
-        reference: &ImageReference,
-    ) -> Option<(String, String)> {
+    fn store_credentials(&self, reference: &ImageReference) -> Option<(String, String)> {
         if let Some(c) = self.inline_credentials() {
             return Some(c);
         }
@@ -149,21 +142,16 @@ impl RegistryClient {
         let creds = self.store_credentials(reference);
 
         let ping_url = format!("https://{}/v2/", registry_connect_host(&reference.registry));
-        let resp = self
-            .client
-            .get(&ping_url)
-            .send()
-            .await
-            .map_err(|e| {
-                use std::error::Error;
-                let mut detail = format!("{e}");
-                let mut src = e.source();
-                while let Some(s) = src {
-                    detail.push_str(&format!("; {s}"));
-                    src = s.source();
-                }
-                anyhow!("registry ping {}: {}", ping_url, detail)
-            })?;
+        let resp = self.client.get(&ping_url).send().await.map_err(|e| {
+            use std::error::Error;
+            let mut detail = format!("{e}");
+            let mut src = e.source();
+            while let Some(s) = src {
+                detail.push_str(&format!("; {s}"));
+                src = s.source();
+            }
+            anyhow!("registry ping {}: {}", ping_url, detail)
+        })?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -298,19 +286,16 @@ impl RegistryClient {
                 req = req.header(AUTHORIZATION, val);
             }
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| {
-                use std::error::Error;
-                let mut detail = format!("{e}");
-                let mut src = e.source();
-                while let Some(s) = src {
-                    detail.push_str(&format!("; {s}"));
-                    src = s.source();
-                }
-                anyhow!("registry ping {}: {}", ping_url, detail)
-            })?;
+        let resp = req.send().await.map_err(|e| {
+            use std::error::Error;
+            let mut detail = format!("{e}");
+            let mut src = e.source();
+            while let Some(s) = src {
+                detail.push_str(&format!("; {s}"));
+                src = s.source();
+            }
+            anyhow!("registry ping {}: {}", ping_url, detail)
+        })?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -358,7 +343,9 @@ impl RegistryClient {
     ) -> Result<()> {
         let check_url = format!(
             "https://{}/v2/{}/blobs/{}",
-            registry_connect_host(&reference.registry), reference.repository, digest
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            digest
         );
         let head = self
             .client
@@ -372,7 +359,8 @@ impl RegistryClient {
 
         let upload_url = format!(
             "https://{}/v2/{}/blobs/uploads/",
-            registry_connect_host(&reference.registry), reference.repository
+            registry_connect_host(&reference.registry),
+            reference.repository
         );
         let post = self
             .client
@@ -486,13 +474,12 @@ impl RegistryClient {
 
         let put_url = format!(
             "https://{}/v2/{}/manifests/{}",
-            registry_connect_host(&reference.registry), reference.repository, reference.tag
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            reference.tag
         );
         let mut headers = self.auth_headers();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_str(manifest_media_type)?,
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_str(manifest_media_type)?);
         let resp = self
             .client
             .put(&put_url)
@@ -543,7 +530,9 @@ impl RegistryClient {
 
         let url = format!(
             "https://{}/v2/{}/manifests/{}",
-            registry_connect_host(&reference.registry), reference.repository, tag_or_digest
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            tag_or_digest
         );
 
         let mut headers = self.auth_headers();
@@ -667,7 +656,9 @@ impl RegistryClient {
     ) -> Result<(ImageConfig, Vec<u8>)> {
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
-            registry_connect_host(&reference.registry), reference.repository, config_descriptor.digest
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            config_descriptor.digest
         );
 
         let resp = self
@@ -728,7 +719,9 @@ impl RegistryClient {
 
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
-            registry_connect_host(&reference.registry), reference.repository, descriptor.digest
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            descriptor.digest
         );
 
         let resp = self

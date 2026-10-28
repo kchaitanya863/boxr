@@ -150,10 +150,7 @@ impl ContainerStore {
             ));
         }
 
-        let record = ContainerRecord {
-            name,
-            ..record
-        };
+        let record = ContainerRecord { name, ..record };
 
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
@@ -179,9 +176,11 @@ impl ContainerStore {
         let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(c) = data.containers.iter_mut().find(|c| {
-                c.id == q || c.id.starts_with(&q) || c.name == q
-            }) {
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
                 // SIGKILL during `podman stop` (separate process) must not be downgraded.
                 if matches!(c.status, ContainerStatus::Exited(137))
                     && !matches!(status, ContainerStatus::Exited(137))
@@ -201,9 +200,11 @@ impl ContainerStore {
         let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(c) = data.containers.iter_mut().find(|c| {
-                c.id == q || c.id.starts_with(&q) || c.name == q
-            }) {
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
                 c.restart_count += 1;
                 let count = c.restart_count;
                 self.save_unlocked(&data)?;
@@ -222,9 +223,11 @@ impl ContainerStore {
         let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(c) = data.containers.iter_mut().find(|c| {
-                c.id == q || c.id.starts_with(&q) || c.name == q
-            }) {
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
                 c.health_status = status;
                 self.save_unlocked(&data)?;
                 Ok(())

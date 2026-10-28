@@ -1,6 +1,6 @@
 //! Podman/Docker-compatible `--ulimit` parsing and application.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::path::Path;
 
 #[derive(Debug, Clone)]

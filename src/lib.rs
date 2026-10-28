@@ -70,15 +70,14 @@ use cli::{
     BuildArgs, BuilderAction, Cli, Commands, ComposeArgs, ComposeSubcommand, DiffArgs, ExecArgs,
     GenerateAction, GenerateSubcommands, LogsArgs, NetworkAction, NetworkSubcommands, PlayAction,
     PlaySubcommands, PodAction, PodCreateArgs, PodLsArgs, PodSubcommands, PsArgs, RunArgs,
-    SpecArgs, SystemAction,
-    TopArgs, UnshareArgs, VolumeAction, VolumeSubcommands,
+    SpecArgs, SystemAction, TopArgs, UnshareArgs, VolumeAction, VolumeSubcommands,
 };
 use events::{ContainerEvent, EventManager};
 use network::{NetworkStore, PortMapping};
 use oci::distribution::RegistryClient;
 use oci::image::unpack_layer;
-use oci::registry_options::{registry_options_from_cli, RegistryOptionsGuard};
 use oci::reference::ImageReference;
+use oci::registry_options::{RegistryOptionsGuard, registry_options_from_cli};
 use oci::runtime::Spec;
 use runtime::{exec_in_bundle, execute_bundle};
 use sha2::{Digest, Sha256};
@@ -92,7 +91,11 @@ use storage::{
 use volume::VolumeStore;
 
 fn authfile_exit_125(global: Option<&str>, local: Option<&str>) -> Result<()> {
-    for p in [local, global].into_iter().flatten().collect::<std::collections::HashSet<_>>() {
+    for p in [local, global]
+        .into_iter()
+        .flatten()
+        .collect::<std::collections::HashSet<_>>()
+    {
         if let Err(e) = auth::validate_authfile(p) {
             eprintln!("Error: {}", e);
             std::process::exit(125);
@@ -170,8 +173,7 @@ fn workdir_allowed_on_container(
 fn fail_missing_workdir(cwd: &str, container_id: &str) -> Result<i32> {
     eprintln!(
         "Error: workdir \"{}\" does not exist on container {}",
-        cwd,
-        container_id
+        cwd, container_id
     );
     Ok(126)
 }
@@ -272,7 +274,11 @@ fn ensure_tty_detach_shell_stays_alive(spec: &mut Spec, args: &RunArgs) {
     if bin != "sh" && bin != "bash" && bin != "ash" {
         return;
     }
-    if argv.iter().skip(1).any(|a| a == "-i" || a == "-il" || a == "-li") {
+    if argv
+        .iter()
+        .skip(1)
+        .any(|a| a == "-i" || a == "-il" || a == "-li")
+    {
         return;
     }
     // Hold the container open without relying on a TTY read loop (BATS leak check).
@@ -306,7 +312,9 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     spec.process.terminal = tty;
     ensure_tty_detach_shell_stays_alive(spec, args);
     for key in &args.unsetenv {
-        spec.process.env.retain(|e| !e.starts_with(&format!("{}=", key)));
+        spec.process
+            .env
+            .retain(|e| !e.starts_with(&format!("{}=", key)));
     }
     if !spec.process.env.iter().any(|e| e.starts_with("container=")) {
         spec.process.env.push("container=podman".to_string());
@@ -392,11 +400,7 @@ fn volume_mount_destination(spec: &str) -> String {
 
 fn volume_mount_source_label(spec: &str) -> String {
     let trimmed = spec.trim();
-    trimmed
-        .split(':')
-        .next()
-        .unwrap_or(trimmed)
-        .to_string()
+    trimmed.split(':').next().unwrap_or(trimmed).to_string()
 }
 
 fn tmpfs_mount_destination(spec: &str) -> String {
@@ -415,10 +419,7 @@ fn record_mount_destination_if_unique(
 ) {
     if let Some(prev_src) = seen.get(dest) {
         if prev_src != src_key {
-            cli::usage_errors::exit_usage_error(format!(
-                "{}: duplicate mount destination",
-                dest
-            ));
+            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dest));
         }
     } else {
         seen.insert(dest.to_string(), src_key.to_string());
@@ -461,9 +462,7 @@ fn validate_device_cgroup_rules_rootless(args: &RunArgs) {
 
 fn warn_kernel_memory_noop(args: &RunArgs) {
     if args.kernel_memory.is_some() {
-        eprintln!(
-            "The --kernel-memory flag is no longer supported. This flag is a noop."
-        );
+        eprintln!("The --kernel-memory flag is no longer supported. This flag is a noop.");
     }
 }
 
@@ -501,7 +500,9 @@ fn container_inspect_image_fields(
     let img = i_store.find(&c.image).or_else(|| {
         i_store.list().into_iter().find(|r| {
             c.image == r.id
-                || c.image.strip_prefix("sha256:").is_some_and(|h| r.id.starts_with(h))
+                || c.image
+                    .strip_prefix("sha256:")
+                    .is_some_and(|h| r.id.starts_with(h))
                 || format!("{}:{}", r.display_reference(), r.tag) == c.image
                 || r.qualified_name() == c.image
         })
@@ -549,7 +550,11 @@ fn append_containerenv_mount(
         return Ok(());
     }
     #[cfg(unix)]
-    let rootless = if !nix::unistd::getuid().is_root() { 1 } else { 0 };
+    let rootless = if !nix::unistd::getuid().is_root() {
+        1
+    } else {
+        0
+    };
     #[cfg(not(unix))]
     let rootless = 0;
     let body = if privileged {
@@ -579,10 +584,7 @@ fn append_containerenv_mount(
 fn validate_runtime_flags(flags: &[String]) -> Result<()> {
     for flag in flags {
         if flag == "invalidflag" {
-            cli::usage_errors::exit_config_error(format!(
-                "unknown runtime flag: {}",
-                flag
-            ));
+            cli::usage_errors::exit_config_error(format!("unknown runtime flag: {}", flag));
         }
     }
     Ok(())
@@ -967,11 +969,8 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             cli::ImageAction::Push(push_args) => {
                 authfile_exit_125(global_auth, push_args.registry_auth.authfile.as_deref())?;
                 let _reg = registry_auth_scope(&push_args.registry_auth);
-                auth::RegistryPusher::push(
-                    &push_args.source,
-                    push_args.destination.as_deref(),
-                )
-                .await?;
+                auth::RegistryPusher::push(&push_args.source, push_args.destination.as_deref())
+                    .await?;
                 Ok(0)
             }
             cli::ImageAction::Tag(tag_args) => {
@@ -1608,8 +1607,12 @@ pub fn load_image_archive_transport(path: &Path, home: &Path) -> Result<ImageRec
         return Err(anyhow!("{}: no such file or directory", path.display()));
     }
     println!("Getting image source signatures");
-    println!("Copying blob sha256:0000000000000000000000000000000000000000000000000000000000000000");
-    println!("Copying config sha256:0000000000000000000000000000000000000000000000000000000000000000");
+    println!(
+        "Copying blob sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    );
+    println!(
+        "Copying config sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    );
     println!("Writing manifest to image destination");
     let loaded = auth::ImageArchiver::load_from(Some(path), home)?;
     loaded
@@ -1690,7 +1693,9 @@ async fn resolve_container_image(
     home: Option<&Path>,
     pull: Option<&str>,
 ) -> Result<ImageRecord> {
-    let home_path = home.map(|p| p.to_path_buf()).unwrap_or_else(storage::boxr_home);
+    let home_path = home
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(storage::boxr_home);
     if let Some(path) = archive_transport_path(image_str) {
         return load_image_archive_transport(&path, &home_path);
     }
@@ -1871,7 +1876,10 @@ pub async fn pull_image_with_platform(
     store.add(record.clone())?;
 
     pull_user_message(format!("Digest: {}", manifest_digest));
-    pull_user_message(format!("Status: Downloaded image for {}", reference.display_name()));
+    pull_user_message(format!(
+        "Status: Downloaded image for {}",
+        reference.display_name()
+    ));
     Ok(record)
 }
 
@@ -2122,15 +2130,10 @@ pub async fn run_container_with_output(
     #[cfg(unix)]
     if args.image.contains("libpod/testimage") && args.uidmap.is_empty() {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(
-            &cow_bundle.merged_dir,
-            fs::Permissions::from_mode(0o555),
-        );
+        let _ = fs::set_permissions(&cow_bundle.merged_dir, fs::Permissions::from_mode(0o555));
     }
 
-    let image_cfg = image_record
-        .as_ref()
-        .and_then(|r| r.config.config.as_ref());
+    let image_cfg = image_record.as_ref().and_then(|r| r.config.config.as_ref());
     let image_ref = image_record.as_ref();
 
     // Configure cgroups v2 resource limits if specified
@@ -2220,13 +2223,7 @@ pub async fn run_container_with_output(
     if let Some(tz) = args.tz.last() {
         apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
     }
-    if !args.unsetenv_all
-        && !spec
-            .process
-            .env
-            .iter()
-            .any(|e| e.starts_with("HOME="))
-    {
+    if !args.unsetenv_all && !spec.process.env.iter().any(|e| e.starts_with("HOME=")) {
         spec.process.env.push("HOME=/".to_string());
     }
 
@@ -2426,18 +2423,15 @@ pub async fn run_container_with_output(
     let attach_all = args.attach.is_empty();
     annotations.insert(
         "boxr.attach_stdout".to_string(),
-        (attach_all || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdout")))
-            .to_string(),
+        (attach_all || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdout"))).to_string(),
     );
     annotations.insert(
         "boxr.attach_stderr".to_string(),
-        (attach_all || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stderr")))
-            .to_string(),
+        (attach_all || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stderr"))).to_string(),
     );
     annotations.insert(
         "boxr.attach_stdin".to_string(),
-        (args.interactive
-            || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin")))
+        (args.interactive || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin")))
             .to_string(),
     );
     apply_log_config_annotations(&args, &mut annotations, &bundle_dir, &container_id)?;
@@ -2658,7 +2652,11 @@ pub async fn run_container_with_output(
         args.privileged,
         &container_name,
         &container_id,
-        if args.image.is_empty() { "scratch" } else { &args.image },
+        if args.image.is_empty() {
+            "scratch"
+        } else {
+            &args.image
+        },
         &image_id_for_env,
     )?;
     spec.save_to_bundle(&bundle_dir)?;
@@ -2678,11 +2676,7 @@ pub async fn run_container_with_output(
         let _ = fs::write(bundle_dir.join("auto_remove_image"), args.image.as_str());
     }
 
-    if !workdir_allowed_on_container(
-        &cow_bundle.merged_dir,
-        &spec.process.cwd,
-        &parsed_mounts,
-    ) {
+    if !workdir_allowed_on_container(&cow_bundle.merged_dir, &spec.process.cwd, &parsed_mounts) {
         return fail_missing_workdir(&spec.process.cwd, &container_id);
     }
 
@@ -2741,12 +2735,10 @@ pub async fn run_container_with_output(
     ));
     add_container_record(&container_store, record, &ephemeral_new_pod)?;
 
-    if let Err(e) =
-        guardrails::PortCollisionGuard::ensure_no_conflicts_excluding(
-            &parsed_ports,
-            Some(&container_id),
-        )
-    {
+    if let Err(e) = guardrails::PortCollisionGuard::ensure_no_conflicts_excluding(
+        &parsed_ports,
+        Some(&container_id),
+    ) {
         cleanup_ephemeral_pod(&ephemeral_new_pod);
         if args.rm {
             let _ = container_store.remove(&container_id);
@@ -2881,11 +2873,7 @@ pub async fn run_container_with_output(
     if !args.detach {
         let auto_rm = run_auto_remove_enabled(&args);
         if args.rmi {
-            try_rmi_with_in_use_warning(
-                &args.image,
-                Some(&container_id),
-                !auto_rm,
-            );
+            try_rmi_with_in_use_warning(&args.image, Some(&container_id), !auto_rm);
         }
         if auto_rm {
             prune_container_attached_volumes(bundle_dir.clone());
@@ -2901,10 +2889,8 @@ pub async fn run_container_with_output(
             } else {
                 exit_code
             };
-            let _ = container_store.update_status(
-                &container_id,
-                ContainerStatus::Exited(stored_exit),
-            );
+            let _ =
+                container_store.update_status(&container_id, ContainerStatus::Exited(stored_exit));
         }
     }
 
@@ -3032,9 +3018,10 @@ fn try_rmi_with_in_use_warning(
 }
 
 /// Update store state and honor `--rm` / `--rmi` after a detached trampoline exits.
-fn load_bundle_for_restart(bundle_path: &Path) -> Result<(Spec, Vec<volume::MountSpec>, Vec<PortMapping>)> {
-    let spec: Spec =
-        serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
+fn load_bundle_for_restart(
+    bundle_path: &Path,
+) -> Result<(Spec, Vec<volume::MountSpec>, Vec<PortMapping>)> {
+    let spec: Spec = serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
     let mounts: Vec<volume::MountSpec> = if bundle_path.join("mounts.json").exists() {
         serde_json::from_str(&fs::read_to_string(bundle_path.join("mounts.json"))?)?
     } else {
@@ -3069,7 +3056,11 @@ fn prepare_detached_restart(container_id: &str, bundle_path: &Path, stored_exit:
     true
 }
 
-fn try_restart_detached_container(container_id: &str, bundle_path: &Path, stored_exit: i32) -> bool {
+fn try_restart_detached_container(
+    container_id: &str,
+    bundle_path: &Path,
+    stored_exit: i32,
+) -> bool {
     if !prepare_detached_restart(container_id, bundle_path, stored_exit) {
         return false;
     }
@@ -3525,7 +3516,8 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
                 .find(name)
                 .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
             let bundle_path = PathBuf::from(&rec.bundle_path);
-            let spec: Spec = serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
+            let spec: Spec =
+                serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
             let _ = sync_bundle_ulimits_inspect(&bundle_path);
             let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
             apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
@@ -3580,7 +3572,9 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
     }
 
     if args.containers.is_empty() {
-        return Err(anyhow!("you must provide at least one container name or ID"));
+        return Err(anyhow!(
+            "you must provide at least one container name or ID"
+        ));
     }
     for name in &args.containers {
         if let Some(_cp) = &args.checkpoint {
@@ -3625,8 +3619,7 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
                 };
                 cli::usage_errors::exit_usage_error(format!(
                     "reading CIDFile: open {}: {}",
-                    path,
-                    detail
+                    path, detail
                 ));
             }
         }
@@ -3647,7 +3640,9 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
             .map(|c| (c.name.clone(), c.id.clone()))
             .collect()
     } else if args.containers.is_empty() {
-        return Err(anyhow!("you must provide at least one container name or ID"));
+        return Err(anyhow!(
+            "you must provide at least one container name or ID"
+        ));
     } else {
         args.containers
             .iter()
@@ -3686,8 +3681,7 @@ fn apply_pod_namespaces_to_spec(spec: &mut Spec, pod: &pod::PodRecord) -> Result
         apply_namespace_to_linux(linux, &mut annotations, "pid", &run_args.pid)?;
     }
     annotations.insert("boxr.network".to_string(), run_args.network.clone());
-    if let Some(target) = network::pasta::NetworkMode::parse(&run_args.network).container_target()
-    {
+    if let Some(target) = network::pasta::NetworkMode::parse(&run_args.network).container_target() {
         annotations.insert("boxr.network_container".to_string(), target.to_string());
     }
     spec.annotations = Some(annotations);
@@ -3784,13 +3778,19 @@ pub fn container_logs(args: &LogsArgs) -> Result<()> {
         .as_ref()
         .and_then(|s| s.annotations.clone())
         .unwrap_or_default();
-    if annotations.get("boxr.log_driver").is_some_and(|d| d == "none") {
+    if annotations
+        .get("boxr.log_driver")
+        .is_some_and(|d| d == "none")
+    {
         cli::usage_errors::exit_usage_error(
             "this container is using the 'none' log driver, cannot read logs",
         );
     }
 
-    let ctr_log = if annotations.get("boxr.log_driver").is_some_and(|d| d == "journald") {
+    let ctr_log = if annotations
+        .get("boxr.log_driver")
+        .is_some_and(|d| d == "journald")
+    {
         annotations
             .get("boxr.journald_capture")
             .map(PathBuf::from)
@@ -4034,9 +4034,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
     let targets: Vec<String> = if args.latest {
         let mut list = c_store.list();
         list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        list.first()
-            .map(|c| vec![c.id.clone()])
-            .unwrap_or_default()
+        list.first().map(|c| vec![c.id.clone()]).unwrap_or_default()
     } else {
         args.targets.clone()
     };
@@ -4408,10 +4406,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
 
         if !matched {
             if only_type == "container" {
-                cli::usage_errors::exit_usage_error(format!(
-                    "no such container \"{}\"",
-                    target
-                ));
+                cli::usage_errors::exit_usage_error(format!("no such container \"{}\"", target));
             }
             println!("[]");
             cli::usage_errors::exit_usage_error(format!("no such object: \"{}\"", target));
@@ -5160,9 +5155,7 @@ fn lookup_passwd_uid(passwd: &str, name_or_id: &str) -> Result<u32> {
     for line in passwd.lines() {
         let parts: Vec<&str> = line.split(':').collect();
         if parts.len() >= 4 && parts[0] == name_or_id {
-            return parts[2]
-                .parse()
-                .context("invalid uid in /etc/passwd");
+            return parts[2].parse().context("invalid uid in /etc/passwd");
         }
     }
     Err(anyhow!("user {} not found in /etc/passwd", name_or_id))
@@ -5175,9 +5168,7 @@ fn lookup_group_gid(group: &str, name_or_id: &str) -> Result<u32> {
     for line in group.lines() {
         let parts: Vec<&str> = line.split(':').collect();
         if parts.len() >= 3 && parts[0] == name_or_id {
-            return parts[2]
-                .parse()
-                .context("invalid gid in /etc/group");
+            return parts[2].parse().context("invalid gid in /etc/group");
         }
     }
     Err(anyhow!("no matching entries in group file"))
@@ -5207,9 +5198,7 @@ fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Result<(u32, u32)> 
     for line in passwd.lines() {
         let parts: Vec<&str> = line.split(':').collect();
         if parts.len() >= 4 && parts[0] == spec {
-            let gid = parts[3]
-                .parse()
-                .context("invalid gid in /etc/passwd")?;
+            let gid = parts[3].parse().context("invalid gid in /etc/passwd")?;
             return Ok((uid, gid));
         }
     }
@@ -5323,7 +5312,9 @@ fn runtime_flags_from_containers_conf() -> Vec<String> {
             }
             collecting = true;
             for part in rest.split('"') {
-                let flag = part.trim().trim_matches(|c| c == ',' || c == '[' || c == ']');
+                let flag = part
+                    .trim()
+                    .trim_matches(|c| c == ',' || c == '[' || c == ']');
                 if !flag.is_empty() && !flag.chars().all(|c| c.is_whitespace()) {
                     flags.push(flag.to_string());
                 }
@@ -5334,7 +5325,9 @@ fn runtime_flags_from_containers_conf() -> Vec<String> {
             continue;
         }
         for part in line.split('"') {
-            let flag = part.trim().trim_matches(|c| c == ',' || c == '[' || c == ']');
+            let flag = part
+                .trim()
+                .trim_matches(|c| c == ',' || c == '[' || c == ']');
             if !flag.is_empty() && !flag.chars().all(|c| c.is_whitespace()) {
                 flags.push(flag.to_string());
             }
@@ -5369,8 +5362,7 @@ fn clamp_rootless_oom_score_adj(requested: i32) -> i32 {
             if requested < current {
                 eprintln!(
                     "Warning: Requested oom_score_adj={} is lower than the current one, changing to {}",
-                    requested,
-                    current
+                    requested, current
                 );
                 return current;
             }
@@ -5399,21 +5391,15 @@ fn apply_run_id_maps(
     if args.uidmap.is_empty() && args.gidmap.is_empty() {
         return Ok(());
     }
-    let uid_maps: Vec<security::IdMapping> = args
-        .uidmap
-        .iter()
-        .filter_map(|s| parse_id_map(s))
-        .collect();
+    let uid_maps: Vec<security::IdMapping> =
+        args.uidmap.iter().filter_map(|s| parse_id_map(s)).collect();
     if uid_maps.is_empty() {
         return Ok(());
     }
     let gid_maps: Vec<security::IdMapping> = if args.gidmap.is_empty() {
         uid_maps.clone()
     } else {
-        args.gidmap
-            .iter()
-            .filter_map(|s| parse_id_map(s))
-            .collect()
+        args.gidmap.iter().filter_map(|s| parse_id_map(s)).collect()
     };
     let (uid_maps, gid_maps, rootfs_setup) =
         security::RootlessUserConfig::augment_maps_for_rootfs_setup(&uid_maps, &gid_maps);
@@ -5441,21 +5427,15 @@ fn shift_merged_rootfs_for_run_id_maps(args: &RunArgs, merged_rootfs: &Path) -> 
     if args.uidmap.is_empty() {
         return Ok(());
     }
-    let uid_maps: Vec<security::IdMapping> = args
-        .uidmap
-        .iter()
-        .filter_map(|s| parse_id_map(s))
-        .collect();
+    let uid_maps: Vec<security::IdMapping> =
+        args.uidmap.iter().filter_map(|s| parse_id_map(s)).collect();
     if uid_maps.is_empty() {
         return Ok(());
     }
     let gid_maps: Vec<security::IdMapping> = if args.gidmap.is_empty() {
         uid_maps.clone()
     } else {
-        args.gidmap
-            .iter()
-            .filter_map(|s| parse_id_map(s))
-            .collect()
+        args.gidmap.iter().filter_map(|s| parse_id_map(s)).collect()
     };
     let (_, _, rootfs_setup) =
         security::RootlessUserConfig::augment_maps_for_rootfs_setup(&uid_maps, &gid_maps);
@@ -5469,11 +5449,9 @@ fn shift_merged_rootfs_for_run_id_maps(args: &RunArgs, merged_rootfs: &Path) -> 
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
-    if let Err(e) = security::RootlessUserConfig::chown_path_as_mapped_root(
-        merged_rootfs,
-        &uid_maps,
-        &gid_maps,
-    ) {
+    if let Err(e) =
+        security::RootlessUserConfig::chown_path_as_mapped_root(merged_rootfs, &uid_maps, &gid_maps)
+    {
         eprintln!(
             "boxr: warning: could not shift rootfs ownership for --uidmap/--gidmap ({e}); \
 custom maps may fail when container root maps off the invoking user (see PODMAN_BATS_CONFORMANCE.md)"
@@ -5517,7 +5495,9 @@ pub(crate) fn seed_bundle_etc_hosts(
     Ok(())
 }
 
-pub(crate) fn id_maps_from_spec(spec: &Spec) -> Option<(Vec<security::IdMapping>, Vec<security::IdMapping>)> {
+pub(crate) fn id_maps_from_spec(
+    spec: &Spec,
+) -> Option<(Vec<security::IdMapping>, Vec<security::IdMapping>)> {
     let ann = spec.annotations.as_ref()?;
     let uid_json = ann.get("boxr.uid_maps")?;
     let gid_json = ann.get("boxr.gid_maps").unwrap_or(uid_json);
@@ -5631,7 +5611,11 @@ fn apply_image_config_volume_mounts(
                     destination: dest.clone(),
                     mount_type: "tmpfs".to_string(),
                     source: "tmpfs".to_string(),
-                    options: Some(vec!["rw".to_string(), "nosuid".to_string(), "nodev".to_string()]),
+                    options: Some(vec![
+                        "rw".to_string(),
+                        "nosuid".to_string(),
+                        "nodev".to_string(),
+                    ]),
                 });
             }
             "anonymous" | "bind" => {
@@ -6058,10 +6042,8 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 }
             } else if let Some(fmt) = &ls_args.format {
                 if fmt.eq_ignore_ascii_case("json") {
-                    let rows: Vec<serde_json::Value> = vols
-                        .iter()
-                        .map(|v| volume_ls_json_entry(v))
-                        .collect();
+                    let rows: Vec<serde_json::Value> =
+                        vols.iter().map(|v| volume_ls_json_entry(v)).collect();
                     println!("{}", serde_json::to_string(&rows)?);
                 } else {
                     for v in &vols {
@@ -6079,10 +6061,7 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
         }
         VolumeAction::Inspect { format, name } => {
             let Some(vol) = store.find(&name) else {
-                crate::cli::usage_errors::exit_usage_error(format!(
-                    "no such volume \"{}\"",
-                    name
-                ));
+                crate::cli::usage_errors::exit_usage_error(format!("no such volume \"{}\"", name));
             };
             let compat = serde_json::json!({
                 "Anonymous": vol.anonymous,
@@ -6526,12 +6505,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             let created_display = format_created_from_unix(ext.created_unix);
             println!(
                 "{:<14} {:<24} {:<20} {:<20} {:<16} {:<16}",
-                id_display,
-                ext.image,
-                "buildah",
-                created_display,
-                "Storage",
-                ext.name
+                id_display, ext.image, "buildah", created_display, "Storage", ext.name
             );
         }
         return Ok(());
@@ -6581,7 +6555,9 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             let show_non_running = args.all
                 || args.latest
                 || args.last.is_some()
-                || status_filters.iter().any(|s| s.to_ascii_lowercase() != "running");
+                || status_filters
+                    .iter()
+                    .any(|s| s.to_ascii_lowercase() != "running");
             let matches_status = if show_non_running {
                 true
             } else {
@@ -6610,8 +6586,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 }
             }
 
-            if !id_filters.is_empty()
-                && !id_filters.iter().any(|v| ps_id_filter_matches(&c.id, v))
+            if !id_filters.is_empty() && !id_filters.iter().any(|v| ps_id_filter_matches(&c.id, v))
             {
                 return false;
             }
@@ -6818,9 +6793,7 @@ fn rm_container_resolving_depend(
             rm_container_resolving_depend(&dep, args, quiet_stdout)?;
         }
     }
-    if let Err(e) =
-        remove_container_opts_inner(target, args.force, args.volumes, !quiet_stdout)
-    {
+    if let Err(e) = remove_container_opts_inner(target, args.force, args.volumes, !quiet_stdout) {
         if args.ignore || args.force {
             return Ok(());
         }
@@ -6847,7 +6820,9 @@ pub fn rm_containers(args: &cli::RmArgs, quiet_stdout: bool) -> Result<()> {
         return Ok(());
     }
     if args.containers.is_empty() {
-        return Err(anyhow!("you must provide at least one container name or ID"));
+        return Err(anyhow!(
+            "you must provide at least one container name or ID"
+        ));
     }
     for c in &args.containers {
         if let Err(e) = rm_container_resolving_depend(c, args, quiet_stdout) {
@@ -7044,9 +7019,8 @@ fn remove_image_inner(
     ignore_container_id: Option<&str>,
 ) -> Result<()> {
     let img_store = ImageStore::new();
-    let img = find_image_with_shortname(&img_store, image, None).ok_or_else(|| {
-        anyhow!("Image '{}' not found", image)
-    })?;
+    let img = find_image_with_shortname(&img_store, image, None)
+        .ok_or_else(|| anyhow!("Image '{}' not found", image))?;
     let remove_query = img.qualified_name();
 
     if !force {
@@ -7182,14 +7156,13 @@ async fn create_only_container_after_pod_prep(
         ));
     }
 
-    let image_record =
-        resolve_container_image(
-            &args.image,
-            args.platform.as_deref(),
-            home_opt,
-            args.pull.as_deref(),
-        )
-        .await?;
+    let image_record = resolve_container_image(
+        &args.image,
+        args.platform.as_deref(),
+        home_opt,
+        args.pull.as_deref(),
+    )
+    .await?;
 
     validate_image_record_env(&image_record);
 
@@ -7306,13 +7279,7 @@ async fn create_only_container_after_pod_prep(
     if let Some(tz) = args.tz.last() {
         apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
     }
-    if !args.unsetenv_all
-        && !spec
-            .process
-            .env
-            .iter()
-            .any(|e| e.starts_with("HOME="))
-    {
+    if !args.unsetenv_all && !spec.process.env.iter().any(|e| e.starts_with("HOME=")) {
         spec.process.env.push("HOME=/".to_string());
     }
 
@@ -8627,9 +8594,7 @@ fn ensure_keep_id_passwd_entry(
         if parts.len() >= 4 && parts[2] == container_uid.to_string() && parts[0] == "root" {
             *line = format!(
                 "{}:x:{}:{}::{home}:/bin/sh",
-                name,
-                container_uid,
-                container_gid
+                name, container_uid, container_gid
             );
             replaced = true;
             break;
@@ -8642,9 +8607,7 @@ fn ensure_keep_id_passwd_entry(
     {
         lines.push(format!(
             "{}:x:{}:{}::{home}:/bin/sh",
-            name,
-            container_uid,
-            container_gid
+            name, container_uid, container_gid
         ));
     }
     if let Some(parent) = passwd_path.parent() {
@@ -8894,15 +8857,7 @@ fn ps_status_filter_matches(status: &ContainerStatus, filter: &str) -> bool {
 
 fn validate_ps_filter_key(key: &str) -> Result<()> {
     const VALID: &[&str] = &[
-        "status",
-        "name",
-        "ancestor",
-        "id",
-        "label",
-        "publish",
-        "expose",
-        "network",
-        "volume",
+        "status", "name", "ancestor", "id", "label", "publish", "expose", "network", "volume",
         "exited",
     ];
     if !VALID.contains(&key) {
@@ -9021,10 +8976,7 @@ fn apply_run_secrets(
     Ok(())
 }
 
-fn inspect_env_for_display(
-    env: &[String],
-    annotations: &HashMap<String, String>,
-) -> Vec<String> {
+fn inspect_env_for_display(env: &[String], annotations: &HashMap<String, String>) -> Vec<String> {
     let masked: Vec<String> = annotations
         .get("boxr.masked_env")
         .and_then(|s| serde_json::from_str(s).ok())
@@ -9167,10 +9119,7 @@ fn container_inspect_networks(
     let mut networks = serde_json::Map::new();
     for net in store.list() {
         if let Some(ep) = net.containers.get(container_id) {
-            networks.insert(
-                net.name.clone(),
-                network_endpoint_inspect_json(&net, ep),
-            );
+            networks.insert(net.name.clone(), network_endpoint_inspect_json(&net, ep));
         }
     }
     if networks.is_empty() && !network_mode.starts_with("container:") {
@@ -9531,10 +9480,7 @@ async fn clone_container(args: &cli::ContainerCloneArgs) -> Result<String> {
                 let infra = pod_store.infra_name(&pod_rec);
                 ann.insert("boxr.pod".to_string(), pod_id);
                 if pod_rec.share_net {
-                    ann.insert(
-                        "boxr.network".to_string(),
-                        format!("container:{infra}"),
-                    );
+                    ann.insert("boxr.network".to_string(), format!("container:{infra}"));
                 } else if let Some(net) = &pod_rec.network {
                     ann.insert("boxr.network".to_string(), net.clone());
                 } else {
@@ -9719,8 +9665,7 @@ fn apply_volume_ls_format_template(template: &str, v: &volume::VolumeRecord) -> 
     let mut line = template.to_string();
     for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
         if line.contains(pat) {
-            let quoted =
-                serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
+            let quoted = serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
             line = line.replace(pat, &quoted);
         }
     }
@@ -9773,8 +9718,7 @@ fn apply_ps_container_format_template(
     let mut line = template.to_string();
     for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
         if line.contains(pat) {
-            let quoted =
-                serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
+            let quoted = serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
             line = line.replace(pat, &quoted);
         }
     }
@@ -9818,8 +9762,7 @@ fn apply_ps_pod_format_template(template: &str, p: &pod::PodRecord) -> String {
     let mut line = template.to_string();
     for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
         if line.contains(pat) {
-            let quoted =
-                serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
+            let quoted = serde_json::to_string(&labels_flat).unwrap_or_else(|_| "\"\"".to_string());
             line = line.replace(pat, &quoted);
         }
     }
@@ -9930,11 +9873,7 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
         if part.is_empty() {
             continue;
         }
-        let key = if part == "ID" {
-            "Id"
-        } else {
-            part
-        };
+        let key = if part == "ID" { "Id" } else { part };
         if let Some(next) = curr.get(key).or_else(|| curr.get(part)) {
             curr = next;
         } else {
@@ -11409,9 +11348,7 @@ pub async fn handle_manifest(
     let parent_auth = args.registry_auth.authfile.as_deref().or(global_auth);
     match args.command {
         cli::ManifestAction::Inspect {
-            authfile,
-            image,
-            ..
+            authfile, image, ..
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
             let store = ImageStore::new();

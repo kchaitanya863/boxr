@@ -594,19 +594,18 @@ pub async fn start_exec_instance(
                         .unwrap_or(false);
 
                     let log_path = bundle.join(format!("exec-{}.log", exec_id));
-                    let code =
-                        crate::runtime::exec_in_bundle(
-                            &bundle,
-                            &cmd,
-                            &env,
-                            wd,
-                            user,
-                            detach,
-                            crate::runtime::ExecAttach::default(),
-                            None,
-                            &[],
-                        )
-                            .unwrap_or(1);
+                    let code = crate::runtime::exec_in_bundle(
+                        &bundle,
+                        &cmd,
+                        &env,
+                        wd,
+                        user,
+                        detach,
+                        crate::runtime::ExecAttach::default(),
+                        None,
+                        &[],
+                    )
+                    .unwrap_or(1);
                     let _ = fs::write(
                         bundle.join(format!("exec-{}.done", exec_id)),
                         code.to_string(),
