@@ -364,6 +364,34 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     pub fn reenable_setgroups_for_pid(pid: i32) {
         Self::write_setgroups_allow(pid);
     }
+
+    /// Join `anchor_pid`'s user namespace as namespaced root and write `allow` for `target_pid`.
+    /// Required when the caller lives in the initial user namespace (host `boxr exec` parent).
+    #[cfg(target_os = "linux")]
+    pub fn allow_setgroups_from_userns(anchor_pid: i32, target_pid: i32) -> Result<()> {
+        use nix::sched::{setns, CloneFlags};
+        use nix::sys::wait::waitpid;
+        use nix::unistd::{fork, ForkResult, Gid, Uid};
+
+        match unsafe { fork() }? {
+            ForkResult::Parent { child } => {
+                waitpid(child, None).context("setgroups userns helper wait")?;
+                Ok(())
+            }
+            ForkResult::Child => {
+                if let Ok(f) = std::fs::File::open(format!("/proc/{anchor_pid}/ns/user")) {
+                    let _ = setns(&f, CloneFlags::CLONE_NEWUSER);
+                }
+                let root_gid = Gid::from_raw(0);
+                let root_uid = Uid::from_raw(0);
+                let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
+                let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
+                let _ = fs::write("/proc/self/setgroups", "allow");
+                Self::write_setgroups_allow(target_pid);
+                std::process::exit(0);
+            }
+        }
+    }
 }
 
 /// Standard safe Linux Capabilities conforming to Docker/Podman default capability whitelist.

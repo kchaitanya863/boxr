@@ -1286,8 +1286,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         );
                         let mut ready = [0u8; 5];
                         let _ = gc_parent_sock.read_exact(&mut ready);
-                        crate::security::RootlessUserConfig::reenable_setgroups_for_pid(
-                            grandchild.as_raw(),
+                        become_effective_container_root();
+                        let _ = fs::write("/proc/self/setgroups", "allow");
+                        let _ = fs::write(
+                            format!("/proc/{}/setgroups", grandchild.as_raw()),
+                            "allow",
                         );
                         let _ = gc_parent_sock.write_all(b"done");
                         drop(gc_parent_sock);
@@ -2041,7 +2044,10 @@ fn exec_in_bundle_via_setns(
             parent_sock
                 .read_exact(&mut ready)
                 .context("exec child did not signal namespace join")?;
-            crate::security::RootlessUserConfig::reenable_setgroups_for_pid(child.as_raw());
+            let _ = crate::security::RootlessUserConfig::allow_setgroups_from_userns(
+                pid,
+                child.as_raw(),
+            );
             parent_sock
                 .write_all(b"done")
                 .context("Failed to notify exec child after setgroups allow")?;
