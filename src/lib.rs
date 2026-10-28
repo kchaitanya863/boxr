@@ -6089,6 +6089,17 @@ fn remove_container_opts_inner(
         let _ = stop_container(container, None);
     }
 
+    let c = match store.find(container) {
+        Some(c) => c,
+        None if force => return Ok(()),
+        None => {
+            return Err(anyhow!(
+                "no container with ID or name \"{}\" found: no such container",
+                container
+            ));
+        }
+    };
+
     if remove_volumes {
         prune_container_attached_volumes(PathBuf::from(&c.bundle_path));
     }
@@ -6106,7 +6117,11 @@ fn remove_container_opts_inner(
         }
     }
 
-    let removed = store.remove(container)?;
+    let removed = match store.remove(container) {
+        Ok(removed) => removed,
+        Err(e) if force && e.to_string().contains("not found") => return Ok(()),
+        Err(e) => return Err(e),
+    };
     let net_store = network::NetworkStore::new();
     let _ = net_store.cleanup_container_endpoints(&removed.id, &removed.name);
     let _ = guardrails::ProcessReaper::reap_stale_containers();
