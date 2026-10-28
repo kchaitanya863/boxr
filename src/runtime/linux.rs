@@ -693,9 +693,16 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         .trim()
         .to_string();
     let journald = log_driver == "journald";
+    let file_log = log_driver == "k8s-file" || log_driver == "json-file";
     let capture_path = fs::read_to_string(bundle_path.join("journald-capture.path"))
         .ok()
         .map(PathBuf::from);
+    let container_id = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let k8s_log_path = bundle_path.join(format!("{container_id}-ctr.log"));
 
     let conmon_bin = bundle_path.join("conmon");
     let mut cmd = std::process::Command::new(&conmon_bin);
@@ -703,9 +710,13 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
     cmd.stdin(Stdio::null());
 
     if detach {
-        let log_file = fs::File::create(bundle_path.join("logs.txt"))?;
-        let err_file = log_file.try_clone()?;
-        cmd.stdout(log_file).stderr(err_file);
+        if file_log {
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        } else {
+            let log_file = fs::File::create(bundle_path.join("logs.txt"))?;
+            let err_file = log_file.try_clone()?;
+            cmd.stdout(log_file).stderr(err_file);
+        }
     } else if journald {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     } else {
@@ -730,7 +741,36 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                     let _ = cgroup_mgr.add_process(child_pid);
                 }
             }
-            let status = child.wait()?;
+            let status = if detach && file_log {
+                if let Some(parent) = k8s_log_path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let path = k8s_log_path.clone();
+                let h_out = stdout.map(|pipe| {
+                    let path = path.clone();
+                    thread::spawn(move || {
+                        crate::logging::tee_k8s_stream(pipe, path, "stdout", false);
+                    })
+                });
+                let h_err = stderr.map(|pipe| {
+                    let path = k8s_log_path.clone();
+                    thread::spawn(move || {
+                        crate::logging::tee_k8s_stream(pipe, path, "stderr", false);
+                    })
+                });
+                let status = child.wait()?;
+                if let Some(h) = h_out {
+                    let _ = h.join();
+                }
+                if let Some(h) = h_err {
+                    let _ = h.join();
+                }
+                status
+            } else {
+                child.wait()?
+            };
             let exit_code = status.code().unwrap_or(1);
             let _ = fs::write(bundle_path.join("boxr-exitcode"), exit_code.to_string());
             if container_id.is_empty()

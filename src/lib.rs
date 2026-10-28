@@ -3770,10 +3770,22 @@ fn wait_for_container_stopped(_bundle_path: &Path, _timeout: std::time::Duration
 }
 
 pub fn container_logs(args: &LogsArgs) -> Result<()> {
+    if args.containers.is_empty() {
+        return Err(anyhow!(
+            "you must provide at least one container name or ID"
+        ));
+    }
+    if args.containers.len() == 1 {
+        return container_logs_one(args, &args.containers[0]);
+    }
+    container_logs_multi(args)
+}
+
+fn container_logs_one(args: &LogsArgs, container: &str) -> Result<()> {
     let store = ContainerStore::new();
     let rec = store
-        .find(&args.container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+        .find(container)
+        .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
 
     let bundle_path = PathBuf::from(&rec.bundle_path);
     let spec: Option<Spec> = fs::read_to_string(bundle_path.join("config.json"))
@@ -3792,23 +3804,6 @@ pub fn container_logs(args: &LogsArgs) -> Result<()> {
         );
     }
 
-    let ctr_log = if annotations
-        .get("boxr.log_driver")
-        .is_some_and(|d| d == "journald")
-    {
-        annotations
-            .get("boxr.journald_capture")
-            .map(PathBuf::from)
-            .filter(|p| p.exists())
-    } else {
-        annotations
-            .get("boxr.log_path")
-            .map(PathBuf::from)
-            .filter(|p| p.exists())
-    };
-    let log_path = PathBuf::from(&rec.bundle_path).join("logs.txt");
-    let rootfs_log = bundle_path.join("rootfs").join("logs.txt");
-
     let print_line = |line: &str| {
         if args.timestamps {
             println!("{} {}", Utc::now().to_rfc3339(), line);
@@ -3817,85 +3812,133 @@ pub fn container_logs(args: &LogsArgs) -> Result<()> {
         }
     };
 
-    let content = if let Some(path) = ctr_log {
-        logging::decode_k8s_log_file(&path)?
-    } else if log_path.exists()
-        && fs::metadata(&log_path)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
-    {
-        fs::read_to_string(&log_path)?
-    } else if rootfs_log.exists() {
-        fs::read_to_string(&rootfs_log)?
-    } else if log_path.exists() {
-        fs::read_to_string(&log_path)?
-    } else {
-        // Podman: no output when the container has never produced logs (e.g. `create` only).
-        return Ok(());
+    if let Some(path) = logging::resolve_container_log_path(&bundle_path, &annotations) {
+        if annotations
+            .get("boxr.log_driver")
+            .is_some_and(|d| d == "journald")
+        {
+            let content = logging::decode_k8s_log_file(&path)?;
+            if !content.is_empty() {
+                for l in content.lines() {
+                    print_line(l);
+                }
+            }
+        } else if path.to_string_lossy().contains("-ctr.log") || logging::is_k8s_log_path(&path) {
+            let store_id = rec.id.clone();
+            return logging::stream_k8s_container_logs(
+                &path,
+                args.since.as_deref(),
+                args.until.as_deref(),
+                args.tail,
+                args.follow,
+                args.timestamps,
+                move || {
+                    ContainerStore::new()
+                        .find(&store_id)
+                        .is_some_and(|c| matches!(c.status, ContainerStatus::Running))
+                },
+            );
+        } else if path.exists() {
+            let output = logging::read_log_output(
+                &path,
+                args.since.as_deref(),
+                args.until.as_deref(),
+                args.tail,
+            )?;
+            if !output.is_empty() {
+                for l in output.lines() {
+                    print_line(l);
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    Ok(())
+}
+
+fn container_logs_multi(args: &LogsArgs) -> Result<()> {
+    let store = ContainerStore::new();
+    struct LogTarget {
+        prefix: String,
+        path: PathBuf,
+        id: String,
+    }
+    let mut targets = Vec::new();
+    for name in &args.containers {
+        let rec = store
+            .find(name)
+            .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
+        let bundle_path = PathBuf::from(&rec.bundle_path);
+        let spec: Option<Spec> = fs::read_to_string(bundle_path.join("config.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+        let annotations = spec
+            .as_ref()
+            .and_then(|s| s.annotations.clone())
+            .unwrap_or_default();
+        let path = logging::resolve_container_log_path(&bundle_path, &annotations)
+            .ok_or_else(|| anyhow!("no logs for container {}", name))?;
+        targets.push(LogTarget {
+            prefix: rec.id[..rec.id.len().min(12)].to_string(),
+            path,
+            id: rec.id.clone(),
+        });
+    }
+
+    let print_prefixed = |prefix: &str, line: &str| {
+        if args.timestamps {
+            println!("{} {} {}", Utc::now().to_rfc3339(), prefix, line);
+        } else {
+            println!("{} {}", prefix, line);
+        }
     };
 
-    let mut lines: Vec<&str> = content.lines().collect();
-
-    if let Some(since_str) = &args.since {
-        if let Ok(since_dt) = chrono::DateTime::parse_from_rfc3339(since_str) {
-            lines.retain(|l| {
-                if let Some((ts_part, _)) = l.split_once(' ') {
-                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_part) {
-                        return dt >= since_dt;
-                    }
-                }
-                true
-            });
+    for t in &targets {
+        let output = logging::read_log_output(
+            &t.path,
+            args.since.as_deref(),
+            args.until.as_deref(),
+            args.tail,
+        )?;
+        for line in output.split('\n') {
+            if line.is_empty() && output.ends_with('\n') {
+                continue;
+            }
+            print_prefixed(&t.prefix, line);
         }
-    }
-
-    if let Some(until_str) = &args.until {
-        if let Ok(until_dt) = chrono::DateTime::parse_from_rfc3339(until_str) {
-            lines.retain(|l| {
-                if let Some((ts_part, _)) = l.split_once(' ') {
-                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_part) {
-                        return dt <= until_dt;
-                    }
-                }
-                true
-            });
-        }
-    }
-
-    if let Some(tail) = args.tail {
-        if tail == 0 {
-            lines.clear();
-        } else if lines.len() > tail {
-            lines = lines[lines.len() - tail..].to_vec();
-        }
-    }
-
-    for l in lines {
-        print_line(l);
     }
 
     if args.follow {
-        let mut pos = fs::metadata(&log_path)?.len();
+        let mut printed: std::collections::HashMap<String, usize> = targets
+            .iter()
+            .map(|t| {
+                let n = logging::read_k8s_log_entries(&t.path)
+                    .map(|e| logging::reconstruct_k8s_lines(&e).len())
+                    .unwrap_or(0);
+                (t.id.clone(), n)
+            })
+            .collect();
         loop {
-            if let Some(current) = store.find(&rec.id) {
-                if !matches!(current.status, ContainerStatus::Running) {
-                    break;
+            let mut any_running = false;
+            for t in &targets {
+                if let Some(c) = store.find(&t.id) {
+                    if matches!(c.status, ContainerStatus::Running) {
+                        any_running = true;
+                    }
+                }
+                if let Ok(entries) = logging::read_k8s_log_entries(&t.path) {
+                    let lines = logging::reconstruct_k8s_lines(&entries);
+                    let start = *printed.get(&t.id).unwrap_or(&0);
+                    for line in lines.iter().skip(start) {
+                        print_prefixed(&t.prefix, &String::from_utf8_lossy(line));
+                    }
+                    printed.insert(t.id.clone(), lines.len());
                 }
             }
-
-            let meta = fs::metadata(&log_path)?;
-            let new_len = meta.len();
-            if new_len > pos {
-                use std::io::{BufRead, Seek};
-                let mut file = fs::File::open(&log_path)?;
-                file.seek(std::io::SeekFrom::Start(pos))?;
-                let reader = std::io::BufReader::new(file);
-                for l in reader.lines().flatten() {
-                    print_line(&l);
-                }
-                pos = new_len;
+            if !any_running {
+                break;
             }
-
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }

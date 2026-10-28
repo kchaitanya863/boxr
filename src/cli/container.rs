@@ -697,19 +697,20 @@ pub struct LogsArgs {
     #[arg(long = "details")]
     pub details: bool,
 
-    /// Show logs since timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m)
-    #[arg(long = "since")]
+    /// Show logs since timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m, -1s)
+    #[arg(long = "since", allow_hyphen_values = true)]
     pub since: Option<String>,
 
-    /// Show logs before a timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m)
-    #[arg(long = "until")]
+    /// Show logs before a timestamp (e.g. 2013-01-02T13:23:37Z) or relative (e.g. 42m, 3s)
+    #[arg(long = "until", allow_hyphen_values = true)]
     pub until: Option<String>,
 
     /// Number of lines to show from the end of the logs
     #[arg(short = 'n', long = "tail")]
     pub tail: Option<usize>,
 
-    pub container: String,
+    #[arg(required = true)]
+    pub containers: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
