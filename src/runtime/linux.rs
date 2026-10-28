@@ -1703,6 +1703,21 @@ fn run_container_child(
                 ));
             }
         }
+        if m.tmpfs_mount_data.is_some() {
+            let data = m.tmpfs_mount_data.as_deref().unwrap_or("");
+            let _ = mount(
+                Some("tmpfs"),
+                &target,
+                Some("tmpfs"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+                if data.is_empty() {
+                    None::<&str>
+                } else {
+                    Some(data)
+                },
+            );
+            continue;
+        }
         let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
         mount(
             Some(&m.source),

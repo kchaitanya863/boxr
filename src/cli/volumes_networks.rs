@@ -108,8 +108,8 @@ pub struct VolumeRmArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
     /// Accepted for Podman teardown compatibility (ignored for volumes)
-    #[arg(short = 't', long = "time", hide = true)]
-    pub time: Option<u32>,
+    #[arg(short = 't', long = "time", hide = true, allow_hyphen_values = true)]
+    pub time: Option<i32>,
     pub names: Vec<String>,
 }
 

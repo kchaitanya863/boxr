@@ -133,6 +133,7 @@ fn default_run_args(image: &str) -> RunArgs {
         tty: None,
         detach: false,
         rm: false,
+        rmi: false,
         name: None,
         env: Vec::new(),
         unsetenv: Vec::new(),
@@ -240,6 +241,7 @@ fn default_run_args(image: &str) -> RunArgs {
         volumes_from: Vec::new(),
         pod: None,
         timeout: None,
+        tz: Vec::new(),
         image: image.to_string(),
         command: vec!["true".to_string()],
     }

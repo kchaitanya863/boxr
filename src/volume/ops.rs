@@ -151,6 +151,12 @@ impl VolumeOps {
     }
 
     pub fn mount_volume(name: &str) -> Result<String> {
+        #[cfg(unix)]
+        if unsafe { libc::getuid() != 0 } {
+            crate::cli::usage_errors::exit_usage_error(
+                "cannot run command \"podman volume mount\" in rootless mode, must execute `podman unshare` first",
+            );
+        }
         let store = VolumeStore::new();
         let vol = store
             .find(name)

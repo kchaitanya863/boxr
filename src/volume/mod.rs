@@ -71,16 +71,19 @@ fn is_volume_mount_option_token(token: &str) -> bool {
     )
 }
 
-/// Destination path and mount flags from `dest:z,ro` / `dest:noexec` style volume suffixes.
-pub fn parse_volume_dest_and_options(rest: &str) -> (String, bool, bool) {
-    let mut read_only = rest.split(',').any(|p| p.trim() == "ro");
-    let mut noexec = rest.split(',').any(|p| p.trim() == "noexec");
-    let head = rest.split(',').next().unwrap_or(rest).trim();
+/// Destination path and mount flags from `dest:z,ro` / `dest:noexec` / `dest:U` style volume suffixes.
+pub fn parse_volume_dest_and_options(rest: &str) -> (String, bool, bool, bool) {
+    let parts: Vec<&str> = rest.split(',').map(|p| p.trim()).collect();
+    let mut read_only = parts.iter().any(|p| *p == "ro");
+    let mut noexec = parts.iter().any(|p| *p == "noexec");
+    let mut chown_u = parts.iter().any(|p| *p == "U");
+    let head = parts.first().map(|s| *s).unwrap_or(rest).trim();
     let dest = if let Some((path, opt)) = head.rsplit_once(':') {
         let opt = opt.trim();
         if !path.is_empty() && path.starts_with('/') && is_volume_mount_option_token(opt) {
             read_only = read_only || opt == "ro";
             noexec = noexec || opt == "noexec";
+            chown_u = chown_u || opt == "U";
             path.trim().to_string()
         } else {
             head.to_string()
@@ -88,7 +91,41 @@ pub fn parse_volume_dest_and_options(rest: &str) -> (String, bool, bool) {
     } else {
         head.to_string()
     };
-    (dest, read_only, noexec)
+    (dest, read_only, noexec, chown_u)
+}
+
+fn default_volume_needs_flags() -> bool {
+    true
+}
+
+pub fn tmpfs_mount_data_from_volume_options(options: &HashMap<String, String>) -> Option<String> {
+    if options.get("type").map(|t| t.as_str()) != Some("tmpfs") {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(o) = options.get("o") {
+        for piece in o.split(',') {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                continue;
+            }
+            if piece.starts_with("size=") {
+                let size = piece.trim_start_matches("size=");
+                if size.ends_with('M') || size.ends_with('m') {
+                    if let Ok(n) = size[..size.len() - 1].parse::<u64>() {
+                        parts.push(format!("size={}k", n * 1024));
+                        continue;
+                    }
+                }
+            }
+            parts.push(piece.to_string());
+        }
+    }
+    if parts.is_empty() {
+        Some(String::new())
+    } else {
+        Some(parts.join(","))
+    }
 }
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -109,6 +146,10 @@ pub struct VolumeRecord {
     /// True when created without an explicit user-provided name (`podman volume create`).
     #[serde(default)]
     pub anonymous: bool,
+    #[serde(default = "default_volume_needs_flags")]
+    pub needs_copy_up: bool,
+    #[serde(default = "default_volume_needs_flags")]
+    pub needs_chown: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -121,13 +162,20 @@ pub struct VolumeStore {
     volumes_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MountSpec {
     pub source: PathBuf,
     pub destination: String,
     pub read_only: bool,
     #[serde(default)]
     pub noexec: bool,
+    #[serde(default)]
+    pub chown_u: bool,
+    /// When set, mount as tmpfs inside the container instead of bind-mounting `_data`.
+    #[serde(default)]
+    pub tmpfs_mount_data: Option<String>,
+    #[serde(default)]
+    pub volume_name: Option<String>,
     pub is_volume: bool,
 }
 
@@ -308,6 +356,8 @@ impl VolumeStore {
                 scope: scope.to_string(),
                 options: options.unwrap_or_default(),
                 anonymous: !user_provided_name,
+                needs_copy_up: true,
+                needs_chown: true,
             };
 
             data.volumes.push(record.clone());
@@ -360,8 +410,17 @@ impl VolumeStore {
         } else {
             for c in &containers {
                 if volume_used_by_container(&c.bundle_path, name) {
-                    let _ = crate::stop_container(&c.id, None);
-                    let _ = crate::remove_container_opts(&c.id, true, false);
+                    if matches!(
+                        c.status,
+                        crate::storage::ContainerStatus::Running
+                            | crate::storage::ContainerStatus::Paused
+                    ) {
+                        let _ = c_store.update_status(
+                            &c.id,
+                            crate::storage::ContainerStatus::Exited(0),
+                        );
+                    }
+                    let _ = c_store.remove(&c.id);
                 }
             }
         }
@@ -498,23 +557,23 @@ impl VolumeStore {
             return Err(anyhow!("Volume specification cannot be empty"));
         }
 
-        let (source_str, dest_str, read_only, noexec) = if let Some(idx) = trimmed.find(':') {
+        let (source_str, dest_str, read_only, noexec, chown_u) = if let Some(idx) = trimmed.find(':') {
             let source_str = trimmed[..idx].to_string();
-            let (dest_str, read_only, noexec) =
+            let (dest_str, read_only, noexec, chown_u) =
                 parse_volume_dest_and_options(&trimmed[idx + 1..]);
-            (source_str, dest_str, read_only, noexec)
+            (source_str, dest_str, read_only, noexec, chown_u)
         } else if trimmed.starts_with('/') {
             // Podman/Docker: `-v /container/path` creates an anonymous volume at that path.
             let vol = self.create(None, None)?;
             return Ok(MountSpec {
                 source: PathBuf::from(vol.mountpoint),
                 destination: trimmed.to_string(),
-                read_only: false,
-                noexec: false,
                 is_volume: true,
+                volume_name: Some(vol.name),
+                ..Default::default()
             });
         } else {
-            (String::new(), trimmed.to_string(), false, false)
+            (String::new(), trimmed.to_string(), false, false, false)
         };
 
         if dest_str.trim().is_empty() {
@@ -537,6 +596,8 @@ impl VolumeStore {
                 read_only,
                 noexec,
                 is_volume: true,
+                volume_name: Some(vol.name),
+                ..Default::default()
             });
         }
 
@@ -580,7 +641,9 @@ impl VolumeStore {
                 destination: dest_str.to_string(),
                 read_only,
                 noexec,
+                chown_u,
                 is_volume: false,
+                ..Default::default()
             })
         } else {
             // Named volume
@@ -588,14 +651,32 @@ impl VolumeStore {
                 Some(v) => v,
                 None => self.create(Some(&source_str), None)?,
             };
+            let tmpfs_mount_data = tmpfs_mount_data_from_volume_options(&record.options);
             Ok(MountSpec {
                 source: PathBuf::from(record.mountpoint),
                 destination: dest_str.to_string(),
                 read_only,
                 noexec,
+                chown_u,
+                tmpfs_mount_data,
+                volume_name: Some(record.name.clone()),
                 is_volume: true,
             })
         }
+    }
+
+    pub fn set_volume_copy_flags(&self, name: &str, needs_copy_up: bool, needs_chown: bool) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            if let Some(v) = data.volumes.iter_mut().find(|v| v.name == name) {
+                v.needs_copy_up = needs_copy_up;
+                v.needs_chown = needs_chown;
+                self.save_unlocked(&data)?;
+                Ok(())
+            } else {
+                Err(anyhow!("Volume '{}' not found", name))
+            }
+        })
     }
 }
 

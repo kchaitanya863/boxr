@@ -2540,6 +2540,14 @@ pub async fn run_container_with_output(
         None
     };
 
+    apply_volume_mount_prep(
+        &vol_store,
+        &parsed_mounts,
+        &cow_bundle.merged_dir,
+        spec.process.user.uid,
+        spec.process.user.gid,
+    )?;
+
     // Execute the container with restart policy support
     let mut exit_code = execute_bundle(
         &bundle_dir,
@@ -4761,6 +4769,8 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 "Name": vol.name,
                 "Options": vol.options,
                 "Scope": vol.scope,
+                "NeedsCopyUp": vol.needs_copy_up,
+                "NeedsChown": vol.needs_chown,
             });
             if let Some(fmt) = &format {
                 println!("{}", evaluate_simple_template(fmt, &compat));
@@ -7514,6 +7524,107 @@ fn prune_container_attached_volumes(bundle_path: PathBuf) {
     }
 }
 
+#[cfg(unix)]
+fn chown_mount_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    use nix::unistd::{chown, Gid, Uid};
+    let meta = fs::metadata(path)?;
+    chown(path, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))?;
+    if meta.is_dir() {
+        for entry in fs::read_dir(path)? {
+            chown_mount_path(&entry?.path(), uid, gid)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            copy_dir_contents(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+        return Ok(());
+    }
+    if meta.file_type().is_symlink() {
+        let link_target = fs::read_link(src)?;
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            if dst.exists() {
+                let _ = fs::remove_file(dst);
+            }
+            symlink(link_target, dst)?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(src, dst)?;
+    Ok(())
+}
+
+fn image_mount_has_content(merged_rootfs: &Path, dest: &str) -> bool {
+    let rel = dest.trim_start_matches('/');
+    let path: PathBuf = if rel.is_empty() {
+        merged_rootfs.to_path_buf()
+    } else {
+        merged_rootfs.join(rel)
+    };
+    if !path.exists() {
+        return false;
+    }
+    if path.is_file() {
+        return true;
+    }
+    fs::read_dir(&path)
+        .map(|rd| rd.filter(|e| e.is_ok()).count() > 0)
+        .unwrap_or(false)
+}
+
+fn apply_volume_mount_prep(
+    vol_store: &VolumeStore,
+    mounts: &[volume::MountSpec],
+    merged_rootfs: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<()> {
+    for m in mounts {
+        if m.chown_u && !m.is_volume {
+            #[cfg(unix)]
+            {
+                let _ = chown_mount_path(&m.source, uid, gid);
+            }
+        }
+        if !m.is_volume {
+            continue;
+        }
+        let vol_name = match &m.volume_name {
+            Some(n) => n.clone(),
+            None => continue,
+        };
+        let vol = match vol_store.find(&vol_name) {
+            Some(v) => v,
+            None => continue,
+        };
+        if !vol.needs_copy_up {
+            continue;
+        }
+        if !image_mount_has_content(merged_rootfs, &m.destination) {
+            continue;
+        }
+        let src = merged_rootfs.join(m.destination.trim_start_matches('/'));
+        copy_dir_contents(&src, &m.source)?;
+        let _ = vol_store.set_volume_copy_flags(&vol_name, false, false);
+    }
+    Ok(())
+}
+
 fn volume_ls_json_entry(v: &volume::VolumeRecord) -> serde_json::Value {
     serde_json::json!({
         "Name": v.name,
@@ -7523,6 +7634,8 @@ fn volume_ls_json_entry(v: &volume::VolumeRecord) -> serde_json::Value {
         "Labels": v.labels,
         "Scope": v.scope,
         "Options": v.options,
+        "NeedsCopyUp": v.needs_copy_up,
+        "NeedsChown": v.needs_chown,
     })
 }
 
