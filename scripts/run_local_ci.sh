@@ -20,6 +20,6 @@ echo "== podman parity blackbox =="
 cargo test --test podman_parity_blackbox_test -- --test-threads=1
 
 echo "== full test suite (sequential) =="
-cargo test --all -- --test-threads=1
+BOXR_FORCE_EMBEDDED_USERNET=1 cargo test --all -- --test-threads=1
 
 echo "Local CI gate: OK"

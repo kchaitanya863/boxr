@@ -38,6 +38,19 @@ impl Default for NetworkMode {
 impl NetworkMode {
     /// When set, `--network usernet` uses the embedded TAP stack even if passt is installed (tests/CI).
     pub fn force_embedded_usernet() -> bool {
+        if cfg!(target_os = "linux") {
+            if std::env::var("CI").is_ok() {
+                if matches!(
+                    std::env::var("BOXR_FORCE_EMBEDDED_USERNET").as_deref(),
+                    Ok("0") | Ok("false") | Ok("FALSE") | Ok("no")
+                ) {
+                    return false;
+                }
+                if std::env::var("BOXR_FORCE_EMBEDDED_USERNET").is_err() {
+                    return true;
+                }
+            }
+        }
         matches!(
             std::env::var("BOXR_FORCE_EMBEDDED_USERNET").as_deref(),
             Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")

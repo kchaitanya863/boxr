@@ -1137,7 +1137,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 let mut pasta_child: Option<std::process::Child> = None;
                 if use_pasta {
                     let mut net_sync = [0u8; 5];
-                    if parent_sock.read_exact(&mut net_sync).is_ok() && &net_sync == b"netok" {
+                    let got_netok = parent_sock.read_exact(&mut net_sync).is_ok()
+                        && &net_sync == b"netok";
+                    if got_netok {
                         let pasta_cfg =
                             crate::network::pasta::PastaConfig::for_pid(child.as_raw(), &ports);
                         pasta_child = crate::network::pasta::PastaDriver::spawn(&pasta_cfg)

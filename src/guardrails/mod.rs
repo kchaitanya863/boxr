@@ -352,12 +352,20 @@ impl ProcessReaper {
 
             let vm_alive = check_pid_alive(&vm_pid_file);
             let cont_alive = check_pid_alive(&cont_pid_file);
-            let is_alive = match (vm_alive, cont_alive) {
-                (Some(true), _) | (_, Some(true)) => true,
-                (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => false,
-                (None, None) => {
-                    // Missing pid files during startup; do not reap a Running record yet.
-                    true
+            // Detached conmon may restart the trampoline while vm.pid is briefly stale.
+            let conmon_supervising = check_pid_alive(&bundle.join("conmon.pid")) == Some(true);
+            let is_alive = if conmon_supervising {
+                true
+            } else {
+                match (vm_alive, cont_alive) {
+                    (Some(true), _) | (_, Some(true)) => true,
+                    (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => {
+                        false
+                    }
+                    (None, None) => {
+                        // Missing pid files during startup; do not reap a Running record yet.
+                        true
+                    }
                 }
             };
 
@@ -588,6 +596,52 @@ mod tests {
 
         let _ = store.remove("reap-test-alive-1234");
         let _ = unsafe { libc::kill(child_pid, libc::SIGKILL) };
+    }
+
+    #[test]
+    fn test_process_reaper_preserves_running_while_conmon_alive() {
+        use crate::storage::{ContainerRecord, ContainerStatus, ContainerStore};
+        use chrono::Utc;
+
+        let temp = tempdir().unwrap();
+        let bundle_dir = temp.path().join("conmon-bundle");
+        fs::create_dir_all(&bundle_dir).unwrap();
+
+        let mut conmon = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        fs::write(
+            bundle_dir.join("conmon.pid"),
+            format!("{}", conmon.id()),
+        )
+        .unwrap();
+        fs::write(bundle_dir.join("vm.pid"), "99999999").unwrap();
+
+        let store = ContainerStore::new();
+        let record = ContainerRecord {
+            id: "reap-conmon-1234".to_string(),
+            name: "reap-conmon".to_string(),
+            image: "alpine:latest".to_string(),
+            command: vec!["sleep".to_string()],
+            created_at: Utc::now(),
+            status: ContainerStatus::Running,
+            bundle_path: bundle_dir.to_string_lossy().to_string(),
+            restart_policy: crate::health::RestartPolicy::No,
+            health_status: crate::health::HealthStatus::None,
+            restart_count: 0,
+            ports: Vec::new(),
+            exposed_ports: Vec::new(),
+        };
+        store.add(record).unwrap();
+
+        let _ = ProcessReaper::reap_stale_containers();
+        let cont = store.find("reap-conmon-1234").unwrap();
+        assert_eq!(cont.status, ContainerStatus::Running);
+
+        let _ = store.remove("reap-conmon-1234");
+        let _ = conmon.kill();
+        let _ = conmon.wait();
     }
 
     #[test]
