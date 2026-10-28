@@ -926,30 +926,34 @@ pub fn run_trampoline_exec(args: &[String]) -> Result<i32> {
 }
 
 fn resolve_container_pid(bundle_path: &Path) -> Option<i32> {
-    let target_pid = if let Ok(pid_str) = fs::read_to_string(bundle_path.join("container.pid")) {
-        pid_str.trim().parse::<i32>().ok()
-    } else {
-        None
-    };
-
-    target_pid.or_else(|| {
-        if let Ok(pid_str) = fs::read_to_string(bundle_path.join("vm.pid")) {
-            let pid = pid_str.trim().parse::<i32>().ok()?;
-            let proc_task = format!("/proc/{}/task/{}/children", pid, pid);
-            if let Ok(children) = fs::read_to_string(&proc_task) {
-                if let Some(first_child) = children.split_whitespace().next() {
-                    return first_child.parse::<i32>().ok();
+    if let Ok(pid_str) = fs::read_to_string(bundle_path.join("container.pid")) {
+        if let Ok(p) = pid_str.trim().parse::<i32>() {
+            if unsafe { libc::kill(p, 0) == 0 } {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(pid_str) = fs::read_to_string(bundle_path.join("vm.pid")) {
+        let pid = pid_str.trim().parse::<i32>().ok()?;
+        if unsafe { libc::kill(pid, 0) != 0 } {
+            return None;
+        }
+        let proc_task = format!("/proc/{}/task/{}/children", pid, pid);
+        if let Ok(children) = fs::read_to_string(&proc_task) {
+            for child in children.split_whitespace() {
+                if let Ok(c) = child.parse::<i32>() {
+                    if unsafe { libc::kill(c, 0) == 0 } {
+                        return Some(c);
+                    }
                 }
             }
-            Some(pid)
-        } else {
-            None
         }
-    })
+    }
+    None
 }
 
 fn wait_for_live_container_pid(bundle_path: &Path) -> Result<i32> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if let Some(p) = resolve_container_pid(bundle_path) {
             if unsafe { libc::kill(p, 0) == 0 } {
@@ -1032,9 +1036,7 @@ fn apply_exec_user_credentials(bundle_path: &Path, user: &str) {
 }
 
 pub fn bundle_process_is_alive(bundle_path: &Path) -> bool {
-    resolve_container_pid(bundle_path)
-        .map(|pid| unsafe { libc::kill(pid, 0) == 0 })
-        .unwrap_or(false)
+    resolve_container_pid(bundle_path).is_some()
 }
 
 fn wrap_command_for_umask(command: &[String], umask: u32) -> Vec<String> {
@@ -1070,8 +1072,9 @@ pub fn exec_in_bundle(
     };
 
     let cred_ids = user.and_then(|u| resolve_exec_uid_gid(bundle_path, u));
+    let needs_setns_credentials = user.is_some_and(|u| u.contains(':'));
     if let Some((uid, gid)) = cred_ids {
-        if uid != 0 || gid != 0 {
+        if needs_setns_credentials || uid != 0 || gid != 0 {
             return exec_in_bundle_via_setns(
                 bundle_path,
                 pid,
@@ -1104,9 +1107,6 @@ pub fn exec_in_bundle(
         cmd.arg("-U");
     }
     cmd.args(["-m", "-p", "-u", "--preserve-credentials"]);
-    if cred_ids == Some((0, 0)) {
-        cmd.args(["--setuid", "0", "--setgid", "0"]);
-    }
     if let Some(wd) = workdir {
         cmd.arg(format!("--wd={}", wd));
     }
@@ -1177,6 +1177,20 @@ pub fn exec_in_bundle(
             }
             if !msg.is_empty() {
                 eprintln!("{}", msg);
+            }
+            if code != 0 && (stderr.contains("nsenter") || stdout.is_empty() && msg.contains("nsenter")) {
+                return exec_in_bundle_via_setns(
+                    bundle_path,
+                    pid,
+                    &command,
+                    env,
+                    workdir,
+                    user,
+                    detach,
+                    attach,
+                    exec_pid_path,
+                    umask,
+                );
             }
             return Ok(code);
         }
@@ -1284,6 +1298,15 @@ fn exec_in_bundle_via_setns(
                         std::env::set_var(k, v);
                     }
                 }
+            }
+            if !Path::new("/proc/self").exists() {
+                let _ = nix::mount::mount(
+                    Some("proc"),
+                    "/proc",
+                    Some("proc"),
+                    nix::mount::MsFlags::empty(),
+                    None::<&str>,
+                );
             }
             if let Some(u) = user {
                 apply_exec_user_credentials(bundle_path, u);
