@@ -127,6 +127,10 @@ pub struct RunArgs {
     #[arg(long = "entrypoint")]
     pub entrypoint: Option<String>,
 
+    /// Set timezone in container
+    #[arg(long = "tz", action = clap::ArgAction::Append)]
+    pub tz: Vec<String>,
+
     /// Size of /dev/shm
     #[arg(long = "shm-size")]
     pub shm_size: Option<String>,
@@ -699,7 +703,7 @@ pub struct PsArgs {
     pub no_trunc: bool,
 
     /// Format output using a custom template (e.g. json, table)
-    #[arg(long = "format")]
+    #[arg(long = "format", allow_hyphen_values = true)]
     pub format: Option<String>,
 
     /// Show n last created containers (includes all states)

@@ -181,6 +181,46 @@ fn run_dir_bind_blocks_containerenv(spec: &Spec, mounts: &[volume::MountSpec]) -
     false
 }
 
+fn apply_container_tz(tz: &str, spec: &mut Spec, bundle_rootfs: &Path) {
+    spec.process.env.retain(|e| !e.starts_with("TZ="));
+    if tz == "local" {
+        let host_local = Path::new("/etc/localtime");
+        if host_local.exists() {
+            spec.mounts.push(oci::runtime::Mount {
+                destination: "/etc/localtime".to_string(),
+                mount_type: "bind".to_string(),
+                source: host_local.to_string_lossy().to_string(),
+                options: Some(vec![
+                    "ro".to_string(),
+                    "nosuid".to_string(),
+                    "nodev".to_string(),
+                ]),
+            });
+        }
+        return;
+    }
+    spec.process.env.push(format!("TZ={}", tz));
+    let zone_in_rootfs = bundle_rootfs.join("usr/share/zoneinfo").join(tz);
+    let host_zone = Path::new("/usr/share/zoneinfo").join(tz);
+    let zone_source = if zone_in_rootfs.exists() {
+        zone_in_rootfs
+    } else if host_zone.exists() {
+        host_zone
+    } else {
+        return;
+    };
+    spec.mounts.push(oci::runtime::Mount {
+        destination: "/etc/localtime".to_string(),
+        mount_type: "bind".to_string(),
+        source: zone_source.to_string_lossy().to_string(),
+        options: Some(vec![
+            "ro".to_string(),
+            "nosuid".to_string(),
+            "nodev".to_string(),
+        ]),
+    });
+}
+
 fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     if args.unsetenv_all {
         spec.process.env.clear();
@@ -1346,10 +1386,46 @@ pub fn load_image_archive_transport(path: &Path, home: &Path) -> Result<ImageRec
         .ok_or_else(|| anyhow!("no images found in archive {}", path.display()))
 }
 
+fn find_image_with_shortname(
+    store: &ImageStore,
+    query: &str,
+    platform: Option<&str>,
+) -> Option<ImageRecord> {
+    if let Some(rec) = store.find_with_platform(query, platform) {
+        return Some(rec);
+    }
+    if query.contains('/') || query.contains('@') {
+        return None;
+    }
+    for candidate in [
+        format!("localhost/{}:latest", query),
+        format!("localhost/{}", query),
+        format!("{}:latest", query),
+        format!("docker.io/library/{}:latest", query),
+    ] {
+        if let Some(rec) = store.find_with_platform(&candidate, platform) {
+            return Some(rec);
+        }
+    }
+    store
+        .list()
+        .into_iter()
+        .find(|rec| {
+            rec.reference == query
+                || rec
+                    .reference
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|short| short == query)
+        })
+        .and_then(|rec| store.find_with_platform(&rec.qualified_name(), platform))
+}
+
 async fn resolve_container_image(
     image_str: &str,
     target_platform: Option<&str>,
     home: Option<&Path>,
+    pull: Option<&str>,
 ) -> Result<ImageRecord> {
     let home_path = home.map(|p| p.to_path_buf()).unwrap_or_else(storage::boxr_home);
     if let Some(path) = archive_transport_path(image_str) {
@@ -1359,20 +1435,25 @@ async fn resolve_container_image(
         Some(h) => ImageStore::with_home(h.to_path_buf()),
         None => ImageStore::new(),
     };
-    match image_store.find_with_platform(image_str, target_platform) {
-        Some(record) if validate_image_record(&record) => Ok(record),
-        _ => {
-            if let Some(plat) = target_platform {
-                pull_user_message(format!(
-                    "Unable to find image '{}' ({}) locally",
-                    image_str,
-                    plat
-                ));
+    let local_image = find_image_with_shortname(&image_store, image_str, target_platform);
+    match local_image {
+        Some(record) if validate_image_record(&record) => {
+            if pull == Some("always") {
+                println!("Trying to pull {}...", image_str);
+                pull_image_with_platform(image_str, target_platform).await
             } else {
-                pull_user_message(format!("Unable to find image '{}' locally", image_str));
+                Ok(record)
             }
-            pull_image_with_platform(image_str, target_platform).await
         }
+        _ => match pull {
+            Some("never") => {
+                cli::usage_errors::exit_usage_error(format!("{}: image not known", image_str));
+            }
+            _ => {
+                println!("Trying to pull {}...", image_str);
+                pull_image_with_platform(image_str, target_platform).await
+            }
+        },
     }
 }
 
@@ -1660,8 +1741,13 @@ pub async fn run_container_with_output(
         ));
     }
 
-    let image_record =
-        resolve_container_image(&args.image, args.platform.as_deref(), None).await?;
+    let image_record = resolve_container_image(
+        &args.image,
+        args.platform.as_deref(),
+        None,
+        args.pull.as_deref(),
+    )
+    .await?;
 
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
@@ -1676,7 +1762,6 @@ pub async fn run_container_with_output(
     let mut parsed_ports = parse_ports(&args.ports)?;
     validate_network_name(&args.network, None)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
-    guardrails::PortCollisionGuard::ensure_no_conflicts(&parsed_ports)?;
 
     // Resolve volume mounts
     let vol_store = VolumeStore::new();
@@ -1788,6 +1873,9 @@ pub async fn run_container_with_output(
         }
     }
     apply_podman_run_env(&mut spec, &args);
+    if let Some(tz) = args.tz.last() {
+        apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
+    }
     if !args.unsetenv_all
         && !spec
             .process
@@ -2227,6 +2315,22 @@ pub async fn run_container_with_output(
         event_attrs.clone(),
     ));
     container_store.add(record)?;
+
+    if let Err(e) =
+        guardrails::PortCollisionGuard::ensure_no_conflicts_excluding(
+            &parsed_ports,
+            Some(&container_id),
+        )
+    {
+        if args.rm {
+            let _ = container_store.remove(&container_id);
+            let _ = OverlayDriver::cleanup(&cow_bundle);
+            let _ = fs::remove_dir_all(&bundle_dir);
+        } else {
+            let _ = container_store.update_status(&container_id, ContainerStatus::Exited(126));
+        }
+        cli::usage_errors::exit_config_error(e.to_string());
+    }
 
     if let Some(pod_name) = &args.pod {
         let pod_store = pod::PodStore::new();
@@ -5224,7 +5328,13 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     }
 
     let image_record =
-        resolve_container_image(&args.image, args.platform.as_deref(), home_opt).await?;
+        resolve_container_image(
+            &args.image,
+            args.platform.as_deref(),
+            home_opt,
+            args.pull.as_deref(),
+        )
+        .await?;
 
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
@@ -5263,7 +5373,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     fs::create_dir_all(&bundle_dir)?;
 
     let base_rootfs = PathBuf::from(&image_record.rootfs_path);
-    let _cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
+    let cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
 
     let cmd_override = if !args.command.is_empty() {
         Some(args.command.as_slice())
@@ -5321,6 +5431,9 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         }
     }
     apply_podman_run_env(&mut spec, &args);
+    if let Some(tz) = args.tz.last() {
+        apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
+    }
     if !args.unsetenv_all
         && !spec
             .process
@@ -7529,6 +7642,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         disable_content_trust: false,
         gpus: None,
         entrypoint: None,
+        tz: Vec::new(),
         env_file: None,
         user: None,
         hostname: Some(pod.name.clone()),

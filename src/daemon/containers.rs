@@ -155,6 +155,7 @@ pub async fn create_container(
         privileged: false,
         gpus: None,
         entrypoint: None,
+        tz: Vec::new(),
         env_file: None,
         shm_size: None,
         cap_add: Vec::new(),

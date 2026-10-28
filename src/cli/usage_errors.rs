@@ -62,6 +62,12 @@ pub fn exit_usage_error(msg: impl AsRef<str>) -> ! {
     std::process::exit(125);
 }
 
+/// OCI/runtime configuration errors (exit 126).
+pub fn exit_config_error(msg: impl AsRef<str>) -> ! {
+    eprintln!("Error: {}", msg.as_ref());
+    std::process::exit(126);
+}
+
 /// `podman help` / `podman help <cmd>` — show help for the root or nested command.
 pub fn run_help_command(path: &[String]) -> ! {
     let bin = std::env::args()

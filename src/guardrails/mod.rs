@@ -185,8 +185,22 @@ pub fn validate_network_port_compatibility(
 impl PortCollisionGuard {
     /// Ensure none of the requested host ports are already bound by other running containers
     pub fn ensure_no_conflicts(requested_ports: &[crate::network::PortMapping]) -> Result<()> {
+        Self::ensure_no_conflicts_excluding(requested_ports, None)
+    }
+
+    pub fn ensure_no_conflicts_excluding(
+        requested_ports: &[crate::network::PortMapping],
+        exclude_container: Option<&str>,
+    ) -> Result<()> {
         let store = ContainerStore::new();
-        Self::ensure_no_conflicts_with_reader(requested_ports, &store)
+        let containers: Vec<_> = store
+            .list()
+            .into_iter()
+            .filter(|c| {
+                exclude_container.is_none_or(|ex| c.id != ex && c.name != ex)
+            })
+            .collect();
+        Self::ensure_no_conflicts_with_containers(requested_ports, &containers)
     }
 
     /// Dependency Inversion: Validate port conflicts against any ContainerReader abstraction
@@ -253,7 +267,7 @@ impl PortCollisionGuard {
 
                         if ips_overlap {
                             return Err(anyhow!(
-                                "Port conflict: host port {}:{}/{} is already in use by running container '{}' ({})",
+                                "address already in use: host port {}:{}/{} bound by container '{}' ({})",
                                 req_ip,
                                 req.host_port,
                                 req.protocol,

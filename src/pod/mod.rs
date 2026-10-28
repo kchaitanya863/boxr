@@ -601,6 +601,7 @@ mod tests {
             disable_content_trust: false,
             gpus: None,
             entrypoint: None,
+            tz: Vec::new(),
             env_file: None,
             user: None,
             hostname: None,
