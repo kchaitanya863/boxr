@@ -4,6 +4,7 @@
 015-help
 020-tag
 030-run
+035-logs
 040-ps
 045-start
 050-stop

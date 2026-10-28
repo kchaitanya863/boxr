@@ -682,7 +682,7 @@ pub struct StartArgs {
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LogsArgs {
     /// Follow log output

@@ -143,23 +143,33 @@ fn drop_k8s_payload(payload: &[u8]) -> bool {
 
 fn filter_k8s_entries(
     mut entries: Vec<K8sLogEntry>,
+    since: Option<DateTime<FixedOffset>>,
+    until: Option<DateTime<FixedOffset>>,
+) -> Vec<K8sLogEntry> {
+    entries.retain(|e| !drop_k8s_payload(&e.payload));
+    if let Some(dt) = since {
+        entries.retain(|e| e.timestamp >= dt);
+    }
+    if let Some(dt) = until {
+        entries.retain(|e| e.timestamp <= dt);
+    }
+    entries
+}
+
+fn filter_k8s_entries_opts(
+    entries: Vec<K8sLogEntry>,
     since: Option<&str>,
     until: Option<&str>,
 ) -> Vec<K8sLogEntry> {
-    entries.retain(|e| !drop_k8s_payload(&e.payload));
-    if let Some(s) = since {
-        if let Ok(dt) = parse_logs_time_filter(s) {
-            entries.retain(|e| e.timestamp >= dt);
+    let since_dt = since.and_then(|s| parse_logs_time_filter(s).ok());
+    let until_dt = until.and_then(|u| {
+        if parse_follow_until_timeout(u).is_some() {
+            None
+        } else {
+            parse_logs_time_filter(u).ok()
         }
-    }
-    if let Some(u) = until {
-        if parse_follow_until_timeout(u).is_none() {
-            if let Ok(dt) = parse_logs_time_filter(u) {
-                entries.retain(|e| e.timestamp <= dt);
-            }
-        }
-    }
-    entries
+    });
+    filter_k8s_entries(entries, since_dt, until_dt)
 }
 
 pub fn write_log_text(text: &str, timestamps: bool) -> Result<()> {
@@ -178,6 +188,12 @@ pub fn write_log_text_opts(text: &str, timestamps: bool, follow_chunk: bool) -> 
     } else {
         out.write_all(text.as_bytes())?;
         if follow_chunk && !text.ends_with('\n') {
+            out.write_all(b"\n")?;
+        } else if !follow_chunk
+            && text.contains('\n')
+            && !text.ends_with('\n')
+            && !text.ends_with('\r')
+        {
             out.write_all(b"\n")?;
         }
     }
@@ -220,7 +236,11 @@ fn looks_like_k8s_record_start(line: &[u8]) -> bool {
 }
 
 pub fn read_k8s_log_entries(path: &Path) -> Result<Vec<K8sLogEntry>> {
-    let bytes = fs::read(path)?;
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
     let mut entries = Vec::new();
     let mut current: Vec<u8> = Vec::new();
     for line in bytes.split(|b| *b == b'\n') {
@@ -404,9 +424,7 @@ pub fn resolve_container_log_path(
     {
         if let Some(name) = bundle_path.file_name().and_then(|s| s.to_str()) {
             let ctr = bundle_path.join(format!("{name}-ctr.log"));
-            if ctr.exists() {
-                return Some(ctr);
-            }
+            return Some(ctr);
         }
     }
     let logs_txt = bundle_path.join("logs.txt");
@@ -437,7 +455,7 @@ pub fn read_log_output_opts(
     timestamps: bool,
 ) -> Result<String> {
     if is_k8s_log_path(path) || path.to_string_lossy().contains("-ctr.log") {
-        let entries = filter_k8s_entries(read_k8s_log_entries(path)?, since, until);
+        let entries = filter_k8s_entries_opts(read_k8s_log_entries(path)?, since, until);
         if timestamps {
             let lines = tail_log_lines_with_ts(
                 expand_embedded_newlines_ts(reconstruct_k8s_lines_with_ts(&entries)),
@@ -454,6 +472,9 @@ pub fn read_log_output_opts(
         .lines()
         .filter(|l| l.trim() != "Terminated")
         .filter(|l| !looks_like_k8s_record_start(l.as_bytes()))
+        .filter(|l| {
+            !l.contains(" stdout F ") && !l.contains(" stderr F ") && !l.contains(" stdout P ")
+        })
         .collect();
     if let Some(t) = tail {
         if t == 0 {
@@ -463,6 +484,33 @@ pub fn read_log_output_opts(
         }
     }
     Ok(lines.join("\n"))
+}
+
+/// After SIGTERM/stop, conmon may still be flushing trap handlers into the k8s log file.
+pub fn wait_k8s_log_quiescent(bundle_path: &Path) {
+    let Some(name) = bundle_path.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let path = bundle_path.join(format!("{name}-ctr.log"));
+    if !path.exists() {
+        return;
+    }
+    let start = Instant::now();
+    let mut last_len = 0u64;
+    let mut stable = 0u32;
+    while start.elapsed() < Duration::from_millis(2500) {
+        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if len == last_len {
+            stable += 1;
+            if stable >= 4 {
+                break;
+            }
+        } else {
+            stable = 0;
+            last_len = len;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 pub fn stream_k8s_container_logs(
@@ -487,6 +535,14 @@ pub fn stream_k8s_container_logs(
     }
 
     let follow_started = Instant::now();
+    let since_cutoff = since.and_then(|s| parse_logs_time_filter(s).ok());
+    let until_cutoff = until.and_then(|u| {
+        if parse_follow_until_timeout(u).is_some() {
+            None
+        } else {
+            parse_logs_time_filter(u).ok()
+        }
+    });
     let timeout_deadline = std::env::var("PODMAN_TIMEOUT")
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
@@ -497,12 +553,16 @@ pub fn stream_k8s_container_logs(
 
     if since.is_none() {
         let text = read_log_output_opts(path, since, until, tail, timestamps)?;
-        write_log_text_opts(&text, false, false)?;
+        write_log_text_opts(&text, false, true)?;
     }
 
     let mut printed_lines = if since.is_none() {
-        let entries = filter_k8s_entries(read_k8s_log_entries(path)?, since, until);
-        tail_log_lines(reconstruct_k8s_lines(&entries), tail).len()
+        let entries = filter_k8s_entries(read_k8s_log_entries(path)?, since_cutoff, until_cutoff);
+        tail_log_lines(
+            expand_embedded_newlines(reconstruct_k8s_lines(&entries)),
+            tail,
+        )
+        .len()
     } else {
         0
     };
@@ -521,17 +581,23 @@ pub fn stream_k8s_container_logs(
             }
         }
 
-        let entries = filter_k8s_entries(read_k8s_log_entries(path)?, since, until);
+        let entries = filter_k8s_entries(read_k8s_log_entries(path)?, since_cutoff, until_cutoff);
         if since.is_some() {
             let new_entries: Vec<K8sLogEntry> =
                 entries.into_iter().skip(initial_entry_count).collect();
-            let new_lines = tail_log_lines(reconstruct_k8s_lines(&new_entries), tail);
+            let new_lines = tail_log_lines(
+                expand_embedded_newlines(reconstruct_k8s_lines(&new_entries)),
+                tail,
+            );
             if printed_since_lines < new_lines.len() {
                 print_lines(&new_lines[printed_since_lines..])?;
                 printed_since_lines = new_lines.len();
             }
         } else {
-            let lines = tail_log_lines(reconstruct_k8s_lines(&entries), tail);
+            let lines = tail_log_lines(
+                expand_embedded_newlines(reconstruct_k8s_lines(&entries)),
+                tail,
+            );
             if printed_lines < lines.len() {
                 print_lines(&lines[printed_lines..])?;
                 printed_lines = lines.len();

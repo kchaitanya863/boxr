@@ -3451,6 +3451,7 @@ pub fn stop_container_with_home_and_timeout(
         return Err(e);
     }
     let _ = guardrails::ProcessReaper::reap_stale_containers();
+    logging::wait_k8s_log_quiescent(&bundle_path);
     if !quiet {
         println!("{}", output_label.unwrap_or(container));
     }
@@ -3770,15 +3771,42 @@ fn wait_for_container_stopped(_bundle_path: &Path, _timeout: std::time::Duration
 }
 
 pub fn container_logs(args: &LogsArgs) -> Result<()> {
+    let mut args = args.clone();
+    peel_logs_trailing_flags(&mut args);
     if args.containers.is_empty() {
         return Err(anyhow!(
             "you must provide at least one container name or ID"
         ));
     }
     if args.containers.len() == 1 {
-        return container_logs_one(args, &args.containers[0]);
+        return container_logs_one(&args, &args.containers[0]);
     }
-    container_logs_multi(args)
+    container_logs_multi(&args)
+}
+
+/// Podman accepts `podman logs [opts] NAME -f` (options after the container name).
+fn peel_logs_trailing_flags(args: &mut LogsArgs) {
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < args.containers.len() {
+        match args.containers[i].as_str() {
+            "-f" | "--follow" => args.follow = true,
+            "-t" | "--timestamps" => args.timestamps = true,
+            "-n" | "--tail" => {
+                i += 1;
+                if i < args.containers.len() {
+                    args.tail = args.containers[i].parse().ok();
+                }
+            }
+            s if let Some(v) = s.strip_prefix("--tail=") => {
+                args.tail = v.parse().ok();
+            }
+            other if other.starts_with('-') => {}
+            other => names.push(other.to_string()),
+        }
+        i += 1;
+    }
+    args.containers = names;
 }
 
 fn container_logs_one(args: &LogsArgs, container: &str) -> Result<()> {
