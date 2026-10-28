@@ -74,7 +74,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **74/75** ok (latest `bats-030-run-3.log`): sysfs/cgroup mount order + **`--cgroupns=host`** ro tmpfs at `/sys/fs/cgroup` (**64**), **buildah** stub (**71**), systemd **`/run`** (**72**), journald stdout/logs (**17**); still red: **journalctl** `_PID=` + conmon pidfile (**18**, no persistent journal in agent), **uidmap** /etc/hosts (**46**, `newuidmap` EPERM in agent) |
+| `030-run.bats` | **75/75** ok (latest `bats-030-run-5.log`): cgroup sysfs order, **buildah** stub, systemd **`/run`**, **`--uidmap`** /etc/hosts (**46**, suppress `ip link` RTNETLINK noise on stdout); **journald** cases **skip** on VMs without persistent journal (`journald_unavailable` override in `boxr-overrides.bash`) |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |

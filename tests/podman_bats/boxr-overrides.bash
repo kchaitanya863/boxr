@@ -72,3 +72,26 @@ function leak_check() {
 
     return $exit_code
 }
+
+# Upstream treats journalctl exit 0 as "available" even when no journal files exist
+# (common on minimal/agent VMs without persistent systemd-journald).
+function journald_unavailable() {
+    if ! is_rootless; then
+        return 1
+    fi
+    local sample
+    sample="$(journalctl -n 1 --output cat 2>&1 || true)"
+    if [[ -z "$sample" ]] || grep -qi 'no journal files' <<<"$sample"; then
+        return 0
+    fi
+    run journalctl -n 1
+    if [[ $status -eq 0 ]]; then
+        return 1
+    fi
+    if [[ $output =~ permission ]]; then
+        return 0
+    fi
+    echo "WEIRD: 'journalctl -n 1' failed with a non-permission error:"
+    echo "$output"
+    return 1
+}

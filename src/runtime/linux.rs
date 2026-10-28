@@ -970,6 +970,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     }
                     let _ = std::process::Command::new("ip")
                         .args(["link", "set", "lo", "up"])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
                         .status();
                 } else if let Some(target_cont) = spec
                     .annotations
@@ -1159,6 +1162,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             // Bring loopback interface up
             let _ = std::process::Command::new("ip")
                 .args(["link", "set", "lo", "up"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status();
 
             // If using native pure-Rust user-mode networking or bridge:
