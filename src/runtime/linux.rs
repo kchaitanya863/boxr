@@ -1183,6 +1183,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             bundle_path.join("container.pid"),
                             grandchild.as_raw().to_string(),
                         );
+                        crate::security::RootlessUserConfig::reenable_setgroups_for_pid(
+                            grandchild.as_raw(),
+                        );
                         let timeout_secs = run_timeout_secs(&spec);
                         let status = wait_grandchild_with_optional_timeout(
                             grandchild,
@@ -1841,8 +1844,28 @@ pub fn exec_in_bundle(
             if !msg.is_empty() && code != 0 {
                 eprintln!("{}", msg);
             }
+            // nsenter can fail PID namespace reassociation yet still run the command on the
+            // host with a broken /proc view (075-exec Groups: lines). Prefer setns when detected.
+            if stderr.contains("reassociate to namespace")
+                || (stderr.contains("nsenter") && stderr.contains("/proc/self"))
+            {
+                return exec_in_bundle_via_setns(
+                    bundle_path,
+                    pid,
+                    &command,
+                    env,
+                    workdir,
+                    exec_creds.as_ref(),
+                    detach,
+                    attach,
+                    exec_pid_path,
+                    umask,
+                    preserve_fds,
+                );
+            }
             if code != 0
                 && (stderr.contains("nsenter")
+                    || stderr.contains("reassociate")
                     || output.stdout.is_empty() && msg.contains("nsenter"))
             {
                 return exec_in_bundle_via_setns(
@@ -1996,6 +2019,9 @@ fn exec_in_bundle_via_setns(
             }
             // Container init is PID 1 after joining the container PID namespace.
             let init_pid = 1;
+            crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe {
+                libc::getpid()
+            });
             if let Some(creds) = exec_creds {
                 apply_exec_user_credentials(creds, init_pid);
             } else {

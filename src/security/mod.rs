@@ -346,17 +346,23 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         fs::write(proc_dir.join("gid_map"), gid_content)
             .context("Failed to write gid_map in /proc")?;
 
-        Self::reenable_setgroups_for_pid(pid);
+        Self::write_setgroups_allow(pid);
 
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
-    fn reenable_setgroups_for_pid(pid: i32) {
+    fn write_setgroups_allow(pid: i32) {
         let setgroups_path = Path::new("/proc").join(pid.to_string()).join("setgroups");
         if setgroups_path.exists() {
             let _ = fs::write(&setgroups_path, "allow");
         }
+    }
+
+    /// Re-enable supplementary groups for a process in a rootless user namespace (075-exec parity).
+    #[cfg(target_os = "linux")]
+    pub fn reenable_setgroups_for_pid(pid: i32) {
+        Self::write_setgroups_allow(pid);
     }
 }
 

@@ -3319,6 +3319,20 @@ pub fn stop_container_with_home_and_timeout(
         let _ = std::fs::remove_file(bundle_path.join("vm.pid"));
         let _ = std::fs::remove_file(bundle_path.join("container.pid"));
         let _ = std::fs::remove_file(bundle_path.join("forwarder.pid"));
+        if used_sigkill && sig_num == libc::SIGTERM {
+            let label = output_label.unwrap_or(container);
+            if let Some(t) = timeout_secs {
+                eprintln!(
+                    "StopSignal SIGTERM failed to stop container {} in {} seconds, resorting to SIGKILL",
+                    label, t
+                );
+            } else {
+                eprintln!(
+                    "StopSignal SIGTERM failed to stop container {}, resorting to SIGKILL",
+                    label
+                );
+            }
+        }
     }
     #[cfg(target_os = "windows")]
     {
