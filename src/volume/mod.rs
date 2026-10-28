@@ -15,6 +15,9 @@ fn volume_used_by_container(bundle_path: &str, volume_name: &str) -> bool {
                     if !m.is_volume {
                         continue;
                     }
+                    if m.volume_name.as_deref() == Some(volume_name) {
+                        return true;
+                    }
                     let src = m.source.to_string_lossy();
                     if src.contains(&format!("volumes/{}/_data", volume_name))
                         || src.contains(&format!("/volumes/{}/", volume_name))
@@ -41,6 +44,47 @@ fn volume_used_by_container(bundle_path: &str, volume_name: &str) -> bool {
         }
     }
     false
+}
+
+fn validate_volume_rename_name(name: &str) -> Result<()> {
+    if name != name.trim() {
+        anyhow::bail!("names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*: invalid argument");
+    }
+    if name.contains('/') {
+        anyhow::bail!("invalid argument");
+    }
+    let re = regex::Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$").expect("volume name regex");
+    if !re.is_match(name) {
+        anyhow::bail!("names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*: invalid argument");
+    }
+    Ok(())
+}
+
+fn rewrite_volume_name_in_container(bundle_path: &str, old_name: &str, new_name: &str) {
+    let bundle = PathBuf::from(bundle_path);
+    let mounts_json = bundle.join("mounts.json");
+    if mounts_json.exists() {
+        if let Ok(content) = fs::read_to_string(&mounts_json) {
+            if let Ok(mut mounts) = serde_json::from_str::<Vec<MountSpec>>(&content) {
+                let mut changed = false;
+                for m in &mut mounts {
+                    let src = m.source.to_string_lossy().to_string();
+                    if src.contains(&format!("volumes/{}/", old_name)) {
+                        m.source = PathBuf::from(src.replace(
+                            &format!("volumes/{}/", old_name),
+                            &format!("volumes/{}/", new_name),
+                        ));
+                        changed = true;
+                    }
+                }
+                if changed {
+                    if let Ok(encoded) = serde_json::to_string(&mounts) {
+                        let _ = fs::write(&mounts_json, encoded);
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub fn volume_name_filter_matches(name: &str, pattern: &str) -> bool {
@@ -385,6 +429,80 @@ impl VolumeStore {
             } else {
                 Err(anyhow!("Volume '{}' not found", name))
             }
+        })
+    }
+
+    /// Podman `volume rename` (updates index, data dir, and container mount references).
+    pub fn rename(&self, old_name: &str, new_name: &str) -> Result<VolumeRecord> {
+        if old_name == new_name {
+            return self
+                .find(old_name)
+                .ok_or_else(|| anyhow!("no such volume \"{}\"", old_name));
+        }
+        validate_volume_rename_name(new_name)?;
+
+        let home = self
+            .index_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let c_store = crate::storage::ContainerStore::with_home(home.clone());
+
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            let pos = data
+                .volumes
+                .iter()
+                .position(|v| v.name == old_name)
+                .ok_or_else(|| anyhow!("no such volume \"{}\"", old_name))?;
+            if data.volumes.iter().any(|v| v.name == new_name) {
+                return Err(anyhow!("volume already exists"));
+            }
+            let mut vol = data.volumes[pos].clone();
+            if vol.driver == "image" {
+                return Err(anyhow!(
+                    "rename is not supported for volumes using driver \"image\""
+                ));
+            }
+
+            for c in c_store.list() {
+                if volume_used_by_container(&c.bundle_path, old_name) {
+                    return Err(anyhow!(
+                        "volume {} is being used by the following container(s): {}: volume is being used",
+                        old_name,
+                        c.id
+                    ));
+                }
+            }
+
+            let old_dir = PathBuf::from(&vol.mountpoint);
+            let new_mp = self.volumes_dir.join(new_name).join("_data");
+            if let Some(parent) = new_mp.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if old_dir.exists() {
+                if new_mp.exists() {
+                    return Err(anyhow!("volume already exists"));
+                }
+                fs::rename(&old_dir, &new_mp)?;
+                if let Some(old_parent) = old_dir.parent() {
+                    let _ = fs::remove_dir(old_parent);
+                }
+            } else {
+                fs::create_dir_all(&new_mp)?;
+            }
+
+            vol.name = new_name.to_string();
+            vol.mountpoint = new_mp.to_string_lossy().to_string();
+            vol.anonymous = false;
+            data.volumes[pos] = vol.clone();
+            self.save_unlocked(&data)?;
+
+            for c in c_store.list() {
+                rewrite_volume_name_in_container(&c.bundle_path, old_name, new_name);
+            }
+
+            Ok(vol)
         })
     }
 

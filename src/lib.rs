@@ -5720,10 +5720,14 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
             }
         }
         VolumeAction::Inspect { format, name } => {
-            let vol = store
-                .find(&name)
-                .ok_or_else(|| anyhow!("Volume '{}' not found", name))?;
+            let Some(vol) = store.find(&name) else {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "no such volume \"{}\"",
+                    name
+                ));
+            };
             let compat = serde_json::json!({
+                "Anonymous": vol.anonymous,
                 "CreatedAt": vol.created_at.to_rfc3339(),
                 "Driver": vol.driver,
                 "Labels": vol.labels,
@@ -5785,9 +5789,26 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 println!("{}", v.name);
             }
         }
-        VolumeAction::Rename { old_name, new_name } => {
-            let vol = volume::VolumeOps::rename_volume(&old_name, &new_name)?;
-            println!("{}", vol.name);
+        VolumeAction::Rename { names } => {
+            if names.len() != 2 {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "accepts 2 arg(s), received {}",
+                    names.len()
+                ));
+            }
+            if let Err(e) = volume::VolumeOps::rename_volume(&names[0], &names[1]) {
+                let msg = e.to_string();
+                if msg.contains("no such volume")
+                    || msg.contains("volume is being used")
+                    || msg.contains("already exists")
+                    || msg.contains("invalid argument")
+                    || msg.contains("names must match")
+                    || msg.contains("rename is not supported")
+                {
+                    crate::cli::usage_errors::exit_usage_error(msg);
+                }
+                return Err(e);
+            }
         }
         VolumeAction::Mount { name } => {
             let path = volume::VolumeOps::mount_volume(&name)?;
@@ -7386,6 +7407,12 @@ async fn create_only_container_after_pod_prep(
         &image_id_for_env,
     )?;
     spec.save_to_bundle(&bundle_dir)?;
+    if !parsed_mounts.is_empty() {
+        let _ = fs::write(
+            bundle_dir.join("mounts.json"),
+            serde_json::to_string(&parsed_mounts)?,
+        );
+    }
     let preserve_fds = args.resolved_preserve_fds();
     if !preserve_fds.is_empty() {
         let _ = fs::write(
@@ -10053,6 +10080,11 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
 }
 
 pub fn handle_unshare(args: UnshareArgs) -> Result<i32> {
+    if let Some(first) = args.command.first() {
+        if first.starts_with("--") {
+            crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
+        }
+    }
     kube::KubeManager::unshare_command(&args.command)
 }
 

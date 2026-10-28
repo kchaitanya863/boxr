@@ -1316,6 +1316,11 @@ pub fn chown_path_rootless(path: &Path, uid: u32, gid: u32, recursive: bool) -> 
 
 /// Run an unshare command in a new user namespace (boxr unshare)
 pub fn run_unshare_cli(args: &[String]) -> Result<i32> {
+    if let Some(first) = args.first() {
+        if first.starts_with("--") {
+            crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
+        }
+    }
     let default_cmd = vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())];
     let cmd = if args.is_empty() { &default_cmd } else { args };
 
@@ -1353,7 +1358,9 @@ pub fn run_unshare_cli(args: &[String]) -> Result<i32> {
                     .iter()
                     .map(|s| CString::new(s.as_str()).unwrap())
                     .collect();
-                nix::unistd::execvp(&binary_c, &args_c)?;
+                if nix::unistd::execvp(&binary_c, &args_c).is_err() {
+                    exit_unshare_exec_failure(&cmd[0]);
+                }
                 std::process::exit(0);
             }
         }
@@ -1364,6 +1371,25 @@ pub fn run_unshare_cli(args: &[String]) -> Result<i32> {
         }
         let status = child.status()?;
         Ok(status.code().unwrap_or(0))
+    }
+}
+
+fn exit_unshare_exec_failure(argv0: &str) -> ! {
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::ENOENT) => {
+            if argv0.contains('/') {
+                eprintln!("{}: no such file or directory", argv0);
+            } else {
+                eprintln!("{}: executable file not found in $PATH", argv0);
+            }
+            std::process::exit(127);
+        }
+        Some(libc::EACCES) => {
+            eprintln!("{}: permission denied", argv0);
+            std::process::exit(126);
+        }
+        _ => std::process::exit(1),
     }
 }
 

@@ -29,8 +29,8 @@ pub enum VolumeAction {
     },
     /// Rename a volume
     Rename {
-        old_name: String,
-        new_name: String,
+        #[arg(value_name = "NAME", num_args = 1..=2)]
+        names: Vec<String>,
     },
     /// Mount a volume filesystem
     Mount {
