@@ -3332,11 +3332,18 @@ pub fn stop_container_with_home_and_timeout(
     if let Ok(conmon_str) = std::fs::read_to_string(bundle_path.join("conmon.pid")) {
         if let Ok(conmon_pid) = conmon_str.trim().parse::<i32>() {
             if conmon_pid > 0 && unsafe { libc::kill(conmon_pid, 0) != 0 } {
+                let was_stopping = matches!(c.status, ContainerStatus::Stopping);
                 let _ = store.update_status(&c.id, ContainerStatus::Stopping);
                 let (_, all_pids) = collect_container_stop_pids(&bundle_path);
                 let _ = sigkill_live_pids(&all_pids);
                 stop_wait_clear_pid_files(&bundle_path, &c.id);
                 let _ = finalize_container_exited_status(&store, &c.id, &bundle_path, true);
+                if was_stopping {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "container {} conmon exited prematurely, exit code could not be retrieved: conmon process killed",
+                        output_label.unwrap_or(container)
+                    ));
+                }
                 if !quiet {
                     println!("{}", output_label.unwrap_or(container));
                 }

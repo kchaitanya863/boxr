@@ -81,7 +81,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **~80/81** isolated: **cert-dir**, **`run --rmi`** (incl. detached `--rmi`) green; **host env leak** (needs skopeo + Podman `containers-storage` transport) remains red; **8 skips** |
+| `030-run.bats` | **~79/81** isolated: **cert-dir**, **`run --rmi`**, **stopping loop** green; **host env leak** (needs skopeo + Podman `containers-storage` transport) remains red; **8 skips** |
 | `040-ps.bats` | **8/8** isolated |
 | `045-start.bats` | **8/8** isolated (restart-policy filter accepts **`none`** alias for **`no`**) |
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr when stop timeout **> 0**; **`stop -t 0`** stays silent on stderr (e2e cleanup) |
