@@ -74,7 +74,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **56/75** ok in latest agent run: **`--rmi`/`--rm`**, **`--hostuser`**, containers.conf runtime flags, **`--memory=0`**, **`--default-mounts-file`**, **`--rootfs`**, **`/etc/mtab`**, pod rollback; still red: preserve-fds, journald, image `/` mode **555**, conmon/syslog, buildah, containers.conf ulimit/read-only, systemd `/run` perms, attach stdin ID |
+| `030-run.bats` | **57/75** ok in latest agent run (56 in full `030-run` log + **failed --rm** bulk `rm -f` fix verified separately): **`--rmi`/`--rm`**, **`--hostuser`**, containers.conf runtime flags, **`--memory=0`**, **`--default-mounts-file`**, **`--rootfs`**, **`/etc/mtab`**, pod rollback; still red: preserve-fds, journald, image `/` mode **555**, conmon/syslog, buildah, containers.conf ulimit/read-only, systemd `/run` perms, attach stdin ID |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
