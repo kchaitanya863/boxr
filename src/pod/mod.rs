@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Podman-compatible pod configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,19 +410,30 @@ pub fn container_namespace_path(container_query: &str, ns: &str) -> Result<Strin
     container_pid_namespace_path(&cont, ns)
 }
 
-pub fn container_pid_namespace_path(cont: &ContainerRecord, ns: &str) -> Result<String> {
-    let pid_file = PathBuf::from(&cont.bundle_path).join("container.pid");
-    if pid_file.exists() {
-        let pid = fs::read_to_string(&pid_file)?.trim().to_string();
-        if !pid.is_empty() {
-            return Ok(format!("/proc/{}/ns/{}", pid, ns));
+pub fn read_container_pid_from_bundle(bundle_path: &Path) -> Option<i32> {
+    for name in ["container.pid", "vm.pid"] {
+        let pid_path = bundle_path.join(name);
+        if let Ok(raw) = fs::read_to_string(&pid_path) {
+            if let Ok(pid) = raw.trim().parse::<i32>() {
+                if pid > 0 {
+                    return Some(pid);
+                }
+            }
         }
     }
-    Err(anyhow!(
-        "Container '{}' is not running; cannot join {} namespace",
-        cont.name,
-        ns
-    ))
+    None
+}
+
+pub fn container_pid_namespace_path(cont: &ContainerRecord, ns: &str) -> Result<String> {
+    let bundle = PathBuf::from(&cont.bundle_path);
+    let pid = read_container_pid_from_bundle(&bundle).ok_or_else(|| {
+        anyhow!(
+            "Container '{}' is not running; cannot join {} namespace",
+            cont.name,
+            ns
+        )
+    })?;
+    Ok(format!("/proc/{}/ns/{}", pid, ns))
 }
 
 /// Parse `container:<name>` or return the value as a namespace path.

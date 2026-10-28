@@ -1919,6 +1919,7 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
             ..Default::default()
         })?;
         let _ = ensure_pod_infra_container(&pod).await?;
+        pod::apply_pod_to_run_args(&pod, &store.infra_name(&pod), args);
         args.pod = Some(pod.name.clone());
         return Ok(Some(pod.name.clone()));
     }
@@ -3585,25 +3586,11 @@ fn apply_pod_namespaces_to_spec(spec: &mut Spec, pod: &pod::PodRecord) -> Result
     Ok(())
 }
 
-fn prepare_spec_for_pod_start(spec: &mut Spec) -> Result<()> {
-    let annotations = spec.annotations.clone().unwrap_or_default();
-    if annotations.get("boxr.pod.infra") == Some(&"true".to_string()) {
-        return Ok(());
-    }
-    let Some(pod_ref) = annotations.get("boxr.pod").cloned() else {
-        return Ok(());
-    };
-    let pod_store = pod::PodStore::new();
-    let pod = pod_store
-        .find(&pod_ref)
-        .or_else(|| {
-            pod_store
-                .list()
-                .into_iter()
-                .find(|p| p.id == pod_ref || p.name == pod_ref)
-        })
-        .ok_or_else(|| anyhow!("pod {} not found", pod_ref))?;
-    apply_pod_namespaces_to_spec(spec, &pod)
+fn prepare_spec_for_pod_start(_spec: &mut Spec) -> Result<()> {
+    // Trampoline reads config.json from disk; pod namespace sharing for `run --pod` is
+    // applied when the bundle is first created. Rewriting ipc/uts/net paths here breaks
+    // parity with that on-disk spec (e.g. `container clone` + `container start`).
+    Ok(())
 }
 
 pub async fn start_container(container: &str) -> Result<()> {
@@ -3629,7 +3616,6 @@ pub async fn start_container_with_home(
     let mut spec: Spec = serde_json::from_str(&content)?;
     if prepare_pod {
         prepare_spec_for_pod_start(&mut spec)?;
-        fs::write(&config_file, serde_json::to_string_pretty(&spec)?)?;
     }
 
     let _ = sync_bundle_ulimits_inspect(&bundle_path);
@@ -9186,17 +9172,6 @@ async fn clone_container(args: &cli::ContainerCloneArgs) -> Result<String> {
             }
             if args.positional_image.is_some() {
                 ann.insert("boxr.clone_image".to_string(), image.clone());
-            }
-            if let Some(pod_ref) = ann.get("boxr.pod").cloned() {
-                let pod_store = pod::PodStore::new();
-                if let Some(pod) = pod_store.find(&pod_ref).or_else(|| {
-                    pod_store
-                        .list()
-                        .into_iter()
-                        .find(|p| p.id == pod_ref || p.name == pod_ref)
-                }) {
-                    apply_pod_namespaces_to_spec(&mut spec, &pod)?;
-                }
             }
             fs::write(&config_path, serde_json::to_string_pretty(&spec)?)?;
         }

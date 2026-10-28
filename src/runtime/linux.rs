@@ -3,7 +3,7 @@ use crate::oci::runtime::Spec;
 use crate::volume::MountSpec;
 use anyhow::{Context, Result, anyhow};
 use nix::mount::{MsFlags, mount};
-use nix::sched::{CloneFlags, unshare};
+use nix::sched::{CloneFlags, setns, unshare};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use nix::unistd::{ForkResult, chdir, fork, pivot_root};
@@ -15,6 +15,111 @@ use std::os::unix::process::CommandExt;
 use std::io::Write;
 use std::process::Stdio;
 use std::thread;
+
+struct NamespaceJoinState {
+    ipc: bool,
+    uts: bool,
+    net: bool,
+}
+
+impl Default for NamespaceJoinState {
+    fn default() -> Self {
+        Self {
+            ipc: false,
+            uts: false,
+            net: false,
+        }
+    }
+}
+
+fn namespace_clone_flag(ns: &str) -> Option<CloneFlags> {
+    match ns {
+        "ipc" => Some(CloneFlags::CLONE_NEWIPC),
+        "uts" => Some(CloneFlags::CLONE_NEWUTS),
+        "net" => Some(CloneFlags::CLONE_NEWNET),
+        "mnt" => Some(CloneFlags::CLONE_NEWNS),
+        "pid" => Some(CloneFlags::CLONE_NEWPID),
+        "cgroup" => Some(CloneFlags::CLONE_NEWCGROUP),
+        "user" => Some(CloneFlags::CLONE_NEWUSER),
+        _ => None,
+    }
+}
+
+fn setns_file_path(path: &str, flag: CloneFlags) {
+    if let Ok(f) = fs::File::open(path) {
+        let _ = setns(&f, flag);
+    }
+}
+
+fn join_namespace_for_container_target(target: &str, ns: &str) -> bool {
+    let Some(flag) = namespace_clone_flag(ns) else {
+        return false;
+    };
+    let store = crate::storage::ContainerStore::new();
+    let Some(rec) = store.find(target) else {
+        return false;
+    };
+    let bundle = PathBuf::from(&rec.bundle_path);
+    let Some(pid) = crate::pod::read_container_pid_from_bundle(&bundle) else {
+        return false;
+    };
+    setns_file_path(&format!("/proc/{pid}/ns/{ns}"), flag);
+    true
+}
+
+fn apply_spec_namespace_joins(spec: &Spec) -> NamespaceJoinState {
+    let mut state = NamespaceJoinState::default();
+    if let Some(linux) = &spec.linux {
+        for ns in &linux.namespaces {
+            if let (Some(path), Some(flag)) = (ns.path.as_deref(), namespace_clone_flag(&ns.ns_type))
+            {
+                setns_file_path(path, flag);
+                match ns.ns_type.as_str() {
+                    "ipc" => state.ipc = true,
+                    "uts" => state.uts = true,
+                    "net" => state.net = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    if let Some(ann) = spec.annotations.as_ref() {
+        for (key, ns, slot) in [
+            ("boxr.ipc", "ipc", &mut state.ipc),
+            ("boxr.uts", "uts", &mut state.uts),
+        ] {
+            if *slot {
+                continue;
+            }
+            if let Some(val) = ann.get(key) {
+                if let Some(target) = val
+                    .strip_prefix("container:")
+                    .or_else(|| val.strip_prefix("container://"))
+                {
+                    if join_namespace_for_container_target(target, ns) {
+                        *slot = true;
+                    }
+                }
+            }
+        }
+    }
+    state
+}
+
+fn join_network_namespace_for_spec(spec: &Spec, joined: &mut NamespaceJoinState) {
+    if joined.net {
+        return;
+    }
+    if let Some(target_cont) = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network_container"))
+    {
+        if join_namespace_for_container_target(target_cont, "net") {
+            joined.net = true;
+        }
+    }
+}
 
 /// Podman/crun-style message and exit code when exec fails in the container child.
 fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
@@ -966,6 +1071,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     } else {
                         None
                     };
+                let mut ns_join = apply_spec_namespace_joins(&spec);
                 if requires_netns {
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWNET) {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
@@ -977,26 +1083,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .status();
-                } else if let Some(target_cont) = spec
-                    .annotations
-                    .as_ref()
-                    .and_then(|a| a.get("boxr.network_container"))
-                {
-                    // Attach to existing container's network namespace (container:<target>)
-                    let store = crate::storage::ContainerStore::new();
-                    if let Some(target_rec) = store.find(target_cont) {
-                        let pid_path =
-                            std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
-                        let target_pid = fs::read_to_string(pid_path)
-                            .ok()
-                            .and_then(|s| s.trim().parse::<i32>().ok());
-                        if let Some(t_pid) = target_pid {
-                            let netns_path = format!("/proc/{}/ns/net", t_pid);
-                            if let Ok(netns_file) = std::fs::File::open(&netns_path) {
-                                let _ = nix::sched::setns(&netns_file, CloneFlags::CLONE_NEWNET);
-                            }
-                        }
-                    }
+                } else {
+                    join_network_namespace_for_spec(&spec, &mut ns_join);
                 }
 
                 // If using pasta, notify parent that netns has been unshared so pasta can attach
@@ -1061,7 +1149,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     .and_then(|a| a.get("boxr.ipc"))
                     .map(|s| s == "host")
                     .unwrap_or(false);
-                if !ipc_host {
+                if !ipc_host && !ns_join.ipc {
                     flags |= CloneFlags::CLONE_NEWIPC;
                 }
                 let uts_host = spec
@@ -1070,7 +1158,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     .and_then(|a| a.get("boxr.uts"))
                     .map(|s| s == "host")
                     .unwrap_or(false);
-                if !uts_host {
+                if !uts_host && !ns_join.uts {
                     flags |= CloneFlags::CLONE_NEWUTS;
                 }
                 let cgroup_host = spec
@@ -1217,35 +1305,30 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     Err(_) => {}
                 }
             }
-        } else if let Some(target_cont) = spec
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get("boxr.network_container"))
-        {
-            // Root mode: attach to existing container's network namespace (container:<target>)
-            let store = crate::storage::ContainerStore::new();
-            if let Some(target_rec) = store.find(target_cont) {
-                let pid_path =
-                    std::path::PathBuf::from(&target_rec.bundle_path).join("container.pid");
-                let target_pid = fs::read_to_string(pid_path)
-                    .ok()
-                    .and_then(|s| s.trim().parse::<i32>().ok());
-                if let Some(t_pid) = target_pid {
-                    let netns_path = format!("/proc/{}/ns/net", t_pid);
-                    if let Ok(netns_file) = std::fs::File::open(&netns_path) {
-                        let _ = nix::sched::setns(&netns_file, CloneFlags::CLONE_NEWNET);
-                    }
-                }
+            let ns_join_root = apply_spec_namespace_joins(&spec);
+            let mut flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS;
+            if !ns_join_root.uts {
+                flags |= CloneFlags::CLONE_NEWUTS;
             }
+            if !ns_join_root.ipc {
+                flags |= CloneFlags::CLONE_NEWIPC;
+            }
+            unshare(flags)
+                .context("Failed to unshare namespaces (requires root or CAP_SYS_ADMIN)")?;
+        } else {
+            let mut ns_join = apply_spec_namespace_joins(&spec);
+            join_network_namespace_for_spec(&spec, &mut ns_join);
+
+            let mut flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS;
+            if !ns_join.uts {
+                flags |= CloneFlags::CLONE_NEWUTS;
+            }
+            if !ns_join.ipc {
+                flags |= CloneFlags::CLONE_NEWIPC;
+            }
+            unshare(flags)
+                .context("Failed to unshare namespaces (requires root or CAP_SYS_ADMIN)")?;
         }
-
-        // Unshare remaining namespaces: PID, Mount, UTS, IPC
-        let mut flags = CloneFlags::CLONE_NEWPID
-            | CloneFlags::CLONE_NEWNS
-            | CloneFlags::CLONE_NEWUTS
-            | CloneFlags::CLONE_NEWIPC;
-
-        unshare(flags).context("Failed to unshare namespaces (requires root or CAP_SYS_ADMIN)")?;
 
         // Fork: child will become PID 1 inside the new PID namespace
         match unsafe { fork() }? {
