@@ -17,7 +17,7 @@ use std::process::{Child, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::storage::container_store::{ContainerRecord, ContainerStatus, ContainerStore};
+use crate::storage::container_store::ContainerStore;
 
 struct NamespaceJoinState {
     ipc: bool,
@@ -577,20 +577,22 @@ fn wait_for_detached_conmon_start(
         .unwrap_or("")
         .to_string();
     let store = ContainerStore::new();
+    let expect_auto_cleanup = crate::bundle_auto_remove(bundle_path)
+        || crate::bundle_auto_remove_image(bundle_path);
     let wait_start = Instant::now();
     while wait_start.elapsed() < Duration::from_secs(30) {
         if bundle_path.join("conmon.pid").exists() {
             return Ok(());
         }
-        if !container_id.is_empty() {
-            match store.find(&container_id) {
-                None => return Ok(()),
-                Some(ContainerRecord { status: ContainerStatus::Exited(_), .. })
-                    if bundle_path.join("boxr-exitcode").exists() =>
-                {
-                    return Ok(());
-                }
-                _ => {}
+        if expect_auto_cleanup {
+            if !bundle_path.exists() {
+                return Ok(());
+            }
+            if !container_id.is_empty() && store.find(&container_id).is_none() {
+                return Ok(());
+            }
+            if bundle_path.join("boxr-exitcode").exists() {
+                return Ok(());
             }
         }
         match supervisor.try_wait() {

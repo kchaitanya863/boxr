@@ -65,12 +65,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 
 | E2e file | Status |
 |----------|--------|
-| `version_test.go` | **6/6** (`e2e-version-3.log`): reports **6.3.0-dev** (bundled podman.git), `-v` / `--version` after globals, trimmed `--format json`, help blurb |
-| `exists_test.go` | **12/12** (`e2e-exists-3.log`): silent exit **1** for missing image/pod/volume; `pod create --infra=false --share ""`; `run --http-proxy=false` |
-| `volume_rename_test.go` | **8/8** (`e2e-volume-rename-3.log`): silent success, Podman error strings/exit **125**, in-use detection via `mounts.json` on `create` |
-| `unshare_test.go` | **2/2** (strict): exec exit **127/126**, `unknown flag: --bogus` → **125** |
-| `container_clone_test.go` | **11/11**: destroy/force, pod clone (including **`in a pod`** `ps --ns` parity), network clone, secrets, health |
-| Other manifest specs | **All green** under `PODMAN_E2E_STRICT=1` for `e2e_manifest.txt` (see `e2e-strict-final2.log`) |
+| Full `e2e_manifest.txt` | **40/40** under `PODMAN_E2E_STRICT=1` (`e2e-strict-run4.log`, Oct 2026): exists, version, volume exists/rename, container clone, unshare |
 
 ## boxr fixes for upstream tests (ongoing)
 
@@ -88,14 +83,14 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
 | `030-run.bats` | **~80/81** isolated: **cert-dir**, **`run --rmi`** (incl. detached `--rmi`) green; **host env leak** (needs skopeo + Podman `containers-storage` transport) remains red; **8 skips** |
 | `040-ps.bats` | **8/8** isolated |
-| `045-start.bats` | **8/8** isolated |
-| `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr (`StopSignal SIGTERM failed to stop container … resorting to SIGKILL`, including **`in N seconds`** when `-t N` is set) |
+| `045-start.bats` | **8/8** isolated (restart-policy filter accepts **`none`** alias for **`no`**) |
+| `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr when stop timeout **> 0**; **`stop -t 0`** stays silent on stderr (e2e cleanup) |
 | `055-rm.bats` | **10/10** isolated (prior runs; re-verify if agent hangs on full file) |
 | `075-exec.bats` | **9/10** isolated: **red: additional groups** — rootless `setgroups(2)` after `setns` into an existing user namespace returns EPERM in this environment (BATS expects explicit `user:group` to clear supplementary GIDs); comma-separated **`--group-add 1,2,3,...`** now lands in OCI `additional_gids` |
 | `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `volume import test`, `--userns=keep-id` (idmap; see gap below) |
 | `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
-| Detached `-d` / restart | Short-lived commands (`true`/`false`) no longer fail start; conmon supervisor restart loop for `--restart=on-failure`; BATS restart+hooks green |
+| Detached `-d` / restart | Short-lived commands (`true`/`false`) no longer fail start; conmon supervisor restart loop for `--restart=on-failure`; fast **`--rm`/`--rmi`** defers bundle rmdir from inside conmon so **`run -d`** does not race on **`conmon.pid`**; BATS restart+hooks green |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*`, `quay.io/libpod/registry:*`, registry **container** named `registry`, `localhost/cve_2022_1227_test*` (build test **49** image when `top` fails) |
 

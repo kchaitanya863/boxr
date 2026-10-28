@@ -3328,10 +3328,10 @@ pub fn stop_container_with_home_and_timeout(
                 let _ = sigkill_live_pids(&all_pids);
                 stop_wait_clear_pid_files(&bundle_path, &c.id);
                 let _ = finalize_container_exited_status(&store, &c.id, &bundle_path, true);
-                cli::usage_errors::exit_usage_error(format!(
-                    "container {} conmon exited prematurely, exit code could not be retrieved: conmon process killed",
-                    output_label.unwrap_or(container)
-                ));
+                if !quiet {
+                    println!("{}", output_label.unwrap_or(container));
+                }
+                return Ok(());
             }
         }
     }
@@ -3369,7 +3369,7 @@ pub fn stop_container_with_home_and_timeout(
             used_sigkill = true;
         }
         stop_wait_clear_pid_files(&bundle_path, &c.id);
-        if used_sigkill && sig_num == libc::SIGTERM {
+        if used_sigkill && sig_num == libc::SIGTERM && grace_secs > 0 {
             let label = output_label.unwrap_or(container);
             if let Some(t) = timeout_secs {
                 eprintln!(
