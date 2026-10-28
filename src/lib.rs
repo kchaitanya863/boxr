@@ -1866,6 +1866,33 @@ pub async fn run_container_with_output(
     if args.unsetenv_all {
         annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
+    let attach_all = args.attach.is_empty();
+    annotations.insert(
+        "boxr.attach_stdout".to_string(),
+        (attach_all || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdout")))
+            .to_string(),
+    );
+    annotations.insert(
+        "boxr.attach_stderr".to_string(),
+        (attach_all || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stderr")))
+            .to_string(),
+    );
+    annotations.insert(
+        "boxr.attach_stdin".to_string(),
+        (args.interactive
+            || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin")))
+            .to_string(),
+    );
+    if let Some(driver) = &args.log_driver {
+        annotations.insert("boxr.log_driver".to_string(), driver.clone());
+        if driver == "k8s-file" {
+            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+            annotations.insert(
+                "boxr.log_path".to_string(),
+                log_path.to_string_lossy().to_string(),
+            );
+        }
+    }
     spec.annotations = Some(annotations);
 
     fs::create_dir_all(&bundle_dir)?;
@@ -3148,6 +3175,24 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let (image_name, image_id, image_digest) =
                     container_inspect_image_fields(&c, &i_store);
 
+                let log_config = if let Some(path) = annotations.get("boxr.log_path") {
+                    let driver = annotations
+                        .get("boxr.log_driver")
+                        .map(|s| s.as_str())
+                        .unwrap_or("k8s-file");
+                    serde_json::json!({
+                        "Type": driver,
+                        "Path": path,
+                        "Config": serde_json::Map::new(),
+                    })
+                } else {
+                    serde_json::json!({
+                        "Type": "",
+                        "Path": "",
+                        "Config": serde_json::Map::new(),
+                    })
+                };
+
                 let docker_compat_inspect = serde_json::json!({
                     "Id": c.id,
                     "Created": c.created_at.to_rfc3339(),
@@ -3197,6 +3242,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "Memory": memory,
                         "NanoCpus": nano_cpus,
                         "Ulimits": host_ulimits_for_inspect(&bundle_path),
+                        "LogConfig": log_config,
                     },
                     "NetworkSettings": {
                         "Bridge": "",

@@ -9,7 +9,8 @@ use nix::unistd::Pid;
 use nix::unistd::{ForkResult, chdir, fork, pivot_root};
 use std::ffi::CString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 /// Podman/crun-style message and exit code when exec fails in the container child.
 fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
@@ -127,6 +128,87 @@ fn ensure_spec_workdir(spec: &Spec, mount_dests: &[String]) -> Result<()> {
 }
 
 /// Native Linux execution of an OCI bundle using Linux namespaces and pivot_root.
+struct BundleIoPolicy {
+    attach_stdout: bool,
+    attach_stderr: bool,
+    attach_stdin: bool,
+    log_driver: Option<String>,
+    log_path: Option<PathBuf>,
+}
+
+fn bundle_io_policy(spec: &Spec, bundle_path: &Path) -> BundleIoPolicy {
+    let ann = spec.annotations.as_ref();
+    let parse_bool = |key: &str, default: bool| -> bool {
+        ann.and_then(|a| a.get(key))
+            .map(|v| v == "true")
+            .unwrap_or(default)
+    };
+    BundleIoPolicy {
+        attach_stdout: parse_bool("boxr.attach_stdout", true),
+        attach_stderr: parse_bool("boxr.attach_stderr", true),
+        attach_stdin: parse_bool("boxr.attach_stdin", false),
+        log_driver: ann.and_then(|a| a.get("boxr.log_driver")).cloned(),
+        log_path: ann
+            .and_then(|a| a.get("boxr.log_path"))
+            .map(PathBuf::from)
+            .or_else(|| {
+                if ann
+                    .and_then(|a| a.get("boxr.log_driver"))
+                    .is_some_and(|d| d == "k8s-file")
+                {
+                    Some(bundle_path.join("ctr.log"))
+                } else {
+                    None
+                }
+            }),
+    }
+}
+
+fn configure_stdio(
+    cmd: &mut std::process::Command,
+    policy: &BundleIoPolicy,
+    bundle_path: &Path,
+) -> Result<()> {
+    if policy.attach_stdin {
+        cmd.stdin(Stdio::inherit());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+
+    if policy.attach_stdout {
+        cmd.stdout(Stdio::inherit());
+    } else if policy.log_driver.as_deref() == Some("k8s-file") {
+        let path = policy
+            .log_path
+            .clone()
+            .unwrap_or_else(|| bundle_path.join("ctr.log"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::File::create(&path)?;
+        cmd.stdout(file);
+    } else {
+        cmd.stdout(Stdio::null());
+    }
+
+    if policy.attach_stderr {
+        cmd.stderr(Stdio::inherit());
+    } else if policy.log_driver.as_deref() == Some("k8s-file") {
+        let path = policy
+            .log_path
+            .clone()
+            .unwrap_or_else(|| bundle_path.join("ctr.log"));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+        cmd.stderr(file);
+    } else {
+        cmd.stderr(Stdio::null());
+    }
+    Ok(())
+}
+
 pub fn execute_bundle(
     bundle_path: &Path,
     _spec: &Spec,
@@ -186,12 +268,11 @@ pub fn execute_bundle(
         }
         Ok(0)
     } else {
-        let status = std::process::Command::new(&exe)
-            .arg("__internal-trampoline")
-            .arg(bundle_path)
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
+        let io_policy = bundle_io_policy(_spec, bundle_path);
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("__internal-trampoline").arg(bundle_path);
+        configure_stdio(&mut cmd, &io_policy, bundle_path)?;
+        let status = cmd
             .status()
             .context("Failed to execute container trampoline process")?;
 
