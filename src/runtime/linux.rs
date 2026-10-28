@@ -1939,9 +1939,11 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
     const AT_EMPTY_PATH: i32 = 0x1000;
     const AT_NO_AUTOMOUNT: i32 = 0x800;
     const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+    const AT_RECURSIVE: i32 = 0x8000;
     const OPEN_TREE_CLONE: u32 = 1;
     const OPEN_TREE_CLOEXEC: u32 = 0x0008_0000;
     const MOVE_MOUNT_F_EMPTY_PATH: u32 = 0x0000_0004;
+    const MS_PRIVATE: u64 = 1 << 18;
 
     #[repr(C)]
     struct MountAttrVer0 {
@@ -1994,7 +1996,7 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
     let attr = MountAttrVer0 {
         attr_set: MOUNT_ATTR_IDMAP,
         attr_clr: 0,
-        propagation: 0,
+        propagation: MS_PRIVATE,
         userns_fd: user_ns.as_raw_fd() as u64,
     };
     let empty_path = CString::new("").context("empty mount_setattr path")?;
@@ -2003,7 +2005,7 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
             SYS_MOUNT_SETATTR,
             tree_fd,
             empty_path.as_ptr(),
-            AT_EMPTY_PATH as libc::c_ulong,
+            (AT_EMPTY_PATH | AT_RECURSIVE) as libc::c_ulong,
             &attr as *const MountAttrVer0,
             MOUNT_ATTR_SIZE_VER0,
         )
@@ -2024,7 +2026,7 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
             SYS_MOVE_MOUNT,
             tree_fd,
             empty_path.as_ptr(),
-            libc::AT_FDCWD,
+            0i32,
             target_c.as_ptr(),
             MOVE_MOUNT_F_EMPTY_PATH,
         )

@@ -61,7 +61,7 @@ chmod +x scripts/run_podman_e2e_conformance.sh
 
 Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=...` in a shallow Podman clone. First run installs ginkgo via upstream Makefile.
 
-**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Global Podman storage flags (`--root`, `--runroot`, `--storage-driver`, …) are stripped in `preprocess_argv` so suite init can invoke the wrapper. **E2e still fails in `SynchronizedBeforeSuite` / `SynchronizedAfterSuite`** (Podman libpod storage, conmon, `/timings-*` artifacts)—**0 specs run** until boxr-specific e2e bootstrap exists; do not treat as boxr CLI regressions.
+**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Global Podman storage flags (`--root`, `--runroot`, `--storage-driver`, …) are stripped in `preprocess_argv` so suite init can invoke the wrapper. **E2e still fails in `SynchronizedBeforeSuite` / `SynchronizedAfterSuite`** (Podman libpod storage, conmon, `/timings-*` artifacts)—**0 specs run** until boxr-specific e2e bootstrap exists; do not treat as boxr CLI regressions. Latest log: `e2e-run.log` in agent artifacts (`SynchronizedBeforeSuite` at `common_test.go:607`, AfterSuite `/timings-1` missing).
 
 ## boxr fixes for upstream tests (ongoing)
 
