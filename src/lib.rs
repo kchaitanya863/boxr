@@ -8221,7 +8221,8 @@ fn apply_podman_userns(
                 .as_deref()
                 .is_some_and(|u| u == "0" || u.starts_with("0:"));
             if !explicit_root {
-                // Rootless boxr maps container UID 0 to the invoking host user.
+                // Container PID 1 runs as namespaced root (host UID on the host); keep-id
+                // file ownership on binds still needs idmapped mounts or Podman uid maps.
                 spec.process.user.uid = 0;
                 spec.process.user.gid = 0;
                 let host_uid = unsafe { libc::getuid() };

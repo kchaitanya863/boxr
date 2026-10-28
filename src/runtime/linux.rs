@@ -1937,10 +1937,11 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
 
     const MOUNT_ATTR_IDMAP: u64 = 0x0010_0000;
     const AT_EMPTY_PATH: i32 = 0x1000;
-    const AT_RECURSIVE: i32 = 0x8000;
+    const AT_NO_AUTOMOUNT: i32 = 0x800;
+    const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
     const OPEN_TREE_CLONE: u32 = 1;
+    const OPEN_TREE_CLOEXEC: u32 = 0x0008_0000;
     const MOVE_MOUNT_F_EMPTY_PATH: u32 = 0x0000_0004;
-    const MS_PRIVATE: u64 = 1 << 18;
 
     #[repr(C)]
     struct MountAttrVer0 {
@@ -1971,12 +1972,14 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
 
     let user_ns = fs::File::open("/proc/self/ns/user").context("open user ns")?;
     let source_c = CString::new(source.to_string_lossy().as_ref())?;
+    let open_tree_flags = (OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC) as libc::c_ulong
+        | (AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_SYMLINK_NOFOLLOW) as libc::c_ulong;
     let tree_fd = unsafe {
         libc::syscall(
             SYS_OPEN_TREE,
             libc::AT_FDCWD,
             source_c.as_ptr(),
-            OPEN_TREE_CLONE,
+            open_tree_flags,
         )
     };
     if tree_fd < 0 {
@@ -1991,15 +1994,16 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
     let attr = MountAttrVer0 {
         attr_set: MOUNT_ATTR_IDMAP,
         attr_clr: 0,
-        propagation: MS_PRIVATE,
+        propagation: 0,
         userns_fd: user_ns.as_raw_fd() as u64,
     };
+    let empty_path = CString::new("").context("empty mount_setattr path")?;
     let rc = unsafe {
         libc::syscall(
             SYS_MOUNT_SETATTR,
             tree_fd,
-            std::ptr::null::<libc::c_char>(),
-            (AT_EMPTY_PATH | AT_RECURSIVE) as libc::c_ulong,
+            empty_path.as_ptr(),
+            AT_EMPTY_PATH as libc::c_ulong,
             &attr as *const MountAttrVer0,
             MOUNT_ATTR_SIZE_VER0,
         )
@@ -2014,12 +2018,13 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
     }
 
     let target_c = CString::new(target.to_string_lossy().as_ref())?;
+    let empty_path = CString::new("").context("empty move_mount path")?;
     let mv = unsafe {
         libc::syscall(
             SYS_MOVE_MOUNT,
             tree_fd,
-            std::ptr::null::<libc::c_char>(),
-            0i32,
+            empty_path.as_ptr(),
+            libc::AT_FDCWD,
             target_c.as_ptr(),
             MOVE_MOUNT_F_EMPTY_PATH,
         )
