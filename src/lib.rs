@@ -4614,7 +4614,7 @@ fn lookup_group_gid(group: &str, name_or_id: &str) -> Result<u32> {
                 .context("invalid gid in /etc/group");
         }
     }
-    Err(anyhow!("Error: no matching entries in group file"))
+    Err(anyhow!("no matching entries in group file"))
 }
 
 fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Result<(u32, u32)> {
@@ -4676,8 +4676,13 @@ fn apply_hostuser_passwd(rootfs: &Path, hostusers: &[String]) -> Result<()> {
     let existing = fs::read_to_string(&passwd_path).unwrap_or_default();
     let mut lines: Vec<String> = existing.lines().map(String::from).collect();
     for spec in hostusers {
-        let line = find_host_passwd_line(&host_passwd, spec)
-            .ok_or_else(|| anyhow!("user {} not found in /etc/passwd", spec))?;
+        let line = match find_host_passwd_line(&host_passwd, spec) {
+            Some(line) => line,
+            None => cli::usage_errors::exit_config_error(format!(
+                "user {} not found in /etc/passwd",
+                spec
+            )),
+        };
         let name = line.split(':').next().unwrap_or("");
         if lines.iter().any(|l| l.split(':').next() == Some(name)) {
             continue;
