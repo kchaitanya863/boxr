@@ -95,7 +95,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `volume import test`, `--userns=keep-id` (idmap; see gap below) |
 | `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
-| `--runtime-flag` | Global flag; unknown values exit **126** (BATS `030-run` global runtime option) |
+| Detached `-d` / restart | Short-lived commands (`true`/`false`) no longer fail start; conmon supervisor restart loop for `--restart=on-failure`; BATS restart+hooks green |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*`, `quay.io/libpod/registry:*`, registry **container** named `registry`, `localhost/cve_2022_1227_test*` (build test **49** image when `top` fails) |
 

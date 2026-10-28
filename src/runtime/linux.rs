@@ -601,6 +601,42 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     }
 
+    if detach {
+        let container_id = bundle_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        loop {
+            let mut child = cmd
+                .spawn()
+                .context("spawn trampoline from conmon supervisor")?;
+            let child_pid = child.id() as i32;
+            fs::write(bundle_path.join("vm.pid"), child_pid.to_string())?;
+            fs::write(bundle_path.join("pid"), child_pid.to_string())?;
+            if !container_id.is_empty() {
+                if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(&container_id) {
+                    let _ = cgroup_mgr.add_process(child_pid);
+                }
+            }
+            let status = child.wait()?;
+            let exit_code = status.code().unwrap_or(1);
+            let _ = fs::write(
+                bundle_path.join("boxr-exitcode"),
+                exit_code.to_string(),
+            );
+            if container_id.is_empty()
+                || !crate::detached_container_process_exited(
+                    &container_id,
+                    bundle_path,
+                    exit_code,
+                )
+            {
+                return Ok(exit_code);
+            }
+        }
+    }
+
     let mut child = cmd
         .spawn()
         .context("spawn trampoline from conmon supervisor")?;
@@ -695,10 +731,15 @@ pub fn execute_bundle(
             let _child = cmd.spawn().context("spawn conmon supervisor")?;
             let wait_start = std::time::Instant::now();
             while wait_start.elapsed() < std::time::Duration::from_secs(30) {
-                if bundle_path.join("conmon.pid").exists() && bundle_path.join("vm.pid").exists() {
+                if bundle_path.join("conmon.pid").exists() {
                     break;
                 }
                 thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if !bundle_path.join("conmon.pid").exists() {
+                return Err(anyhow!(
+                    "Container failed to start: conmon supervisor did not start"
+                ));
             }
             return Ok(0);
         }

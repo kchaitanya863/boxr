@@ -2785,45 +2785,10 @@ pub async fn run_container_with_output(
     )?;
 
     if args.detach {
-        let pid_path = bundle_dir.join("vm.pid");
-        let pid_wait = std::time::Instant::now();
-        while !pid_path.exists() && pid_wait.elapsed() < std::time::Duration::from_secs(30) {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                #[cfg(unix)]
-                if unsafe { libc::kill(pid, 0) } != 0 {
-                    return Err(anyhow!(
-                        "Container failed to start: trampoline process exited immediately"
-                    ));
-                }
-                #[cfg(windows)]
-                {
-                    let is_running = std::process::Command::new("tasklist")
-                        .args(["/FI", &format!("PID eq {}", pid)])
-                        .output()
-                        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-                        .unwrap_or(true);
-                    if !is_running {
-                        return Err(anyhow!(
-                            "Container failed to start: process exited immediately"
-                        ));
-                    }
-                }
-            }
-        } else if !pid_path.exists() {
-            return Err(anyhow!(
-                "Container failed to start: micro-VM runner did not report a PID"
-            ));
-        }
-
         #[cfg(target_os = "linux")]
         if !parsed_ports.is_empty() {
-            // Rootless forward helper may write forwarder.pid; passt/pasta does not.
             let _ =
                 network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
-            // Detached starts must not block on in-container listeners (Docker/Podman parity).
         }
         if !health_cfg.test.is_empty() {
             health::supervisor::spawn_detached_health_supervisor(
@@ -3051,7 +3016,7 @@ fn load_bundle_for_restart(bundle_path: &Path) -> Result<(Spec, Vec<volume::Moun
     Ok((spec, mounts, ports))
 }
 
-fn try_restart_detached_container(container_id: &str, bundle_path: &Path, stored_exit: i32) -> bool {
+fn prepare_detached_restart(container_id: &str, bundle_path: &Path, stored_exit: i32) -> bool {
     let store = ContainerStore::new();
     let c = match store.find(container_id) {
         Some(c) => c,
@@ -3072,12 +3037,20 @@ fn try_restart_detached_container(container_id: &str, bundle_path: &Path, stored
         return false;
     }
     let _ = runtime::oci_hooks::run_hooks_from_bundle(bundle_path, "prestart");
+    let _ = store.update_status(container_id, ContainerStatus::Running);
+    true
+}
+
+fn try_restart_detached_container(container_id: &str, bundle_path: &Path, stored_exit: i32) -> bool {
+    if !prepare_detached_restart(container_id, bundle_path, stored_exit) {
+        return false;
+    }
     let (spec, mounts, ports) = match load_bundle_for_restart(bundle_path) {
         Ok(v) => v,
         Err(_) => return false,
     };
-    let _ = store.update_status(container_id, ContainerStatus::Running);
     if execute_bundle(bundle_path, &spec, &mounts, &ports, true, false).is_err() {
+        let store = ContainerStore::new();
         let _ = store.update_status(container_id, ContainerStatus::Exited(stored_exit));
         return false;
     }
@@ -3098,7 +3071,7 @@ pub fn detached_container_process_exited(
     } else {
         exit_code
     };
-    if try_restart_detached_container(container_id, bundle_path, stored) {
+    if prepare_detached_restart(container_id, bundle_path, stored) {
         return true;
     }
     let store = ContainerStore::new();
