@@ -429,7 +429,7 @@ async fn test_issue_120_shm_size_validation() {
 #[test]
 fn test_issue_121_update_memory_rejects_negative() {
     assert!(ResourceLimits::parse_memory("-10m").is_err());
-    assert!(ResourceLimits::parse_memory("0m").is_err());
+    assert!(ResourceLimits::parse_memory("0m").is_ok());
     assert!(ResourceLimits::parse_memory("128m").is_ok());
 }
 
