@@ -63,7 +63,7 @@ pub mod system;
 pub mod terminal;
 pub mod volume;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use cli::{
     BuildArgs, BuilderAction, Cli, Commands, ComposeArgs, ComposeSubcommand, DiffArgs, ExecArgs,
@@ -1921,6 +1921,14 @@ pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     run_container_with_output(args, CliOutputPolicy::default()).await
 }
 
+/// Podman treats `--rmi` as implying `--rm` unless the user set `--rm=false`.
+fn run_auto_remove_enabled(args: &RunArgs) -> bool {
+    if args.rm {
+        return true;
+    }
+    args.rmi && cli::RUN_RM_EXPLICIT_FALSE.get() != Some(&true)
+}
+
 pub async fn run_container_with_output(
     mut args: RunArgs,
     output_policy: CliOutputPolicy,
@@ -2255,10 +2263,7 @@ pub async fn run_container_with_output(
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     if let Some(u) = &args.user {
-        if let Some((uid, gid)) = resolve_user_spec_in_rootfs(&cow_bundle.merged_dir, u) {
-            spec.process.user.uid = uid;
-            spec.process.user.gid = gid;
-        }
+        apply_run_user_spec(&cow_bundle.merged_dir, u, &mut spec);
     }
     if let Some(img) = image_ref {
         apply_image_config_volume_mounts(
@@ -2531,7 +2536,7 @@ pub async fn run_container_with_output(
     )?;
     spec.save_to_bundle(&bundle_dir)?;
 
-    if args.rm || (args.rmi && args.detach) {
+    if run_auto_remove_enabled(&args) {
         let _ = fs::write(bundle_dir.join("auto_remove"), "1");
     }
     if args.rmi {
@@ -2752,14 +2757,15 @@ pub async fn run_container_with_output(
     }
 
     if !args.detach {
+        let auto_rm = run_auto_remove_enabled(&args);
         if args.rmi {
             try_rmi_with_in_use_warning(
                 &args.image,
                 Some(&container_id),
-                !args.rm,
+                !auto_rm,
             );
         }
-        if args.rm {
+        if auto_rm {
             prune_container_attached_volumes(bundle_dir.clone());
             let _ = OverlayDriver::cleanup(&cow_bundle);
             let _ = container_store.remove(&container_id);
@@ -2892,6 +2898,29 @@ fn try_rmi_with_in_use_warning(
         }
     }
     let _ = remove_image_inner(image, false, false, exclude_container_id);
+}
+
+/// Update store state and honor `--rm` / `--rmi` after a detached trampoline exits.
+pub fn detached_container_process_exited(
+    container_id: &str,
+    bundle_path: &Path,
+    exit_code: i32,
+) {
+    let stored = if exit_code == 255 {
+        fs::read_to_string(bundle_path.join("boxr-exitcode"))
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .unwrap_or(-1)
+    } else {
+        exit_code
+    };
+    let store = ContainerStore::new();
+    let _ = store.update_status(container_id, ContainerStatus::Exited(stored));
+    let _ = fs::remove_file(bundle_path.join("vm.pid"));
+    let _ = fs::remove_file(bundle_path.join("container.pid"));
+    if let Some(c) = store.find(container_id) {
+        finalize_stopped_container(&c);
+    }
 }
 
 /// After a detached container's main process exits, honor `--rm` / `--rmi` markers.
@@ -4548,39 +4577,77 @@ fn log_opt_max_size_mb(log_opts: &[String]) -> Option<String> {
     None
 }
 
-fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Option<(u32, u32)> {
+fn apply_run_user_spec(rootfs: &Path, user: &str, spec: &mut oci::runtime::Spec) {
+    match resolve_user_spec_in_rootfs(rootfs, user) {
+        Ok((uid, gid)) => {
+            spec.process.user.uid = uid;
+            spec.process.user.gid = gid;
+        }
+        Err(e) => cli::usage_errors::exit_config_error(e.to_string()),
+    }
+}
+
+fn lookup_passwd_uid(passwd: &str, name_or_id: &str) -> Result<u32> {
+    if let Ok(uid) = name_or_id.parse::<u32>() {
+        return Ok(uid);
+    }
+    for line in passwd.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 4 && parts[0] == name_or_id {
+            return parts[2]
+                .parse()
+                .context("invalid uid in /etc/passwd");
+        }
+    }
+    Err(anyhow!("user {} not found in /etc/passwd", name_or_id))
+}
+
+fn lookup_group_gid(group: &str, name_or_id: &str) -> Result<u32> {
+    if let Ok(gid) = name_or_id.parse::<u32>() {
+        return Ok(gid);
+    }
+    for line in group.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3 && parts[0] == name_or_id {
+            return parts[2]
+                .parse()
+                .context("invalid gid in /etc/group");
+        }
+    }
+    Err(anyhow!("Error: no matching entries in group file"))
+}
+
+fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Result<(u32, u32)> {
     let spec = spec.trim();
-    let passwd = fs::read_to_string(rootfs.join("etc/passwd")).ok();
+    let passwd = fs::read_to_string(rootfs.join("etc/passwd"))
+        .context("failed to read /etc/passwd in container")?;
+    let group = fs::read_to_string(rootfs.join("etc/group"))
+        .context("failed to read /etc/group in container")?;
     if let Some((left, right)) = spec.split_once(':') {
         if let (Ok(uid), Ok(gid)) = (left.parse::<u32>(), right.parse::<u32>()) {
-            return Some((uid, gid));
+            return Ok((uid, gid));
         }
+        let uid = lookup_passwd_uid(&passwd, left)?;
         if let Ok(gid) = right.parse::<u32>() {
-            if let Some(content) = &passwd {
-                for line in content.lines() {
-                    let parts: Vec<&str> = line.split(':').collect();
-                    if parts.len() >= 4 && parts[0] == left {
-                        let uid = parts[2].parse().ok()?;
-                        return Some((uid, gid));
-                    }
-                }
-            }
+            return Ok((uid, gid));
         }
+        let gid = lookup_group_gid(&group, right)?;
+        return Ok((uid, gid));
     }
     if let Ok(uid) = spec.parse::<u32>() {
-        return Some((uid, uid));
+        return Ok((uid, uid));
     }
-    if let Some(content) = passwd {
-        for line in content.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 4 && parts[0] == spec {
-                let uid = parts[2].parse().ok()?;
-                let gid = parts[3].parse().ok()?;
-                return Some((uid, gid));
-            }
+    let uid = lookup_passwd_uid(&passwd, spec)?;
+    for line in passwd.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 4 && parts[0] == spec {
+            let gid = parts[3]
+                .parse()
+                .context("invalid gid in /etc/passwd")?;
+            return Ok((uid, gid));
         }
     }
-    None
+    Err(anyhow!("user {} not found in /etc/passwd", spec))
 }
 
 fn find_host_passwd_line(host_passwd: &str, spec: &str) -> Option<String> {
@@ -6702,10 +6769,7 @@ async fn create_only_container_after_pod_prep(
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     if let Some(u) = &args.user {
-        if let Some((uid, gid)) = resolve_user_spec_in_rootfs(&cow_bundle.merged_dir, u) {
-            spec.process.user.uid = uid;
-            spec.process.user.gid = gid;
-        }
+        apply_run_user_spec(&cow_bundle.merged_dir, u, &mut spec);
     }
     apply_image_config_volume_mounts(
         &image_record,
@@ -6784,7 +6848,7 @@ async fn create_only_container_after_pod_prep(
         &image_id_for_env,
     )?;
     spec.save_to_bundle(&bundle_dir)?;
-    if args.rm || (args.rmi && args.detach) {
+    if run_auto_remove_enabled(&args) {
         let _ = fs::write(bundle_dir.join("auto_remove"), "1");
     }
     if args.rmi {

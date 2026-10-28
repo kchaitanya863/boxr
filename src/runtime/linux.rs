@@ -503,17 +503,35 @@ pub fn execute_bundle(
             cmd.process_group(0);
         }
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .context("Failed to spawn container trampoline process")?;
 
         let child_pid = child.id() as i32;
         let _ = fs::write(bundle_path.join("vm.pid"), child_pid.to_string());
         let _ = fs::write(bundle_path.join("pid"), child_pid.to_string());
-        if let Some(cont_id) = bundle_path.file_name().and_then(|s| s.to_str()) {
-            if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(cont_id) {
+        let container_id = bundle_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !container_id.is_empty() {
+            if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(&container_id) {
                 let _ = cgroup_mgr.add_process(child_pid);
             }
+            let bundle_watch = bundle_path.to_path_buf();
+            thread::spawn(move || {
+                let exit_code = match child.wait() {
+                    Ok(status) => status.code().unwrap_or(1),
+                    Err(_) => 137,
+                };
+                write_container_exit_code(&bundle_watch, exit_code);
+                crate::detached_container_process_exited(
+                    &container_id,
+                    &bundle_watch,
+                    exit_code,
+                );
+            });
         }
         Ok(0)
     } else {
