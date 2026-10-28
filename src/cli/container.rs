@@ -10,9 +10,16 @@ pub struct RunArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
-    /// Allocate a pseudo-TTY
-    #[arg(short = 't', long = "tty")]
-    pub tty: bool,
+    /// Allocate a pseudo-TTY (`-t`, `-t=true`, `-t=false`; Podman-compatible)
+    #[arg(
+        short = 't',
+        long = "tty",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub tty: Option<bool>,
 
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
@@ -326,9 +333,9 @@ pub struct RunArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
 
-    /// Logging driver for the container
+    /// Logging driver for the container (last value wins when repeated)
     #[arg(long = "log-driver")]
-    pub log_driver: Option<String>,
+    pub log_driver: Vec<String>,
 
     /// Log driver options
     #[arg(long = "log-opt")]
@@ -446,6 +453,13 @@ pub struct RunArgs {
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
+}
+
+impl RunArgs {
+    /// Whether `-t` / `--tty` requests a pseudo-TTY (default false).
+    pub fn allocate_tty(&self) -> bool {
+        self.tty.unwrap_or(false)
+    }
 }
 
 #[derive(Args, Debug)]

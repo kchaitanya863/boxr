@@ -576,7 +576,7 @@ mod tests {
         let mut args = crate::cli::RunArgs {
             registry_auth: Default::default(),
             interactive: false,
-            tty: false,
+            tty: None,
             detach: true,
             rm: false,
             rmi: false,
@@ -654,7 +654,7 @@ mod tests {
             attach: vec![],
             pull: None,
             quiet: false,
-            log_driver: None,
+            log_driver: vec![],
             log_opt: vec![],
             oom_kill_disable: false,
             oom_score_adj: None,

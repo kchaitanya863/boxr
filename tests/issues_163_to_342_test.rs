@@ -130,7 +130,7 @@ fn default_run_args(image: &str) -> RunArgs {
     RunArgs {
         registry_auth: Default::default(),
         interactive: false,
-        tty: false,
+        tty: None,
         detach: false,
         rm: false,
         name: None,
@@ -207,7 +207,7 @@ fn default_run_args(image: &str) -> RunArgs {
         attach: Vec::new(),
         pull: None,
         quiet: false,
-        log_driver: None,
+        log_driver: vec![],
         log_opt: Vec::new(),
         oom_kill_disable: false,
         oom_score_adj: None,

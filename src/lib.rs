@@ -227,7 +227,7 @@ fn apply_container_tz(tz: &str, spec: &mut Spec, bundle_rootfs: &Path) {
 
 /// Detached `run -td … /bin/sh` needs an interactive shell or the session exits immediately.
 fn ensure_tty_detach_shell_stays_alive(spec: &mut Spec, args: &RunArgs) {
-    if !args.tty || !args.detach {
+    if !args.allocate_tty() || !args.detach {
         return;
     }
     let argv = &spec.process.args;
@@ -260,7 +260,8 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
         return;
     }
     let user_set_term = args.env.iter().any(|e| e.starts_with("TERM="));
-    if !args.tty {
+    let tty = args.allocate_tty();
+    if !tty {
         if !user_set_term {
             spec.process.env.retain(|e| !e.starts_with("TERM="));
         }
@@ -268,7 +269,7 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
         // Podman BATS: printenv TERM on a pseudo-tty reports CRLF line ending.
         spec.process.env.push("TERM=xterm\r".to_string());
     }
-    spec.process.terminal = args.tty;
+    spec.process.terminal = tty;
     ensure_tty_detach_shell_stays_alive(spec, args);
     for key in &args.unsetenv {
         spec.process.env.retain(|e| !e.starts_with(&format!("{}=", key)));
@@ -296,6 +297,20 @@ fn validate_log_driver(driver: &str) -> Result<()> {
                 "running container create option: invalid log driver: invalid argument",
             );
         }
+    }
+}
+
+fn validate_container_name_cli(name: &str) {
+    let normalized = ContainerStore::normalize_container_name(name);
+    if normalized.is_empty()
+        || !normalized
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        cli::usage_errors::exit_usage_error(format!(
+            "Invalid container name '{}': must be alphanumeric, '_', '-', or '.'",
+            name
+        ));
     }
 }
 
@@ -1813,6 +1828,9 @@ pub async fn run_container_with_output(
 
     // Generate container ID and name
     let container_id = new_container_id();
+    if let Some(n) = &args.name {
+        validate_container_name_cli(n);
+    }
     let container_name = args
         .name
         .as_ref()
@@ -2086,7 +2104,7 @@ pub async fn run_container_with_output(
             || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin")))
             .to_string(),
     );
-    if let Some(driver) = &args.log_driver {
+    if let Some(driver) = args.log_driver.last() {
         validate_log_driver(driver)?;
         annotations.insert("boxr.log_driver".to_string(), driver.clone());
         if driver == "k8s-file" || driver == "json-file" {
@@ -2412,7 +2430,7 @@ pub async fn run_container_with_output(
 
     // Enter raw terminal mode on macOS where a VM serial console is used
     #[cfg(target_os = "macos")]
-    let _term_guard = if args.interactive && args.tty {
+    let _term_guard = if args.interactive && args.allocate_tty() {
         terminal::TerminalGuard::enter_raw_mode().ok()
     } else {
         None
@@ -3397,6 +3415,9 @@ fn merge_exec_environment(
 }
 
 pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
+    if args.latest && !args.targets.is_empty() {
+        cli::usage_errors::exit_usage_error("--latest and containers cannot be used together");
+    }
     let only_type = args.obj_type.as_deref().unwrap_or("");
     if !only_type.is_empty()
         && only_type != "container"
@@ -5085,7 +5106,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                     match k.trim() {
                         "status" | "exited" | "id" => {}
                         "name" => {
-                            if !c.name.contains(v.trim()) {
+                            if !ps_name_filter_matches(&c.name, v.trim()) {
                                 return false;
                             }
                         }
@@ -5575,6 +5596,9 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     }
 
     let container_id = new_container_id();
+    if let Some(n) = &args.name {
+        validate_container_name_cli(n);
+    }
     let container_name = args
         .name
         .as_ref()
@@ -6841,17 +6865,38 @@ fn host_passwd_name_for_uid(uid: u32) -> String {
 }
 
 /// Podman #6829: ensure `id -un` works under `--userns=keep-id`.
+fn keep_id_container_home(args: &RunArgs, spec: &Spec) -> String {
+    let default = if spec.process.cwd.starts_with('/') && spec.process.cwd != "/" {
+        spec.process.cwd.clone()
+    } else {
+        "/home/podman".to_string()
+    };
+    if args.volumes.is_empty() {
+        return default;
+    }
+    if let Ok(host_home) = std::env::var("HOME") {
+        if args
+            .volumes
+            .iter()
+            .any(|v| v.split(':').next() == Some(host_home.as_str()))
+        {
+            return host_home;
+        }
+    }
+    default
+}
+
 fn ensure_keep_id_passwd_entry(
     rootfs: &Path,
     container_uid: u32,
     container_gid: u32,
     host_uid: u32,
     _host_gid: u32,
+    home: &str,
 ) -> Result<()> {
     let passwd_path = rootfs.join("etc/passwd");
     let existing = fs::read_to_string(&passwd_path).unwrap_or_default();
     let name = host_passwd_name_for_uid(host_uid);
-    let home = format!("/home/{}", name);
     let mut lines: Vec<String> = existing.lines().map(String::from).collect();
     let mut replaced = false;
     for line in &mut lines {
@@ -6913,12 +6958,21 @@ fn apply_podman_userns(
             });
         }
         if userns == "keep-id" {
-            // Rootless boxr maps container UID 0 to the invoking host user.
-            spec.process.user.uid = 0;
-            spec.process.user.gid = 0;
-            let host_uid = unsafe { libc::getuid() };
-            let host_gid = unsafe { libc::getgid() };
-            ensure_keep_id_passwd_entry(merged_rootfs, 0, 0, host_uid, host_gid)?;
+            let explicit_root = args
+                .user
+                .as_deref()
+                .is_some_and(|u| u == "0" || u.starts_with("0:"));
+            if !explicit_root {
+                // Rootless boxr maps container UID 0 to the invoking host user.
+                spec.process.user.uid = 0;
+                spec.process.user.gid = 0;
+                let host_uid = unsafe { libc::getuid() };
+                let host_gid = unsafe { libc::getgid() };
+                let home = keep_id_container_home(args, spec);
+                ensure_keep_id_passwd_entry(merged_rootfs, 0, 0, host_uid, host_gid, &home)?;
+                spec.process.env.retain(|e| !e.starts_with("HOME="));
+                spec.process.env.push(format!("HOME={}", home));
+            }
         }
     }
     Ok(())
@@ -7014,6 +7068,19 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
             p.containers.len()
         );
     }
+}
+
+fn ps_name_filter_matches(name: &str, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return true;
+    }
+    if filter.starts_with('^') && filter.ends_with('$') && filter.len() >= 2 {
+        let pat = filter[1..filter.len() - 1].trim();
+        let pat_body = pat.trim_start_matches('/');
+        return name == pat_body || format!("/{}", name) == pat;
+    }
+    name.contains(filter) || format!("/{}", name).contains(filter)
 }
 
 fn ps_id_filter_matches(container_id: &str, filter: &str) -> bool {
@@ -7313,7 +7380,9 @@ fn apply_ps_container_format_template(
     line = line.replace("{{ .PodName }}", &pod_name);
 
     line = line.replace("{{.ID}}", id_display);
+    line = line.replace("{{ .ID }}", id_display);
     line = line.replace("{{.Names}}", &c.name);
+    line = line.replace("{{ .Names }}", &c.name);
     line = line.replace("{{.Image}}", &c.image);
     line = line.replace("{{.Status}}", &c.status.to_string());
     line = line.replace("{{.State}}", state_str);
@@ -7981,7 +8050,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
     let infra_args = cli::RunArgs {
         registry_auth: Default::default(),
         interactive: false,
-        tty: false,
+        tty: None,
         detach: true,
         rm: false,
         rmi: false,
@@ -8069,7 +8138,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         attach: Vec::new(),
         pull: None,
         quiet: false,
-        log_driver: None,
+        log_driver: vec![],
         log_opt: Vec::new(),
         oom_kill_disable: false,
         oom_score_adj: None,
