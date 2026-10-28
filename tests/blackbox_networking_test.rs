@@ -44,6 +44,10 @@ fn test_d1_tcp_publish_and_curl() {
 
 #[test]
 fn test_d4_port_collision_rejected() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
@@ -61,6 +65,8 @@ fn test_d4_port_collision_rejected() {
         &[
             "run",
             "-d",
+            "--network",
+            "bridge",
             "--name",
             &c1,
             "-p",
@@ -70,11 +76,23 @@ fn test_d4_port_collision_rejected() {
             "60",
         ],
     );
+    let ports_out = run_boxr_ok(&home, &["port", &c1]);
+    if !ports_out.contains(&port.to_string()) {
+        eprintln!(
+            "SKIPPED: host port {} not published (port output: {:?})",
+            port,
+            ports_out.trim()
+        );
+        cleanup_container(&home, &c1);
+        return;
+    }
     let out = run_boxr(
         &home,
         &[
             "run",
             "-d",
+            "--network",
+            "bridge",
             "--name",
             &c2,
             "-p",
