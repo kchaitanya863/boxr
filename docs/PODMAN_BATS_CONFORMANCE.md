@@ -122,14 +122,22 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 
 ### Known gap: `075-exec` additional groups (rootless)
 
-Podman test **075-exec** (case 10) requires `podman exec --user root:root … id -G` to print **`0`** only (no inherited supplementary GIDs), and with `--group-add` to list **`0 1 2 … 10`** exactly. That needs `setgroups(2)` after entering the container user namespace.
+### Known gap: `075-exec` supplementary groups (rootless)
+
+Podman test **075-exec** requires `podman exec --user root:root … id -G` to print **`0`** only (no inherited supplementary GIDs), and with `--group-add` to list **`0 1 2 … 10`** exactly. That needs `setgroups(2)` after entering the container user namespace.
 
 On typical rootless boxr hosts (`newuidmap` / `newgidmap`, subuid/subgid):
 
 1. The mapping child writes **`deny`** to `/proc/self/setgroups` before `gid_map` (required by the kernel).
-2. The parent re-enables **`allow`** on the **mapping child PID** after `newuidmap`/`newgidmap` (`RootlessUserConfig::reenable_setgroups_for_pid`).
-3. boxr also re-enables **`allow`** on the **container init (PID 1) host PID** immediately after the PID-namespace fork.
-4. Exec **`--user root:root`** uses a dedicated **`setns(CLONE_NEWUSER)` → setgroups sync → `setns(CLONE_NEWPID)`** path (mount **`setns` drops the user namespace** on this kernel, so **`nsenter -m` is not used there). The exec process runs the container binary via an absolute **`rootfs/…`** path while host **`/proc`** still exposes **`setgroups`**. **`allow_setgroups_from_userns`** plus **`setgroups(2)`** shrink inherited groups but **`id -G`** still prints **`0 65534`** here (one unmapped supplementary GID), so case 10 remains red until **`setgroups allow`** sticks on the exec PID the way runc/conmon does on Podman CI.
+2. The parent re-enables **`allow`** on the **mapping child PID** after maps (`RootlessUserConfig::write_setgroups_allow` / `newuidmap` path).
+3. boxr drops host supplementary groups before forking the mapping child, re-enables **`allow`** on **container init** after the PID-namespace fork, and uses a **setns user → setgroups sync → setns pid** exec path with **`allow_setgroups_from_userns`**.
+
+**Environment blockers (Cloud Agent / hardened hosts):**
+
+- Host **`setgroups(2)`** may return **`EPERM`** even when `/proc/self/setgroups` is `allow` (verify with `python3 -c "import ctypes; print(ctypes.CDLL(None).setgroups(0, None))"`). Then the mapping child inherits the host group list into the user namespace as repeated **`65534`** entries; **`id -G`** cannot be trimmed without a working post-map **`setgroups allow`**.
+- Repro: `tools/userns_setgroups_repro.c` — after `gid_map`, writing **`allow`** to `/proc/<child>/setgroups` stays **`deny`** with **`errno=EPERM`** on affected kernels.
+
+When **`setgroups allow`** works after maps (Podman CI-style hosts), boxr’s sync paths above are intended to match runc/conmon behavior; re-run **`075:podman exec - additional groups`** there before treating a failure as a boxr regression.
 
 ### Known gap: `160-volumes` keep-id bind `stat` (rootless)
 
@@ -138,7 +146,7 @@ Podman test **160-volumes** (case 12) expects `stat` on a host-owned bind-mount 
 1. **Keep-id user namespace maps** (see `getRootlessKeepIDMapping` in upstream Podman), and/or  
 2. **ID-mapped bind mounts** when maps alone are insufficient.
 
-On this rootless host, `newuidmap` rejects Podman’s first keep-id segment because delegated `/etc/subuid` ranges do not cover host IDs `1..host_uid`. boxr applies Podman-style keep-id maps (`getRootlessKeepIDMapping`: `0→1`, `host_uid→0`, remainder from subuid size sum), so **`id -u` / `--userns=keep-id`** match the host UID. Bind mounts still need **idmapped** binds (`mount_setattr(2)` + `MOUNT_ATTR_IDMAP`); on this Cloud Agent VM that step returns **`EPERM`**, so **`stat` on a host-owned bind file shows `0:0:0`** and **160-volumes** case 12 stays red until the environment allows idmapped mounts (or Podman-equivalent shifting). boxr falls back to a plain bind when idmap fails.
+On this rootless host, boxr applies Podman-style keep-id maps (`getRootlessKeepIDMapping`: `0→1`, `host_uid→0`, remainder from subuid size sum), so **`id -u` / `--userns=keep-id`** match the host UID. Bind mounts still need **idmapped** binds (`mount_setattr(2)` + `MOUNT_ATTR_IDMAP`); on this Cloud Agent VM that step returns **`EPERM`** (plain bind leaves host-owned files visible as **`0:0`** in the container, while the test expects **`$(id -u):$(id -g):0`**). boxr falls back to a plain bind when idmap fails. Re-run case 12 on a host where **`mount_setattr`** idmap succeeds (Linux ≥ 6.3 with unprivileged idmapped mounts enabled) before treating a failure as a boxr regression.
 
 ## Related
 
