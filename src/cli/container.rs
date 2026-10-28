@@ -1023,8 +1023,11 @@ pub struct PauseArgs {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UnpauseArgs {
+    /// Unpause all paused containers
+    #[arg(long = "all")]
+    pub all: bool,
+
     /// Containers to unpause
-    #[arg(required = true)]
     pub containers: Vec<String>,
 }
 

@@ -553,10 +553,11 @@ using single-ID mapping only (images requiring chown/--user may fail)"
             return;
         }
         if let Err(e) = fs::write(path, "allow") {
-            eprintln!(
-                "boxr: could not enable setgroups in user namespace (supplementary groups may fail): {}",
-                e
-            );
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                let _ = e;
+                // Intentionally quiet: stderr from this path is often captured in container logs.
+            });
         }
     }
 

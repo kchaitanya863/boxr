@@ -3333,6 +3333,10 @@ pub fn stop_container_with_home_and_timeout(
         }
     };
 
+    if matches!(c.status, ContainerStatus::Paused) {
+        thaw_container_processes(&c);
+    }
+
     let sig_num = if let Some(s) = signal {
         runtime::kill::ContainerKiller::parse_signal(s).unwrap_or(libc::SIGTERM)
     } else {
@@ -3943,6 +3947,7 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
     let attach = runtime::ExecAttach {
         interactive: args.interactive,
         tty: args.tty,
+        quiet: false,
     };
     let exec_user = resolve_exec_user_spec(&bundle_path, args.user.as_deref());
     let preserve_fds = args.resolved_preserve_fds();
@@ -4511,20 +4516,51 @@ pub fn commit_container(args: &cli::CommitArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn freeze_container_processes(cont: &ContainerRecord) {
+    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&cont.id) {
+        let _ = cgroup_mgr.freeze();
+    }
+    if let Some(pid) = container_runtime_pid(cont) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(-pid), Signal::SIGSTOP)
+            .or_else(|_| kill(Pid::from_raw(pid), Signal::SIGSTOP));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn freeze_container_processes(_cont: &ContainerRecord) {}
+
+#[cfg(target_os = "linux")]
+fn thaw_container_processes(cont: &ContainerRecord) {
+    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&cont.id) {
+        let _ = cgroup_mgr.unfreeze();
+    }
+    if let Some(pid) = container_runtime_pid(cont) {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(-pid), Signal::SIGCONT)
+            .or_else(|_| kill(Pid::from_raw(pid), Signal::SIGCONT));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thaw_container_processes(_cont: &ContainerRecord) {}
+
 pub fn pause_container(args: &cli::PauseArgs, output: &CliOutputPolicy) -> Result<()> {
     for container in &args.containers {
         let c_store = ContainerStore::new();
-        let cont = c_store
-            .find(container)
-            .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
+        let cont = match c_store.find(container) {
+            Some(c) => c,
+            None => cli::usage_errors::exit_container_not_found(container),
+        };
 
         if !matches!(cont.status, ContainerStatus::Running) {
             return Err(anyhow!("Container {} is not running", container));
         }
 
-        if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&cont.id) {
-            let _ = cgroup_mgr.freeze();
-        }
+        freeze_container_processes(&cont);
         c_store.update_status(&cont.id, ContainerStatus::Paused)?;
 
         let mut attrs = HashMap::new();
@@ -4545,19 +4581,38 @@ pub fn pause_container(args: &cli::PauseArgs, output: &CliOutputPolicy) -> Resul
 }
 
 pub fn unpause_container(args: &cli::UnpauseArgs, output: &CliOutputPolicy) -> Result<()> {
-    for container in &args.containers {
-        let c_store = ContainerStore::new();
-        let cont = c_store
-            .find(container)
-            .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
+    if args.all && !args.containers.is_empty() {
+        return Err(anyhow!("cannot unpause --all with container names"));
+    }
+    if !args.all && args.containers.is_empty() {
+        return Err(anyhow!(
+            "you must provide at least one container name or ID, or use --all"
+        ));
+    }
+
+    let c_store = ContainerStore::new();
+    let targets: Vec<String> = if args.all {
+        c_store
+            .list()
+            .into_iter()
+            .filter(|c| matches!(c.status, ContainerStatus::Paused))
+            .map(|c| c.id.clone())
+            .collect()
+    } else {
+        args.containers.clone()
+    };
+
+    for container in targets {
+        let cont = match c_store.find(&container) {
+            Some(c) => c,
+            None => cli::usage_errors::exit_container_not_found(&container),
+        };
 
         if !matches!(cont.status, ContainerStatus::Paused) {
             return Err(anyhow!("Container {} is not paused", container));
         }
 
-        if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&cont.id) {
-            let _ = cgroup_mgr.unfreeze();
-        }
+        thaw_container_processes(&cont);
         c_store.update_status(&cont.id, ContainerStatus::Running)?;
 
         let mut attrs = HashMap::new();
@@ -4571,7 +4626,7 @@ pub fn unpause_container(args: &cli::UnpauseArgs, output: &CliOutputPolicy) -> R
         ));
 
         if !output.suppress_stdout() {
-            println!("{}", container);
+            println!("{}", cont.id);
         }
     }
     Ok(())
@@ -5948,6 +6003,7 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                 }
                 unpause_container(
                     &cli::UnpauseArgs {
+                        all: false,
                         containers: vec![c.name.clone()],
                     },
                     &CliOutputPolicy::default(),
@@ -6740,7 +6796,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 c.image,
                 truncated_cmd,
                 created_display,
-                c.status.to_string(),
+                format_ps_status_column(c),
                 size_str,
                 c.name
             );
@@ -6751,7 +6807,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 c.image,
                 truncated_cmd,
                 created_display,
-                c.status.to_string(),
+                format_ps_status_column(c),
                 c.name
             );
         }
@@ -9054,6 +9110,11 @@ fn container_inspect_health_config(
             }
         }
     }
+    if health_cfg.test.is_empty() {
+        if let Some(cmd) = annotations.get("boxr.health_cmd") {
+            health_cfg.test = cmd.split_whitespace().map(|s| s.to_string()).collect();
+        }
+    }
     let mut startup = health::HealthConfig::default();
     if let Some(cmd) = annotations.get("boxr.health_startup_cmd") {
         startup.test = cmd.split_whitespace().map(|s| s.to_string()).collect();
@@ -9224,6 +9285,9 @@ fn apply_run_health_annotations(
     if let Some(v) = &args.health_log_destination {
         annotations.insert("boxr.health_log_destination".to_string(), v.clone());
     }
+    if let Some(cmd) = &args.health_cmd {
+        annotations.insert("boxr.health_cmd".to_string(), cmd.clone());
+    }
     Ok(())
 }
 
@@ -9316,6 +9380,27 @@ fn format_running_for(created_at: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
+/// Podman/Docker `ps` STATUS column (distinct from CREATED "… ago" strings).
+fn format_ps_status_column(c: &ContainerRecord) -> String {
+    match &c.status {
+        ContainerStatus::Running => {
+            let duration = chrono::Utc::now().signed_duration_since(c.created_at);
+            let suffix = if duration.num_days() > 0 {
+                format!("{} days", duration.num_days())
+            } else if duration.num_hours() > 0 {
+                format!("{} hours", duration.num_hours())
+            } else if duration.num_minutes() > 0 {
+                format!("{} minutes", duration.num_minutes())
+            } else {
+                let secs = duration.num_seconds().max(1);
+                format!("{} seconds", secs)
+            };
+            format!("Up {}", suffix)
+        }
+        other => other.to_string(),
+    }
+}
+
 fn load_container_labels_from_bundle(bundle_path: &str) -> HashMap<String, String> {
     let mut labels_map = HashMap::new();
     let labels_file = PathBuf::from(bundle_path).join("labels.json");
@@ -9327,6 +9412,18 @@ fn load_container_labels_from_bundle(bundle_path: &str) -> HashMap<String, Strin
                         labels_map.insert(k.to_string(), v.to_string());
                     } else {
                         labels_map.insert(l, String::new());
+                    }
+                }
+            }
+        }
+    }
+    let config_path = PathBuf::from(bundle_path).join("config.json");
+    if let Ok(raw) = fs::read_to_string(&config_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(ann) = v.get("annotations").and_then(|a| a.as_object()) {
+                for (k, val) in ann {
+                    if let Some(s) = val.as_str() {
+                        labels_map.insert(k.clone(), s.to_string());
                     }
                 }
             }
@@ -9749,7 +9846,7 @@ fn apply_ps_container_format_template(
     line = line.replace("{{.Names}}", &c.name);
     line = line.replace("{{ .Names }}", &c.name);
     line = line.replace("{{.Image}}", &c.image);
-    line = line.replace("{{.Status}}", &c.status.to_string());
+    line = line.replace("{{.Status}}", &format_ps_status_column(c));
     line = line.replace("{{.State}}", state_str);
     line = line.replace("{{.Ports}}", &format_container_ports(&c.ports));
     line = line.replace("{{.Command}}", cmd_display);
@@ -10805,6 +10902,7 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 for cid in store.member_container_ids(&p) {
                     unpause_container(
                         &cli::UnpauseArgs {
+                            all: false,
                             containers: vec![cid],
                         },
                         &CliOutputPolicy::default(),
@@ -10954,13 +11052,48 @@ pub async fn run_healthcheck(container: &str) -> Result<i32> {
         .find(container)
         .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
 
-    if matches!(cont.status, ContainerStatus::Running) {
-        println!("healthy");
-        Ok(0)
-    } else {
-        println!("unhealthy");
-        Ok(1)
+    if !matches!(
+        cont.status,
+        ContainerStatus::Running | ContainerStatus::Paused
+    ) {
+        return Ok(1);
     }
+
+    let bundle_path = PathBuf::from(&cont.bundle_path);
+    let annotations = load_container_labels_from_bundle(&cont.bundle_path);
+    let health_inspect = container_inspect_health_config(&bundle_path, &annotations);
+    let mut health_cfg = health::HealthConfig::default();
+    if let Some(test) = health_inspect
+        .healthcheck
+        .get("Test")
+        .and_then(|t| t.as_array())
+    {
+        if test.len() >= 2 {
+            if test[0].as_str() == Some("CMD-SHELL") {
+                if let Some(shell) = test[1].as_str() {
+                    health_cfg.test =
+                        vec!["/bin/sh".to_string(), "-c".to_string(), shell.to_string()];
+                }
+            } else {
+                health_cfg.test = test
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+        }
+    }
+    if health_cfg.test.is_empty() {
+        return Ok(1);
+    }
+
+    let mut result = health::HealthCheckResult::default();
+    let status = health::check_container_health(&bundle_path, &health_cfg, &mut result, false)?;
+    let exit = match status {
+        health::HealthStatus::Unhealthy => 1,
+        _ => 0,
+    };
+    let _ = c_store.update_health_status(&cont.id, result.status);
+    Ok(exit)
 }
 
 pub fn diff_images(img1: &str, img2: Option<&str>) -> Result<()> {

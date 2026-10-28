@@ -61,6 +61,15 @@ pub fn exit_usage_error(msg: impl AsRef<str>) -> ! {
     std::process::exit(125);
 }
 
+/// Missing container (Podman BATS / CLI parity).
+pub fn exit_container_not_found(name_or_id: &str) -> ! {
+    eprintln!(
+        "Error: no container with name or ID \"{}\" found: no such container",
+        name_or_id
+    );
+    std::process::exit(125);
+}
+
 /// OCI/runtime configuration errors (exit 126).
 pub fn exit_config_error(msg: impl AsRef<str>) -> ! {
     eprintln!("Error: {}", msg.as_ref());

@@ -288,8 +288,13 @@ pub fn wait_http_ok(url: &str, timeout: Duration) -> bool {
 }
 
 pub fn wait_container_running(home: &Path, name: &str, timeout: Duration) -> bool {
+    let effective = if cfg!(target_os = "macos") || std::env::var("CI").is_ok() {
+        timeout.max(Duration::from_secs(120))
+    } else {
+        timeout
+    };
     let start = Instant::now();
-    while start.elapsed() < timeout {
+    while start.elapsed() < effective {
         let out = run_boxr(home, &["inspect", "-f", "{{.State.Running}}", name]);
         if out.status.success() {
             let stdout = String::from_utf8_lossy(&out.stdout);

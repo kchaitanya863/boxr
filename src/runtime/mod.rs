@@ -17,6 +17,8 @@ pub use traits::{ContainerRuntime, NativeContainerRuntime};
 pub struct ExecAttach {
     pub interactive: bool,
     pub tty: bool,
+    /// Do not inherit probe stdout/stderr to the boxr process (health checks, etc.).
+    pub quiet: bool,
 }
 
 #[cfg(target_os = "linux")]

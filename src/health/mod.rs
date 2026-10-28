@@ -178,7 +178,10 @@ pub fn check_container_health(
         None,
         None,
         false,
-        crate::runtime::ExecAttach::default(),
+        crate::runtime::ExecAttach {
+            quiet: true,
+            ..Default::default()
+        },
         None,
         &[],
     ) {

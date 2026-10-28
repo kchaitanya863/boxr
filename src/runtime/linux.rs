@@ -10,7 +10,7 @@ use nix::unistd::{ForkResult, chdir, fork, pivot_root};
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
-use std::os::unix::io::FromRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
@@ -2025,6 +2025,7 @@ fn exec_in_bundle_via_userns_socket(
     workdir: Option<&str>,
     exec_creds: Option<&ExecCredentials>,
     umask: Option<u32>,
+    attach: crate::runtime::ExecAttach,
 ) -> Result<i32> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
@@ -2057,13 +2058,16 @@ fn exec_in_bundle_via_userns_socket(
         .read_exact(&mut out_len)
         .context("exec-userns.sock output length")?;
     let n = u32::from_le_bytes(out_len) as usize;
-    if n > 0 {
+    if n > 0 && !attach.quiet {
         let mut out = vec![0u8; n];
         stream
             .read_exact(&mut out)
             .context("exec-userns.sock output")?;
         let _ = std::io::stdout().write_all(&out);
         let _ = std::io::stdout().flush();
+    } else if n > 0 {
+        let mut out = vec![0u8; n];
+        let _ = stream.read_exact(&mut out);
     }
     let _ = init_pid;
     Ok(i32::from_le_bytes(code_buf))
@@ -2232,6 +2236,7 @@ pub fn exec_in_bundle(
                 workdir,
                 exec_creds.as_ref(),
                 umask,
+                attach,
             ) {
                 return Ok(code);
             }
@@ -2343,7 +2348,7 @@ pub fn exec_in_bundle(
                     preserve_fds,
                 );
             }
-            if !output.stdout.is_empty() {
+            if !output.stdout.is_empty() && !attach.quiet {
                 let _ = std::io::stdout().write_all(&output.stdout);
             }
             let mut msg = stderr.trim().to_string();
@@ -2552,6 +2557,17 @@ fn exec_in_bundle_via_setns(
             if !preserve_fds.is_empty() {
                 clear_close_on_exec(preserve_fds);
                 close_fds_except(preserve_fds);
+            }
+            if attach.quiet && !attach.interactive {
+                if let Ok(null) = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open("/dev/null")
+                {
+                    let fd = null.as_raw_fd();
+                    let _ = nix::unistd::dup2(fd, 1);
+                    let _ = nix::unistd::dup2(fd, 2);
+                }
             }
             // Init is PID 1 in the container PID namespace; host proc still resolves status.
             let init_pid = pid;
