@@ -70,11 +70,6 @@ fn test_d4_port_collision_rejected() {
             "60",
         ],
     );
-    assert!(
-        wait_container_running(&home, &c1, Duration::from_secs(45)),
-        "first container {} did not reach running state before collision check",
-        c1
-    );
     let out = run_boxr(
         &home,
         &[

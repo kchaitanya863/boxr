@@ -251,7 +251,10 @@ impl PortCollisionGuard {
             let req_ip = req.host_ip.as_deref().unwrap_or("0.0.0.0");
 
             for c in containers {
-                if !matches!(c.status, ContainerStatus::Running) {
+                if matches!(
+                    c.status,
+                    ContainerStatus::Exited(_) | ContainerStatus::Failed(_)
+                ) {
                     continue;
                 }
 
