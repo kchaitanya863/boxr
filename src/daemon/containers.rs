@@ -140,6 +140,8 @@ pub async fn create_container(
         image_volume: None,
         workdir: payload.working_dir,
         user: payload.user,
+        hostuser: Vec::new(),
+        group_entry: Vec::new(),
         hostname: None,
         add_host: Vec::new(),
         dns: Vec::new(),

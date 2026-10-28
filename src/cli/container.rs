@@ -102,6 +102,14 @@ pub struct RunArgs {
     #[arg(short = 'u', long = "user")]
     pub user: Option<String>,
 
+    /// Add a user account from the host into the container /etc/passwd
+    #[arg(long = "hostuser")]
+    pub hostuser: Vec<String>,
+
+    /// Add a custom group line to /etc/group (Podman --group-entry)
+    #[arg(long = "group-entry")]
+    pub group_entry: Vec<String>,
+
     /// Container host name
     #[arg(long = "hostname")]
     pub hostname: Option<String>,

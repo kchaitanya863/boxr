@@ -2252,6 +2252,8 @@ pub async fn run_container_with_output(
         apply_namespace_to_linux(linux, &mut annotations, "pid", &args.pid)?;
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
+    apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     if let Some(img) = image_ref {
         apply_image_config_volume_mounts(
             img,
@@ -2282,6 +2284,20 @@ pub async fn run_container_with_output(
             || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin")))
             .to_string(),
     );
+    if let Some(size) = log_opt_max_size_mb(&args.log_opt) {
+        annotations.insert("boxr.log_max_size".to_string(), size);
+        if args.log_driver.is_empty() {
+            annotations.insert("boxr.log_driver".to_string(), "json-file".to_string());
+            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+            annotations.insert(
+                "boxr.log_path".to_string(),
+                log_path.to_string_lossy().to_string(),
+            );
+        }
+    }
+    if let Some(rt) = &args.runtime {
+        annotations.insert("boxr.oci_runtime".to_string(), rt.clone());
+    }
     if let Some(driver) = args.log_driver.last() {
         validate_log_driver(driver)?;
         annotations.insert("boxr.log_driver".to_string(), driver.clone());
@@ -2884,14 +2900,14 @@ pub fn finalize_stopped_container(c: &ContainerRecord) {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    if auto_rm {
+        let name = c.name.clone();
+        let _ = remove_container_quiet(&name, true, false);
+    }
     if auto_rmi {
         if let Some(img) = image_for_rmi {
             try_rmi_with_in_use_warning(&img, Some(&c.id), true);
         }
-    }
-    if auto_rm {
-        let name = c.name.clone();
-        let _ = remove_container_quiet(&name, true, false);
     }
 }
 
@@ -3801,11 +3817,15 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         .get("boxr.log_path")
                         .map(|s| s.as_str())
                         .unwrap_or("");
-                    serde_json::json!({
+                    let mut log_obj = serde_json::json!({
                         "Type": driver,
                         "Path": path,
                         "Config": serde_json::Map::new(),
-                    })
+                    });
+                    if let Some(size) = annotations.get("boxr.log_max_size") {
+                        log_obj["Size"] = serde_json::Value::String(size.clone());
+                    }
+                    log_obj
                 } else {
                     serde_json::json!({
                         "Type": "",
@@ -3814,8 +3834,14 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     })
                 };
 
+                let oci_runtime = annotations
+                    .get("boxr.oci_runtime")
+                    .cloned()
+                    .unwrap_or_else(oci_runtime_path);
+
                 let docker_compat_inspect = serde_json::json!({
                     "Id": c.id,
+                    "OCIRuntime": oci_runtime,
                     "Created": c.created_at.to_rfc3339(),
                     "Path": c.command.first().cloned().unwrap_or_default(),
                     "Args": if c.command.len() > 1 { c.command[1..].to_vec() } else { Vec::new() },
@@ -4468,6 +4494,17 @@ fn containers_conf_toml_value(key: &str) -> Option<String> {
     None
 }
 
+fn oci_runtime_path() -> String {
+    for candidate in ["/usr/bin/crun", "/usr/bin/runc", "/usr/local/bin/crun"] {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "/usr/bin/crun".to_string())
+}
+
 fn configured_oci_runtime_name() -> String {
     if let Some(rt) = containers_conf_toml_value("runtime") {
         let rt = rt.trim_matches('"');
@@ -4479,7 +4516,103 @@ fn configured_oci_runtime_name() -> String {
                 .to_string();
         }
     }
-    "crun".to_string()
+    Path::new(&oci_runtime_path())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("crun")
+        .to_string()
+}
+
+fn log_opt_max_size_mb(log_opts: &[String]) -> Option<String> {
+    for opt in log_opts {
+        let trimmed = opt.trim();
+        let value = trimmed
+            .strip_prefix("max-size=")
+            .or_else(|| trimmed.strip_prefix("max-size:"));
+        if let Some(v) = value {
+            let lower = v.to_lowercase();
+            if let Some(num) = lower.strip_suffix('m') {
+                return Some(format!("{}MB", num));
+            }
+            if let Some(num) = lower.strip_suffix("mb") {
+                return Some(format!("{}MB", num));
+            }
+        }
+    }
+    None
+}
+
+fn find_host_passwd_line(host_passwd: &str, spec: &str) -> Option<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    for line in host_passwd.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        if parts[0] == spec || parts[2] == spec {
+            return Some(line.to_string());
+        }
+    }
+    None
+}
+
+fn apply_hostuser_passwd(rootfs: &Path, hostusers: &[String]) -> Result<()> {
+    if hostusers.is_empty() {
+        return Ok(());
+    }
+    let host_passwd = fs::read_to_string("/etc/passwd")?;
+    let passwd_path = rootfs.join("etc/passwd");
+    let existing = fs::read_to_string(&passwd_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+    for spec in hostusers {
+        let line = find_host_passwd_line(&host_passwd, spec)
+            .ok_or_else(|| anyhow!("user {} not found in /etc/passwd", spec))?;
+        let name = line.split(':').next().unwrap_or("");
+        if lines.iter().any(|l| l.split(':').next() == Some(name)) {
+            continue;
+        }
+        lines.push(line);
+    }
+    if let Some(parent) = passwd_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    fs::write(&passwd_path, out)?;
+    Ok(())
+}
+
+fn apply_group_entries(rootfs: &Path, entries: &[String]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let group_path = rootfs.join("etc/group");
+    let existing = fs::read_to_string(&group_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+    for entry in entries {
+        let name = entry.split(':').next().unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        if lines.iter().any(|l| l.split(':').next() == Some(name)) {
+            continue;
+        }
+        lines.push(entry.clone());
+    }
+    if let Some(parent) = group_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut out = lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    fs::write(&group_path, out)?;
+    Ok(())
 }
 
 fn runtime_flags_from_containers_conf() -> Vec<String> {
@@ -6525,6 +6658,8 @@ async fn create_only_container_after_pod_prep(
         }
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
+    apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     apply_image_config_volume_mounts(
         &image_record,
         &args,
@@ -7189,6 +7324,7 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
     if let Some(fmt) = &args.format {
         let graph_root = storage::boxr_home().display().to_string();
         let oci_runtime = configured_oci_runtime_name();
+        let oci_runtime_path = oci_runtime_path();
         let info_json = serde_json::json!({
             "Containers": containers.len(),
             "ContainersRunning": running,
@@ -7205,7 +7341,7 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
             "Host": {
                 "OCIRuntime": {
                     "Name": oci_runtime,
-                    "Path": format!("/usr/bin/{}", oci_runtime)
+                    "Path": oci_runtime_path
                 }
             },
             "Store": {
@@ -8773,6 +8909,8 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         tz: Vec::new(),
         env_file: None,
         user: None,
+        hostuser: Vec::new(),
+        group_entry: Vec::new(),
         hostname: Some(pod.name.clone()),
         add_host: Vec::new(),
         shm_size: None,

@@ -608,6 +608,8 @@ mod tests {
             tz: Vec::new(),
             env_file: None,
             user: None,
+            hostuser: vec![],
+            group_entry: vec![],
             hostname: None,
             add_host: vec![],
             shm_size: None,

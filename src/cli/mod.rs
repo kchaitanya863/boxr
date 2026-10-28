@@ -130,6 +130,9 @@ pub struct Cli {
     /// Flags passed through to the OCI runtime (Podman global flag)
     #[arg(global = true, long = "runtime-flag", value_name = "FLAG")]
     pub runtime_flag: Vec<String>,
+    /// Log container output via syslog (accepted for Podman BATS; no-op in boxr)
+    #[arg(global = true, long = "syslog")]
+    pub syslog: bool,
     #[command(subcommand)]
     pub command: Commands,
 }
