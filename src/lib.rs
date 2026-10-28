@@ -783,11 +783,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ContainerAction::Pause(pause_args) => {
-                pause_container(&pause_args)?;
+                pause_container(&pause_args, &output_policy)?;
                 Ok(0)
             }
             cli::ContainerAction::Unpause(unpause_args) => {
-                unpause_container(&unpause_args)?;
+                unpause_container(&unpause_args, &output_policy)?;
                 Ok(0)
             }
             cli::ContainerAction::Wait(wait_args) => {
@@ -1088,11 +1088,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Pause(args) => {
-            pause_container(&args)?;
+            pause_container(&args, &output_policy)?;
             Ok(0)
         }
         Commands::Unpause(args) => {
-            unpause_container(&args)?;
+            unpause_container(&args, &output_policy)?;
             Ok(0)
         }
         Commands::Rename(args) => {
@@ -4511,7 +4511,7 @@ pub fn commit_container(args: &cli::CommitArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn pause_container(args: &cli::PauseArgs) -> Result<()> {
+pub fn pause_container(args: &cli::PauseArgs, output: &CliOutputPolicy) -> Result<()> {
     for container in &args.containers {
         let c_store = ContainerStore::new();
         let cont = c_store
@@ -4537,12 +4537,14 @@ pub fn pause_container(args: &cli::PauseArgs) -> Result<()> {
             attrs,
         ));
 
-        println!("{}", container);
+        if !output.suppress_stdout() {
+            println!("{}", container);
+        }
     }
     Ok(())
 }
 
-pub fn unpause_container(args: &cli::UnpauseArgs) -> Result<()> {
+pub fn unpause_container(args: &cli::UnpauseArgs, output: &CliOutputPolicy) -> Result<()> {
     for container in &args.containers {
         let c_store = ContainerStore::new();
         let cont = c_store
@@ -4568,7 +4570,9 @@ pub fn unpause_container(args: &cli::UnpauseArgs) -> Result<()> {
             attrs,
         ));
 
-        println!("{}", container);
+        if !output.suppress_stdout() {
+            println!("{}", container);
+        }
     }
     Ok(())
 }
@@ -5927,9 +5931,12 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                         continue;
                     }
                 }
-                pause_container(&cli::PauseArgs {
-                    containers: vec![c.name.clone()],
-                })?;
+                pause_container(
+                    &cli::PauseArgs {
+                        containers: vec![c.name.clone()],
+                    },
+                    &CliOutputPolicy::default(),
+                )?;
             }
         }
         ComposeSubcommand::Unpause(opts) => {
@@ -5939,9 +5946,12 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                         continue;
                     }
                 }
-                unpause_container(&cli::UnpauseArgs {
-                    containers: vec![c.name.clone()],
-                })?;
+                unpause_container(
+                    &cli::UnpauseArgs {
+                        containers: vec![c.name.clone()],
+                    },
+                    &CliOutputPolicy::default(),
+                )?;
             }
         }
         ComposeSubcommand::Port(opts) => {
@@ -9979,11 +9989,15 @@ pub fn handle_secret(args: cli::SecretSubcommands) -> Result<()> {
     let store = secret::SecretStore::new();
     match args.command {
         SecretAction::Create {
-            name,
+            name_flag,
+            name_pos,
             file,
             file_flag,
             labels,
         } => {
+            let name = name_flag.or(name_pos).ok_or_else(|| {
+                anyhow::anyhow!("secret name required (positional NAME or --name)")
+            })?;
             let mut label_map = HashMap::new();
             for l in labels {
                 if let Some((k, v)) = l.split_once('=') {
@@ -10772,9 +10786,12 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     .find(&pod)
                     .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
                 for cid in store.member_container_ids(&p) {
-                    pause_container(&cli::PauseArgs {
-                        containers: vec![cid],
-                    })?;
+                    pause_container(
+                        &cli::PauseArgs {
+                            containers: vec![cid],
+                        },
+                        &CliOutputPolicy::default(),
+                    )?;
                 }
                 store.update_status(&p.name, "Paused")?;
                 println!("{}", pod);
@@ -10786,9 +10803,12 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     .find(&pod)
                     .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
                 for cid in store.member_container_ids(&p) {
-                    unpause_container(&cli::UnpauseArgs {
-                        containers: vec![cid],
-                    })?;
+                    unpause_container(
+                        &cli::UnpauseArgs {
+                            containers: vec![cid],
+                        },
+                        &CliOutputPolicy::default(),
+                    )?;
                 }
                 store.update_status(&p.name, "Running")?;
                 println!("{}", pod);

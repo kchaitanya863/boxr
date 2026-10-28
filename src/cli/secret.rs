@@ -11,9 +11,11 @@ pub struct SecretSubcommands {
 pub enum SecretAction {
     /// Create a secret from a file or stdin
     Create {
-        /// Secret name
-        #[arg(value_name = "NAME")]
-        name: String,
+        /// Secret name (Podman: positional NAME or `--name`)
+        #[arg(long = "name", group = "secret_name")]
+        name_flag: Option<String>,
+        #[arg(value_name = "NAME", group = "secret_name")]
+        name_pos: Option<String>,
         /// Read secret from file (use - for stdin); optional second positional
         #[arg(value_name = "FILE")]
         file: Option<String>,
