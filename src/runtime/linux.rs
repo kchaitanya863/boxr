@@ -1571,6 +1571,14 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
         let _ = nix::unistd::setuid(nix::unistd::Uid::from_raw(spec.process.user.uid));
     }
 
+    #[cfg(target_os = "linux")]
+    unsafe {
+        unsafe extern "C" {
+            fn tzset();
+        }
+        tzset();
+    }
+
     // Execute container binary
     let binary = &spec.process.args[0];
     let binary_c = CString::new(binary.as_str())?;

@@ -183,6 +183,7 @@ fn run_dir_bind_blocks_containerenv(spec: &Spec, mounts: &[volume::MountSpec]) -
 
 fn apply_container_tz(tz: &str, spec: &mut Spec, bundle_rootfs: &Path) {
     spec.process.env.retain(|e| !e.starts_with("TZ="));
+    spec.mounts.retain(|m| m.destination != "/etc/localtime");
     if tz == "local" {
         let host_local = Path::new("/etc/localtime");
         if host_local.exists() {
@@ -202,23 +203,26 @@ fn apply_container_tz(tz: &str, spec: &mut Spec, bundle_rootfs: &Path) {
     spec.process.env.push(format!("TZ={}", tz));
     let zone_in_rootfs = bundle_rootfs.join("usr/share/zoneinfo").join(tz);
     let host_zone = Path::new("/usr/share/zoneinfo").join(tz);
-    let zone_source = if zone_in_rootfs.exists() {
-        zone_in_rootfs
-    } else if host_zone.exists() {
-        host_zone
-    } else {
-        return;
-    };
-    spec.mounts.push(oci::runtime::Mount {
-        destination: "/etc/localtime".to_string(),
-        mount_type: "bind".to_string(),
-        source: zone_source.to_string_lossy().to_string(),
-        options: Some(vec![
-            "ro".to_string(),
-            "nosuid".to_string(),
-            "nodev".to_string(),
-        ]),
-    });
+    if !zone_in_rootfs.exists() {
+        if host_zone.exists() {
+            if let Some(parent) = zone_in_rootfs.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::copy(&host_zone, &zone_in_rootfs);
+        } else {
+            return;
+        }
+    }
+    let etc = bundle_rootfs.join("etc");
+    let _ = fs::create_dir_all(&etc);
+    let localtime = etc.join("localtime");
+    let _ = fs::remove_file(&localtime);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let target = format!("../usr/share/zoneinfo/{}", tz);
+        let _ = symlink(&target, &localtime);
+    }
 }
 
 fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
