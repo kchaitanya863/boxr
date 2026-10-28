@@ -140,7 +140,7 @@ Podman test **160-volumes** (case 12) expects `stat` on a host-owned bind-mount 
 1. **Keep-id user namespace maps** (see `getRootlessKeepIDMapping` in upstream Podman), and/or  
 2. **ID-mapped bind mounts** when maps alone are insufficient.
 
-On this rootless host, `newuidmap` rejects Podman’s first keep-id segment because delegated `/etc/subuid` ranges do not cover host IDs `1..host_uid`. boxr then applies the usual `0 → host_uid` + subuid range maps, so `stat` shows `0:0:0` (same as without keep-id). boxr already attempts idmapped binds for `--userns=keep-id`; without working keep-id maps, `mount_setattr(2)` with `MOUNT_ATTR_IDMAP` returns **EPERM** or **EINVAL** and boxr falls back to a plain bind. Passing case 12 needs kernel/subuid layout parity with Podman CI or a deeper runtime mapping pipeline (OCI `linux.uidMappings` + crun-equivalent setup), not a CLI-only tweak.
+On this rootless host, `newuidmap` rejects Podman’s first keep-id segment because delegated `/etc/subuid` ranges do not cover host IDs `1..host_uid`. boxr applies Podman-style keep-id maps (`getRootlessKeepIDMapping`: `0→1`, `host_uid→0`, remainder from subuid size sum), so **`id -u` / `--userns=keep-id`** match the host UID. Bind mounts still need **idmapped** binds (`mount_setattr(2)` + `MOUNT_ATTR_IDMAP`); on this Cloud Agent VM that step returns **`EPERM`**, so **`stat` on a host-owned bind file shows `0:0:0`** and **160-volumes** case 12 stays red until the environment allows idmapped mounts (or Podman-equivalent shifting). boxr falls back to a plain bind when idmap fails.
 
 ## Related
 

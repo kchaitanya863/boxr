@@ -175,8 +175,8 @@ impl RootlessUserConfig {
         let sub_gid_first = sub_gid.first().copied();
 
         if mode.keep_id {
-            let uid_maps = Self::keep_id_uid_mappings(host_uid, sub_uid_first.as_ref());
-            let gid_maps = Self::keep_id_uid_mappings(host_gid, sub_gid_first.as_ref());
+            let uid_maps = Self::keep_id_uid_mappings(host_uid, &sub_uid);
+            let gid_maps = Self::keep_id_uid_mappings(host_gid, &sub_gid);
             if Self::apply_id_mappings(pid, &uid_maps, &gid_maps).is_ok() {
                 return Ok(());
             }
@@ -266,29 +266,25 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     }
 
     #[cfg(target_os = "linux")]
-    fn keep_id_uid_mappings(host_id: u32, sub: Option<&SubordinateRange>) -> Vec<IdMapping> {
-        let max_id = sub.map(|r| r.count).unwrap_or(0);
+    fn keep_id_uid_mappings(host_id: u32, sub_ranges: &[SubordinateRange]) -> Vec<IdMapping> {
+        let max_id: u32 = sub_ranges.iter().map(|r| r.count).sum();
         let mut maps = Vec::new();
-        // Rootless /proc/uid_map requires the creator's host UID as the first mapping target.
+        // Match Podman `getRootlessKeepIDMapping` (pkg/util/utils.go).
+        if !sub_ranges.is_empty() && host_id != 0 {
+            let size = host_id.min(max_id);
+            if size > 0 {
+                maps.push(IdMapping {
+                    container_id: 0,
+                    host_id: 1,
+                    size,
+                });
+            }
+        }
         maps.push(IdMapping {
-            container_id: 0,
-            host_id: host_id,
+            container_id: host_id,
+            host_id: 0,
             size: 1,
         });
-        if sub.is_some() && host_id > 1 {
-            maps.push(IdMapping {
-                container_id: 1,
-                host_id: 1,
-                size: host_id - 1,
-            });
-        }
-        if host_id != 0 {
-            maps.push(IdMapping {
-                container_id: host_id,
-                host_id: host_id,
-                size: 1,
-            });
-        }
         if max_id > host_id {
             maps.push(IdMapping {
                 container_id: host_id + 1,

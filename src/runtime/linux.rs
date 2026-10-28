@@ -2086,15 +2086,26 @@ fn exec_in_bundle_via_setns(
             let mut ready = [0u8; 5];
             parent_sock
                 .read_exact(&mut ready)
-                .context("exec child did not signal namespace join")?;
-            let _ = crate::security::RootlessUserConfig::allow_setgroups_from_userns(
+                .context("exec child did not signal user namespace join")?;
+            crate::security::RootlessUserConfig::allow_setgroups_from_userns(
                 pid,
                 child.as_raw(),
-            );
-            crate::security::RootlessUserConfig::reenable_setgroups_for_pid(child.as_raw());
+            )
+            .context("setgroups allow after user setns")?;
             parent_sock
                 .write_all(b"done")
-                .context("Failed to notify exec child after setgroups allow")?;
+                .context("Failed to notify exec child after user setgroups allow")?;
+            parent_sock
+                .read_exact(&mut ready)
+                .context("exec child did not signal pid namespace join")?;
+            crate::security::RootlessUserConfig::allow_setgroups_from_userns(
+                pid,
+                child.as_raw(),
+            )
+            .context("setgroups allow after pid setns")?;
+            parent_sock
+                .write_all(b"done")
+                .context("Failed to notify exec child after pid setgroups allow")?;
             if detach {
                 if let Some(path) = exec_pid_path {
                     let _ = fs::write(path, pid.to_string());
@@ -2149,10 +2160,12 @@ fn exec_in_bundle_via_setns(
             child_sock.write_all(b"ready").ok();
             let mut done = [0u8; 4];
             let _ = child_sock.read_exact(&mut done);
-            drop(child_sock);
             if exec_join_pid_namespace(pid).is_err() {
                 std::process::exit(125);
             }
+            child_sock.write_all(b"ready").ok();
+            let _ = child_sock.read_exact(&mut done);
+            drop(child_sock);
             let rootfs = bundle_path.join("rootfs");
             if let Some(wd) = workdir {
                 let wd_path = rootfs.join(wd.trim_start_matches('/'));
