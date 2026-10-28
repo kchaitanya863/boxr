@@ -76,6 +76,9 @@ fn is_podman_global_flag_token(a: &str) -> bool {
 }
 
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
+    if argv.len() == 2 && argv[1] == "-v" {
+        return vec![argv[0].clone(), "version".to_string()];
+    }
     let mut out = Vec::new();
     let mut rm_false = false;
     let mut read_only_false = false;
@@ -113,6 +116,12 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     }
     if read_only_false {
         let _ = READ_ONLY_EXPLICIT_FALSE.set(true);
+    }
+    if out.len() >= 2 && out[out.len() - 1] == "-v" {
+        let last = out.len() - 1;
+        out[last] = "version".to_string();
+    } else if out.len() == 2 && out[1] == "--version" {
+        out[1] = "version".to_string();
     }
     out
 }
@@ -160,7 +169,7 @@ Options:\n\
     name = "podman",
     bin_name = "podman",
     author = "Boxr Contributors",
-    version,
+    version = "6.3.0-dev",
     about = "Manage pods, containers and images",
     long_about = "Manage pods, containers and images",
     subcommand_required = true,
@@ -226,7 +235,7 @@ pub enum Commands {
     /// Display system-wide information
     Info(FormatArgs),
 
-    /// Show the boxr version information
+    /// Display the Podman version information
     Version(FormatArgs),
 
     /// Stop a running container

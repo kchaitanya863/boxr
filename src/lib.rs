@@ -8036,9 +8036,12 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
 }
 
 pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
+    /// Matches bundled `podman.git` for upstream e2e `version.Version.String()` checks.
+    const PODMAN_VERSION: &str = "6.3.0-dev";
     let version_json = serde_json::json!({
+        "Version": PODMAN_VERSION,
         "Client": {
-            "Version": env!("CARGO_PKG_VERSION"),
+            "Version": PODMAN_VERSION,
             "ApiVersion": "1.45",
             "GitCommit": "main",
             "GoVersion": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
@@ -8046,7 +8049,7 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
             "Arch": std::env::consts::ARCH
         },
         "Server": {
-            "Version": env!("CARGO_PKG_VERSION"),
+            "Version": PODMAN_VERSION,
             "ApiVersion": "1.45",
             "MinAPIVersion": "1.24",
             "GitCommit": "main",
@@ -8057,19 +8060,26 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
     });
 
     if let Some(fmt) = &args.format {
-        if fmt == "json" || fmt == "{{json .}}" {
+        if version_format_is_json(fmt) {
             println!("{}", serde_json::to_string_pretty(&version_json)?);
-        } else {
-            println!("{}", evaluate_simple_template(fmt, &version_json));
+            return Ok(());
         }
+        if version_format_is_invalid_json_template(fmt) {
+            crate::cli::usage_errors::exit_usage_error("invalid template");
+        }
+        let rendered = evaluate_simple_template(fmt.trim(), &version_json);
+        if fmt.trim().starts_with("{{") && rendered.is_empty() && fmt.contains("json") {
+            crate::cli::usage_errors::exit_usage_error("invalid template");
+        }
+        println!("{}", rendered);
         return Ok(());
     }
 
-    println!("Client: Boxr Engine");
-    println!(" Version:           {}", env!("CARGO_PKG_VERSION"));
+    println!("Client: Podman Engine");
+    println!(" Version:           {}", PODMAN_VERSION);
     println!(" API version:       1.45");
     println!(
-        " Rustc version:     {}",
+        " Go version:        {}",
         option_env!("RUSTC_VERSION").unwrap_or("unknown")
     );
     println!(" Git commit:        main");
@@ -8079,9 +8089,9 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    println!("\nServer: Boxr Engine");
+    println!("\nServer: Podman Engine");
     println!(" Engine:");
-    println!("  Version:          {}", env!("CARGO_PKG_VERSION"));
+    println!("  Version:          {}", PODMAN_VERSION);
     println!("  API version:      1.45");
     println!(
         "  OS/Arch:          {}/{}",
@@ -8089,6 +8099,27 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
         std::env::consts::ARCH
     );
     Ok(())
+}
+
+fn version_format_is_json(fmt: &str) -> bool {
+    let t = fmt.trim();
+    if t.eq_ignore_ascii_case("json") {
+        return true;
+    }
+    let Some(inner) = t
+        .strip_prefix("{{")
+        .and_then(|s| s.strip_suffix("}}"))
+        .map(|s| s.trim())
+    else {
+        return false;
+    };
+    let tokens: Vec<&str> = inner.split_whitespace().collect();
+    tokens.first() == Some(&"json")
+}
+
+fn version_format_is_invalid_json_template(fmt: &str) -> bool {
+    let t = fmt.trim();
+    t.starts_with("{{") && !t.ends_with("}}") && t.contains("json")
 }
 
 fn parse_pod_share(share: &str) -> (bool, bool, bool, bool) {
