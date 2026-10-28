@@ -350,9 +350,16 @@ impl ProcessReaper {
                 None
             };
 
-            let is_alive = check_pid_alive(&vm_pid_file)
-                .or_else(|| check_pid_alive(&cont_pid_file))
-                .unwrap_or(false);
+            let vm_alive = check_pid_alive(&vm_pid_file);
+            let cont_alive = check_pid_alive(&cont_pid_file);
+            let is_alive = match (vm_alive, cont_alive) {
+                (Some(true), _) | (_, Some(true)) => true,
+                (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => false,
+                (None, None) => {
+                    // Missing pid files during startup; do not reap a Running record yet.
+                    true
+                }
+            };
 
             if !is_alive {
                 // Container process is gone; self-heal state to Exited(code)

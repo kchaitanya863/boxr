@@ -294,17 +294,40 @@ pub fn wait_container_running(home: &Path, name: &str, timeout: Duration) -> boo
         timeout
     };
     let start = Instant::now();
+    let mut start_attempted = false;
     while start.elapsed() < effective {
-        let out = run_boxr(home, &["inspect", "-f", "{{.State.Running}}", name]);
-        if out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.trim() == "true" {
-                return true;
-            }
+        if container_reports_running(home, name) {
+            return true;
+        }
+        let status = container_inspect_status(home, name);
+        if status == "created" && !start_attempted {
+            start_attempted = true;
+            let _ = run_boxr(home, &["start", name]);
         }
         std::thread::sleep(Duration::from_millis(500));
     }
     false
+}
+
+fn container_inspect_status(home: &Path, name: &str) -> String {
+    let out = run_boxr(home, &["inspect", "-f", "{{.State.Status}}", name]);
+    if !out.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn container_reports_running(home: &Path, name: &str) -> bool {
+    let out = run_boxr(home, &["inspect", "-f", "{{.State.Running}}", name]);
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.trim() == "true" {
+            return true;
+        }
+    }
+    container_inspect_status(home, name) == "running"
 }
 
 pub fn wait_exec_success(home: &Path, container: &str, cmd: &[&str], timeout: Duration) -> bool {
