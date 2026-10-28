@@ -80,7 +80,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
 | `055-rm.bats` | **6/10** (`--depend` green); buildah external / conmon cases red |
 | `075-exec.bats` | **9/10** in isolation (leak check, stdin, keep-id, umask, TTY, exec_pid/`GraphRoot`); red: **additional groups** `id -G` for `root:root` (rootless user-ns unmapped supplementary GIDs `65534`) |
-| `160-volumes.bats` | **7/26** in isolation: basic binds (`:z,ro`), duplicate dest (**125** incl. `--tmpfs`), `volume ls --filter name=` regex, `ps --filter volume=`, `--ignore`, `ls --format` Labels; export/prune/mount/copyup still red |
+| `160-volumes.bats` | **11/26** in isolation (+2 skips): above plus bind `device=` volumes and multi-file export; prune/mount/`--image-volume`/chown `:U` still red |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*` (not auto-rmi’d on `pod rm`) |
 

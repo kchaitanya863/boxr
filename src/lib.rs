@@ -4729,8 +4729,16 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     println!("{}", v.name);
                 }
             } else if let Some(fmt) = &ls_args.format {
-                for v in &vols {
-                    println!("{}", apply_volume_ls_format_template(fmt, v));
+                if fmt.eq_ignore_ascii_case("json") {
+                    let rows: Vec<serde_json::Value> = vols
+                        .iter()
+                        .map(|v| volume_ls_json_entry(v))
+                        .collect();
+                    println!("{}", serde_json::to_string(&rows)?);
+                } else {
+                    for v in &vols {
+                        println!("{}", apply_volume_ls_format_template(fmt, v));
+                    }
                 }
             } else {
                 if !ls_args.noheading {
@@ -4780,10 +4788,15 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 &exp_args.name,
                 exp_args.output.as_deref().map(Path::new),
             )?;
-            println!("{}", out.display());
+            // Podman is silent when `-o`/`--output` is set; default file export prints the path.
+            if exp_args.output.is_none() {
+                if let Some(path) = out {
+                    println!("{}", path.display());
+                }
+            }
         }
         VolumeAction::Import(imp_args) => {
-            let vol = volume::VolumeOps::import_volume(&imp_args.name, Path::new(&imp_args.input))?;
+            let vol = volume::VolumeOps::import_volume(&imp_args.name, &imp_args.input)?;
             println!("{}", vol.name);
         }
         VolumeAction::Reload { name } => {
@@ -5455,11 +5468,16 @@ pub fn rm_volumes(store: &VolumeStore, args: &cli::VolumeRmArgs) -> Result<()> {
             Ok(_) => println!("{}", name),
             Err(e) if args.force && e.to_string().contains("not found") => {}
             Err(e) => {
-                if e.to_string().contains("not found") {
+                let msg = e.to_string();
+                if msg.contains("not found") {
                     return Err(anyhow!(
                         "no volume with name \"{}\" found: no such volume",
                         name
                     ));
+                }
+                if msg.contains("volume is being used") {
+                    eprintln!("Error: {}", msg);
+                    std::process::exit(2);
                 }
                 return Err(e);
             }
@@ -5512,24 +5530,7 @@ fn remove_container_opts_inner(
     }
 
     if remove_volumes {
-        let bundle_path = PathBuf::from(&c.bundle_path);
-        let config_file = bundle_path.join("config.json");
-        if let Ok(content) = fs::read_to_string(&config_file) {
-            if let Ok(spec) = serde_json::from_str::<Spec>(&content) {
-                let v_store = VolumeStore::new();
-                for m in spec.mounts {
-                    let m_src = m.source;
-                    for v in v_store.list() {
-                        if m_src.contains(&format!("volumes/{}/_data", v.name))
-                            || m_src.contains(&format!("volumes/{}", v.name))
-                            || m_src == v.name
-                        {
-                            let _ = v_store.remove_with_force(&v.name, true);
-                        }
-                    }
-                }
-            }
-        }
+        prune_container_attached_volumes(PathBuf::from(&c.bundle_path));
     }
 
     let bundle_path = PathBuf::from(&c.bundle_path);
@@ -7465,6 +7466,58 @@ fn load_container_labels_from_bundle(bundle_path: &str) -> HashMap<String, Strin
         }
     }
     labels_map
+}
+
+fn prune_container_attached_volumes(bundle_path: PathBuf) {
+    let v_store = VolumeStore::new();
+    let mounts_path = bundle_path.join("mounts.json");
+    if mounts_path.exists() {
+        if let Ok(content) = fs::read_to_string(&mounts_path) {
+            if let Ok(mounts) = serde_json::from_str::<Vec<volume::MountSpec>>(&content) {
+                for m in mounts {
+                    if !m.is_volume {
+                        continue;
+                    }
+                    let src = m.source.to_string_lossy();
+                    for v in v_store.list() {
+                        if src.contains(&format!("volumes/{}/_data", v.name))
+                            || src.contains(&format!("/volumes/{}/", v.name))
+                        {
+                            let _ = v_store.delete_volume_record(&v.name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let config_file = bundle_path.join("config.json");
+    if let Ok(content) = fs::read_to_string(&config_file) {
+        if let Ok(spec) = serde_json::from_str::<Spec>(&content) {
+            for m in spec.mounts {
+                let m_src = m.source;
+                for v in v_store.list() {
+                    if m_src.contains(&format!("volumes/{}/_data", v.name))
+                        || m_src.contains(&format!("volumes/{}", v.name))
+                        || m_src == v.name
+                    {
+                        let _ = v_store.delete_volume_record(&v.name);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn volume_ls_json_entry(v: &volume::VolumeRecord) -> serde_json::Value {
+    serde_json::json!({
+        "Name": v.name,
+        "Driver": v.driver,
+        "Mountpoint": v.mountpoint,
+        "CreatedAt": v.created_at.to_rfc3339(),
+        "Labels": v.labels,
+        "Scope": v.scope,
+        "Options": v.options,
+    })
 }
 
 fn apply_volume_ls_format_template(template: &str, v: &volume::VolumeRecord) -> String {

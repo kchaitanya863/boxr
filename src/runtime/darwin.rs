@@ -436,6 +436,11 @@ pub fn execute_bundle(
                         .as_ref()
                         .map(|opts| opts.iter().any(|o| o == "ro"))
                         .unwrap_or(false),
+                    noexec: m
+                        .options
+                        .as_ref()
+                        .map(|opts| opts.iter().any(|o| o == "noexec"))
+                        .unwrap_or(false),
                     is_volume: false,
                 });
             }

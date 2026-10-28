@@ -5,6 +5,44 @@ use crate::storage::boxr_home;
 use anyhow::{Result, anyhow};
 
 /// Podman-compatible volume name filter (`name=volume_1.+` uses regex).
+fn volume_used_by_container(bundle_path: &str, volume_name: &str) -> bool {
+    let bundle = PathBuf::from(bundle_path);
+    let mounts_json = bundle.join("mounts.json");
+    if mounts_json.exists() {
+        if let Ok(content) = fs::read_to_string(&mounts_json) {
+            if let Ok(mounts) = serde_json::from_str::<Vec<MountSpec>>(&content) {
+                for m in mounts {
+                    if !m.is_volume {
+                        continue;
+                    }
+                    let src = m.source.to_string_lossy();
+                    if src.contains(&format!("volumes/{}/_data", volume_name))
+                        || src.contains(&format!("/volumes/{}/", volume_name))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    let config_file = bundle.join("config.json");
+    if let Ok(content) = fs::read_to_string(&config_file) {
+        if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content) {
+            for m in spec.mounts {
+                let m_src = m.source;
+                if m_src.contains(&format!("volumes/{}/_data", volume_name))
+                    || m_src.contains(&format!("volumes/{}", volume_name))
+                    || m_src.ends_with(&format!("/{}", volume_name))
+                    || m_src == volume_name
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn volume_name_filter_matches(name: &str, pattern: &str) -> bool {
     let pattern = pattern.trim();
     if pattern.is_empty() {
@@ -33,14 +71,16 @@ fn is_volume_mount_option_token(token: &str) -> bool {
     )
 }
 
-/// Destination path and read-only flag from `dest:z,ro` / `dest:ro` style volume suffixes.
-pub fn parse_volume_dest_and_options(rest: &str) -> (String, bool) {
+/// Destination path and mount flags from `dest:z,ro` / `dest:noexec` style volume suffixes.
+pub fn parse_volume_dest_and_options(rest: &str) -> (String, bool, bool) {
     let mut read_only = rest.split(',').any(|p| p.trim() == "ro");
+    let mut noexec = rest.split(',').any(|p| p.trim() == "noexec");
     let head = rest.split(',').next().unwrap_or(rest).trim();
     let dest = if let Some((path, opt)) = head.rsplit_once(':') {
         let opt = opt.trim();
         if !path.is_empty() && path.starts_with('/') && is_volume_mount_option_token(opt) {
             read_only = read_only || opt == "ro";
+            noexec = noexec || opt == "noexec";
             path.trim().to_string()
         } else {
             head.to_string()
@@ -48,7 +88,7 @@ pub fn parse_volume_dest_and_options(rest: &str) -> (String, bool) {
     } else {
         head.to_string()
     };
-    (dest, read_only)
+    (dest, read_only, noexec)
 }
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -83,6 +123,8 @@ pub struct MountSpec {
     pub source: PathBuf,
     pub destination: String,
     pub read_only: bool,
+    #[serde(default)]
+    pub noexec: bool,
     pub is_volume: bool,
 }
 
@@ -216,22 +258,41 @@ impl VolumeStore {
                 return Err(anyhow!("Volume with name '{}' already exists", vol_name));
             }
 
-            let mountpoint = self.volumes_dir.join(&vol_name).join("_data");
-            fs::create_dir_all(&mountpoint)?;
-            if let (Ok(canon_vols), Ok(canon_mount)) =
-                (self.volumes_dir.canonicalize(), mountpoint.canonicalize())
-            {
-                if !canon_mount.starts_with(&canon_vols) {
+            let opts = options.clone().unwrap_or_default();
+            let mountpoint = if opts.get("type").map(|t| t.as_str()) == Some("bind") {
+                let device = opts
+                    .get("device")
+                    .filter(|d| !d.is_empty())
+                    .ok_or_else(|| anyhow!("bind volume requires device option"))?;
+                let device_path = PathBuf::from(device);
+                if !device_path.exists() {
                     return Err(anyhow!(
-                        "Volume mountpoint escapes volumes directory: '{}'",
-                        vol_name
+                        "bind device path '{}' does not exist",
+                        device_path.display()
                     ));
                 }
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&mountpoint, fs::Permissions::from_mode(0o777));
+                device_path
+            } else {
+                let mp = self.volumes_dir.join(&vol_name).join("_data");
+                fs::create_dir_all(&mp)?;
+                if let (Ok(canon_vols), Ok(canon_mount)) =
+                    (self.volumes_dir.canonicalize(), mp.canonicalize())
+                {
+                    if !canon_mount.starts_with(&canon_vols) {
+                        return Err(anyhow!(
+                            "Volume mountpoint escapes volumes directory: '{}'",
+                            vol_name
+                        ));
+                    }
+                }
+                mp
+            };
+            if opts.get("type").map(|t| t.as_str()) != Some("bind") {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&mountpoint, fs::Permissions::from_mode(0o777));
+                }
             }
 
             let record = VolumeRecord {
@@ -254,40 +315,7 @@ impl VolumeStore {
         self.remove_with_force(name, false)
     }
 
-    pub fn remove_with_force(&self, name: &str, force: bool) -> Result<VolumeRecord> {
-        let home = self
-            .index_file
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let c_store = crate::storage::ContainerStore::with_home(home);
-        let containers = c_store.list();
-
-        if !force {
-            for c in containers {
-                let bundle_path = PathBuf::from(&c.bundle_path);
-                let config_file = bundle_path.join("config.json");
-                if let Ok(content) = fs::read_to_string(&config_file) {
-                    if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content) {
-                        for m in spec.mounts {
-                            let m_src = m.source;
-                            if m_src.contains(&format!("volumes/{}/_data", name))
-                                || m_src.contains(&format!("volumes/{}", name))
-                                || m_src.ends_with(&format!("/{}", name))
-                                || m_src == name
-                            {
-                                return Err(anyhow!(
-                                    "conflict: unable to remove volume '{}' - volume is in use by container {}",
-                                    name,
-                                    c.id
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+    pub fn delete_volume_record(&self, name: &str) -> Result<VolumeRecord> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             if let Some(pos) = data.volumes.iter().position(|v| v.name == name) {
@@ -303,6 +331,37 @@ impl VolumeStore {
                 Err(anyhow!("Volume '{}' not found", name))
             }
         })
+    }
+
+    pub fn remove_with_force(&self, name: &str, force: bool) -> Result<VolumeRecord> {
+        let home = self
+            .index_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let c_store = crate::storage::ContainerStore::with_home(home);
+        let containers = c_store.list();
+
+        if !force {
+            for c in containers {
+                if volume_used_by_container(&c.bundle_path, name) {
+                    return Err(anyhow!(
+                        "volume {} is being used by the following container(s): {}: volume is being used",
+                        name,
+                        c.id
+                    ));
+                }
+            }
+        } else {
+            for c in &containers {
+                if volume_used_by_container(&c.bundle_path, name) {
+                    let _ = crate::stop_container(&c.id, None);
+                    let _ = crate::remove_container_opts(&c.id, true, false);
+                }
+            }
+        }
+
+        self.delete_volume_record(name)
     }
 
     pub fn list_filtered(&self, filters: &[String]) -> Vec<VolumeRecord> {
@@ -449,14 +508,23 @@ impl VolumeStore {
             return Err(anyhow!("Volume specification cannot be empty"));
         }
 
-        let (source_str, dest_str, read_only) = if let Some(idx) = trimmed.find(':') {
+        let (source_str, dest_str, read_only, noexec) = if let Some(idx) = trimmed.find(':') {
             let source_str = trimmed[..idx].to_string();
-            let (dest_str, read_only) = parse_volume_dest_and_options(&trimmed[idx + 1..]);
-            (source_str, dest_str, read_only)
+            let (dest_str, read_only, noexec) =
+                parse_volume_dest_and_options(&trimmed[idx + 1..]);
+            (source_str, dest_str, read_only, noexec)
         } else if trimmed.starts_with('/') {
-            (trimmed.to_string(), trimmed.to_string(), false)
+            // Podman/Docker: `-v /container/path` creates an anonymous volume at that path.
+            let vol = self.create(None, None)?;
+            return Ok(MountSpec {
+                source: PathBuf::from(vol.mountpoint),
+                destination: trimmed.to_string(),
+                read_only: false,
+                noexec: false,
+                is_volume: true,
+            });
         } else {
-            (String::new(), trimmed.to_string(), false)
+            (String::new(), trimmed.to_string(), false, false)
         };
 
         if dest_str.trim().is_empty() {
@@ -477,6 +545,7 @@ impl VolumeStore {
                 source: PathBuf::from(vol.mountpoint),
                 destination: dest_str.to_string(),
                 read_only,
+                noexec,
                 is_volume: true,
             });
         }
@@ -520,6 +589,7 @@ impl VolumeStore {
                 source: canonical_source,
                 destination: dest_str.to_string(),
                 read_only,
+                noexec,
                 is_volume: false,
             })
         } else {
@@ -532,6 +602,7 @@ impl VolumeStore {
                 source: PathBuf::from(record.mountpoint),
                 destination: dest_str.to_string(),
                 read_only,
+                noexec,
                 is_volume: true,
             })
         }

@@ -1711,12 +1711,19 @@ fn run_container_child(
             bind_flags,
             None::<&str>,
         )?;
+        let mut remount_flags = MsFlags::MS_REMOUNT | MsFlags::MS_BIND;
         if m.read_only {
+            remount_flags |= MsFlags::MS_RDONLY;
+        }
+        if m.noexec {
+            remount_flags |= MsFlags::MS_NOEXEC;
+        }
+        if m.read_only || m.noexec {
             mount(
                 None::<&str>,
                 &target,
                 None::<&str>,
-                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                remount_flags,
                 None::<&str>,
             )?;
         }
