@@ -8581,14 +8581,19 @@ fn apply_podman_userns(
                 .as_deref()
                 .is_some_and(|u| u == "0" || u.starts_with("0:"));
             if !explicit_root {
-                // Container PID 1 runs as namespaced root (host UID on the host); keep-id
-                // file ownership on binds still needs idmapped mounts or Podman uid maps.
-                spec.process.user.uid = 0;
-                spec.process.user.gid = 0;
                 let host_uid = unsafe { libc::getuid() };
                 let host_gid = unsafe { libc::getgid() };
+                spec.process.user.uid = host_uid;
+                spec.process.user.gid = host_gid;
                 let home = keep_id_container_home(args, spec);
-                ensure_keep_id_passwd_entry(merged_rootfs, 0, 0, host_uid, host_gid, &home)?;
+                ensure_keep_id_passwd_entry(
+                    merged_rootfs,
+                    host_uid,
+                    host_gid,
+                    host_uid,
+                    host_gid,
+                    &home,
+                )?;
                 spec.process.env.retain(|e| !e.starts_with("HOME="));
                 spec.process.env.push(format!("HOME={}", home));
             }

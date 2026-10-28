@@ -1327,6 +1327,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                         }
                         drop(gc_parent_sock);
+                        #[cfg(target_os = "linux")]
+                        {
+                            let _ = fs::write("/proc/self/setgroups", "allow");
+                            let _ = nix::unistd::setgroups(&[]);
+                        }
                         let _ = gc_child_sock.write_all(b"ready");
                         let mut done = [0u8; 4];
                         let _ = gc_child_sock.read_exact(&mut done);
@@ -1759,7 +1764,10 @@ fn apply_exec_supplementary_groups(init_pid: i32, creds: Option<&ExecCredentials
                 .map(|g| nix::unistd::Gid::from_raw(*g))
                 .collect();
             // Explicit user:group clears inherited groups; --group-add supplies extras only.
-            let _ = nix::unistd::setgroups(&gids);
+            if nix::unistd::setgroups(&gids).is_err() {
+                let _ = fs::write("/proc/self/setgroups", "allow");
+                let _ = nix::unistd::setgroups(&gids);
+            }
             return;
         }
         if c.uid == 0 {
@@ -1789,9 +1797,10 @@ fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32) {
     let root_uid = nix::unistd::Uid::from_raw(0);
     let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
     let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
+    // setgroups(2) requires CAP_SETGID; apply while still euid 0 in the user namespace.
+    apply_exec_supplementary_groups(init_pid, Some(creds));
     let _ = nix::unistd::setresgid(gid, gid, gid);
     let _ = nix::unistd::setresuid(uid, uid, uid);
-    apply_exec_supplementary_groups(init_pid, Some(creds));
 }
 
 pub fn bundle_process_is_alive(bundle_path: &Path) -> bool {

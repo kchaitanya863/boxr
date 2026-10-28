@@ -61,8 +61,8 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
-| 075-exec | 9 | 1 | **additional groups** (`/proc/setgroups` stays `deny` in this rootless VM; init inherits mapped host supp GIDs as 65534) |
-| 160-volumes | 24 | 1 | **--userns=keep-id** (idmapped binds / subuid limits) |
+| 075-exec | 9 | 1 | **additional groups** (`setgroups` / mapped 65534 supp GIDs; needs Podman-style id mapping + exec cred pipeline) |
+| 160-volumes | 24 | 1 | **--userns=keep-id** (multi-line `uid_map` via `newuidmap` + idmapped binds; `subuid overflow` on full keep-id map in this VM) |
 | **Total** | **153** | **2** | plus skips |
 
 Earlier scorecard (`bats-manifest-v2.log`) predated stopping-loop and volume-import fixes; use v3 for current counts.

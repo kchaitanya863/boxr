@@ -239,18 +239,26 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     fn keep_id_uid_mappings(host_id: u32, sub: Option<&SubordinateRange>) -> Vec<IdMapping> {
         let max_id = sub.map(|r| r.count).unwrap_or(0);
         let mut maps = Vec::new();
-        if sub.is_some() && host_id != 0 {
-            maps.push(IdMapping {
-                container_id: 0,
-                host_id: 1,
-                size: host_id.min(max_id),
-            });
-        }
+        // Rootless /proc/uid_map requires the creator's host UID as the first mapping target.
         maps.push(IdMapping {
-            container_id: host_id,
-            host_id: 0,
+            container_id: 0,
+            host_id: host_id,
             size: 1,
         });
+        if sub.is_some() && host_id > 1 {
+            maps.push(IdMapping {
+                container_id: 1,
+                host_id: 1,
+                size: host_id - 1,
+            });
+        }
+        if host_id != 0 {
+            maps.push(IdMapping {
+                container_id: host_id,
+                host_id: host_id,
+                size: 1,
+            });
+        }
         if max_id > host_id {
             maps.push(IdMapping {
                 container_id: host_id + 1,
