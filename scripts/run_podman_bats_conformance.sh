@@ -114,7 +114,9 @@ run_manifest() {
   local buildah_stub_dir="$CACHE_DIR/buildah-stub-bin"
   mkdir -p "$buildah_stub_dir"
   install -m 0755 "$REPO_ROOT/tests/podman_bats/buildah-stub.sh" "$buildah_stub_dir/buildah"
+  install -m 0755 "$REPO_ROOT/tests/podman_bats/skopeo-stub.sh" "$buildah_stub_dir/skopeo"
   export PATH="$buildah_stub_dir:$PATH"
+  export BOXR_BIN="$BOXR_BIN"
 
   echo "PODMAN=$PODMAN"
   echo "Podman tests: $SRC_DIR"

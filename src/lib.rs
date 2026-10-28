@@ -1618,6 +1618,30 @@ pub fn load_image_archive_transport(path: &Path, home: &Path) -> Result<ImageRec
         .ok_or_else(|| anyhow!("no images found in archive {}", path.display()))
 }
 
+/// Podman parity: reject malformed OCI/Docker `Env` entries (030-run host env leak).
+fn validate_image_record_env(record: &ImageRecord) {
+    if let Some(cfg) = record.config.config.as_ref() {
+        if let Some(envs) = &cfg.env {
+            for e in envs {
+                if !e.contains('=') {
+                    cli::usage_errors::exit_usage_error(format!(
+                        r#"invalid image env variable "{}""#,
+                        e
+                    ));
+                }
+            }
+        }
+    }
+}
+
+pub fn validate_image_config_env(image: &str) -> Result<()> {
+    let store = ImageStore::new();
+    let rec = find_image_with_shortname(&store, image, None)
+        .ok_or_else(|| anyhow!("image not known: {}", image))?;
+    validate_image_record_env(&rec);
+    Ok(())
+}
+
 fn find_image_with_shortname(
     store: &ImageStore,
     query: &str,
@@ -2042,6 +2066,10 @@ pub async fn run_container_with_output(
         )
     };
 
+    if let Some(rec) = &image_record {
+        validate_image_record_env(rec);
+    }
+
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
     }
@@ -2168,19 +2196,6 @@ pub async fn run_container_with_output(
     } else {
         None
     };
-
-    if let Some(cfg) = image_cfg {
-        if let Some(envs) = &cfg.env {
-            for e in envs {
-                if !e.contains('=') {
-                    cli::usage_errors::exit_usage_error(format!(
-                        r#"invalid image env variable "{}""#,
-                        e
-                    ));
-                }
-            }
-        }
-    }
 
     let mut spec = Spec::new_default(image_cfg, cmd_override, env_override);
     if rootfs_only && args.command.is_empty() {
@@ -4310,6 +4325,12 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .filter(|r| r.id == i.id && r.reference != "<none>" && r.tag != "<none>")
                     .map(|r| format!("{}:{}", r.display_reference(), r.tag))
                     .collect();
+                let config_env = i
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.env.clone())
+                    .unwrap_or_default();
                 let docker_compat_image = serde_json::json!({
                     "Id": format!("sha256:{}", i.id),
                     "RepoTags": repo_tags,
@@ -4318,6 +4339,9 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Created": i.created_at.to_rfc3339(),
                     "Architecture": i.config.architecture,
                     "Os": i.config.os,
+                    "Config": {
+                        "Env": config_env,
+                    },
                     "boxr_raw": i
                 });
                 results.push(docker_compat_image);
@@ -7072,7 +7096,8 @@ async fn create_only_container_after_pod_prep(
         )
         .await?;
 
-    let mut args = args;
+    validate_image_record_env(&image_record);
+
     apply_containers_conf_defaults(&mut args);
     if let Err(e) = ulimit::validate_ulimit_cli_options(&args.ulimits) {
         cli::usage_errors::exit_usage_error(e.to_string());
@@ -7162,19 +7187,6 @@ async fn create_only_container_after_pod_prep(
     } else {
         None
     };
-
-    if let Some(cfg) = image_record.config.config.as_ref() {
-        if let Some(envs) = &cfg.env {
-            for e in envs {
-                if !e.contains('=') {
-                    cli::usage_errors::exit_usage_error(format!(
-                        r#"invalid image env variable "{}""#,
-                        e
-                    ));
-                }
-            }
-        }
-    }
 
     let mut spec = Spec::new_default(
         image_record.config.config.as_ref(),

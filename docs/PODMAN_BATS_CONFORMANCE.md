@@ -56,14 +56,14 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 |------|-----|--------|--------|
 | 015-help | 1 | 0 | |
 | 020-tag | 2 | 0 | |
-| 030-run | 80 | 1 | **host env leak** (skopeo + Podman `containers-storage:`; out of scope) |
+| 030-run | 81 | 0 | **host env leak** green (`skopeo-stub` + early image `Env` validation before pod infra) |
 | 040-ps | 8 | 0 | |
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
 | 075-exec | 9 | 1 | **additional groups** (`/proc/setgroups` stays `deny` in this rootless VM; init inherits mapped host supp GIDs as 65534) |
 | 160-volumes | 24 | 1 | **--userns=keep-id** (idmapped binds / subuid limits) |
-| **Total** | **152** | **3** | plus skips |
+| **Total** | **153** | **2** | plus skips |
 
 Earlier scorecard (`bats-manifest-v2.log`) predated stopping-loop and volume-import fixes; use v3 for current counts.
 
@@ -93,14 +93,14 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | CLI usage exit **125** | Implemented (`try_parse`, `subcommand_required`) |
 | `rm` / `pod rm` / `volume rm` bulk flags | `--all`, `-f`, `-a`, combined `-fa` / `-fat` via `preprocess_argv`; `pod rm` accepts **`-a`** |
 | `--authfile` | Global + pull/run/build/login/… |
-| BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash` |
+| BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash`; **`skopeo-stub.sh`** on `PATH` for `containers-storage:` ↔ dir (030 host env leak) |
 | `--cert-dir` / `--creds` | Parsed on pull/run/create/push; BATS local registry TLS via skip built-in roots + `localhost`→127.0.0.1 resolve; **`030-run:cert-dir`** green |
 | Registry **push** | Upload exact config/layer bytes from pull; manifest `Content-Type` from stored manifest (OCI vs Docker v2) |
 | `image rm` / `rmi -a` | **`--all`** removes all local images (BATS registry teardown `rmi -a -f`) |
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **~79/81** isolated: **cert-dir**, **`run --rmi`**, **stopping loop** green; **host env leak** (needs skopeo + Podman `containers-storage` transport) remains red; **8 skips** |
+| `030-run.bats` | **81/81** isolated (incl. **host env leak** via skopeo stub + kube play teardown); **8 skips** |
 | `040-ps.bats` | **8/8** isolated |
 | `045-start.bats` | **8/8** isolated (restart-policy filter accepts **`none`** alias for **`no`**) |
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr when stop timeout **> 0**; **`stop -t 0`** stays silent on stderr (e2e cleanup) |
@@ -116,6 +116,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 ### External storage (buildah stub)
 
 - **`buildah` stub** (`tests/podman_bats/buildah-stub.sh` on `PATH`): `from`, `commit`, `mount`, `unshare` for BATS; persists `external-containers.json` under `BOXR_HOME`.
+- **`skopeo` stub** (`tests/podman_bats/skopeo-stub.sh`): `skopeo copy` between `dir:` and `containers-storage:` using boxr save/load and direct `images.json` updates for config env edits.
 - **`podman ps --external`**, **`image prune -f --external`**, and **`rm`** on mounted externals use `src/storage/external.rs` (not full buildah/libpod storage).
 - Full **manifest.txt** sequential run can OOM; use per-file BATS for focused progress.
 
