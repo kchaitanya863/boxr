@@ -278,7 +278,7 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     }
 
     #[cfg(target_os = "linux")]
-    fn apply_id_mappings(pid: i32, uid_maps: &[IdMapping], gid_maps: &[IdMapping]) -> Result<()> {
+    pub fn apply_id_mappings(pid: i32, uid_maps: &[IdMapping], gid_maps: &[IdMapping]) -> Result<()> {
         if Self::has_newidmap_binaries() {
             let mut uid_args = vec![pid.to_string()];
             for m in uid_maps {

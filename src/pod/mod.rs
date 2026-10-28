@@ -636,6 +636,8 @@ mod tests {
             pid: None,
             uts: None,
             userns: Vec::new(),
+            uidmap: Vec::new(),
+            gidmap: vec![],
             cgroupns: None,
             cgroup_parent: None,
             isolation: None,

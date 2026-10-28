@@ -721,12 +721,22 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     .context("Failed to read sync from container child (unshare failed)")?;
 
                 // 2. Configure UID and GID mapping for child PID in parent namespace
-                let userns_mode = userns_mapping_mode_from_spec(&spec);
-                crate::security::RootlessUserConfig::setup_child_mappings_with_mode(
-                    child.as_raw(),
-                    userns_mode,
-                )
-                    .context("Failed to setup rootless UID/GID mappings")?;
+                let mapping_res = if let Some((uid_maps, gid_maps)) =
+                    crate::id_maps_from_spec(&spec)
+                {
+                    crate::security::RootlessUserConfig::apply_id_mappings(
+                        child.as_raw(),
+                        &uid_maps,
+                        &gid_maps,
+                    )
+                } else {
+                    let userns_mode = userns_mapping_mode_from_spec(&spec);
+                    crate::security::RootlessUserConfig::setup_child_mappings_with_mode(
+                        child.as_raw(),
+                        userns_mode,
+                    )
+                };
+                mapping_res.context("Failed to setup rootless UID/GID mappings")?;
 
                 // 3. Notify child that mapping is complete
                 parent_sock

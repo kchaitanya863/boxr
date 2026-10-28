@@ -187,6 +187,8 @@ pub async fn create_container(
         pid: None,
         uts: None,
         userns: Vec::new(),
+        uidmap: Vec::new(),
+        gidmap: Vec::new(),
         cgroupns: None,
         cgroup_parent: None,
         isolation: None,

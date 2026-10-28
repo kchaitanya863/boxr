@@ -261,6 +261,14 @@ pub struct RunArgs {
     #[arg(long = "userns")]
     pub userns: Vec<String>,
 
+    /// Map a user namespace range (containerID:hostID:size)
+    #[arg(long = "uidmap")]
+    pub uidmap: Vec<String>,
+
+    /// Map a group namespace range (containerID:hostID:size)
+    #[arg(long = "gidmap")]
+    pub gidmap: Vec<String>,
+
     /// Cgroup namespace to use
     #[arg(long = "cgroupns")]
     pub cgroupns: Option<String>,

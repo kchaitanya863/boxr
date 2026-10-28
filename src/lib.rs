@@ -1256,7 +1256,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Manifest(args) => {
-            handle_manifest(args).await?;
+            handle_manifest(args, global_auth).await?;
             Ok(0)
         }
         Commands::Service(args) => {
@@ -1948,6 +1948,9 @@ pub async fn run_container_with_output(
     }
 
     apply_containers_conf_defaults(&mut args);
+    if let Some(adj) = args.oom_score_adj {
+        args.oom_score_adj = Some(clamp_rootless_oom_score_adj(adj));
+    }
     apply_default_mounts_file(&mut args)?;
 
     let rootfs_only = args.rootfs.is_some();
@@ -2196,6 +2199,7 @@ pub async fn run_container_with_output(
     }
     if let Some(adj) = args.oom_score_adj {
         annotations.insert("boxr.oom_score_adj".to_string(), adj.to_string());
+        spec.process.oom_score_adj = Some(adj);
     }
     if !args.group_add.is_empty() {
         let mut gids = Vec::new();
@@ -2260,6 +2264,7 @@ pub async fn run_container_with_output(
         apply_namespace_to_linux(linux, &mut annotations, "pid", &args.pid)?;
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    apply_run_id_maps(&args, &mut spec, &mut annotations)?;
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     if let Some(u) = &args.user {
@@ -4796,11 +4801,104 @@ fn userns_from_containers_conf() -> Option<String> {
     containers_conf_toml_value("userns")
 }
 
+fn oom_score_adj_from_containers_conf() -> Option<i32> {
+    containers_conf_toml_value("oom_score_adj")?.parse().ok()
+}
+
+fn clamp_rootless_oom_score_adj(requested: i32) -> i32 {
+    #[cfg(unix)]
+    {
+        if unsafe { libc::getuid() } != 0 {
+            let current = fs::read_to_string("/proc/self/oom_score_adj")
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .unwrap_or(0);
+            if requested < current {
+                eprintln!(
+                    "Warning: Requested oom_score_adj={} is lower than the current one, changing to {}",
+                    requested,
+                    current
+                );
+                return current;
+            }
+        }
+    }
+    requested
+}
+
+fn parse_id_map(spec: &str) -> Option<security::IdMapping> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some(security::IdMapping {
+        container_id: parts[0].parse().ok()?,
+        host_id: parts[1].parse().ok()?,
+        size: parts[2].parse().ok()?,
+    })
+}
+
+fn apply_run_id_maps(
+    args: &RunArgs,
+    spec: &mut Spec,
+    annotations: &mut HashMap<String, String>,
+) -> Result<()> {
+    if args.uidmap.is_empty() && args.gidmap.is_empty() {
+        return Ok(());
+    }
+    let uid_maps: Vec<security::IdMapping> = args
+        .uidmap
+        .iter()
+        .filter_map(|s| parse_id_map(s))
+        .collect();
+    if uid_maps.is_empty() {
+        return Ok(());
+    }
+    let gid_maps: Vec<security::IdMapping> = if args.gidmap.is_empty() {
+        uid_maps.clone()
+    } else {
+        args.gidmap
+            .iter()
+            .filter_map(|s| parse_id_map(s))
+            .collect()
+    };
+    let l = spec.linux.get_or_insert_with(Default::default);
+    l.namespaces.retain(|ns| ns.ns_type != "user");
+    l.namespaces.push(oci::runtime::LinuxNamespace {
+        ns_type: "user".to_string(),
+        path: None,
+    });
+    annotations.insert(
+        "boxr.uid_maps".to_string(),
+        serde_json::to_string(&uid_maps)?,
+    );
+    annotations.insert(
+        "boxr.gid_maps".to_string(),
+        serde_json::to_string(&gid_maps)?,
+    );
+    Ok(())
+}
+
+pub(crate) fn id_maps_from_spec(spec: &Spec) -> Option<(Vec<security::IdMapping>, Vec<security::IdMapping>)> {
+    let ann = spec.annotations.as_ref()?;
+    let uid_json = ann.get("boxr.uid_maps")?;
+    let gid_json = ann.get("boxr.gid_maps").unwrap_or(uid_json);
+    let uid_maps: Vec<security::IdMapping> = serde_json::from_str(uid_json).ok()?;
+    let gid_maps: Vec<security::IdMapping> = serde_json::from_str(gid_json).ok()?;
+    if uid_maps.is_empty() {
+        return None;
+    }
+    Some((uid_maps, gid_maps))
+}
+
 fn apply_containers_conf_defaults(args: &mut RunArgs) {
     if args.userns.is_empty() {
         if let Some(u) = userns_from_containers_conf() {
             args.userns.push(u);
         }
+    }
+    if args.oom_score_adj.is_none() {
+        args.oom_score_adj = oom_score_adj_from_containers_conf();
     }
 }
 
@@ -6510,6 +6608,7 @@ async fn create_only_container_after_pod_prep(
     }
     if let Some(adj) = args.oom_score_adj {
         annotations.insert("boxr.oom_score_adj".to_string(), adj.to_string());
+        spec.process.oom_score_adj = Some(adj);
     }
     if !args.group_add.is_empty() {
         let mut gids = Vec::new();
@@ -6794,6 +6893,7 @@ async fn create_only_container_after_pod_prep(
         }
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    apply_run_id_maps(&args, &mut spec, &mut annotations)?;
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
     apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
     if let Some(u) = &args.user {
@@ -9083,6 +9183,8 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         pid: None,
         uts: None,
         userns: Vec::new(),
+        uidmap: Vec::new(),
+        gidmap: Vec::new(),
         cgroupns: None,
         cgroup_parent: None,
         isolation: None,
@@ -9872,9 +9974,27 @@ pub fn handle_context(args: cli::ContextSubcommands) -> Result<()> {
     Ok(())
 }
 
-pub async fn handle_manifest(args: cli::ManifestSubcommands) -> Result<()> {
+fn manifest_authfile_check(global: Option<&str>, local: Option<&str>) -> Result<()> {
+    if let Some(p) = local.or(global) {
+        if let Err(e) = auth::validate_authfile(p) {
+            cli::usage_errors::exit_usage_error(e.to_string());
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_manifest(
+    args: cli::ManifestSubcommands,
+    global_auth: Option<&str>,
+) -> Result<()> {
+    let parent_auth = args.registry_auth.authfile.as_deref().or(global_auth);
     match args.command {
-        cli::ManifestAction::Inspect { image, .. } => {
+        cli::ManifestAction::Inspect {
+            authfile,
+            image,
+            ..
+        } => {
+            manifest_authfile_check(parent_auth, authfile.as_deref())?;
             let store = ImageStore::new();
             if let Some(img) = store.find(&image) {
                 let manifest_json = serde_json::json!({
@@ -9895,23 +10015,45 @@ pub async fn handle_manifest(args: cli::ManifestSubcommands) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&manifest)?);
             }
         }
-        cli::ManifestAction::Create { target, sources } => {
+        cli::ManifestAction::Create {
+            authfile,
+            target,
+            sources,
+        } => {
+            manifest_authfile_check(parent_auth, authfile.as_deref())?;
             println!("Created manifest list {}", target);
             for s in sources {
                 println!("  added {}", s);
             }
         }
-        cli::ManifestAction::Push { target, .. } => {
+        cli::ManifestAction::Push {
+            authfile, target, ..
+        } => {
+            manifest_authfile_check(parent_auth, authfile.as_deref())?;
             println!("Pushed manifest {}", target);
         }
-        cli::ManifestAction::Rm { target } => {
+        cli::ManifestAction::Rm { authfile, target } => {
+            manifest_authfile_check(parent_auth, authfile.as_deref())?;
             println!("Removed manifest {}", target);
         }
-        cli::ManifestAction::Annotate { target, annotation } => {
+        cli::ManifestAction::Annotate {
+            authfile,
+            target,
+            annotation,
+        } => {
+            manifest_authfile_check(parent_auth, authfile.as_deref())?;
             println!("Annotated manifest {}", target);
             for ann in annotation {
                 println!("  {}", ann);
             }
+        }
+        cli::ManifestAction::Add {
+            authfile,
+            manifest_list,
+            source,
+        } => {
+            manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            println!("Added {} to manifest list {}", source, manifest_list);
         }
     }
     Ok(())
