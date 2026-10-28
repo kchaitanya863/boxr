@@ -214,6 +214,7 @@ impl KubeManager {
                 cap_add: Vec::new(),
                 cap_drop: Vec::new(),
                 read_only: false,
+                http_proxy: false,
                 read_only_tmpfs: None,
                 init: false,
                 tmpfs: Vec::new(),

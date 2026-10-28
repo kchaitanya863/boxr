@@ -279,7 +279,12 @@ pub struct PodCreateArgs {
     #[arg(long = "network")]
     pub network: Option<String>,
     /// Share namespaces: ipc, net, uts, pid (comma-separated)
-    #[arg(long = "share", default_value = "ipc,net,uts")]
+    #[arg(
+        long = "share",
+        default_value = "ipc,net,uts",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
     pub share: String,
     /// Create an infra container
     #[arg(long = "infra", default_value_t = true)]

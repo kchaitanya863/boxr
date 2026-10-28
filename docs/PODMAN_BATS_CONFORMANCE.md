@@ -66,7 +66,8 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | E2e file | Status |
 |----------|--------|
 | `version_test.go` | **6/6** (`e2e-version-3.log`): reports **6.3.0-dev** (bundled podman.git), `-v` / `--version` after globals, trimmed `--format json`, help blurb |
-| Other manifest specs | Mostly red (`exists_test`, volumes, unshare, …) — triage ongoing |
+| `exists_test.go` | **12/12** (`e2e-exists-3.log`): silent exit **1** for missing image/pod/volume; `pod create --infra=false --share ""`; `run --http-proxy=false` |
+| Other manifest specs | Mostly red (`volume_rename`, `unshare`, …) — triage ongoing |
 
 ## boxr fixes for upstream tests (ongoing)
 

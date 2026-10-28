@@ -30,6 +30,12 @@ pub static RUN_RM_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 /// Podman `run --read-only=false` (clap `SetTrue` cannot represent this).
 pub static READ_ONLY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
+/// Podman `pod create --infra=false` (clap `SetTrue` cannot represent this).
+pub static POD_INFRA_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
+
+/// Podman `run --http-proxy=false` (accepted for e2e; boxr does not inject proxy env).
+pub static HTTP_PROXY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
+
 /// Strip `--rm=false` before clap parsing (Podman accepts `run --rmi --rm=false`).
 /// Podman global flags that take a value; stripped before clap (e2e / storage init).
 /// Expand Podman/Docker combined short options (e.g. `run -td` → `-t` `-d`).
@@ -85,6 +91,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut i = 0;
     while i < argv.len() {
         let a = &argv[i];
+        if a.is_empty() {
+            i += 1;
+            continue;
+        }
         if a == "--rm=false" {
             rm_false = true;
             i += 1;
@@ -97,6 +107,16 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         if a == "--read-only=true" {
             out.push("--read-only".to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--infra=false" {
+            let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
+            i += 1;
+            continue;
+        }
+        if a == "--http-proxy=false" {
+            let _ = HTTP_PROXY_EXPLICIT_FALSE.set(true);
             i += 1;
             continue;
         }

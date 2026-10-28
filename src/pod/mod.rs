@@ -616,6 +616,7 @@ mod tests {
             cap_add: vec![],
             cap_drop: vec![],
             read_only: false,
+            http_proxy: false,
             read_only_tmpfs: None,
             init: false,
             tmpfs: vec![],

@@ -173,6 +173,10 @@ pub struct RunArgs {
     #[arg(long = "read-only", action = clap::ArgAction::SetTrue, default_value_t = false)]
     pub read_only: bool,
 
+    /// Inject proxy environment variables (Podman-compatible; no-op in boxr)
+    #[arg(long = "http-proxy", action = clap::ArgAction::SetTrue, default_value_t = false)]
+    pub http_proxy: bool,
+
     /// Mount read-only container paths as tmpfs (Podman-compatible)
     #[arg(
         long = "read-only-tmpfs",

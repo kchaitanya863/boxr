@@ -1025,8 +1025,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Exists { image } => {
-                ensure_image_exists(&image)?;
-                Ok(0)
+                if ensure_image_exists(&image).is_ok() {
+                    Ok(0)
+                } else {
+                    std::process::exit(1);
+                }
             }
             cli::ImageAction::Diff(diff_args) => {
                 diff_images(&diff_args.image1, diff_args.image2.as_deref())?;
@@ -5756,7 +5759,9 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
             }
         }
         VolumeAction::Exists { name } => {
-            ensure_volume_exists(&name)?;
+            if volume::VolumeStore::new().find(&name).is_none() {
+                std::process::exit(1);
+            }
         }
         VolumeAction::Export(exp_args) => {
             let out = volume::VolumeOps::export_volume(
@@ -9657,6 +9662,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
         read_only: false,
+        http_proxy: false,
         read_only_tmpfs: None,
         init: false,
         tmpfs: Vec::new(),
@@ -9783,6 +9789,11 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 }
             }
             let (share_ipc, share_net, share_uts, share_pid) = parse_pod_share(&share);
+            let want_infra = if cli::POD_INFRA_EXPLICIT_FALSE.get() == Some(&true) {
+                false
+            } else {
+                infra && !no_infra
+            };
             let config = pod::PodConfig {
                 name: pod_name.clone(),
                 ports: parsed_ports,
@@ -9795,11 +9806,11 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 share_net,
                 share_uts,
                 share_pid,
-                infra: infra && !no_infra,
+                infra: want_infra,
                 network,
             };
             let pod = store.create_with_config(config)?;
-            if infra && !no_infra {
+            if want_infra {
                 let _ = ensure_pod_infra_container(&pod).await?;
             }
             println!("{}", pod.id);
@@ -9969,7 +9980,7 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
         }
         PodAction::Exists { pod } => {
             if !store.exists(&pod) {
-                return Err(anyhow!("Pod '{}' not found", pod));
+                std::process::exit(1);
             }
         }
         PodAction::Clone { source, target } => {
