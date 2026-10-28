@@ -4550,21 +4550,34 @@ fn log_opt_max_size_mb(log_opts: &[String]) -> Option<String> {
 
 fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Option<(u32, u32)> {
     let spec = spec.trim();
-    if let Some((u, g)) = spec.split_once(':') {
-        let uid = u.parse().ok()?;
-        let gid = g.parse().ok()?;
-        return Some((uid, gid));
+    let passwd = fs::read_to_string(rootfs.join("etc/passwd")).ok();
+    if let Some((left, right)) = spec.split_once(':') {
+        if let (Ok(uid), Ok(gid)) = (left.parse::<u32>(), right.parse::<u32>()) {
+            return Some((uid, gid));
+        }
+        if let Ok(gid) = right.parse::<u32>() {
+            if let Some(content) = &passwd {
+                for line in content.lines() {
+                    let parts: Vec<&str> = line.split(':').collect();
+                    if parts.len() >= 4 && parts[0] == left {
+                        let uid = parts[2].parse().ok()?;
+                        return Some((uid, gid));
+                    }
+                }
+            }
+        }
     }
     if let Ok(uid) = spec.parse::<u32>() {
         return Some((uid, uid));
     }
-    let content = fs::read_to_string(rootfs.join("etc/passwd")).ok()?;
-    for line in content.lines() {
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() >= 4 && parts[0] == spec {
-            let uid = parts[2].parse().ok()?;
-            let gid = parts[3].parse().ok()?;
-            return Some((uid, gid));
+    if let Some(content) = passwd {
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 4 && parts[0] == spec {
+                let uid = parts[2].parse().ok()?;
+                let gid = parts[3].parse().ok()?;
+                return Some((uid, gid));
+            }
         }
     }
     None

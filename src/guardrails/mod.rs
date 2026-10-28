@@ -370,6 +370,17 @@ impl ProcessReaper {
             }
         }
 
+        for c in &containers {
+            if !matches!(c.status, ContainerStatus::Exited(_)) {
+                continue;
+            }
+            let bundle = PathBuf::from(&c.bundle_path);
+            if crate::bundle_auto_remove(&bundle) || crate::bundle_auto_remove_image(&bundle) {
+                crate::finalize_stopped_container(c);
+                reaped_count += 1;
+            }
+        }
+
         #[cfg(target_os = "macos")]
         {
             use std::collections::HashSet;
