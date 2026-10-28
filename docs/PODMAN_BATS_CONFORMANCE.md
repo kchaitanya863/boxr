@@ -74,7 +74,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **61/75** ok (latest `run-20261028-042547.log`): detached **`__internal-detached-wait`** (restart/`RestartCount`), **`--hooks-dir`** OCI prestart/poststop on restart (**67**), **`[engine] static_dir`** via `CONTAINERS_CONF*` (**68**), read-only/ulimits/containerenv; still red: **`--name`** dup (**9**), **`--rmi`** (**11**), keep-id passwd (**16**), journald (**18**), image `/` **555** (**43**), log-opt (**44**), hosts/uidmap (**46**), `top`/nsenter build (**49**), port **`--rm`** race (**52**), privileged `/dev/tty` (**56**), cgroupns (**64**), conmon/syslog (**70**), buildah name clash (**71**), systemd **`/run` perms** (**72**) |
+| `030-run.bats` | **68/75** ok (latest `run-20261028-043619.log`): detached watcher polls non-child trampoline PIDs (fixes **`ps`/`exec`/`top`** on `-d`), **`--hooks-dir`**, **`static_dir`**, **`--rmi`/`stop`**, port **126** conflicts, keep-id passwd; still red: journald (**18**), image `/` **555** (**43**), hosts/uidmap (**46**), cgroupns (**64**), conmon/syslog (**70**), **buildah** name clash (**71**), systemd **`/run` perms** (**72**) |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |

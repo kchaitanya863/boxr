@@ -89,6 +89,46 @@ fn write_container_exit_code(bundle_path: &Path, status: i32) {
     let _ = fs::write(bundle_path.join("boxr-exitcode"), stored.to_string());
 }
 
+fn process_alive(pid: i32) -> bool {
+    pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn read_bundle_exit_code(bundle_path: &Path) -> i32 {
+    fs::read_to_string(bundle_path.join("boxr-exitcode"))
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(0)
+}
+
+/// Wait until `pid` exits. The waiter is usually not the parent (sibling of trampoline), so fall back to `/proc` polling.
+fn wait_for_trampoline_exit(bundle_path: &Path, pid: i32) -> i32 {
+    use nix::errno::Errno;
+    let pgid = Pid::from_raw(pid);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    while std::time::Instant::now() < deadline {
+        match waitpid(pgid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, code)) => return code,
+            Ok(WaitStatus::Signaled(_, sig, _)) => return 128 + sig as i32,
+            Ok(WaitStatus::StillAlive) => {}
+            Err(Errno::ECHILD) => {
+                if !process_alive(pid) {
+                    return read_bundle_exit_code(bundle_path);
+                }
+            }
+            _ => {
+                if !process_alive(pid) {
+                    return read_bundle_exit_code(bundle_path);
+                }
+            }
+        }
+        if !process_alive(pid) {
+            return read_bundle_exit_code(bundle_path);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    read_bundle_exit_code(bundle_path)
+}
+
 fn run_timeout_secs(spec: &Spec) -> Option<u64> {
     spec.annotations
         .as_ref()
@@ -660,12 +700,7 @@ pub fn run_detached_wait(args: &[String]) -> Result<i32> {
         .unwrap_or("")
         .to_string();
     loop {
-        let exit_code = match waitpid(Pid::from_raw(pid), None) {
-            Ok(WaitStatus::Exited(_, code)) => code,
-            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
-            _ => 1,
-        };
-        write_container_exit_code(bundle_path, exit_code);
+        let exit_code = wait_for_trampoline_exit(bundle_path, pid);
         if container_id.is_empty() {
             break;
         }

@@ -3234,7 +3234,13 @@ pub fn stop_container_with_home_and_timeout(
         }
     }
     let exit_code = if used_sigkill { 137 } else { 0 };
-    store.update_status(&c.id, ContainerStatus::Exited(exit_code))?;
+    if let Err(e) = store.update_status(&c.id, ContainerStatus::Exited(exit_code)) {
+        if store.find(&c.id).is_none() {
+            // Detached watcher may have already finalized --rm/--rmi cleanup.
+            return Ok(());
+        }
+        return Err(e);
+    }
     let _ = guardrails::ProcessReaper::reap_stale_containers();
     if used_sigkill {
         eprintln!(
