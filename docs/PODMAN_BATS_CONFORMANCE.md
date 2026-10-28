@@ -80,11 +80,13 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `rm` / `pod rm` / `volume rm` bulk flags | `--all`, `-f`, `-a`, combined `-fa` / `-fat` via `preprocess_argv`; `pod rm` accepts **`-a`** |
 | `--authfile` | Global + pull/run/build/login/… |
 | BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash` |
-| `--cert-dir` / `--creds` | Parsed on pull/run/create/push; custom CA PEMs loaded from `--cert-dir` (TLS to BATS local registry still WIP) |
+| `--cert-dir` / `--creds` | Parsed on pull/run/create/push; BATS local registry TLS via skip built-in roots + `localhost`→127.0.0.1 resolve; **`030-run:cert-dir`** green |
+| Registry **push** | Upload exact config/layer bytes from pull; manifest `Content-Type` from stored manifest (OCI vs Docker v2) |
+| `image rm` / `rmi -a` | **`--all`** removes all local images (BATS registry teardown `rmi -a -f`) |
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **~79/81** isolated: stopping loop, log-opt, no-hostname, inspect Args/Path green; **cert-dir** (TLS to local test registry), **host env leak** (needs skopeo + Podman `containers-storage` transport) remain red; **8 skips** |
+| `030-run.bats` | **~80/81** isolated: **cert-dir** green; **host env leak** (needs skopeo + Podman `containers-storage` transport) remains red; **8 skips** |
 | `040-ps.bats` | **8/8** isolated |
 | `045-start.bats` | **8/8** isolated |
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr (`StopSignal SIGTERM failed to stop container … resorting to SIGKILL`, including **`in N seconds`** when `-t N` is set) |
@@ -95,7 +97,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
 | `--runtime-flag` | Global flag; unknown values exit **126** (BATS `030-run` global runtime option) |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
-| Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*`, `localhost/cve_2022_1227_test*` (build test **49** image when `top` fails) |
+| Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*`, `quay.io/libpod/registry:*`, registry **container** named `registry`, `localhost/cve_2022_1227_test*` (build test **49** image when `top` fails) |
 
 ### External storage (buildah stub)
 

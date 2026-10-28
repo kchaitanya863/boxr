@@ -556,6 +556,10 @@ pub struct ImagesArgs {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RmiArgs {
+    /// Remove all images
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
     /// Force removal of the image
     #[arg(short = 'f', long = "force")]
     pub force: bool,
@@ -569,7 +573,6 @@ pub struct RmiArgs {
     pub platform: Option<String>,
 
     /// Image references or IDs to remove
-    #[arg(required = true)]
     pub images: Vec<String>,
 }
 

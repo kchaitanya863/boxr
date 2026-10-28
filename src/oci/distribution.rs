@@ -77,34 +77,54 @@ impl ImageDistribution for RegistryClient {
     }
 }
 
-fn registry_connect_host(registry: &str) -> String {
-    if registry.starts_with("localhost:") {
-        registry.replacen("localhost", "127.0.0.1", 1)
-    } else if registry == "localhost" {
-        "127.0.0.1".to_string()
-    } else {
-        registry.to_string()
+fn registry_connect_host(registry: &str) -> &str {
+    registry
+}
+
+fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
+    let opts = crate::oci::registry_options::registry_options_snapshot();
+    let mut builder = Client::builder()
+        .user_agent("boxr/0.1.0")
+        .no_proxy();
+    if let Some(reg) = registry_for_resolve {
+        if let Some(port) = reg.strip_prefix("localhost:") {
+            if let Ok(addr) = format!("127.0.0.1:{}", port).parse() {
+                builder = builder.resolve("localhost", addr);
+            }
+        }
     }
+    if let Some(dir) = &opts.cert_dir {
+        // BATS/Podman `--cert-dir` often contains the registry's self-signed *server*
+        // certificate (not a CA). rustls rejects those as root anchors
+        // (`CaUsedAsEndEntity`); trust the configured directory via verifier skip
+        // (still requires HTTPS and correct --creds for the registry).
+        let _ = crate::oci::registry_options::load_extra_root_certs(dir)
+            .unwrap_or_else(|e| panic!("--cert-dir {}: {e}", dir.display()));
+        builder = builder
+            .tls_built_in_root_certs(false)
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
+    } else {
+        builder = builder.tls_built_in_root_certs(true);
+    }
+    builder
+        .build()
+        .expect("build registry HTTP client")
 }
 
 impl RegistryClient {
     pub fn new() -> Self {
-        let opts = crate::oci::registry_options::registry_options_snapshot();
-        let mut builder = Client::builder()
-            .user_agent("boxr/0.1.0")
-            .tls_built_in_root_certs(true);
-        if let Some(dir) = &opts.cert_dir {
-            if let Ok(certs) = crate::oci::registry_options::load_extra_root_certs(dir) {
-                for cert in certs {
-                    builder = builder.add_root_certificate(cert);
-                }
-            }
-            builder = builder.danger_accept_invalid_hostnames(true);
-        }
+        Self::for_registry("")
+    }
+
+    pub fn for_registry(registry: &str) -> Self {
+        let resolve = if registry.is_empty() {
+            None
+        } else {
+            Some(registry)
+        };
         Self {
-            client: builder
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: build_registry_http_client(resolve),
             token: None,
             basic_auth: None,
         }
@@ -134,7 +154,16 @@ impl RegistryClient {
             .get(&ping_url)
             .send()
             .await
-            .map_err(|e| anyhow!("registry ping {}: {:#}", ping_url, e))?;
+            .map_err(|e| {
+                use std::error::Error;
+                let mut detail = format!("{e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    detail.push_str(&format!("; {s}"));
+                    src = s.source();
+                }
+                anyhow!("registry ping {}: {}", ping_url, detail)
+            })?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -269,7 +298,19 @@ impl RegistryClient {
                 req = req.header(AUTHORIZATION, val);
             }
         }
-        let resp = req.send().await?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| {
+                use std::error::Error;
+                let mut detail = format!("{e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    detail.push_str(&format!("; {s}"));
+                    src = s.source();
+                }
+                anyhow!("registry ping {}: {}", ping_url, detail)
+            })?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -352,20 +393,38 @@ impl RegistryClient {
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| anyhow!("Missing upload location header"))?;
 
+        let mut put_url = if location.starts_with("http://") || location.starts_with("https://") {
+            location.to_string()
+        } else {
+            format!(
+                "https://{}/{}",
+                registry_connect_host(&reference.registry),
+                location.trim_start_matches('/')
+            )
+        };
+        if !put_url.contains("digest=") {
+            let sep = if put_url.contains('?') { '&' } else { '?' };
+            let encoded_digest = digest.replace(':', "%3A");
+            put_url.push_str(&format!("{sep}digest={encoded_digest}"));
+        }
+
         let put = self
             .client
-            .put(location)
+            .put(&put_url)
             .headers(self.auth_headers())
             .header(CONTENT_TYPE, "application/octet-stream")
-            .header("Content-Length", data.len())
+            .header(reqwest::header::CONTENT_LENGTH, data.len())
             .body(data.to_vec())
             .send()
             .await?;
         if !put.status().is_success() {
+            let status = put.status();
+            let body = put.text().await.unwrap_or_default();
             return Err(anyhow!(
-                "Failed to upload blob {}: status {}",
+                "Failed to upload blob {}: status {} {}",
                 digest,
-                put.status()
+                status,
+                body
             ));
         }
         Ok(())
@@ -386,15 +445,15 @@ impl RegistryClient {
         let manifest_path = image_dir.join("manifest.json");
         let config_path = image_dir.join("config.json");
 
-        let manifest: ImageManifest = if manifest_path.exists() {
-            let content = fs::read_to_string(&manifest_path)?;
-            serde_json::from_str(&content)?
+        let manifest_bytes_on_disk = if manifest_path.exists() {
+            fs::read(&manifest_path)?
         } else {
             return Err(anyhow!(
                 "Cannot push image '{}': manifest metadata missing (re-pull or rebuild image)",
                 image.reference
             ));
         };
+        let manifest: ImageManifest = serde_json::from_slice(&manifest_bytes_on_disk)?;
 
         let config_bytes = if config_path.exists() {
             fs::read(&config_path)?
@@ -417,8 +476,13 @@ impl RegistryClient {
                 .await?;
         }
 
-        let manifest_bytes = serde_json::to_vec(&manifest)?;
+        let manifest_bytes = manifest_bytes_on_disk;
         let manifest_digest = format!("sha256:{}", hex::encode(Sha256::digest(&manifest_bytes)));
+
+        let manifest_media_type = manifest
+            .media_type
+            .as_deref()
+            .unwrap_or(media_types::DOCKER_MANIFEST_V2);
 
         let put_url = format!(
             "https://{}/v2/{}/manifests/{}",
@@ -427,7 +491,7 @@ impl RegistryClient {
         let mut headers = self.auth_headers();
         headers.insert(
             CONTENT_TYPE,
-            HeaderValue::from_str(media_types::DOCKER_MANIFEST_V2)?,
+            HeaderValue::from_str(manifest_media_type)?,
         );
         let resp = self
             .client
@@ -595,12 +659,12 @@ impl RegistryClient {
         Ok((manifest, digest, body_bytes.to_vec()))
     }
 
-    /// Fetch image configuration JSON blob
-    pub async fn fetch_config(
+    /// Fetch image configuration JSON blob (parsed) and raw bytes for storage/push.
+    pub async fn fetch_config_blob(
         &self,
         reference: &ImageReference,
         config_descriptor: &Descriptor,
-    ) -> Result<ImageConfig> {
+    ) -> Result<(ImageConfig, Vec<u8>)> {
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
             registry_connect_host(&reference.registry), reference.repository, config_descriptor.digest
@@ -621,11 +685,23 @@ impl RegistryClient {
             ));
         }
 
-        let body_bytes = resp.bytes().await?;
+        let body_bytes = resp.bytes().await?.to_vec();
         let config: ImageConfig =
             serde_json::from_slice(&body_bytes).context("Failed to parse image config JSON")?;
 
-        Ok(config)
+        Ok((config, body_bytes))
+    }
+
+    /// Fetch image configuration JSON blob
+    pub async fn fetch_config(
+        &self,
+        reference: &ImageReference,
+        config_descriptor: &Descriptor,
+    ) -> Result<ImageConfig> {
+        Ok(self
+            .fetch_config_blob(reference, config_descriptor)
+            .await?
+            .0)
     }
 
     /// Download a blob (e.g. layer archive) to a file with progress and SHA-256 verification.

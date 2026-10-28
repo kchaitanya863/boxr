@@ -976,9 +976,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Rm(rmi_args) => {
-                for img in &rmi_args.images {
-                    remove_image(img, rmi_args.force, rmi_args.no_prune)?;
-                }
+                rmi_images(&rmi_args)?;
                 Ok(0)
             }
             cli::ImageAction::Inspect(inspect_args) => {
@@ -1272,9 +1270,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Rmi(args) => {
-            for img in &args.images {
-                remove_image(img, args.force, args.no_prune)?;
-            }
+            rmi_images(&args)?;
             Ok(0)
         }
         Commands::Spec(args) => {
@@ -1700,7 +1696,7 @@ pub async fn pull_image_with_platform(
         return load_image_archive_transport(&path, &storage::boxr_home());
     }
     let reference = ImageReference::parse(image_str)?;
-    let mut client = RegistryClient::new();
+    let mut client = RegistryClient::for_registry(&reference.registry);
 
     if let Some(plat) = target_platform {
         pull_user_message(format!(
@@ -1737,7 +1733,9 @@ pub async fn pull_image_with_platform(
         }
     }
 
-    let config = client.fetch_config(&reference, &manifest.config).await?;
+    let (config, config_blob) = client
+        .fetch_config_blob(&reference, &manifest.config)
+        .await?;
 
     if let Some(rootfs) = &config.rootfs {
         if rootfs.diff_ids.len() != manifest.layers.len() {
@@ -1779,7 +1777,7 @@ pub async fn pull_image_with_platform(
     fs::create_dir_all(&rootfs_dir)?;
 
     fs::write(image_dir.join("manifest.json"), &manifest_bytes)?;
-    fs::write(image_dir.join("config.json"), serde_json::to_vec(&config)?)?;
+    fs::write(image_dir.join("config.json"), &config_blob)?;
 
     pull_user_message("Extracting image layers to rootfs...");
     for layer_desc in &manifest.layers {
@@ -6880,6 +6878,30 @@ fn remove_container_opts_inner(
     let _ = guardrails::ProcessReaper::reap_stale_containers();
     if print_removed {
         println!("{}", container);
+    }
+    Ok(())
+}
+
+fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
+    if args.all {
+        let store = ImageStore::new();
+        let names: Vec<String> = store
+            .list()
+            .iter()
+            .map(|img| img.qualified_name())
+            .collect();
+        for img in names {
+            remove_image(&img, args.force, args.no_prune)?;
+        }
+        return Ok(());
+    }
+    if args.images.is_empty() {
+        crate::cli::usage_errors::exit_usage_error(
+            "you must select at least one image or use --all",
+        );
+    }
+    for img in &args.images {
+        remove_image(img, args.force, args.no_prune)?;
     }
     Ok(())
 }
