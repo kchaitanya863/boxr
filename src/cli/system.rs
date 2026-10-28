@@ -307,7 +307,7 @@ pub enum PodAction {
         force: bool,
         #[arg(short = 't', long = "time", value_name = "SECONDS")]
         time: Option<u32>,
-        #[arg(long = "all")]
+        #[arg(short = 'a', long = "all")]
         all: bool,
         #[arg(long = "ignore")]
         ignore: bool,
