@@ -1176,7 +1176,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     std::process::exit(1);
                 }
 
-                // 5. Fork so grandchild becomes PID 1 inside new PID namespace
+                // Fork so workload becomes PID 1 inside the new PID namespace.
                 match unsafe { fork() } {
                     Ok(ForkResult::Parent { child: grandchild }) => {
                         let _ = fs::write(
@@ -2247,6 +2247,26 @@ fn run_container_child(
     if let Err(e) = crate::ulimit::apply_ulimits_from_bundle(bundle_path) {
         eprintln!("{}", e);
         std::process::exit(1);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = fs::write("/proc/self/setgroups", "allow");
+        let mut supp: Vec<nix::unistd::Gid> = spec
+            .process
+            .user
+            .additional_gids
+            .as_ref()
+            .map(|gids| {
+                gids.iter()
+                    .map(|g| nix::unistd::Gid::from_raw(*g))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if supp.is_empty() {
+            supp.push(nix::unistd::Gid::from_raw(spec.process.user.gid));
+        }
+        let _ = nix::unistd::setgroups(&supp);
     }
 
     if let Some(ann) = &spec.annotations {
