@@ -3281,6 +3281,16 @@ fn resolve_stop_exit_code(
     bundle_path: &std::path::Path,
     used_sigkill: bool,
 ) -> i32 {
+    if let Ok(code_str) = std::fs::read_to_string(bundle_path.join("boxr-exitcode")) {
+        if let Ok(code) = code_str.trim().parse::<i32>() {
+            if code == 143 || code == 130 || code == 0 {
+                return 0;
+            }
+            if !used_sigkill {
+                return code;
+            }
+        }
+    }
     if used_sigkill {
         return 137;
     }
@@ -3289,15 +3299,6 @@ fn resolve_stop_exit_code(
             if code == 137 {
                 return 137;
             }
-        }
-    }
-    if let Ok(code_str) = std::fs::read_to_string(bundle_path.join("boxr-exitcode")) {
-        if let Ok(code) = code_str.trim().parse::<i32>() {
-            // Trampoline may record 128+signal even when the workload trapped and exited 0.
-            if code == 143 || code == 130 {
-                return 0;
-            }
-            return code;
         }
     }
     if let Some(rec) = store.find(id) {
@@ -3401,7 +3402,18 @@ pub fn stop_container_with_home_and_timeout(
             if !any_pid_alive(&stop_pids) {
                 break;
             }
+            if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
+                if let Ok(init_pid) = pid_str.trim().parse::<i32>() {
+                    if init_pid > 0 && unsafe { libc::kill(init_pid, 0) != 0 } {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        break;
+                    }
+                }
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if sig_num == libc::SIGTERM {
+            logging::wait_k8s_log_quiescent(&bundle_path);
         }
         if sigkill_live_pids(pids) {
             used_sigkill = true;
@@ -3435,14 +3447,7 @@ pub fn stop_container_with_home_and_timeout(
         }
     }
     let bundle_path = std::path::PathBuf::from(&c.bundle_path);
-    let mut exit_code = resolve_stop_exit_code(&store, &c.id, &bundle_path, used_sigkill);
-    if let Some(rec) = store.find(&c.id) {
-        if let ContainerStatus::Exited(existing) = rec.status {
-            if existing == 137 {
-                exit_code = 137;
-            }
-        }
-    }
+    let exit_code = resolve_stop_exit_code(&store, &c.id, &bundle_path, used_sigkill);
     if let Err(e) = store.update_status(&c.id, ContainerStatus::Exited(exit_code)) {
         if store.find(&c.id).is_none() {
             // Detached watcher may have already finalized --rm/--rmi cleanup.
