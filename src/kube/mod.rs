@@ -257,6 +257,7 @@ impl KubeManager {
                 health_timeout: None,
                 health_retries: None,
                 health_start_period: None,
+                health_on_failure: None,
                 health_start_interval: None,
                 no_healthcheck: false,
                 attach: Vec::new(),

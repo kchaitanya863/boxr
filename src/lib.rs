@@ -840,9 +840,12 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 commit_container(&commit_args)?;
                 Ok(0)
             }
-            cli::ContainerAction::Exists { container } => {
-                ensure_container_exists(&container)?;
-                Ok(0)
+            cli::ContainerAction::Exists(args) => {
+                if container_exists(&args.container, args.external)? {
+                    Ok(0)
+                } else {
+                    std::process::exit(1);
+                }
             }
             cli::ContainerAction::Checkpoint(cp_args) => {
                 let cp_path = runtime::CheckpointManager::checkpoint(
@@ -2649,7 +2652,13 @@ pub async fn run_container_with_output(
         if let Some(cmd) = &args.health_cmd {
             health_cfg.test = cmd.split_whitespace().map(|s| s.to_string()).collect();
         }
+        apply_run_health_config(&args, &mut health_cfg)?;
     }
+    let health_on_failure = if let Some(action) = &args.health_on_failure {
+        health::parse_health_on_failure(action)?
+    } else {
+        health::HealthOnFailureAction::None
+    };
     let initial_health = if health_cfg.test.is_empty() {
         health::HealthStatus::None
     } else {
@@ -2805,9 +2814,13 @@ pub async fn run_container_with_output(
             // Detached starts must not block on in-container listeners (Docker/Podman parity).
         }
         if !health_cfg.test.is_empty() {
-            let mut health_res = health::HealthCheckResult::default();
-            let _ = health::check_container_health(&bundle_dir, &health_cfg, &mut health_res);
-            let _ = container_store.update_health_status(&container_id, health_res.status);
+            health::supervisor::spawn_detached_health_supervisor(
+                bundle_dir.clone(),
+                container_id.clone(),
+                container_name.clone(),
+                health_cfg.clone(),
+                health_on_failure,
+            );
         }
         return Ok(exit_code);
     }
@@ -2857,7 +2870,7 @@ pub async fn run_container_with_output(
     // Health check evaluation if configured
     if args.detach && !health_cfg.test.is_empty() {
         let mut health_res = health::HealthCheckResult::default();
-        let _ = health::check_container_health(&bundle_dir, &health_cfg, &mut health_res);
+        let _ = health::check_container_health(&bundle_dir, &health_cfg, &mut health_res, false);
     }
 
     if !args.detach {
@@ -6540,12 +6553,20 @@ fn remove_container_opts_inner(
         }
     };
 
-    let is_active =
-        matches!(c.status, ContainerStatus::Running) || matches!(c.status, ContainerStatus::Paused);
+    let is_active = matches!(
+        c.status,
+        ContainerStatus::Running | ContainerStatus::Paused | ContainerStatus::Stopping
+    );
     if is_active && !force {
+        let state = match c.status {
+            ContainerStatus::Stopping => "stopping",
+            ContainerStatus::Paused => "paused",
+            _ => "running",
+        };
         return Err(anyhow!(
-            "cannot remove container {} as it is running - running or paused containers cannot be removed without force: container state improper",
-            c.id
+            "cannot remove container {} as it is {} - running or paused containers cannot be removed without force: container state improper",
+            c.id,
+            state
         ));
     }
 
@@ -8484,6 +8505,22 @@ fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+fn apply_run_health_config(args: &cli::RunArgs, cfg: &mut health::HealthConfig) -> Result<()> {
+    if let Some(interval) = &args.health_interval {
+        cfg.interval_secs = parse_duration_flag(interval, "--health-interval")?.max(1);
+    }
+    if let Some(timeout) = &args.health_timeout {
+        cfg.timeout_secs = parse_duration_flag(timeout, "--health-timeout")?.max(1);
+    }
+    if let Some(retries) = args.health_retries {
+        cfg.retries = retries;
+    }
+    if let Some(period) = &args.health_start_period {
+        cfg.start_period_secs = parse_duration_flag(period, "--health-start-period")?;
+    }
+    Ok(())
+}
+
 fn parse_duration_flag(value: &str, flag: &str) -> Result<u64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -9197,9 +9234,15 @@ fn read_machine_state(home: &Path) -> Option<(String, String, bool)> {
     ))
 }
 
+pub fn container_exists(query: &str, external: bool) -> Result<bool> {
+    if external {
+        return Ok(storage::external::find_storage_container(query).is_some());
+    }
+    Ok(ContainerStore::new().find(query).is_some())
+}
+
 pub fn ensure_container_exists(query: &str) -> Result<()> {
-    let store = ContainerStore::new();
-    if store.find(query).is_none() {
+    if !container_exists(query, false)? {
         return Err(anyhow!("Container '{}' not found", query));
     }
     Ok(())
@@ -9621,6 +9664,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         health_timeout: None,
         health_retries: None,
         health_start_period: None,
+        health_on_failure: None,
         health_start_interval: None,
         no_healthcheck: true,
         attach: Vec::new(),

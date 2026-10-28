@@ -363,6 +363,10 @@ pub struct RunArgs {
     #[arg(long = "health-start-interval")]
     pub health_start_interval: Option<String>,
 
+    /// Action to take when the container becomes unhealthy
+    #[arg(long = "health-on-failure")]
+    pub health_on_failure: Option<String>,
+
     /// Disable any container-specified HEALTHCHECK
     #[arg(long = "no-healthcheck")]
     pub no_healthcheck: bool,
@@ -798,9 +802,18 @@ pub enum ContainerAction {
         container: String,
     },
     /// Return 0 if the container exists, 1 otherwise
-    Exists {
-        container: String,
-    },
+    Exists(ContainerExistsArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct ContainerExistsArgs {
+    /// Check external storage containers (e.g. buildah)
+    #[arg(long = "external")]
+    pub external: bool,
+
+    #[arg(value_name = "CONTAINER")]
+    pub container: String,
 }
 
 #[derive(Args, Debug, Clone, Default)]

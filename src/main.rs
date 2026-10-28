@@ -31,6 +31,20 @@ fn main() -> Result<()> {
                 std::process::exit(0);
             }
         }
+        if args[1] == "__internal-health-supervisor" {
+            #[cfg(target_os = "linux")]
+            {
+                let bundle = std::path::Path::new(&args[2]);
+                let code = boxr::health::supervisor::run_internal_health_supervisor(bundle)
+                    .map(|_| 0)
+                    .unwrap_or(1);
+                std::process::exit(code);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::process::exit(0);
+            }
+        }
         if args[1] == "__internal-detached-wait" {
             #[cfg(target_os = "linux")]
             {

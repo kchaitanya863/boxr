@@ -213,6 +213,7 @@ fn default_run_args(image: &str) -> RunArgs {
         health_timeout: None,
         health_retries: None,
         health_start_period: None,
+        health_on_failure: None,
         health_start_interval: None,
         no_healthcheck: true,
         attach: Vec::new(),

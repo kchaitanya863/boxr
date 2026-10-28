@@ -77,8 +77,8 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `030-run.bats` | **75/75** ok (latest `bats-030-run-5.log`): cgroup sysfs order, **buildah** stub, systemd **`/run`**, **`--uidmap`** /etc/hosts (**46**, suppress `ip link` RTNETLINK noise on stdout); **journald** cases **skip** on VMs without persistent journal (`journald_unavailable` override in `boxr-overrides.bash`) |
 | `040-ps.bats` | **8/8** in isolation (`ps --external` + buildah stub + `image prune --external`) |
 | `045-start.bats` | **8/8** in isolation |
-| `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
-| `055-rm.bats` | **6/10** (`--depend` green); buildah external / conmon cases red |
+| `050-stop.bats` | **9/9** in isolation (SIGKILL warning before `--rm` teardown; stop/kill exit **137** race; trap exit **0** vs **143**) |
+| `055-rm.bats` | **10/10** in isolation (`container exists --external`, `--health-on-failure=stop`, detached health supervisor subprocess) |
 | `075-exec.bats` | **9/10** in isolation (leak check, stdin, keep-id, umask, TTY, exec_pid/`GraphRoot`); red: **additional groups** `id -G` for `root:root` (rootless user-ns unmapped supplementary GIDs `65534`) |
 | `160-volumes.bats` | **24/26** in isolation (+2 skips): named volumes survive `run --rm`, `--default-mounts-file`, `:U`/`start --attach`, tmpfs/copyup/prune/mount, `--image-volume`, `volume create --ignore`; red: `--userns=keep-id` bind `stat` (`12`) when host `newuidmap` rejects Podman keep-id UID maps |
 | `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah, containers.conf); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
@@ -87,10 +87,11 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*`, `localhost/cve_2022_1227_test*` (build test **49** image when `top` fails) |
 
-### Known gaps (`040-ps`)
+### External storage (buildah stub)
 
-- **`podman ps --external`**: BATS uses a **`buildah` stub** on `PATH` (see `tests/podman_bats/buildah-stub.sh`) plus boxr’s `external-container-names` file for create/rm name collisions; real buildah storage is not integrated.
-- Full **manifest.txt** run still has many reds (`030-run`, `020-tag`, volumes, etc.); use per-file manifests to track focused progress.
+- **`buildah` stub** (`tests/podman_bats/buildah-stub.sh` on `PATH`): `from`, `commit`, `mount`, `unshare` for BATS; persists `external-containers.json` under `BOXR_HOME`.
+- **`podman ps --external`**, **`image prune -f --external`**, and **`rm`** on mounted externals use `src/storage/external.rs` (not full buildah/libpod storage).
+- Full **manifest.txt** sequential run can OOM; use per-file BATS for focused progress.
 
 **100% pass** of upstream suites is not realistic until `info`, logging, networking, and storage output match Podman; the harness measures progress.
 
