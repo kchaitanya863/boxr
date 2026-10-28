@@ -5415,6 +5415,8 @@ fn apply_run_id_maps(
             .filter_map(|s| parse_id_map(s))
             .collect()
     };
+    let (uid_maps, gid_maps, rootfs_setup) =
+        security::RootlessUserConfig::augment_maps_for_rootfs_setup(&uid_maps, &gid_maps);
     let l = spec.linux.get_or_insert_with(Default::default);
     l.namespaces.retain(|ns| ns.ns_type != "user");
     l.namespaces.push(oci::runtime::LinuxNamespace {
@@ -5429,6 +5431,9 @@ fn apply_run_id_maps(
         "boxr.gid_maps".to_string(),
         serde_json::to_string(&gid_maps)?,
     );
+    if rootfs_setup {
+        annotations.insert("boxr.rootfs_setup_uid".to_string(), "65534".to_string());
+    }
     Ok(())
 }
 
@@ -5452,6 +5457,11 @@ fn shift_merged_rootfs_for_run_id_maps(args: &RunArgs, merged_rootfs: &Path) -> 
             .filter_map(|s| parse_id_map(s))
             .collect()
     };
+    let (_, _, rootfs_setup) =
+        security::RootlessUserConfig::augment_maps_for_rootfs_setup(&uid_maps, &gid_maps);
+    if rootfs_setup {
+        return Ok(());
+    }
     let _ = std::process::Command::new("chmod")
         .args(["-R", "u+w"])
         .arg(merged_rootfs)

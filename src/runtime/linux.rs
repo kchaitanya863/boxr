@@ -1328,7 +1328,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
                 // Drop host supplementary groups before forking init so the child does not
                 // inherit a long list of unmapped 65534 entries (075-exec / id -G).
-                become_effective_container_root();
+                assume_credentials_for_rootfs_setup(&spec);
                 let _ = fs::write("/proc/self/setgroups", "allow");
                 let _ = nix::unistd::setgroups(&[]);
 
@@ -2096,6 +2096,22 @@ fn become_effective_container_root() {
     let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
 }
 
+fn rootfs_setup_container_uid(spec: &Spec) -> Option<u32> {
+    spec.annotations.as_ref().and_then(|a| a.get("boxr.rootfs_setup_uid"))?.parse().ok()
+}
+
+/// Use the auxiliary rootfs-owner ID (65534→host) for pivot/mount when `--uidmap` shifts uid 0.
+fn assume_credentials_for_rootfs_setup(spec: &Spec) {
+    if let Some(cid) = rootfs_setup_container_uid(spec) {
+        let uid = nix::unistd::Uid::from_raw(cid);
+        let gid = nix::unistd::Gid::from_raw(cid);
+        let _ = nix::unistd::setresgid(gid, gid, gid);
+        let _ = nix::unistd::setresuid(uid, uid, uid);
+    } else {
+        become_effective_container_root();
+    }
+}
+
 fn apply_exec_supplementary_groups(init_pid: i32, creds: Option<&ExecCredentials>) {
     let _ = fs::write("/proc/self/setgroups", "allow");
     if let Some(c) = creds {
@@ -2787,7 +2803,7 @@ fn run_container_child(
 
     #[cfg(target_os = "linux")]
     {
-        become_effective_container_root();
+        assume_credentials_for_rootfs_setup(spec);
         let _ = fs::write("/proc/self/setgroups", "allow");
         let _ = nix::unistd::setgroups(&[]);
         if let Some(gids) = &spec.process.user.additional_gids {
@@ -3433,6 +3449,10 @@ fn run_container_child(
 
     if spec.process.terminal {
         attach_stdio_to_bundle_pty(bundle_path);
+    }
+
+    if rootfs_setup_container_uid(spec).is_some() {
+        become_effective_container_root();
     }
 
     if spec.process.user.gid != 0 {

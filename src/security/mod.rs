@@ -322,6 +322,50 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         cfg.write_proc_mappings(pid)
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn augment_maps_for_rootfs_setup(
+        uid_maps: &[IdMapping],
+        gid_maps: &[IdMapping],
+    ) -> (Vec<IdMapping>, Vec<IdMapping>, bool) {
+        let host_uid = unsafe { libc::getuid() };
+        let host_gid = unsafe { libc::getgid() };
+        const SETUP_ID: u32 = 65534;
+
+        fn container_to_host(maps: &[IdMapping], cid: u32) -> Option<u32> {
+            for m in maps {
+                let end = m.container_id.saturating_add(m.size);
+                if cid >= m.container_id && cid < end {
+                    return Some(m.host_id + (cid - m.container_id));
+                }
+            }
+            None
+        }
+
+        if container_to_host(uid_maps, 0) == Some(host_uid) {
+            return (uid_maps.to_vec(), gid_maps.to_vec(), false);
+        }
+        if container_to_host(uid_maps, SETUP_ID) == Some(host_uid) {
+            return (uid_maps.to_vec(), gid_maps.to_vec(), true);
+        }
+        if container_to_host(uid_maps, SETUP_ID).is_some() {
+            return (uid_maps.to_vec(), gid_maps.to_vec(), false);
+        }
+
+        let mut u = uid_maps.to_vec();
+        u.push(IdMapping {
+            container_id: SETUP_ID,
+            host_id: host_uid,
+            size: 1,
+        });
+        let mut g = gid_maps.to_vec();
+        g.push(IdMapping {
+            container_id: SETUP_ID,
+            host_id: host_gid,
+            size: 1,
+        });
+        (u, g, true)
+    }
+
     /// Shift a host path to container uid/gid 0 on disk using the same ID maps as the container.
     #[cfg(target_os = "linux")]
     pub fn chown_path_as_mapped_root(
@@ -389,7 +433,9 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                 let root_uid = Uid::from_raw(0);
                 setresgid(root_gid, root_gid, root_gid).context("setresgid in chown helper")?;
                 setresuid(root_uid, root_uid, root_uid).context("setresuid in chown helper")?;
-                chown_visit(path)?;
+                if chown_visit(path).is_err() {
+                    std::process::exit(1);
+                }
                 std::process::exit(0);
             }
         }

@@ -50,24 +50,22 @@ Summarize a log:
 grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 ```
 
-**Curated manifest (Oct 2026, `bats-manifest-v3.log`, latest boxr on Linux rootless VM):**
+**Curated manifest (Oct 2026, latest boxr on Linux rootless VM):**
 
 | File | ok | not ok | notes |
 |------|-----|--------|--------|
 | 015-help | 1 | 0 | |
 | 020-tag | 2 | 0 | |
-| 030-run | 80 | 1 | **`--uidmap` /etc/hosts** — custom maps set container root to a subuid; rootfs must be owned on disk at that subuid before pivot/mount. boxr attempts `chown_path_as_mapped_root` (userns + same maps + `chown 0:0`); on this VM host policy denies retargeting a 1000-owned overlay (`EPERM`), so setup fails at `MS_PRIVATE`/`MS_BIND`. Pre-seeds `etc/hosts` when maps are set (helps when shift succeeds). |
+| 030-run | 81 | 0 | **`--uidmap` /etc/hosts** — when container uid 0 maps off the invoking user, boxr adds auxiliary map **65534→host** for pivot/mount (`assume_credentials_for_rootfs_setup`), pre-seeds `etc/hosts`, and skips disk `chown_path_as_mapped_root` (host EPERM on overlay). |
 | 040-ps | 8 | 0 | |
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
 | 075-exec | 9 | 1 | **additional groups** — on this Linux profile `/proc/<pid>/setgroups` stays `deny` after `gid_map` (parent `allow` write does not stick; `newuidmap` fallback same). Init/exec inherit host supplementary GIDs (shown as `65534` in the user ns); `exec --user root:root id -G` must be exactly `0`. boxr prefers `write_proc_mappings` (deny→map→allow) before `newuidmap`; full fix needs setgroups `allow` after maps (kernel/uidmap policy). |
-| 160-volumes | 24 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
-| **Total** | **152** | **3** | plus skips |
+| 160-volumes | 25 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
+| **Total** | **153** | **2** | plus skips |
 
-Earlier scorecard (`bats-manifest-v2.log`) predated stopping-loop and volume-import fixes; use v3 for current counts.
-
-Re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest for authoritative counts.
+Authoritative log: `.cache/podman-bats-results/run-20261028-124424.log` (153 ok / 2 not ok). Earlier scorecards predated `--uidmap` rootfs-setup identity; re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest.
 
 Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails (for future gating).
 
