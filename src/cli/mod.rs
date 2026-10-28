@@ -27,6 +27,9 @@ use std::sync::OnceLock;
 /// When argv contains `--rm=false`, clap would otherwise treat `--rm` as a boolean flag.
 pub static RUN_RM_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
+/// Podman `run --read-only=false` (clap `SetTrue` cannot represent this).
+pub static READ_ONLY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
+
 /// Strip `--rm=false` before clap parsing (Podman accepts `run --rmi --rm=false`).
 /// Podman global flags that take a value; stripped before clap (e2e / storage init).
 const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
@@ -44,11 +47,22 @@ const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut rm_false = false;
+    let mut read_only_false = false;
     let mut i = 0;
     while i < argv.len() {
         let a = &argv[i];
         if a == "--rm=false" {
             rm_false = true;
+            i += 1;
+            continue;
+        }
+        if a == "--read-only=false" {
+            read_only_false = true;
+            i += 1;
+            continue;
+        }
+        if a == "--read-only=true" {
+            out.push("--read-only".to_string());
             i += 1;
             continue;
         }
@@ -61,6 +75,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     }
     if rm_false {
         let _ = RUN_RM_EXPLICIT_FALSE.set(true);
+    }
+    if read_only_false {
+        let _ = READ_ONLY_EXPLICIT_FALSE.set(true);
     }
     out
 }

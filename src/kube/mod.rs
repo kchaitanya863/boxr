@@ -213,7 +213,7 @@ impl KubeManager {
                 shm_size: None,
                 cap_add: Vec::new(),
                 cap_drop: Vec::new(),
-                read_only: None,
+                read_only: false,
                 read_only_tmpfs: None,
                 init: false,
                 tmpfs: Vec::new(),

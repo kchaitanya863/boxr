@@ -29,7 +29,7 @@ Environment:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `BOXR_BIN` | `target/debug/boxr` | boxr binary |
+| `BOXR_BIN` | `target/debug/boxr` | boxr binary (script resolves to an **absolute** path in the wrapper; relative paths break BATS because tests `cd` into the podman clone) |
 | `PODMAN_BATS_CACHE` | `.cache/podman-bats` | Shallow podman git clone |
 | `MANIFEST` | `tests/podman_bats/manifest.txt` | BATS filename patterns |
 | `PODMAN_TESTS_REF` | `main` | Git ref for clone |

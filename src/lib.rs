@@ -5001,9 +5001,9 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
     if args.oom_score_adj.is_none() {
         args.oom_score_adj = oom_score_adj_from_containers_conf();
     }
-    if args.read_only.is_none() {
+    if !args.read_only && cli::READ_ONLY_EXPLICIT_FALSE.get() != Some(&true) {
         if containers_conf_bool("read_only") == Some(true) {
-            args.read_only = Some(true);
+            args.read_only = true;
         }
     }
     if args.ulimits.is_empty() {
@@ -9308,7 +9308,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         shm_size: None,
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
-        read_only: None,
+        read_only: false,
         read_only_tmpfs: None,
         init: false,
         tmpfs: Vec::new(),

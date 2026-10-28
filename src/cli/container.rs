@@ -170,14 +170,8 @@ pub struct RunArgs {
     pub cap_drop: Vec<String>,
 
     /// Mount the container's root filesystem as read only
-    #[arg(
-        long = "read-only",
-        action = clap::ArgAction::Set,
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = clap::builder::BoolishValueParser::new()
-    )]
-    pub read_only: Option<bool>,
+    #[arg(long = "read-only", action = clap::ArgAction::SetTrue, default_value_t = false)]
+    pub read_only: bool,
 
     /// Mount read-only container paths as tmpfs (Podman-compatible)
     #[arg(
@@ -523,7 +517,10 @@ impl RunArgs {
     }
 
     pub fn effective_read_only(&self) -> bool {
-        self.read_only.unwrap_or(false)
+        if crate::cli::READ_ONLY_EXPLICIT_FALSE.get() == Some(&true) {
+            return false;
+        }
+        self.read_only
     }
 
     /// When unset, Podman defaults read-only tmpfs mounts to match read-only rootfs.

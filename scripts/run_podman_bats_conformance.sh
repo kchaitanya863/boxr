@@ -14,6 +14,8 @@ if [[ ! -x "$BOXR_BIN" ]]; then
   echo "boxr binary not found; run: cargo build" >&2
   exit 2
 fi
+# BATS runs from the cloned podman repo; the wrapper must invoke an absolute path.
+BOXR_BIN="$(cd "$(dirname "$BOXR_BIN")" && pwd)/$(basename "$BOXR_BIN")"
 
 PODMAN_TESTS_REPO="${PODMAN_TESTS_REPO:-https://github.com/podman-container-tools/podman.git}"
 PODMAN_TESTS_REF="${PODMAN_TESTS_REF:-main}"

@@ -615,7 +615,7 @@ mod tests {
             shm_size: None,
             cap_add: vec![],
             cap_drop: vec![],
-            read_only: None,
+            read_only: false,
             read_only_tmpfs: None,
             init: false,
             tmpfs: vec![],
