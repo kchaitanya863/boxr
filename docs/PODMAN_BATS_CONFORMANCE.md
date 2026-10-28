@@ -91,7 +91,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `045-start.bats` | **8/8** isolated |
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr (`StopSignal SIGTERM failed to stop container … resorting to SIGKILL`, including **`in N seconds`** when `-t N` is set) |
 | `055-rm.bats` | **10/10** isolated (prior runs; re-verify if agent hangs on full file) |
-| `075-exec.bats` | **9/10** isolated: **red: additional groups** — rootless supplementary GIDs / `setgroups(2)` parity (see gap below) |
+| `075-exec.bats` | **9/10** isolated: **red: additional groups** — rootless `setgroups(2)` after `setns` into an existing user namespace returns EPERM in this environment (BATS expects explicit `user:group` to clear supplementary GIDs); comma-separated **`--group-add 1,2,3,...`** now lands in OCI `additional_gids` |
 | `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `volume import test`, `--userns=keep-id` (idmap; see gap below) |
 | `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |

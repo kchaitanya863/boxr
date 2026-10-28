@@ -1572,6 +1572,23 @@ fn pull_user_message(msg: impl AsRef<str>) {
     }
 }
 
+/// Podman accepts `--group-add 1,2,3` (comma-separated) and repeated flags.
+fn parse_group_add_gids(group_add: &[String]) -> Vec<u32> {
+    let mut gids = Vec::new();
+    for entry in group_add {
+        for part in entry.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if let Ok(gid) = part.parse::<u32>() {
+                gids.push(gid);
+            }
+        }
+    }
+    gids
+}
+
 fn archive_transport_path(image_str: &str) -> Option<PathBuf> {
     for prefix in ["docker-archive:", "oci-archive:"] {
         if let Some(rest) = image_str.strip_prefix(prefix) {
@@ -2279,12 +2296,7 @@ pub async fn run_container_with_output(
         );
     }
     if !args.group_add.is_empty() {
-        let mut gids = Vec::new();
-        for g in &args.group_add {
-            if let Ok(gid) = g.parse::<u32>() {
-                gids.push(gid);
-            }
-        }
+        let gids = parse_group_add_gids(&args.group_add);
         if !gids.is_empty() {
             spec.process.user.additional_gids = Some(gids);
         }
@@ -7311,12 +7323,7 @@ async fn create_only_container_after_pod_prep(
         );
     }
     if !args.group_add.is_empty() {
-        let mut gids = Vec::new();
-        for g in &args.group_add {
-            if let Ok(gid) = g.parse::<u32>() {
-                gids.push(gid);
-            }
-        }
+        let gids = parse_group_add_gids(&args.group_add);
         if !gids.is_empty() {
             spec.process.user.additional_gids = Some(gids);
         }

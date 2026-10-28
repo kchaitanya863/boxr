@@ -1635,14 +1635,12 @@ fn apply_exec_supplementary_groups(init_pid: i32, creds: Option<&ExecCredentials
     let _ = fs::write("/proc/self/setgroups", "allow");
     if let Some(c) = creds {
         if c.reset_supplementary_groups {
-            let mut gids: Vec<nix::unistd::Gid> = c
+            let gids: Vec<nix::unistd::Gid> = c
                 .supplementary_gids
                 .iter()
                 .map(|g| nix::unistd::Gid::from_raw(*g))
                 .collect();
-            if gids.is_empty() {
-                gids.push(nix::unistd::Gid::from_raw(c.gid));
-            }
+            // Explicit user:group clears inherited groups; --group-add supplies extras only.
             let _ = nix::unistd::setgroups(&gids);
             return;
         }
@@ -1915,9 +1913,31 @@ fn exec_in_bundle_via_setns(
     preserve_fds: &[u32],
 ) -> Result<i32> {
     use nix::sched::{CloneFlags, setns};
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    let needs_setgroups_sync = exec_creds.is_some();
+    let sync_pair = if needs_setgroups_sync {
+        Some(
+            UnixStream::pair()
+                .context("Failed to create UnixStream pair for exec setgroups sync")?,
+        )
+    } else {
+        None
+    };
 
     match unsafe { fork() }? {
         ForkResult::Parent { child } => {
+            if let Some((mut parent_sock, _)) = sync_pair {
+                let mut ready = [0u8; 5];
+                parent_sock
+                    .read_exact(&mut ready)
+                    .context("exec child did not signal namespace join")?;
+                crate::security::RootlessUserConfig::reenable_setgroups_for_pid(child.as_raw());
+                parent_sock
+                    .write_all(b"done")
+                    .context("Failed to notify exec child after setgroups allow")?;
+            }
             if detach {
                 if let Some(path) = exec_pid_path {
                     let _ = fs::write(path, pid.to_string());
@@ -1961,21 +1981,49 @@ fn exec_in_bundle_via_setns(
             }
         }
         ForkResult::Child => {
-            let enter_ns = |name: &str, flag: CloneFlags| {
-                let ns_path = format!("/proc/{}/ns/{}", pid, name);
-                if let Ok(f) = std::fs::File::open(&ns_path) {
-                    let _ = setns(&f, flag);
+            if needs_setgroups_sync {
+                // Drop host supplementary groups before joining the container user
+                // namespace (setgroups is often EPERM after setns when /proc/pid/setgroups is deny).
+                let _ = fs::write("/proc/self/setgroups", "allow");
+                let _ = nix::unistd::setgroups(&[]);
+            }
+            if let Some((_, mut child_sock)) = sync_pair {
+                for (name, flag) in [
+                    ("user", CloneFlags::CLONE_NEWUSER),
+                    ("ipc", CloneFlags::CLONE_NEWIPC),
+                    ("uts", CloneFlags::CLONE_NEWUTS),
+                    ("net", CloneFlags::CLONE_NEWNET),
+                    ("mnt", CloneFlags::CLONE_NEWNS),
+                    ("pid", CloneFlags::CLONE_NEWPID),
+                ] {
+                    let ns_path = format!("/proc/{}/ns/{}", pid, name);
+                    if let Ok(f) = std::fs::File::open(&ns_path) {
+                        let _ = setns(&f, flag);
+                    }
                 }
-            };
-            for (name, flag) in [
-                ("user", CloneFlags::CLONE_NEWUSER),
-                ("ipc", CloneFlags::CLONE_NEWIPC),
-                ("uts", CloneFlags::CLONE_NEWUTS),
-                ("net", CloneFlags::CLONE_NEWNET),
-                ("mnt", CloneFlags::CLONE_NEWNS),
-                ("pid", CloneFlags::CLONE_NEWPID),
-            ] {
-                enter_ns(name, flag);
+                child_sock
+                    .write_all(b"ready")
+                    .ok();
+                let mut done = [0u8; 4];
+                let _ = child_sock.read_exact(&mut done);
+                drop(child_sock);
+            } else {
+                let enter_ns = |name: &str, flag: CloneFlags| {
+                    let ns_path = format!("/proc/{}/ns/{}", pid, name);
+                    if let Ok(f) = std::fs::File::open(&ns_path) {
+                        let _ = setns(&f, flag);
+                    }
+                };
+                for (name, flag) in [
+                    ("user", CloneFlags::CLONE_NEWUSER),
+                    ("ipc", CloneFlags::CLONE_NEWIPC),
+                    ("uts", CloneFlags::CLONE_NEWUTS),
+                    ("net", CloneFlags::CLONE_NEWNET),
+                    ("mnt", CloneFlags::CLONE_NEWNS),
+                    ("pid", CloneFlags::CLONE_NEWPID),
+                ] {
+                    enter_ns(name, flag);
+                }
             }
             if let Some(wd) = workdir {
                 let _ = chdir(Path::new(wd));
