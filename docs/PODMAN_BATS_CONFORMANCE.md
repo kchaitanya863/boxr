@@ -56,7 +56,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 |------|-----|--------|--------|
 | 015-help | 1 | 0 | |
 | 020-tag | 2 | 0 | |
-| 030-run | 81 | 0 | **`--uidmap` /etc/hosts** — when container uid 0 maps off the invoking user, boxr adds auxiliary map **65534→host** for pivot/mount (`assume_credentials_for_rootfs_setup`), pre-seeds `etc/hosts`, and skips disk `chown_path_as_mapped_root` (host EPERM on overlay). |
+| 030-run | 81 | 0 | **`--uidmap` /etc/hosts** — persist `boxr.uid_maps` / `boxr.rootfs_setup_uid` on `create` (annotations synced before `save_to_bundle`); init uses `assume_credentials_for_rootfs_setup` without an early `become_effective_container_root()` before `run_container_child`. MS propagation on `/` is best-effort when hardened hosts EPERM. |
 | 040-ps | 8 | 0 | |
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |

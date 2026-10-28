@@ -7610,7 +7610,6 @@ async fn create_only_container_after_pod_prep(
         annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
     apply_log_config_annotations(&args, &mut annotations, &bundle_dir, &container_id)?;
-    spec.annotations = Some(annotations.clone());
 
     if !args.add_host.is_empty() {
         for host_entry in &args.add_host {
@@ -7921,6 +7920,7 @@ async fn create_only_container_after_pod_prep(
         &args.image,
         &image_id_for_env,
     )?;
+    spec.annotations = Some(annotations.clone());
     spec.save_to_bundle(&bundle_dir)?;
     if !parsed_mounts.is_empty() {
         let _ = fs::write(

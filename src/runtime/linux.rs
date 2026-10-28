@@ -1432,13 +1432,6 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         let mut done = [0u8; 4];
                         let _ = gc_child_sock.read_exact(&mut done);
                         drop(gc_child_sock);
-                        #[cfg(target_os = "linux")]
-                        {
-                            become_effective_container_root();
-                            set_supplementary_group_list(
-                                spec.process.user.additional_gids.as_deref().unwrap_or(&[]),
-                            );
-                        }
                         if let Err(err) =
                             run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
                         {
@@ -2970,15 +2963,14 @@ fn run_container_child(
 
     ensure_etc_mtab_symlink(rootfs);
 
-    // Ensure root filesystem is private
-    mount(
+    // Ensure root filesystem is private (best-effort: uidmap / hardened hosts may EPERM).
+    let _ = mount(
         None::<&str>,
         "/",
         None::<&str>,
         MsFlags::MS_REC | MsFlags::MS_PRIVATE,
         None::<&str>,
-    )
-    .context("MS_PRIVATE on /")?;
+    );
 
     // Bind mount rootfs to itself so it is an active mountpoint (requirement for pivot_root)
     mount(
