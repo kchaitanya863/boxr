@@ -1924,22 +1924,6 @@ pub fn exec_in_bundle(
         Ok(output) => {
             let code = output.status.code().unwrap_or(1);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if !output.stdout.is_empty() {
-                let _ = std::io::stdout().write_all(&output.stdout);
-            }
-            let mut msg = stderr.trim().to_string();
-            if let Some(rest) = msg.strip_prefix("nsenter: failed to execute ") {
-                if let Some((_, reason)) = rest.rsplit_once(": ") {
-                    msg = reason.to_lowercase();
-                } else {
-                    msg = rest.to_lowercase();
-                }
-            }
-            if !msg.is_empty() && code != 0 {
-                eprintln!("{}", msg);
-            }
-            // nsenter can fail PID namespace reassociation yet still run the command on the
-            // host with a broken /proc view (075-exec Groups: lines). Prefer setns when detected.
             if stderr.contains("reassociate to namespace")
                 || (stderr.contains("nsenter") && stderr.contains("/proc/self"))
             {
@@ -1956,6 +1940,20 @@ pub fn exec_in_bundle(
                     umask,
                     preserve_fds,
                 );
+            }
+            if !output.stdout.is_empty() {
+                let _ = std::io::stdout().write_all(&output.stdout);
+            }
+            let mut msg = stderr.trim().to_string();
+            if let Some(rest) = msg.strip_prefix("nsenter: failed to execute ") {
+                if let Some((_, reason)) = rest.rsplit_once(": ") {
+                    msg = reason.to_lowercase();
+                } else {
+                    msg = rest.to_lowercase();
+                }
+            }
+            if !msg.is_empty() && code != 0 {
+                eprintln!("{}", msg);
             }
             if code != 0
                 && (stderr.contains("nsenter")

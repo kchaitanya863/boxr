@@ -808,7 +808,10 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 list_containers(ps_args, "ls")?;
                 Ok(0)
             }
-            cli::ContainerAction::Inspect(inspect_args) => {
+            cli::ContainerAction::Inspect(mut inspect_args) => {
+                if inspect_args.obj_type.is_none() {
+                    inspect_args.obj_type = Some("container".to_string());
+                }
                 inspect_target(&inspect_args)?;
                 Ok(0)
             }
@@ -3191,6 +3194,12 @@ fn collect_container_stop_pids(bundle_path: &std::path::Path) -> (Vec<i32>, Vec<
 }
 
 #[cfg(unix)]
+fn any_pid_alive(pids: &[i32]) -> bool {
+    pids.iter()
+        .any(|pid| *pid > 0 && unsafe { libc::kill(*pid, 0) == 0 })
+}
+
+#[cfg(unix)]
 fn sigkill_live_pids(pids: &[i32]) -> bool {
     let mut any = false;
     for pid in pids {
@@ -3360,9 +3369,10 @@ pub fn stop_container_with_home_and_timeout(
                 let _ = libc::kill(-*pid, sig_num);
             }
         }
-        // Hold `stopping` for the full stop timeout (Podman/conmon); do not exit early when
-        // the workload already exited on SIGTERM.
         for _i in 0..iters {
+            if !any_pid_alive(&stop_pids) {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if sigkill_live_pids(pids) {
@@ -4356,6 +4366,12 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
         }
 
         if !matched {
+            if only_type == "container" {
+                cli::usage_errors::exit_usage_error(format!(
+                    "no such container \"{}\"",
+                    target
+                ));
+            }
             println!("[]");
             cli::usage_errors::exit_usage_error(format!("no such object: \"{}\"", target));
         }
