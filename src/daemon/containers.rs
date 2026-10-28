@@ -181,7 +181,7 @@ pub async fn create_container(
         ipc: None,
         pid: None,
         uts: None,
-        userns: None,
+        userns: Vec::new(),
         cgroupns: None,
         cgroup_parent: None,
         isolation: None,
@@ -569,7 +569,16 @@ pub async fn start_exec_instance(
 
                     let log_path = bundle.join(format!("exec-{}.log", exec_id));
                     let code =
-                        crate::runtime::exec_in_bundle(&bundle, &cmd, &env, wd, user, detach)
+                        crate::runtime::exec_in_bundle(
+                            &bundle,
+                            &cmd,
+                            &env,
+                            wd,
+                            user,
+                            detach,
+                            crate::runtime::ExecAttach::default(),
+                            None,
+                        )
                             .unwrap_or(1);
                     let _ = fs::write(
                         bundle.join(format!("exec-{}.done", exec_id)),

@@ -14,11 +14,29 @@ impl ContainerTop {
         }
 
         // Run ps in bundle
-        let code = exec_in_bundle(bundle_path, &cmd, &[], None, None, false)?;
+        let code = exec_in_bundle(
+            bundle_path,
+            &cmd,
+            &[],
+            None,
+            None,
+            false,
+            crate::runtime::ExecAttach::default(),
+            None,
+        )?;
         if code != 0 {
             // Fallback to simple ps without flags
             let fallback = vec!["ps".to_string()];
-            let _ = exec_in_bundle(bundle_path, &fallback, &[], None, None, false);
+            let _ = exec_in_bundle(
+                bundle_path,
+                &fallback,
+                &[],
+                None,
+                None,
+                false,
+                crate::runtime::ExecAttach::default(),
+                None,
+            );
         }
 
         Ok("".to_string())

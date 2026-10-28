@@ -148,7 +148,16 @@ pub fn check_container_health(
         return Ok(HealthStatus::None);
     }
 
-    let code = exec_in_bundle(bundle_path, &config.test, &[], None, None, false)?;
+    let code = exec_in_bundle(
+        bundle_path,
+        &config.test,
+        &[],
+        None,
+        None,
+        false,
+        crate::runtime::ExecAttach::default(),
+        None,
+    )?;
     current.last_checked = Utc::now();
 
     if code == 0 {

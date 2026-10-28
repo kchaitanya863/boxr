@@ -10,13 +10,8 @@ pub struct RunArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
-    #[arg(
-        short = 't',
-        long = "tty",
-        action = clap::ArgAction::Set,
-        default_value = "false",
-        value_parser = clap::value_parser!(bool)
-    )]
+    /// Allocate a pseudo-TTY
+    #[arg(short = 't', long = "tty")]
     pub tty: bool,
 
     #[arg(short = 'd', long = "detach")]
@@ -235,9 +230,9 @@ pub struct RunArgs {
     #[arg(long = "uts")]
     pub uts: Option<String>,
 
-    /// User namespace to use
+    /// User namespace to use (last value wins when repeated, Podman-compatible)
     #[arg(long = "userns")]
-    pub userns: Option<String>,
+    pub userns: Vec<String>,
 
     /// Cgroup namespace to use
     #[arg(long = "cgroupns")]

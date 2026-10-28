@@ -10,6 +10,7 @@ use nix::unistd::{ForkResult, chdir, fork, pivot_root};
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::os::unix::io::FromRawFd;
 use std::process::Stdio;
 use std::thread;
 
@@ -267,6 +268,28 @@ pub fn execute_bundle(
             .stdin(std::process::Stdio::null())
             .stdout(log_file)
             .stderr(err_file);
+
+        if _spec.process.terminal {
+            if let Some((master_fd, slave_name)) = open_detach_pty() {
+                let _ = fs::write(bundle_path.join("attach-pty"), slave_name.as_bytes());
+                let bundle_watch = bundle_path.to_path_buf();
+                thread::spawn(move || {
+                    let _hold = master_fd;
+                    loop {
+                        let alive = fs::read_to_string(bundle_watch.join("vm.pid"))
+                            .ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok())
+                            .map(|pid| unsafe { libc::kill(pid, 0) == 0 })
+                            .unwrap_or(false);
+                        if !alive {
+                            break;
+                        }
+                        thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                    let _ = fs::remove_file(bundle_watch.join("attach-pty"));
+                });
+            }
+        }
 
         #[cfg(unix)]
         {
@@ -669,7 +692,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         unsafe {
                             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                         }
-                        if let Err(err) = run_container_child(&abs_rootfs, &spec, &mounts) {
+                        if let Err(err) =
+                            run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
+                        {
                             eprintln!("Container child failed: {:?}", err);
                             std::process::exit(1);
                         }
@@ -817,7 +842,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 status
             }
             ForkResult::Child => {
-                if let Err(err) = run_container_child(&abs_rootfs, &spec, &mounts) {
+                if let Err(err) =
+                    run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
+                {
                     eprintln!("Container child failed: {:?}", err);
                     std::process::exit(1);
                 }
@@ -886,7 +913,16 @@ pub fn run_trampoline_exec(args: &[String]) -> Result<i32> {
     }
     let bundle_path = Path::new(&args[0]);
     let cmd = &args[1..];
-    exec_in_bundle(bundle_path, cmd, &[], None, None, false)
+    exec_in_bundle(
+        bundle_path,
+        cmd,
+        &[],
+        None,
+        None,
+        false,
+        crate::runtime::ExecAttach::default(),
+        None,
+    )
 }
 
 fn resolve_container_pid(bundle_path: &Path) -> Option<i32> {
@@ -925,6 +961,26 @@ fn wait_for_live_container_pid(bundle_path: &Path) -> Result<i32> {
     Err(anyhow!("Container is not running"))
 }
 
+fn bundle_process_umask(bundle_path: &Path) -> Option<u32> {
+    let config_path = bundle_path.join("config.json");
+    let content = fs::read_to_string(config_path).ok()?;
+    let spec: Spec = serde_json::from_str(&content).ok()?;
+    spec.process.umask
+}
+
+fn wrap_command_for_umask(command: &[String], umask: u32) -> Vec<String> {
+    let umask_oct = format!("{:04o}", umask);
+    let script = format!("umask {}; exec \"$@\"", umask_oct);
+    let mut wrapped = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        script,
+        "sh".to_string(),
+    ];
+    wrapped.extend(command.iter().cloned());
+    wrapped
+}
+
 pub fn exec_in_bundle(
     bundle_path: &Path,
     command: &[String],
@@ -932,8 +988,17 @@ pub fn exec_in_bundle(
     workdir: Option<&str>,
     user: Option<&str>,
     detach: bool,
+    attach: crate::runtime::ExecAttach,
+    exec_pid_path: Option<&Path>,
 ) -> Result<i32> {
     let pid = wait_for_live_container_pid(bundle_path)?;
+
+    let umask = bundle_process_umask(bundle_path);
+    let command = if let Some(u) = umask {
+        wrap_command_for_umask(command, u)
+    } else {
+        command.to_vec()
+    };
 
     let mut cmd = std::process::Command::new("nsenter");
     // Only enter the user namespace if the container actually has a private
@@ -961,18 +1026,53 @@ pub fn exec_in_bundle(
         }
     }
     cmd.arg("--");
+    cmd.env_clear();
     for e in env {
         if let Some((k, v)) = e.split_once('=') {
             cmd.env(k, v);
         }
     }
-    cmd.args(command);
+    cmd.args(&command);
     if detach {
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
-        let _ = cmd.spawn()?;
+        if let Some(path) = exec_pid_path {
+            let _ = fs::write(path, pid.to_string());
+        }
+        let mut child = cmd.spawn()?;
+        for _ in 0..30 {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if let Some(path) = exec_pid_path {
+                        let _ = fs::remove_file(path);
+                    }
+                    if status.success() {
+                        return Ok(0);
+                    }
+                    return Ok(125);
+                }
+                Ok(None) => {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        if let Some(path) = exec_pid_path {
+            let path = path.to_path_buf();
+            thread::spawn(move || {
+                let _ = child.wait();
+                let _ = fs::remove_file(path);
+            });
+        }
         return Ok(0);
+    }
+    if attach.interactive {
+        cmd.stdin(Stdio::inherit());
+        cmd.stdout(Stdio::inherit());
+        cmd.stderr(Stdio::inherit());
+        let status = cmd.status()?;
+        return Ok(status.code().unwrap_or(1));
     }
     match cmd.output() {
         Ok(output) => {
@@ -1026,6 +1126,11 @@ pub fn exec_in_bundle(
                     } else {
                         let _ = chdir(Path::new("/"));
                     }
+                    if let Some(u) = umask {
+                        unsafe {
+                            libc::umask(u as libc::mode_t);
+                        }
+                    }
                     for e in env {
                         if let Some((k, v)) = e.split_once('=') {
                             unsafe {
@@ -1050,7 +1155,51 @@ pub fn exec_in_bundle(
     }
 }
 
-fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Result<()> {
+fn open_detach_pty() -> Option<(std::fs::File, String)> {
+    let mut master: libc::c_int = -1;
+    let mut slave: libc::c_int = -1;
+    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) }
+        != 0
+    {
+        return None;
+    }
+    let slave_name = unsafe {
+        let ptr = libc::ttyname(slave);
+        if ptr.is_null() {
+            libc::close(master);
+            libc::close(slave);
+            return None;
+        }
+        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    };
+    unsafe {
+        libc::close(slave);
+    }
+    let master_file = unsafe { std::fs::File::from_raw_fd(master) };
+    Some((master_file, slave_name))
+}
+
+fn attach_stdio_to_bundle_pty(bundle_path: &Path) {
+    let slave_path = bundle_path.join("attach-pty");
+    if let Ok(name) = fs::read_to_string(&slave_path) {
+        if let Ok(slave) = fs::File::open(name.trim()) {
+            use std::os::unix::io::AsRawFd;
+            let fd = slave.as_raw_fd();
+            unsafe {
+                libc::dup2(fd, libc::STDIN_FILENO);
+                libc::dup2(fd, libc::STDOUT_FILENO);
+                libc::dup2(fd, libc::STDERR_FILENO);
+            }
+        }
+    }
+}
+
+fn run_container_child(
+    rootfs: &Path,
+    bundle_path: &Path,
+    spec: &Spec,
+    mounts: &[MountSpec],
+) -> Result<()> {
     if let Some(ann) = &spec.annotations {
         if ann.get("boxr.init").map(|v| v == "true").unwrap_or(false) {
             unsafe {
@@ -1562,6 +1711,10 @@ fn run_container_child(rootfs: &Path, spec: &Spec, mounts: &[MountSpec]) -> Resu
     }
     if let Some(adj) = spec.process.oom_score_adj {
         let _ = fs::write("/proc/self/oom_score_adj", adj.to_string());
+    }
+
+    if spec.process.terminal {
+        attach_stdio_to_bundle_pty(bundle_path);
     }
 
     if spec.process.user.gid != 0 {

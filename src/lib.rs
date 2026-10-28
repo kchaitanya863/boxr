@@ -225,6 +225,27 @@ fn apply_container_tz(tz: &str, spec: &mut Spec, bundle_rootfs: &Path) {
     }
 }
 
+/// Detached `run -td … /bin/sh` needs an interactive shell or the session exits immediately.
+fn ensure_tty_detach_shell_stays_alive(spec: &mut Spec, args: &RunArgs) {
+    if !args.tty || !args.detach {
+        return;
+    }
+    let argv = &spec.process.args;
+    if argv.is_empty() {
+        return;
+    }
+    let bin = argv[0].rsplit('/').next().unwrap_or(&argv[0]);
+    if bin != "sh" && bin != "bash" && bin != "ash" {
+        return;
+    }
+    if argv.iter().skip(1).any(|a| a == "-i" || a == "-il" || a == "-li") {
+        return;
+    }
+    let mut new_argv = vec![argv[0].clone(), "-i".to_string()];
+    new_argv.extend(argv.iter().skip(1).cloned());
+    spec.process.args = new_argv;
+}
+
 fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     if args.unsetenv_all {
         spec.process.env.clear();
@@ -245,6 +266,7 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
         spec.process.env.push("TERM=xterm\r".to_string());
     }
     spec.process.terminal = args.tty;
+    ensure_tty_detach_shell_stays_alive(spec, args);
     for key in &args.unsetenv {
         spec.process.env.retain(|e| !e.starts_with(&format!("{}=", key)));
     }
@@ -3299,14 +3321,60 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
     }
 
     let bundle_path = PathBuf::from(&rec.bundle_path);
+    let merged_env = merge_exec_environment(&bundle_path, &combined_env, args.tty);
+    let exec_pid_path = bundle_path.join("exec_pid");
+    let attach = runtime::ExecAttach {
+        interactive: args.interactive,
+        tty: args.tty,
+    };
     exec_in_bundle(
         &bundle_path,
         &args.command,
-        &combined_env,
+        &merged_env,
         args.workdir.as_deref(),
         args.user.as_deref(),
         args.detach,
+        attach,
+        if args.detach {
+            Some(exec_pid_path.as_path())
+        } else {
+            None
+        },
     )
+}
+
+fn merge_exec_environment(
+    bundle_path: &Path,
+    overrides: &[String],
+    alloc_tty: bool,
+) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut env: HashMap<String, String> = HashMap::new();
+    let config_path = bundle_path.join("config.json");
+    if let Ok(content) = fs::read_to_string(&config_path) {
+        if let Ok(spec) = serde_json::from_str::<oci::runtime::Spec>(&content) {
+            for entry in &spec.process.env {
+                if let Some((k, v)) = entry.split_once('=') {
+                    env.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+    }
+    for entry in overrides {
+        if let Some((k, v)) = entry.split_once('=') {
+            let v = v.strip_suffix('\r').unwrap_or(v);
+            env.insert(k.to_string(), v.to_string());
+        }
+    }
+    if let Some(term) = env.get_mut("TERM") {
+        *term = term.strip_suffix('\r').unwrap_or(term).to_string();
+    }
+    if alloc_tty && !env.contains_key("TERM") {
+        env.insert("TERM".to_string(), "xterm".to_string());
+    }
+    env.into_iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect()
 }
 
 pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
@@ -3556,6 +3624,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             || bundle_auto_remove_image(&bundle_path),
                         "AutoRemoveImage": bundle_auto_remove_image(&bundle_path),
                     },
+                    "ExecIDs": [],
                     "NetworkSettings": {
                         "Bridge": "",
                         "SandboxID": "",
@@ -5924,7 +5993,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         apply_namespace_to_linux(l, &mut annotations, "ipc", &args.ipc)?;
         apply_namespace_to_linux(l, &mut annotations, "uts", &args.uts)?;
         apply_namespace_to_linux(l, &mut annotations, "pid", &args.pid)?;
-        if let Some(userns) = &args.userns {
+        if let Some(userns) = args.userns.last() {
             annotations.insert("boxr.userns".to_string(), userns.clone());
             if userns == "host" {
                 l.namespaces.retain(|ns| ns.ns_type != "user");
@@ -6629,6 +6698,7 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
     };
 
     if let Some(fmt) = &args.format {
+        let graph_root = storage::boxr_home().display().to_string();
         let info_json = serde_json::json!({
             "Containers": containers.len(),
             "ContainersRunning": running,
@@ -6641,7 +6711,10 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
             "Architecture": std::env::consts::ARCH,
             "OSType": os_type,
             "OperatingSystem": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
-            "DockerRootDir": storage::boxr_home().display().to_string()
+            "DockerRootDir": graph_root,
+            "Store": {
+                "GraphRoot": graph_root
+            }
         });
         if fmt == "json" || fmt == "{{json .}}" {
             println!("{}", serde_json::to_string_pretty(&info_json)?);
@@ -7865,7 +7938,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         ipc: None,
         pid: None,
         uts: None,
-        userns: None,
+        userns: Vec::new(),
         cgroupns: None,
         cgroup_parent: None,
         isolation: None,

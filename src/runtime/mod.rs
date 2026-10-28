@@ -1,3 +1,5 @@
+use std::path::Path;
+
 pub mod checkpoint;
 pub mod cp;
 pub mod diff;
@@ -8,6 +10,13 @@ pub mod traits;
 pub use checkpoint::CheckpointManager;
 pub use kill::{ContainerKiller, ProcessKiller};
 pub use traits::{ContainerRuntime, NativeContainerRuntime};
+
+/// Stdin/TTY attachment for `exec_in_bundle` (Podman `exec -i` / `exec -t`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecAttach {
+    pub interactive: bool,
+    pub tty: bool,
+}
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -43,6 +52,8 @@ pub fn exec_in_bundle(
     _workdir: Option<&str>,
     _user: Option<&str>,
     _detach: bool,
+    _attach: ExecAttach,
+    _exec_pid_path: Option<&Path>,
 ) -> Result<i32> {
     anyhow::bail!("Container execution is only supported on Linux, macOS, and Windows");
 }

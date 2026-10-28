@@ -630,7 +630,7 @@ mod tests {
             ipc: None,
             pid: None,
             uts: None,
-            userns: None,
+            userns: Vec::new(),
             cgroupns: None,
             cgroup_parent: None,
             isolation: None,

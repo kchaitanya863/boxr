@@ -99,6 +99,8 @@ pub fn exec_in_bundle(
     workdir: Option<&str>,
     _user: Option<&str>,
     _detach: bool,
+    _attach: crate::runtime::ExecAttach,
+    _exec_pid_path: Option<&Path>,
 ) -> Result<i32> {
     let binary = &command[0];
     let args = &command[1..];

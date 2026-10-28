@@ -76,7 +76,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
 | `055-rm.bats` | **6/10** (`--depend` green); buildah external / conmon cases red |
-| `075-exec.bats` | **1+/10** (exec stderr normalization, empty-command exit 125); many need userns/tty |
+| `075-exec.bats` | **7/10** in isolation: `exec -i`, umask, `--tty`/`TERM`, detached invalid exec (**125**), `Store.GraphRoot` + `exec_pid` lifecycle; red: **keep-id** userns, **additional groups**, **leak check** (flaky under memory pressure / `run -td` shell) |
 | `160-volumes.bats` | **2+/26** (`--ignore`, `ls --format` Labels); teardown `volume rm -t` accepted |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*` (not auto-rmi’d on `pod rm`) |
