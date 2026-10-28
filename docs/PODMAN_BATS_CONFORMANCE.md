@@ -61,14 +61,19 @@ chmod +x scripts/run_podman_e2e_conformance.sh
 
 Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=...` in a shallow Podman clone. First run installs ginkgo via upstream Makefile.
 
-**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Global Podman storage flags (`--root`, `--runroot`, `--storage-driver`, …) are stripped in `preprocess_argv` so suite init can invoke the wrapper. **E2e still fails in `SynchronizedBeforeSuite` / `SynchronizedAfterSuite`** (Podman libpod storage, conmon, `/timings-*` artifacts)—**0 specs run** until boxr-specific e2e bootstrap exists; do not treat as boxr CLI regressions. Latest log: `e2e-run.log` in agent artifacts (`SynchronizedBeforeSuite` at `common_test.go:607`, AfterSuite `/timings-1` missing).
+**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Global Podman storage flags (`--root`, `--runroot`, `--storage-driver`, `--runtime`, `--storage-opt`, `--log-level`, …) are stripped in `preprocess_argv` so suite init can invoke the wrapper. **`SynchronizedBeforeSuite` / `SynchronizedAfterSuite` pass** once image-config JSON (Docker `Healthcheck` field names) and teardown flags (`rm -fa`, `pod rm -fa`, `stop --all -t 0`) match Podman.
+
+| E2e file | Status |
+|----------|--------|
+| `version_test.go` | **6/6** (`e2e-version-3.log`): reports **6.3.0-dev** (bundled podman.git), `-v` / `--version` after globals, trimmed `--format json`, help blurb |
+| Other manifest specs | Mostly red (`exists_test`, volumes, unshare, …) — triage ongoing |
 
 ## boxr fixes for upstream tests (ongoing)
 
 | Area | Status |
 |------|--------|
 | CLI usage exit **125** | Implemented (`try_parse`, `subcommand_required`) |
-| `rm` / `pod rm` / `volume rm` bulk flags | `--all`, `-f`, `-a` (see `RmArgs`, `VolumeRmArgs`) |
+| `rm` / `pod rm` / `volume rm` bulk flags | `--all`, `-f`, `-a`, combined `-fa` / `-fat` via `preprocess_argv`; `pod rm` accepts **`-a`** |
 | `--authfile` | Global + pull/run/build/login/… |
 | BATS `skopeo` prefetch | Overridden to `boxr pull` in `boxr-overrides.bash` |
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
