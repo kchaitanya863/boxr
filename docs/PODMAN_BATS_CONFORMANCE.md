@@ -61,7 +61,7 @@ chmod +x scripts/run_podman_e2e_conformance.sh
 
 Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=...` in a shallow Podman clone. First run installs ginkgo via upstream Makefile.
 
-**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Upstream `SynchronizedBeforeSuite` still expects a full Podman test environment (`/timings-*`, storage paths); expect suite setup failures until boxr-specific e2e hooks land—run logs belong in `.cache/` / artifacts, not gating.
+**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Global Podman storage flags (`--root`, `--runroot`, `--storage-driver`, …) are stripped in `preprocess_argv` so suite init can invoke the wrapper. `SynchronizedBeforeSuite` still expects full Podman storage/conmon/crun wiring beyond stripped flags—expect setup failures until boxr-specific e2e hooks land.
 
 ## boxr fixes for upstream tests (ongoing)
 
