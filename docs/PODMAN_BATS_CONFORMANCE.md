@@ -69,7 +69,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `exists_test.go` | **12/12** (`e2e-exists-3.log`): silent exit **1** for missing image/pod/volume; `pod create --infra=false --share ""`; `run --http-proxy=false` |
 | `volume_rename_test.go` | **8/8** (`e2e-volume-rename-3.log`): silent success, Podman error strings/exit **125**, in-use detection via `mounts.json` on `create` |
 | `unshare_test.go` | **2/2** (strict): exec exit **127/126**, `unknown flag: --bogus` → **125** |
-| `container_clone_test.go` | **10/11** (`e2e-clone-run4.log`): destroy/force, pod clone, network clone, secrets, health; **`in a pod`** still red — clone start must join pod IPC/UTS/NET so `ps --ns` inode triple matches source (runtime netns join, not CLI-only) |
+| `container_clone_test.go` | **11/11**: destroy/force, pod clone (including **`in a pod`** `ps --ns` parity), network clone, secrets, health |
 | Other manifest specs | Mostly red (`volume_rename`, `unshare`, …) — triage ongoing |
 
 ## boxr fixes for upstream tests (ongoing)
