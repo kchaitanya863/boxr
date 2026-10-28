@@ -631,6 +631,7 @@ mod tests {
             hostuser: vec![],
             group_entry: vec![],
             hostname: None,
+            no_hostname: false,
             add_host: vec![],
             shm_size: None,
             cap_add: vec![],

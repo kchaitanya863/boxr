@@ -2119,14 +2119,25 @@ pub async fn run_container_with_output(
         None
     };
 
+    if let Some(cfg) = image_cfg {
+        if let Some(envs) = &cfg.env {
+            for e in envs {
+                if !e.contains('=') {
+                    cli::usage_errors::exit_usage_error(format!(
+                        r#"invalid image env variable "{}""#,
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
     let mut spec = Spec::new_default(image_cfg, cmd_override, env_override);
     if rootfs_only && args.command.is_empty() {
         spec.process.args = vec![String::new()];
     }
 
-    if let Some(h) = &args.hostname {
-        spec.hostname = Some(h.clone());
-    }
+    apply_run_hostname(&mut spec, &args);
 
     if let Some(u) = &args.user {
         if let Some((uid_str, gid_str)) = u.split_once(':') {
@@ -2191,6 +2202,9 @@ pub async fn run_container_with_output(
     }
 
     let mut annotations = HashMap::new();
+    if args.no_hostname {
+        annotations.insert("boxr.no_hostname".to_string(), "true".to_string());
+    }
     annotations.insert(
         "org.opencontainers.image.architecture".to_string(),
         image_ref
@@ -2356,36 +2370,9 @@ pub async fn run_container_with_output(
             || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin")))
             .to_string(),
     );
-    if let Some(size) = log_opt_max_size_mb(&args.log_opt) {
-        annotations.insert("boxr.log_max_size".to_string(), size);
-        if args.log_driver.is_empty() {
-            annotations.insert("boxr.log_driver".to_string(), "json-file".to_string());
-            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
-            annotations.insert(
-                "boxr.log_path".to_string(),
-                log_path.to_string_lossy().to_string(),
-            );
-        }
-    }
+    apply_log_config_annotations(&args, &mut annotations, &bundle_dir, &container_id)?;
     if let Some(rt) = &args.runtime {
         annotations.insert("boxr.oci_runtime".to_string(), rt.clone());
-    }
-    if let Some(driver) = args.log_driver.last() {
-        validate_log_driver(driver)?;
-        annotations.insert("boxr.log_driver".to_string(), driver.clone());
-        if driver == "k8s-file" || driver == "json-file" {
-            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
-            annotations.insert(
-                "boxr.log_path".to_string(),
-                log_path.to_string_lossy().to_string(),
-            );
-        } else if driver == "journald" {
-            let capture = bundle_dir.join(".journald-capture");
-            annotations.insert(
-                "boxr.journald_capture".to_string(),
-                capture.to_string_lossy().to_string(),
-            );
-        }
     }
     if let Some(cidfile) = &args.cidfile {
         annotations.insert("boxr.cidfile".to_string(), cidfile.clone());
@@ -3224,12 +3211,27 @@ pub fn stop_container_with_home_and_timeout(
     };
 
     let mut used_sigkill = false;
-    let grace_secs = timeout_secs.unwrap_or(10);
+    let bundle_path = std::path::PathBuf::from(&c.bundle_path);
+    let grace_secs = timeout_secs
+        .or_else(|| crate::health::supervisor::read_bundle_stop_timeout(&bundle_path))
+        .unwrap_or(10);
+
+    #[cfg(unix)]
+    if let Ok(conmon_str) = std::fs::read_to_string(bundle_path.join("conmon.pid")) {
+        if let Ok(conmon_pid) = conmon_str.trim().parse::<i32>() {
+            if conmon_pid > 0 && unsafe { libc::kill(conmon_pid, 0) != 0 } {
+                cli::usage_errors::exit_usage_error(format!(
+                    "Error: container {} conmon exited prematurely, exit code could not be retrieved: conmon process killed",
+                    output_label.unwrap_or(container)
+                ));
+            }
+        }
+    }
+
     let _ = store.update_status(&c.id, ContainerStatus::Stopping);
 
     #[cfg(unix)]
     {
-        let bundle_path = std::path::PathBuf::from(&c.bundle_path);
         let mut workload_pids = Vec::new();
         let mut all_pids = Vec::new();
         if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
@@ -3262,29 +3264,21 @@ pub fn stop_container_with_home_and_timeout(
         };
 
         let grace_ms = grace_secs * 1000;
-        let iters = (grace_ms / 50).max(1);
+        let iters = if grace_secs == 0 {
+            0
+        } else {
+            (grace_ms / 50).max(1)
+        };
         for pid in &stop_pids {
             unsafe {
                 libc::kill(*pid, sig_num);
                 let _ = libc::kill(-*pid, sig_num);
             }
         }
-        // Podman waits up to the stop timeout before escalating to SIGKILL.
-        for i in 0..iters {
+        // Hold `stopping` for the full stop timeout (Podman/conmon); do not exit early when
+        // the workload already exited on SIGTERM.
+        for _i in 0..iters {
             std::thread::sleep(std::time::Duration::from_millis(50));
-            let mut all_dead = true;
-            for pid in pids {
-                if unsafe { libc::kill(*pid, 0) == 0 } {
-                    all_dead = false;
-                    break;
-                }
-            }
-            if all_dead && !pids.is_empty() {
-                break;
-            }
-            if i == iters - 1 {
-                // full grace elapsed
-            }
         }
         for pid in pids {
             if unsafe { libc::kill(*pid, 0) == 0 } {
@@ -4776,15 +4770,21 @@ fn containers_conf_toml_value(key: &str) -> Option<String> {
     let content = containers_conf_content()?;
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
+        if line.starts_with('#') || line.is_empty() || line.starts_with('[') {
             continue;
         }
-        if let Some(rest) = line.strip_prefix(key) {
-            let rest = rest.trim_start_matches('=').trim();
-            let mode = rest.trim_matches('"').trim();
-            if !mode.is_empty() {
-                return Some(mode.to_string());
-            }
+        let (k, v) = line.split_once('=')?;
+        if k.trim() != key {
+            continue;
+        }
+        let mut v = v.split('#').next().unwrap_or(v).trim();
+        if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
+            || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2)
+        {
+            v = &v[1..v.len() - 1];
+        }
+        if !v.is_empty() {
+            return Some(v.to_string());
         }
     }
     None
@@ -4902,23 +4902,132 @@ fn configured_oci_runtime_name() -> String {
         .to_string()
 }
 
-fn log_opt_max_size_mb(log_opts: &[String]) -> Option<String> {
+fn apply_log_config_annotations(
+    args: &RunArgs,
+    annotations: &mut HashMap<String, String>,
+    bundle_dir: &Path,
+    container_id: &str,
+) -> Result<()> {
+    if let Some(size) = log_opt_max_size_display(&args.log_opt) {
+        annotations.insert("boxr.log_max_size".to_string(), size);
+        if args.log_driver.is_empty() {
+            annotations.insert("boxr.log_driver".to_string(), "json-file".to_string());
+            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+            annotations.insert(
+                "boxr.log_path".to_string(),
+                log_path.to_string_lossy().to_string(),
+            );
+        }
+    }
+    if let Some(driver) = args.log_driver.last() {
+        validate_log_driver(driver)?;
+        annotations.insert("boxr.log_driver".to_string(), driver.clone());
+        if driver == "k8s-file" || driver == "json-file" {
+            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+            annotations.insert(
+                "boxr.log_path".to_string(),
+                log_path.to_string_lossy().to_string(),
+            );
+        } else if driver == "journald" {
+            let capture = bundle_dir.join(".journald-capture");
+            annotations.insert(
+                "boxr.journald_capture".to_string(),
+                capture.to_string_lossy().to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn log_opt_max_size_display(log_opts: &[String]) -> Option<String> {
     for opt in log_opts {
         let trimmed = opt.trim();
         let value = trimmed
             .strip_prefix("max-size=")
             .or_else(|| trimmed.strip_prefix("max-size:"));
         if let Some(v) = value {
-            let lower = v.to_lowercase();
-            if let Some(num) = lower.strip_suffix('m') {
-                return Some(format!("{}MB", num));
-            }
-            if let Some(num) = lower.strip_suffix("mb") {
-                return Some(format!("{}MB", num));
+            if let Some(bytes) = parse_log_size_human(v.trim()) {
+                return Some(human_size_si(bytes));
             }
         }
     }
     None
+}
+
+/// Parse Podman/Docker `--log-opt max-size` values (decimal SI, per go-units `FromHumanSize`).
+fn parse_log_size_human(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.chars().all(|c| c.is_ascii_digit()) {
+        return raw.parse().ok();
+    }
+    let sep = raw
+        .char_indices()
+        .rfind(|(_, c)| c.is_ascii_digit() || *c == '.')
+        .map(|(i, _)| i)?;
+    let (num, sfx_raw) = if raw.as_bytes().get(sep + 1) == Some(&b' ') {
+        (&raw[..sep], raw[sep + 2..].trim())
+    } else {
+        (&raw[..=sep], &raw[sep + 1..])
+    };
+    let size: f64 = num.trim().parse().ok()?;
+    if size < 0.0 {
+        return None;
+    }
+    if sfx_raw.is_empty() {
+        return Some(size as u64);
+    }
+    if sfx_raw.len() > 3 {
+        return None;
+    }
+    let sfx = sfx_raw.to_ascii_lowercase();
+    let mult: u64 = match sfx.as_bytes().first()? {
+        b'b' if sfx.len() == 1 => return Some(size as u64),
+        b'k' => 1_000,
+        b'm' => 1_000_000,
+        b'g' => 1_000_000_000,
+        b't' => 1_000_000_000_000,
+        b'p' => 1_000_000_000_000_000,
+        _ => return None,
+    };
+    if sfx.len() == 2 && sfx.as_bytes()[1] != b'b' {
+        return None;
+    }
+    if sfx.len() == 3 && sfx.as_bytes()[1..] != *b"ib" {
+        return None;
+    }
+    Some((size * mult as f64) as u64)
+}
+
+/// Match `github.com/docker/go-units`.HumanSize (decimal, up to 4 significant digits).
+fn human_size_si(bytes: u64) -> String {
+    const KB: f64 = 1000.0;
+    let units = ["B", "kB", "MB", "GB", "TB", "PB"];
+    let mut size = bytes as f64;
+    let mut idx = 0usize;
+    while size >= KB && idx < units.len() - 1 {
+        size /= KB;
+        idx += 1;
+    }
+    if idx == 0 {
+        return format!("{}{}", bytes, units[0]);
+    }
+    format!("{}{}", format_float_g(size, 4), units[idx])
+}
+
+fn format_float_g(v: f64, prec: usize) -> String {
+    let s = format!("{:.prec$}", v, prec = prec);
+    trim_trailing_decimal_zeros(&s)
+}
+
+fn trim_trailing_decimal_zeros(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    trimmed.to_string()
 }
 
 fn apply_run_user_spec(rootfs: &Path, user: &str, spec: &mut oci::runtime::Spec) {
@@ -5222,6 +5331,18 @@ pub(crate) fn id_maps_from_spec(spec: &Spec) -> Option<(Vec<security::IdMapping>
     Some((uid_maps, gid_maps))
 }
 
+fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs) {
+    if args.no_hostname {
+        spec.hostname = None;
+        return;
+    }
+    if let Some(h) = &args.hostname {
+        spec.hostname = Some(h.clone());
+    } else if args.name.as_deref().is_some_and(|n| !n.is_empty()) {
+        spec.hostname = Some(args.name.clone().unwrap_or_default());
+    }
+}
+
 fn apply_containers_conf_defaults(args: &mut RunArgs) {
     if args.userns.is_empty() {
         if let Some(u) = userns_from_containers_conf() {
@@ -5238,6 +5359,16 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
     }
     if args.ulimits.is_empty() {
         args.ulimits.extend(default_ulimits_from_containers_conf());
+    }
+    if args.log_driver.is_empty() {
+        if let Some(driver) = containers_conf_toml_value("log_driver") {
+            args.log_driver.push(driver);
+        }
+    }
+    if args.log_opt.is_empty() {
+        if let Some(raw) = containers_conf_toml_value("log_size_max") {
+            args.log_opt.push(format!("max-size={}", raw));
+        }
     }
 }
 
@@ -6929,14 +7060,25 @@ async fn create_only_container_after_pod_prep(
         None
     };
 
+    if let Some(cfg) = image_record.config.config.as_ref() {
+        if let Some(envs) = &cfg.env {
+            for e in envs {
+                if !e.contains('=') {
+                    cli::usage_errors::exit_usage_error(format!(
+                        r#"invalid image env variable "{}""#,
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
     let mut spec = Spec::new_default(
         image_record.config.config.as_ref(),
         cmd_override,
         env_override,
     );
-    if let Some(h) = &args.hostname {
-        spec.hostname = Some(h.clone());
-    }
+    apply_run_hostname(&mut spec, &args);
 
     if let Some(u) = &args.user {
         if let Some((uid_str, gid_str)) = u.split_once(':') {
@@ -7029,6 +7171,9 @@ async fn create_only_container_after_pod_prep(
     }
 
     let mut annotations = HashMap::new();
+    if args.no_hostname {
+        annotations.insert("boxr.no_hostname".to_string(), "true".to_string());
+    }
     annotations.insert(
         "org.opencontainers.image.architecture".to_string(),
         image_record.config.architecture.clone(),
@@ -7145,6 +7290,7 @@ async fn create_only_container_after_pod_prep(
     if args.unsetenv_all {
         annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
+    apply_log_config_annotations(&args, &mut annotations, &bundle_dir, &container_id)?;
     spec.annotations = Some(annotations.clone());
 
     if !args.add_host.is_empty() {
@@ -10195,6 +10341,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         hostuser: Vec::new(),
         group_entry: Vec::new(),
         hostname: Some(pod.name.clone()),
+        no_hostname: false,
         add_host: Vec::new(),
         shm_size: None,
         cap_add: Vec::new(),
@@ -11182,6 +11329,48 @@ mod tests {
 
     // Issue #404: rmi must only report "Deleted" when no other tag still
     // references the image data.
+    #[test]
+    fn test_containers_conf_log_driver_from_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("containers.conf");
+        std::fs::write(
+            &path,
+            "[containers]\nlog_driver = \"k8s-file\"\nlog_size_max = 400000000\n",
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("CONTAINERS_CONF_OVERRIDE", &path);
+        }
+        let driver = containers_conf_toml_value("log_driver").expect("log_driver");
+        assert_eq!(driver, "k8s-file");
+        validate_log_driver(&driver).unwrap();
+        let mut args = RunArgs {
+            log_driver: vec![],
+            log_opt: vec![],
+            ..Default::default()
+        };
+        apply_containers_conf_defaults(&mut args);
+        assert_eq!(args.log_driver.last().map(String::as_str), Some("k8s-file"));
+        assert_eq!(
+            log_opt_max_size_display(&args.log_opt),
+            Some("400MB".to_string())
+        );
+    }
+
+    #[test]
+    fn test_log_size_display_podman_parity() {
+        assert_eq!(human_size_si(400_000_000), "400MB");
+        assert_eq!(human_size_si(8_000), "8kB");
+        assert_eq!(
+            log_opt_max_size_display(&["max-size=8000".to_string()]),
+            Some("8kB".to_string())
+        );
+        assert_eq!(
+            log_opt_max_size_display(&["max-size=5.123m".to_string()]),
+            Some("5.123MB".to_string())
+        );
+    }
+
     #[test]
     fn test_issue_404_deleted_only_when_unreferenced() {
         let home = tempfile::tempdir().unwrap();

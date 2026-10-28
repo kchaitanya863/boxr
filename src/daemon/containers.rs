@@ -143,6 +143,7 @@ pub async fn create_container(
         hostuser: Vec::new(),
         group_entry: Vec::new(),
         hostname: None,
+        no_hostname: false,
         add_host: Vec::new(),
         dns: Vec::new(),
         labels: Vec::new(),

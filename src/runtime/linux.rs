@@ -2278,10 +2278,30 @@ fn run_container_child(
     }
 
     // Set hostname
+    let skip_hostname_file = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.no_hostname"))
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !skip_hostname_file {
+        let host_label = spec
+            .hostname
+            .as_deref()
+            .filter(|h| !h.is_empty())
+            .unwrap_or("localhost");
+        let hostname_path = rootfs.join("etc/hostname");
+        if let Some(parent) = hostname_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&hostname_path, format!("{host_label}\n"));
+    }
     if let Some(hostname) = &spec.hostname {
-        let host_c = CString::new(hostname.as_str())?;
-        unsafe {
-            libc::sethostname(host_c.as_ptr(), host_c.as_bytes().len());
+        if !skip_hostname_file {
+            let host_c = CString::new(hostname.as_str())?;
+            unsafe {
+                libc::sethostname(host_c.as_ptr(), host_c.as_bytes().len());
+            }
         }
     }
 

@@ -111,6 +111,10 @@ pub struct RunArgs {
     #[arg(long = "hostname")]
     pub hostname: Option<String>,
 
+    /// Do not create /etc/hostname in the container (Podman --no-hostname)
+    #[arg(long = "no-hostname")]
+    pub no_hostname: bool,
+
     /// Add a custom host-to-IP mapping (host:ip)
     #[arg(long = "add-host")]
     pub add_host: Vec<String>,

@@ -218,6 +218,7 @@ impl KubeManager {
                 hostuser: Vec::new(),
                 group_entry: Vec::new(),
                 hostname: None,
+                no_hostname: false,
                 add_host: Vec::new(),
                 shm_size: None,
                 cap_add: Vec::new(),

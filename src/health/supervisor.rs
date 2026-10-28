@@ -161,7 +161,7 @@ fn run_supervisor_loop(
     }
 }
 
-fn read_bundle_stop_timeout(bundle_path: &Path) -> Option<u64> {
+pub(crate) fn read_bundle_stop_timeout(bundle_path: &Path) -> Option<u64> {
     let config = bundle_path.join("config.json");
     let content = std::fs::read_to_string(config).ok()?;
     let spec: crate::oci::runtime::Spec = serde_json::from_str(&content).ok()?;
