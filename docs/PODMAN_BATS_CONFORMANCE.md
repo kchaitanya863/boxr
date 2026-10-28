@@ -69,6 +69,16 @@ Authoritative log: `.cache/podman-bats-results/run-20261028-124424.log` (153 ok 
 
 Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails (for future gating).
 
+### Host prerequisites (075 / 160)
+
+Before treating **075-exec** or **160-volumes** keep-id failures as boxr regressions, run:
+
+```bash
+./tools/check_podman_bats_prereqs.sh
+```
+
+This checks whether the host allows **`setgroups(2)`** (075) and **`mount_setattr(MOUNT_ATTR_IDMAP)`** (160). Cloud Agent / hardened profiles often fail both with **EPERM** while the rest of the curated manifest passes.
+
 ## E2E (Ginkgo)
 
 ```bash

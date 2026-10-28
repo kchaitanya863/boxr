@@ -2685,8 +2685,6 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
 
     const MOUNT_ATTR_IDMAP: u64 = 0x0010_0000;
     const AT_EMPTY_PATH: i32 = 0x1000;
-    const AT_NO_AUTOMOUNT: i32 = 0x800;
-    const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
     const AT_RECURSIVE: i32 = 0x8000;
     const OPEN_TREE_CLONE: u32 = 1;
     const OPEN_TREE_CLOEXEC: u32 = 0x0008_0000;
@@ -2722,8 +2720,8 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
 
     let user_ns = fs::File::open("/proc/self/ns/user").context("open user ns")?;
     let source_c = CString::new(source.to_string_lossy().as_ref())?;
-    let open_tree_flags = (OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC) as libc::c_ulong
-        | (AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_SYMLINK_NOFOLLOW) as libc::c_ulong;
+    // Match Podman go.podman.io/storage/pkg/idmap.CreateIDMappedMount (OPEN_TREE_CLONE on path).
+    let open_tree_flags = (OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC) as libc::c_ulong;
     let tree_fd = unsafe {
         libc::syscall(
             SYS_OPEN_TREE,
