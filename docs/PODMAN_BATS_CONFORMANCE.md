@@ -133,7 +133,7 @@ On typical rootless boxr hosts (`newuidmap` / `newgidmap`, subuid/subgid):
 3. boxr also re-enables **`allow`** on the **container init (PID 1) host PID** immediately after the PID-namespace fork.
 4. The PID-1 process still may not shrink supplementary groups via `setgroups(2)` on some hosts ( **`id -G`** lists repeated **`65534`** ); **`exec --user root:root`** therefore stays red on **`075-exec`** case 10 until full runc/Podman-style credential application is ported.
 
-Verified locally: `boxr run --rm … cat /proc/1/setgroups` → **`allow`** after the init fix; **`id -G`** after **`exec --user root:root`** may still include mapped **`65534`** entries on this VM. Fixing case 10 likely needs deeper alignment with Podman/runc’s user-namespace lifecycle, not a one-line CLI tweak. **9/10** on `075-exec.bats` is the current ceiling here.
+Verified locally: `boxr run --rm … cat /proc/1/setgroups` → **`allow`** after the init fix; **`id -G`** after **`exec --user root:root`** may still include mapped **`65534`** entries on this VM. **`setns(CLONE_NEWNS)` into the container mount namespace drops the container user namespace** on Linux, so the credential-override exec path cannot stay in the user namespace while also joining `mnt` (unlike `nsenter -U -m`, which uses a different join sequence). Fixing case 10 likely needs init-as-mapping-child (no inner PID-1 fork) plus mount-less exec/`chroot` or runc-equivalent join order. **9/10** on `075-exec.bats` is the current ceiling here.
 
 ### Known gap: `160-volumes` keep-id bind `stat` (rootless)
 

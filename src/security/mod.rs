@@ -52,7 +52,7 @@ impl Default for RootlessUserConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubordinateRange {
     pub start: u32,
     pub count: u32,
@@ -89,8 +89,8 @@ impl RootlessUserConfig {
         None
     }
 
-    /// Read subordinate range from /etc/subuid or /etc/subgid on Linux
-    pub fn read_subordinate_range(is_gid: bool) -> Option<SubordinateRange> {
+    /// Read all subordinate ranges from /etc/subuid or /etc/subgid for the current user.
+    pub fn read_subordinate_ranges(is_gid: bool) -> Vec<SubordinateRange> {
         #[cfg(unix)]
         let (id, user_name) = {
             let u = if is_gid {
@@ -105,11 +105,39 @@ impl RootlessUserConfig {
         let (id, user_name): (u32, Option<String>) = (1000, None);
 
         let file_path = if is_gid { "/etc/subgid" } else { "/etc/subuid" };
-        if let Ok(content) = fs::read_to_string(file_path) {
-            Self::parse_subid_content(&content, id, user_name.as_deref())
-        } else {
-            None
+        let Ok(content) = fs::read_to_string(file_path) else {
+            return Vec::new();
+        };
+        let uid_str = id.to_string();
+        let mut ranges = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() < 3 {
+                continue;
+            }
+            let name_or_id = parts[0].trim();
+            let matches_name = user_name.as_deref().map(|u| u == name_or_id).unwrap_or(false);
+            let matches_id = name_or_id == uid_str;
+            if !matches_name && !matches_id {
+                continue;
+            }
+            if let (Ok(start), Ok(count)) = (
+                parts[1].trim().parse::<u32>(),
+                parts[2].trim().parse::<u32>(),
+            ) {
+                ranges.push(SubordinateRange { start, count });
+            }
         }
+        ranges
+    }
+
+    /// Read the first subordinate range from /etc/subuid or /etc/subgid on Linux
+    pub fn read_subordinate_range(is_gid: bool) -> Option<SubordinateRange> {
+        Self::read_subordinate_ranges(is_gid).into_iter().next()
     }
 
     /// Check if newuidmap and newgidmap helper binaries are installed on the system
@@ -141,25 +169,27 @@ impl RootlessUserConfig {
     #[cfg(target_os = "linux")]
     pub fn setup_child_mappings_with_mode(pid: i32, mode: UsernsMappingMode) -> Result<()> {
         let (host_uid, host_gid) = unsafe { (libc::getuid(), libc::getgid()) };
-        let sub_uid = Self::read_subordinate_range(false);
-        let sub_gid = Self::read_subordinate_range(true);
+        let sub_uid = Self::read_subordinate_ranges(false);
+        let sub_gid = Self::read_subordinate_ranges(true);
+        let sub_uid_first = sub_uid.first().copied();
+        let sub_gid_first = sub_gid.first().copied();
 
         if mode.keep_id {
-            let uid_maps = Self::keep_id_uid_mappings(host_uid, sub_uid.as_ref());
-            let gid_maps = Self::keep_id_uid_mappings(host_gid, sub_gid.as_ref());
+            let uid_maps = Self::keep_id_uid_mappings(host_uid, sub_uid_first.as_ref());
+            let gid_maps = Self::keep_id_uid_mappings(host_gid, sub_gid_first.as_ref());
             if Self::apply_id_mappings(pid, &uid_maps, &gid_maps).is_ok() {
                 return Ok(());
             }
         } else if mode.nomap {
-            let uid_maps = Self::nomap_uid_mappings(sub_uid.as_ref());
-            let gid_maps = Self::nomap_uid_mappings(sub_gid.as_ref());
+            let uid_maps = Self::nomap_uid_mappings(sub_uid_first.as_ref());
+            let gid_maps = Self::nomap_uid_mappings(sub_gid_first.as_ref());
             if Self::apply_id_mappings(pid, &uid_maps, &gid_maps).is_ok() {
                 return Ok(());
             }
         }
 
         if Self::has_newidmap_binaries() {
-            if let (Some(u_range), Some(g_range)) = (sub_uid.as_ref(), sub_gid.as_ref()) {
+            if let (Some(u_range), Some(g_range)) = (sub_uid_first.as_ref(), sub_gid_first.as_ref()) {
                 let uid_status = std::process::Command::new("newuidmap")
                     .args([
                         &pid.to_string(),
@@ -195,7 +225,7 @@ impl RootlessUserConfig {
             }
         }
 
-        if sub_uid.is_some() && sub_gid.is_some() && !Self::has_newidmap_binaries() {
+        if sub_uid_first.is_some() && sub_gid_first.is_some() && !Self::has_newidmap_binaries() {
             eprintln!(
                 "boxr: install the 'uidmap' package (newuidmap/newgidmap) for full rootless UID/GID ranges; \
 using single-ID mapping only (images requiring chown/--user may fail)"
@@ -212,14 +242,14 @@ using single-ID mapping only (images requiring chown/--user may fail)"
             host_id: host_gid,
             size: 1,
         }];
-        if let Some(u_range) = sub_uid {
+        if let Some(u_range) = sub_uid_first {
             uid_mappings.push(IdMapping {
                 container_id: 1,
                 host_id: u_range.start,
                 size: u_range.count,
             });
         }
-        if let Some(g_range) = sub_gid {
+        if let Some(g_range) = sub_gid_first {
             gid_mappings.push(IdMapping {
                 container_id: 1,
                 host_id: g_range.start,
