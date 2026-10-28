@@ -1823,6 +1823,10 @@ fn bundle_supplementary_gids(bundle_path: &Path) -> Vec<u32> {
         .unwrap_or_default()
 }
 
+fn bundle_needs_exec_group_sync(bundle_path: &Path) -> bool {
+    !bundle_supplementary_gids(bundle_path).is_empty()
+}
+
 /// Resolved on the host before entering the container mount namespace (rootfs lookups).
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ExecCredentials {
@@ -1851,6 +1855,16 @@ fn exec_userns_socket_path(bundle_path: &Path) -> PathBuf {
         .unwrap_or("ctr");
     let short = if id.len() > 16 { &id[..16] } else { id };
     PathBuf::from(format!("/tmp/boxr-exec-{short}.sock"))
+}
+
+fn exec_remount_proc_for_pid_namespace() {
+    let _ = mount(
+        Some("proc"),
+        "/proc",
+        Some("proc"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+        None::<&str>,
+    );
 }
 
 fn exec_join_init_namespaces(init_pid: i32, mnt_only: bool) -> Result<()> {
@@ -1902,10 +1916,10 @@ fn exec_run_worker_in_holder_context(
         }
     }
     if let Some(creds) = &job.exec_creds {
-        apply_exec_user_credentials(creds, init_pid);
+        apply_exec_user_credentials(creds, init_pid, Some(bundle_path));
     } else {
         become_effective_container_root();
-        apply_exec_supplementary_groups(init_pid, None);
+        apply_exec_supplementary_groups(init_pid, None, Some(bundle_path));
     }
     // Mount namespace only when a container workdir requires the container root view.
     if let Some(wd) = job.workdir.as_deref() {
@@ -2193,30 +2207,38 @@ fn assume_credentials_for_rootfs_setup(spec: &Spec) {
     }
 }
 
-fn apply_exec_supplementary_groups(init_pid: i32, creds: Option<&ExecCredentials>) {
-    let init_groups = || {
-        if init_pid == 1 {
-            parse_supplementary_groups_from_container_init()
-        } else {
-            parse_supplementary_groups_from_status(init_pid)
+fn resolve_init_supplementary_gids(bundle_path: Option<&Path>, init_pid: i32) -> Vec<u32> {
+    if let Some(bp) = bundle_path {
+        let from_spec = bundle_supplementary_gids(bp);
+        if !from_spec.is_empty() {
+            return from_spec;
         }
-    };
+    }
+    if init_pid == 1 {
+        parse_supplementary_groups_from_container_init()
+    } else {
+        parse_supplementary_groups_from_status(init_pid)
+    }
+}
+
+fn apply_exec_supplementary_groups(
+    init_pid: i32,
+    creds: Option<&ExecCredentials>,
+    bundle_path: Option<&Path>,
+) {
+    let init_groups = || resolve_init_supplementary_gids(bundle_path, init_pid);
     if let Some(c) = creds {
         if c.reset_supplementary_groups {
             set_supplementary_group_list(&c.supplementary_gids);
             return;
         }
-        if c.uid == 0 {
-            set_supplementary_group_list(&init_groups());
-        } else {
-            set_supplementary_group_list(&[]);
-        }
+        set_supplementary_group_list(&init_groups());
     } else {
         set_supplementary_group_list(&init_groups());
     }
 }
 
-fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32) {
+fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32, bundle_path: Option<&Path>) {
     let gid = nix::unistd::Gid::from_raw(creds.gid);
     let uid = nix::unistd::Uid::from_raw(creds.uid);
     let root_gid = nix::unistd::Gid::from_raw(0);
@@ -2224,7 +2246,7 @@ fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32) {
     let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
     let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
     // setgroups(2) requires CAP_SETGID; apply while still euid 0 in the user namespace.
-    apply_exec_supplementary_groups(init_pid, Some(creds));
+    apply_exec_supplementary_groups(init_pid, Some(creds), bundle_path);
     let _ = nix::unistd::setresgid(gid, gid, gid);
     let _ = nix::unistd::setresuid(uid, uid, uid);
 }
@@ -2282,6 +2304,8 @@ pub fn exec_in_bundle(
     let override_creds = exec_creds
         .as_ref()
         .filter(|c| c.reset_supplementary_groups || c.uid != 0 || c.gid != 0);
+    let needs_group_sync = bundle_needs_exec_group_sync(bundle_path);
+    let use_setns_exec = override_creds.is_some() || needs_group_sync;
     let same_userns = match (
         fs::read_link("/proc/self/ns/user"),
         fs::read_link(format!("/proc/{pid}/ns/user")),
@@ -2289,20 +2313,22 @@ pub fn exec_in_bundle(
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     };
-    if override_creds.is_some() {
-        let sock = exec_userns_socket_path(bundle_path);
-        if sock.exists() {
-            if let Ok(code) = exec_in_bundle_via_userns_socket(
-                bundle_path,
-                pid,
-                &command,
-                env,
-                workdir,
-                exec_creds.as_ref(),
-                umask,
-                attach,
-            ) {
-                return Ok(code);
+    if use_setns_exec {
+        if !needs_group_sync {
+            let sock = exec_userns_socket_path(bundle_path);
+            if sock.exists() {
+                if let Ok(code) = exec_in_bundle_via_userns_socket(
+                    bundle_path,
+                    pid,
+                    &command,
+                    env,
+                    workdir,
+                    exec_creds.as_ref(),
+                    umask,
+                    attach,
+                ) {
+                    return Ok(code);
+                }
             }
         }
         return exec_in_bundle_via_setns(
@@ -2602,6 +2628,11 @@ fn exec_in_bundle_via_setns(
             child_sock.write_all(b"ready").ok();
             let _ = child_sock.read_exact(&mut done);
             drop(child_sock);
+            let needs_mnt_for_groups = bundle_needs_exec_group_sync(bundle_path);
+            if needs_mnt_for_groups {
+                let _ = exec_join_init_namespaces(pid, true);
+                exec_remount_proc_for_pid_namespace();
+            }
             let rootfs = bundle_path.join("rootfs");
             if let Some(wd) = workdir {
                 let wd_path = rootfs.join(wd.trim_start_matches('/'));
@@ -2636,18 +2667,31 @@ fn exec_in_bundle_via_setns(
                     let _ = nix::unistd::dup2(fd, 2);
                 }
             }
-            // Init is PID 1 in the container PID namespace; host proc still resolves status.
-            let init_pid = pid;
+            // After joining the container PID namespace, init is always PID 1.
+            const INIT_PID_IN_CONTAINER: i32 = 1;
+            let command = exec_rootfs_command(&rootfs, command);
+            if needs_mnt_for_groups {
+                match unsafe { fork() }? {
+                    ForkResult::Parent { child: grand } => {
+                        let code = match waitpid(grand, None) {
+                            Ok(WaitStatus::Exited(_, c)) => c,
+                            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+                            _ => 1,
+                        };
+                        std::process::exit(code as i32);
+                    }
+                    ForkResult::Child => {}
+                }
+            }
             become_effective_container_root();
             crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe {
                 libc::getpid()
             });
             let _ = fs::write("/proc/self/setgroups", "allow");
-            let command = exec_rootfs_command(&rootfs, command);
             if let Some(creds) = exec_creds {
-                apply_exec_user_credentials(creds, init_pid);
+                apply_exec_user_credentials(creds, INIT_PID_IN_CONTAINER, Some(bundle_path));
             } else {
-                apply_exec_supplementary_groups(init_pid, None);
+                apply_exec_supplementary_groups(INIT_PID_IN_CONTAINER, None, Some(bundle_path));
             }
             let binary = &command[0];
             let binary_c = match CString::new(binary.as_str()) {

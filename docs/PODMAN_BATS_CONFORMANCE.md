@@ -61,9 +61,9 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
-| 075-exec | 9 | 1 | **additional groups** — on this Linux profile `/proc/<pid>/setgroups` stays `deny` after `gid_map` (parent `allow` write does not stick; `newuidmap` fallback same). Init/exec inherit host supplementary GIDs (shown as `65534` in the user ns); `exec --user root:root id -G` must be exactly `0`. boxr prefers `write_proc_mappings` (deny→map→allow) before `newuidmap`; full fix needs setgroups `allow` after maps (kernel/uidmap policy). |
+| 075-exec | 10 | 0 | **`--group-add`** — setns exec joins mnt + proc remount, applies bundle supplementary GIDs (double-fork after remount for `/proc/self`); skips userns socket when group sync needed. |
 | 160-volumes | 25 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
-| **Total** | **153** | **2** | plus skips (075-exec setgroups, 160-volumes keep-id on some hosts) |
+| **Total** | **154** | **1** | plus skips (160-volumes keep-id on some hosts) |
 
 Authoritative log: `.cache/podman-bats-results/run-20261028-130514.log` (153 ok / 2 not ok). Earlier scorecards predated `--uidmap` rootfs-setup identity; re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest.
 
@@ -113,7 +113,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `045-start.bats` | **8/8** isolated (restart-policy filter accepts **`none`** alias for **`no`**) |
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr when stop timeout **> 0**; **`stop -t 0`** stays silent on stderr (e2e cleanup) |
 | `055-rm.bats` | **10/10** isolated (prior runs; re-verify if agent hangs on full file) |
-| `075-exec.bats` | **9/10** isolated: **red: additional groups** — even a userns-root helper that `setns` into the container user namespace and writes `/proc/<exec-pid>/setgroups` leaves **`deny`** on this rootless VM (init PID too); `exec --user root:root` cannot clear mapped 65534 supplementary GIDs |
+| `075-exec.bats` | **10/10** isolated (`--group-add` exec matches init supplementary groups via setns + proc remount) |
 | `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `--userns=keep-id` (idmap; see gap below); **volume import** fixed (import into existing volume) |
 | `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
