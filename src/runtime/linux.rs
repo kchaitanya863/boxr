@@ -11,6 +11,8 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::os::unix::io::FromRawFd;
+use std::os::unix::process::CommandExt;
+use std::io::Write;
 use std::process::Stdio;
 use std::thread;
 
@@ -948,6 +950,13 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // 4. Child is now root in user namespace.
+                let allow_res = fs::write("/proc/self/setgroups", "allow");
+                let sg_after = fs::read_to_string("/proc/self/setgroups").unwrap_or_default();
+                eprintln!(
+                    "boxr: mapping-child setgroups allow={:?} after={:?}",
+                    allow_res,
+                    sg_after.trim()
+                );
                 // Host TCP/DNS relay must start before CLONE_NEWNET (TAP worker cannot setns to host).
                 let mut usernet_relay_pid = None;
                 if network_mode.should_use_native_usernet() && !use_pasta {
@@ -1124,6 +1133,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         unsafe {
                             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                         }
+                        let _ = fs::write("/proc/self/setgroups", "allow");
                         if let Err(err) =
                             run_container_child(&abs_rootfs, bundle_path, &spec, &mounts)
                         {
@@ -1482,18 +1492,40 @@ fn resolve_exec_uid_gid(bundle_path: &Path, user: &str) -> Option<(u32, u32)> {
     Some((uid, gid))
 }
 
-fn apply_exec_user_credentials(bundle_path: &Path, user: &str) {
-    if let Some((uid, gid)) = resolve_exec_uid_gid(bundle_path, user) {
-        let gid = nix::unistd::Gid::from_raw(gid);
-        let uid = nix::unistd::Uid::from_raw(uid);
-        // Explicit `user:group` resets supplementary groups (Podman 075-exec).
-        if user.contains(':') {
-            let _ = fs::write("/proc/self/setgroups", "allow");
-            let _ = nix::unistd::setgroups(&[]);
-        }
-        let _ = nix::unistd::setgid(gid);
-        let _ = nix::unistd::setuid(uid);
+fn bundle_supplementary_gids(bundle_path: &Path) -> Vec<u32> {
+    let content = fs::read_to_string(bundle_path.join("config.json")).ok();
+    let spec: Option<Spec> = content.and_then(|c| serde_json::from_str(&c).ok());
+    spec.map(|s| s.process.user.additional_gids.unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// Resolved on the host before entering the container mount namespace (rootfs lookups).
+struct ExecCredentials {
+    uid: u32,
+    gid: u32,
+    /// Explicit `user:group` replaces supplementary groups (Podman 075-exec).
+    reset_supplementary_groups: bool,
+    supplementary_gids: Vec<u32>,
+}
+
+fn apply_exec_user_credentials(creds: &ExecCredentials) {
+    let gid = nix::unistd::Gid::from_raw(creds.gid);
+    let uid = nix::unistd::Uid::from_raw(creds.uid);
+    let root_gid = nix::unistd::Gid::from_raw(0);
+    let root_uid = nix::unistd::Uid::from_raw(0);
+    let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
+    let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
+    if creds.reset_supplementary_groups {
+        let _ = fs::write("/proc/self/setgroups", "allow");
+        let raw: Vec<nix::unistd::Gid> = creds
+            .supplementary_gids
+            .iter()
+            .map(|g| nix::unistd::Gid::from_raw(*g))
+            .collect();
+        let _ = nix::unistd::setgroups(&raw);
     }
+    let _ = nix::unistd::setresgid(gid, gid, gid);
+    let _ = nix::unistd::setresuid(uid, uid, uid);
 }
 
 pub fn bundle_process_is_alive(bundle_path: &Path) -> bool {
@@ -1536,24 +1568,35 @@ pub fn exec_in_bundle(
         command.to_vec()
     };
 
-    let cred_ids = user.and_then(|u| resolve_exec_uid_gid(bundle_path, u));
-    let needs_setns_credentials = user.is_some_and(|u| u.contains(':'));
-    if let Some((uid, gid)) = cred_ids {
-        if needs_setns_credentials || uid != 0 || gid != 0 {
-            return exec_in_bundle_via_setns(
-                bundle_path,
-                pid,
-                &command,
-                env,
-                workdir,
-                user,
-                detach,
-                attach,
-                exec_pid_path,
-                umask,
-                preserve_fds,
-            );
-        }
+    let exec_creds = user.and_then(|u| {
+        resolve_exec_uid_gid(bundle_path, u).map(|(uid, gid)| ExecCredentials {
+            uid,
+            gid,
+            reset_supplementary_groups: u.contains(':'),
+            supplementary_gids: if u.contains(':') {
+                bundle_supplementary_gids(bundle_path)
+            } else {
+                Vec::new()
+            },
+        })
+    });
+    let override_creds = exec_creds
+        .as_ref()
+        .filter(|c| c.reset_supplementary_groups || c.uid != 0 || c.gid != 0);
+    if override_creds.is_some() {
+        return exec_in_bundle_via_setns(
+            bundle_path,
+            pid,
+            &command,
+            env,
+            workdir,
+            exec_creds.as_ref(),
+            detach,
+            attach,
+            exec_pid_path,
+            umask,
+            preserve_fds,
+        );
     }
 
     let mut cmd = std::process::Command::new("nsenter");
@@ -1584,6 +1627,15 @@ pub fn exec_in_bundle(
         }
     }
     cmd.args(&command);
+    if !preserve_fds.is_empty() {
+        let keep: Vec<u32> = preserve_fds.to_vec();
+        unsafe {
+            cmd.pre_exec(move || {
+                close_fds_except(&keep);
+                Ok(())
+            });
+        }
+    }
     if detach {
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
@@ -1629,9 +1681,8 @@ pub fn exec_in_bundle(
         Ok(output) => {
             let code = output.status.code().unwrap_or(1);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.is_empty() {
-                print!("{}", stdout);
+            if !output.stdout.is_empty() {
+                let _ = std::io::stdout().write_all(&output.stdout);
             }
             let mut msg = stderr.trim().to_string();
             if let Some(rest) = msg.strip_prefix("nsenter: failed to execute ") {
@@ -1641,17 +1692,20 @@ pub fn exec_in_bundle(
                     msg = rest.to_lowercase();
                 }
             }
-            if !msg.is_empty() {
+            if !msg.is_empty() && code != 0 {
                 eprintln!("{}", msg);
             }
-            if code != 0 && (stderr.contains("nsenter") || stdout.is_empty() && msg.contains("nsenter")) {
+            if code != 0
+                && (stderr.contains("nsenter")
+                    || output.stdout.is_empty() && msg.contains("nsenter"))
+            {
                 return exec_in_bundle_via_setns(
                     bundle_path,
                     pid,
                     &command,
                     env,
                     workdir,
-                    user,
+                    exec_creds.as_ref(),
                     detach,
                     attach,
                     exec_pid_path,
@@ -1667,7 +1721,7 @@ pub fn exec_in_bundle(
             &command,
             env,
             workdir,
-            user,
+            exec_creds.as_ref(),
             detach,
             attach,
             exec_pid_path,
@@ -1683,7 +1737,7 @@ fn exec_in_bundle_via_setns(
     command: &[String],
     env: &[String],
     workdir: Option<&str>,
-    user: Option<&str>,
+    exec_creds: Option<&ExecCredentials>,
     detach: bool,
     attach: crate::runtime::ExecAttach,
     exec_pid_path: Option<&Path>,
@@ -1737,19 +1791,21 @@ fn exec_in_bundle_via_setns(
             }
         }
         ForkResult::Child => {
-            let ns_types = [
+            let enter_ns = |name: &str, flag: CloneFlags| {
+                let ns_path = format!("/proc/{}/ns/{}", pid, name);
+                if let Ok(f) = std::fs::File::open(&ns_path) {
+                    let _ = setns(&f, flag);
+                }
+            };
+            for (name, flag) in [
                 ("user", CloneFlags::CLONE_NEWUSER),
                 ("ipc", CloneFlags::CLONE_NEWIPC),
                 ("uts", CloneFlags::CLONE_NEWUTS),
                 ("net", CloneFlags::CLONE_NEWNET),
                 ("mnt", CloneFlags::CLONE_NEWNS),
                 ("pid", CloneFlags::CLONE_NEWPID),
-            ];
-            for (name, flag) in ns_types {
-                let ns_path = format!("/proc/{}/ns/{}", pid, name);
-                if let Ok(f) = std::fs::File::open(&ns_path) {
-                    let _ = setns(&f, flag);
-                }
+            ] {
+                enter_ns(name, flag);
             }
             if let Some(wd) = workdir {
                 let _ = chdir(Path::new(wd));
@@ -1779,9 +1835,10 @@ fn exec_in_bundle_via_setns(
             }
             if !preserve_fds.is_empty() {
                 clear_close_on_exec(preserve_fds);
+                close_fds_except(preserve_fds);
             }
-            if let Some(u) = user {
-                apply_exec_user_credentials(bundle_path, u);
+            if let Some(creds) = exec_creds {
+                apply_exec_user_credentials(creds);
             }
             let binary = &command[0];
             let binary_c = match CString::new(binary.as_str()) {
@@ -2589,6 +2646,8 @@ fn run_container_child(
         }
     }
 
+    let _ = fs::write("/proc/self/setgroups", "allow");
+    let _ = nix::unistd::setgroups(&[]);
     if let Some(gids) = &spec.process.user.additional_gids {
         let raw_gids: Vec<nix::unistd::Gid> = gids
             .iter()

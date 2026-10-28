@@ -79,8 +79,8 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **9/9** in isolation (SIGKILL warning before `--rm` teardown; stop/kill exit **137** race; trap exit **0** vs **143**) |
 | `055-rm.bats` | **10/10** in isolation (`container exists --external`, `--health-on-failure=stop`, detached health supervisor subprocess) |
-| `075-exec.bats` | **9/10** in isolation (leak check, stdin, keep-id, umask, TTY, exec_pid/`GraphRoot`); red: **additional groups** `id -G` for `root:root` (rootless user-ns unmapped supplementary GIDs `65534`) |
-| `160-volumes.bats` | **24/26** in isolation (+2 skips): named volumes survive `run --rm`, `--default-mounts-file`, `:U`/`start --attach`, tmpfs/copyup/prune/mount, `--image-volume`, `volume create --ignore`; red: `--userns=keep-id` bind `stat` (`12`) when host `newuidmap` rejects Podman keep-id UID maps |
+| `075-exec.bats` | **9/10** in isolation (`bats-075-exec-4.log`): combined `-td` flags, `exec --preserve-fd`, binary-safe exec stdout, credential resolution before mount setns; **red: additional groups** — `exec --user root:root` / `nobody:nobody` expect `id -G` to list only explicit primary/supplementary groups (see gap below) |
+| `160-volumes.bats` | **~11/26** + **2 skips** in isolation (`bats-160-volumes.log`; flaky under shared `BOXR_HOME`): prune/create/mount/copyup pass; red includes basic bind mount contents, import/export, `--userns=keep-id`, tmpfs/bind types, `--image-volume`, `volume ls --format` |
 | `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah, containers.conf); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
 | `--runtime-flag` | Global flag; unknown values exit **126** (BATS `030-run` global runtime option) |
@@ -94,6 +94,18 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 - Full **manifest.txt** sequential run can OOM; use per-file BATS for focused progress.
 
 **100% pass** of upstream suites is not realistic until `info`, logging, networking, and storage output match Podman; the harness measures progress.
+
+### Known gap: `075-exec` additional groups (rootless)
+
+Podman test **075-exec** (case 10) requires `podman exec --user root:root … id -G` to print **`0`** only (no inherited supplementary GIDs), and with `--group-add` to list **`0 1 2 … 10`** exactly. That needs `setgroups(2)` after entering the container user namespace.
+
+On typical rootless boxr hosts (`newuidmap` / `newgidmap`, subuid/subgid):
+
+1. The mapping child writes **`deny`** to `/proc/self/setgroups` before `gid_map` (required by the kernel).
+2. The parent re-enables **`allow`** on the **mapping child PID** after `newuidmap`/`newgidmap` (`RootlessUserConfig::reenable_setgroups_for_pid`).
+3. The PID-1 process that runs the container workload still observes **`/proc/self/setgroups` = `deny`** and **`write("allow")` returns `EPERM`**, so supplementary groups stay populated (often repeated **`65534`** / `nobody` in the user namespace).
+
+Verified locally: `boxr run --rm … cat /proc/self/setgroups` → `deny`; explicit `allow` from the init process fails with **Operation not permitted**. Fixing this likely needs deeper alignment with Podman/runc’s user-namespace lifecycle (which process may call `setgroups`, and when), not a one-line CLI tweak. **9/10** on `075-exec.bats` is the current ceiling until that is resolved.
 
 ## Related
 

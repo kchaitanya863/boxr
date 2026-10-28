@@ -188,6 +188,7 @@ impl RootlessUserConfig {
                     .status();
                 if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
                     if u_st.success() && g_st.success() {
+                        Self::reenable_setgroups_for_pid(pid);
                         return Ok(());
                     }
                 }
@@ -304,6 +305,7 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                 .status();
             if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
                 if u_st.success() && g_st.success() {
+                    Self::reenable_setgroups_for_pid(pid);
                     return Ok(());
                 }
             }
@@ -344,7 +346,17 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         fs::write(proc_dir.join("gid_map"), gid_content)
             .context("Failed to write gid_map in /proc")?;
 
+        Self::reenable_setgroups_for_pid(pid);
+
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reenable_setgroups_for_pid(pid: i32) {
+        let setgroups_path = Path::new("/proc").join(pid.to_string()).join("setgroups");
+        if setgroups_path.exists() {
+            let _ = fs::write(&setgroups_path, "allow");
+        }
     }
 }
 
