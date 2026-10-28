@@ -61,7 +61,7 @@ chmod +x scripts/run_podman_e2e_conformance.sh
 
 Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=...` in a shallow Podman clone. First run installs ginkgo via upstream Makefile.
 
-**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Global Podman storage flags (`--root`, `--runroot`, `--storage-driver`, …) are stripped in `preprocess_argv` so suite init can invoke the wrapper. `SynchronizedBeforeSuite` still expects full Podman storage/conmon/crun wiring beyond stripped flags—expect setup failures until boxr-specific e2e hooks land.
+**Agent/CI deps:** `libseccomp-dev`, `libgpgme-dev`, `pkg-config` (Go e2e compile). Global Podman storage flags (`--root`, `--runroot`, `--storage-driver`, …) are stripped in `preprocess_argv` so suite init can invoke the wrapper. **E2e still fails in `SynchronizedBeforeSuite` / `SynchronizedAfterSuite`** (Podman libpod storage, conmon, `/timings-*` artifacts)—**0 specs run** until boxr-specific e2e bootstrap exists; do not treat as boxr CLI regressions.
 
 ## boxr fixes for upstream tests (ongoing)
 
@@ -74,7 +74,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **~66/75** ok in spot runs after **`containers.conf` `read_only` / `default_ulimits`**, **`--read-only-tmpfs`**, **`--ulimit`** apply + inspect `HostConfig.Ulimits`; still red: journald, image `/` mode **555**, **`--uidmap`** + `/etc/hosts` (**46**, needs host `subuid`/`newuidmap`), conmon/syslog, buildah, containers.conf **`read_only=true`** default ulimit edge cases, systemd `/run` perms, cgroupns/hooks/static_dir, **`--memory=0`**, pod rollback |
+| `030-run.bats` | **61/75** ok (latest `run-20261028-042547.log`): detached **`__internal-detached-wait`** (restart/`RestartCount`), **`--hooks-dir`** OCI prestart/poststop on restart (**67**), **`[engine] static_dir`** via `CONTAINERS_CONF*` (**68**), read-only/ulimits/containerenv; still red: **`--name`** dup (**9**), **`--rmi`** (**11**), keep-id passwd (**16**), journald (**18**), image `/` **555** (**43**), log-opt (**44**), hosts/uidmap (**46**), `top`/nsenter build (**49**), port **`--rm`** race (**52**), privileged `/dev/tty` (**56**), cgroupns (**64**), conmon/syslog (**70**), buildah name clash (**71**), systemd **`/run` perms** (**72**) |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
@@ -85,7 +85,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
 | `--runtime-flag` | Global flag; unknown values exit **126** (BATS `030-run` global runtime option) |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
-| Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*` (not auto-rmi’d on `pod rm`) |
+| Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*`, `localhost/cve_2022_1227_test*` (build test **49** image when `top` fails) |
 
 ### Known gaps (`040-ps`)
 
