@@ -177,8 +177,17 @@ pub fn validate_network_port_compatibility(
     network: &str,
     ports: &[crate::network::PortMapping],
 ) -> Result<()> {
+    if ports.is_empty() {
+        return Ok(());
+    }
     let mut copy = ports.to_vec();
     warn_discard_incompatible_ports(network, &mut copy);
+    if copy.is_empty() {
+        return Err(anyhow!(
+            "published ports are not supported for network mode \"{}\"",
+            network.trim()
+        ));
+    }
     Ok(())
 }
 
