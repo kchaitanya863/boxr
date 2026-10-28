@@ -1832,6 +1832,11 @@ fn run_container_child(
     let preserve_fds = read_preserve_fds(bundle_path);
     clear_close_on_exec(&preserve_fds);
 
+    if let Err(e) = crate::ulimit::apply_ulimits_from_bundle(bundle_path) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+
     if let Some(ann) = &spec.annotations {
         if ann.get("boxr.init").map(|v| v == "true").unwrap_or(false) {
             unsafe {
@@ -2274,6 +2279,23 @@ fn run_container_child(
             MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY | MsFlags::MS_BIND,
             None::<&str>,
         );
+        let read_only_tmpfs = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.read_only_tmpfs"))
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        if !read_only_tmpfs {
+            for target in ["/dev", "/dev/shm"] {
+                let _ = mount(
+                    None::<&str>,
+                    target,
+                    None::<&str>,
+                    MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                    None::<&str>,
+                );
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]

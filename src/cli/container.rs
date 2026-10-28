@@ -170,8 +170,24 @@ pub struct RunArgs {
     pub cap_drop: Vec<String>,
 
     /// Mount the container's root filesystem as read only
-    #[arg(long = "read-only")]
-    pub read_only: bool,
+    #[arg(
+        long = "read-only",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub read_only: Option<bool>,
+
+    /// Mount read-only container paths as tmpfs (Podman-compatible)
+    #[arg(
+        long = "read-only-tmpfs",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub read_only_tmpfs: Option<bool>,
 
     /// Run an init inside the container that forwards signals and reaps processes
     #[arg(long = "init")]
@@ -504,6 +520,18 @@ impl RunArgs {
     /// Whether `-t` / `--tty` requests a pseudo-TTY (default false).
     pub fn allocate_tty(&self) -> bool {
         self.tty.unwrap_or(false)
+    }
+
+    pub fn effective_read_only(&self) -> bool {
+        self.read_only.unwrap_or(false)
+    }
+
+    /// When unset, Podman defaults read-only tmpfs mounts to match read-only rootfs.
+    pub fn effective_read_only_tmpfs(&self) -> bool {
+        match self.read_only_tmpfs {
+            Some(v) => v,
+            None => self.effective_read_only(),
+        }
     }
 
     /// File descriptors to pass into the container (Podman/crun semantics).

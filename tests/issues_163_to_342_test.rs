@@ -169,7 +169,8 @@ fn default_run_args(image: &str) -> RunArgs {
         shm_size: None,
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
-        read_only: false,
+        read_only: None,
+        read_only_tmpfs: None,
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
@@ -986,7 +987,7 @@ async fn test_issue_204_inspect_hostconfig_does_not_report_readonlyrootfs_true_w
         .unwrap();
     let mut args = default_run_args("alpine:latest");
     args.name = Some("cont-204".to_string());
-    args.read_only = true;
+    args.read_only = Some(true);
     let cid = boxr::create_only_container_with_home(args, Some(temp.path()))
         .await
         .unwrap();

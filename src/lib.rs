@@ -61,6 +61,7 @@ pub mod stats;
 pub mod storage;
 pub mod system;
 pub mod terminal;
+pub mod ulimit;
 pub mod volume;
 
 use anyhow::{Context, Result, anyhow};
@@ -1951,6 +1952,9 @@ pub async fn run_container_with_output(
     if let Some(adj) = args.oom_score_adj {
         args.oom_score_adj = Some(clamp_rootless_oom_score_adj(adj));
     }
+    if let Err(e) = ulimit::validate_ulimit_cli_options(&args.ulimits) {
+        cli::usage_errors::exit_usage_error(e.to_string());
+    }
     apply_default_mounts_file(&mut args)?;
 
     let rootfs_only = args.rootfs.is_some();
@@ -2124,9 +2128,7 @@ pub async fn run_container_with_output(
         spec.process.env.push("HOME=/".to_string());
     }
 
-    if args.read_only {
-        spec.root.readonly = true;
-    }
+    apply_read_only_rootfs_config(&args, &mut spec);
 
     if let Some(shm) = &args.shm_size {
         cgroups::ResourceLimits::parse_memory(shm)?;
@@ -2200,6 +2202,12 @@ pub async fn run_container_with_output(
     if let Some(adj) = args.oom_score_adj {
         annotations.insert("boxr.oom_score_adj".to_string(), adj.to_string());
         spec.process.oom_score_adj = Some(adj);
+    }
+    if args.effective_read_only() {
+        annotations.insert(
+            "boxr.read_only_tmpfs".to_string(),
+            args.effective_read_only_tmpfs().to_string(),
+        );
     }
     if !args.group_add.is_empty() {
         let mut gids = Vec::new();
@@ -2387,6 +2395,7 @@ pub async fn run_container_with_output(
             bundle_dir.join("ulimits.json"),
             serde_json::to_string(&args.ulimits)?,
         );
+        let _ = ulimit::write_inspect_ulimits(&bundle_dir, &args.ulimits);
     }
     if let Some(cidfile) = &args.cidfile {
         fs::write(cidfile, &container_id)?;
@@ -2803,7 +2812,16 @@ pub async fn run_container_with_output(
 }
 
 #[cfg(target_os = "linux")]
-fn sync_host_nproc_ulimit(bundle_path: &Path) -> Result<()> {
+fn sync_bundle_ulimits_inspect(bundle_path: &Path) -> Result<()> {
+    let ulimits_path = bundle_path.join("ulimits.json");
+    if ulimits_path.exists() {
+        if let Ok(content) = fs::read_to_string(&ulimits_path) {
+            if let Ok(specs) = serde_json::from_str::<Vec<String>>(&content) {
+                let _ = ulimit::write_inspect_ulimits(bundle_path, &specs);
+                return Ok(());
+            }
+        }
+    }
     #[cfg(unix)]
     {
         let mut lim = libc::rlimit {
@@ -2813,8 +2831,8 @@ fn sync_host_nproc_ulimit(bundle_path: &Path) -> Result<()> {
         if unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut lim) } == 0 {
             let ulimits = serde_json::json!([{
                 "Name": "RLIMIT_NPROC",
-                "Soft": lim.rlim_cur,
-                "Hard": lim.rlim_max,
+                "Soft": lim.rlim_cur as i64,
+                "Hard": lim.rlim_max as i64,
             }]);
             let _ = fs::write(
                 bundle_path.join("host_ulimits.json"),
@@ -3230,7 +3248,7 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
                 .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
             let bundle_path = PathBuf::from(&rec.bundle_path);
             let spec: Spec = serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
-            let _ = sync_host_nproc_ulimit(&bundle_path);
+            let _ = sync_bundle_ulimits_inspect(&bundle_path);
             let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
             apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
             store.update_status(&rec.id, ContainerStatus::Running)?;
@@ -3396,7 +3414,7 @@ pub async fn start_container_with_home(container: &str, home_opt: Option<&Path>)
     let content = fs::read_to_string(&config_file)?;
     let spec: Spec = serde_json::from_str(&content)?;
 
-    let _ = sync_host_nproc_ulimit(&bundle_path);
+    let _ = sync_bundle_ulimits_inspect(&bundle_path);
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
     apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
     store.update_status(&rec.id, ContainerStatus::Running)?;
@@ -4542,6 +4560,89 @@ fn containers_conf_toml_value(key: &str) -> Option<String> {
     None
 }
 
+fn containers_conf_bool(key: &str) -> Option<bool> {
+    containers_conf_toml_value(key).and_then(|v| match v.to_lowercase().as_str() {
+        "true" | "1" | "yes" => Some(true),
+        "false" | "0" | "no" => Some(false),
+        _ => None,
+    })
+}
+
+fn default_ulimits_from_containers_conf() -> Vec<String> {
+    let content = match containers_conf_content() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    let mut in_array = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if !in_array {
+            if trimmed.starts_with("default_ulimits") && trimmed.contains('[') {
+                in_array = true;
+                for entry in extract_toml_quoted_strings(trimmed) {
+                    out.push(entry);
+                }
+                if trimmed.contains(']') {
+                    in_array = false;
+                }
+            }
+            continue;
+        }
+        for entry in extract_toml_quoted_strings(trimmed) {
+            out.push(entry);
+        }
+        if trimmed.contains(']') {
+            in_array = false;
+        }
+    }
+    out
+}
+
+fn extract_toml_quoted_strings(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('"') {
+        rest = &rest[start + 1..];
+        if let Some(end) = rest.find('"') {
+            out.push(rest[..end].to_string());
+            rest = &rest[end + 1..];
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn apply_read_only_rootfs_config(args: &RunArgs, spec: &mut Spec) {
+    if !args.effective_read_only() {
+        return;
+    }
+    spec.root.readonly = true;
+    if !args.effective_read_only_tmpfs() {
+        return;
+    }
+    const TMPFS_PATHS: [&str; 4] = ["/tmp", "/var/tmp", "/run", "/dev/shm"];
+    for dest in TMPFS_PATHS {
+        if spec.mounts.iter().any(|m| m.destination == *dest) {
+            continue;
+        }
+        spec.mounts.push(oci::runtime::Mount {
+            destination: dest.to_string(),
+            mount_type: "tmpfs".to_string(),
+            source: "tmpfs".to_string(),
+            options: Some(vec![
+                "nosuid".to_string(),
+                "nodev".to_string(),
+                "mode=1777".to_string(),
+            ]),
+        });
+    }
+}
+
 fn oci_runtime_path() -> String {
     for candidate in ["/usr/bin/crun", "/usr/bin/runc", "/usr/local/bin/crun"] {
         if Path::new(candidate).exists() {
@@ -4899,6 +5000,14 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
     }
     if args.oom_score_adj.is_none() {
         args.oom_score_adj = oom_score_adj_from_containers_conf();
+    }
+    if args.read_only.is_none() {
+        if containers_conf_bool("read_only") == Some(true) {
+            args.read_only = Some(true);
+        }
+    }
+    if args.ulimits.is_empty() {
+        args.ulimits.extend(default_ulimits_from_containers_conf());
     }
 }
 
@@ -6387,6 +6496,9 @@ async fn create_only_container_after_pod_prep(
 
     let mut args = args;
     apply_containers_conf_defaults(&mut args);
+    if let Err(e) = ulimit::validate_ulimit_cli_options(&args.ulimits) {
+        cli::usage_errors::exit_usage_error(e.to_string());
+    }
 
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
@@ -6507,9 +6619,7 @@ async fn create_only_container_after_pod_prep(
         spec.process.env.push("HOME=/".to_string());
     }
 
-    if args.read_only {
-        spec.root.readonly = true;
-    }
+    apply_read_only_rootfs_config(&args, &mut spec);
 
     if let Some(shm) = &args.shm_size {
         cgroups::ResourceLimits::parse_memory(shm)?;
@@ -6609,6 +6719,12 @@ async fn create_only_container_after_pod_prep(
     if let Some(adj) = args.oom_score_adj {
         annotations.insert("boxr.oom_score_adj".to_string(), adj.to_string());
         spec.process.oom_score_adj = Some(adj);
+    }
+    if args.effective_read_only() {
+        annotations.insert(
+            "boxr.read_only_tmpfs".to_string(),
+            args.effective_read_only_tmpfs().to_string(),
+        );
     }
     if !args.group_add.is_empty() {
         let mut gids = Vec::new();
@@ -6726,6 +6842,7 @@ async fn create_only_container_after_pod_prep(
             bundle_dir.join("ulimits.json"),
             serde_json::to_string(&args.ulimits)?,
         );
+        let _ = ulimit::write_inspect_ulimits(&bundle_dir, &args.ulimits);
     }
     if let Some(cidfile) = &args.cidfile {
         fs::write(cidfile, &container_id)?;
@@ -8588,6 +8705,25 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
             return String::new();
         }
     }
+    if path == "HostConfig.Ulimits" {
+        if let Some(arr) = curr.as_array() {
+            let parts: Vec<String> = arr
+                .iter()
+                .filter_map(|entry| {
+                    let name = entry.get("Name").and_then(|n| n.as_str())?;
+                    let soft = entry.get("Soft")?;
+                    let hard = entry.get("Hard")?;
+                    Some(format!(
+                        "{{{name} {} {}}}",
+                        format_inspect_ulimit_val(soft),
+                        format_inspect_ulimit_val(hard)
+                    ))
+                })
+                .collect();
+            return format!("[{}]", parts.join(" "));
+        }
+        return String::new();
+    }
     match curr {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Number(n) => n.to_string(),
@@ -8595,6 +8731,16 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+fn format_inspect_ulimit_val(v: &serde_json::Value) -> String {
+    if let Some(n) = v.as_i64() {
+        return n.to_string();
+    }
+    if let Some(n) = v.as_u64() {
+        return n.to_string();
+    }
+    v.to_string()
 }
 
 fn resolve_template_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
@@ -9162,7 +9308,8 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         shm_size: None,
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
-        read_only: false,
+        read_only: None,
+        read_only_tmpfs: None,
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
