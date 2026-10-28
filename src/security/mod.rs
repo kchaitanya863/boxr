@@ -188,50 +188,6 @@ impl RootlessUserConfig {
             }
         }
 
-        if Self::has_newidmap_binaries() {
-            if let (Some(u_range), Some(g_range)) = (sub_uid_first.as_ref(), sub_gid_first.as_ref()) {
-                let uid_status = std::process::Command::new("newuidmap")
-                    .args([
-                        &pid.to_string(),
-                        "0",
-                        &host_uid.to_string(),
-                        "1",
-                        "1",
-                        &u_range.start.to_string(),
-                        &u_range.count.to_string(),
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                let gid_status = std::process::Command::new("newgidmap")
-                    .args([
-                        &pid.to_string(),
-                        "0",
-                        &host_gid.to_string(),
-                        "1",
-                        "1",
-                        &g_range.start.to_string(),
-                        &g_range.count.to_string(),
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
-                    if u_st.success() && g_st.success() {
-                        Self::reenable_setgroups_for_pid(pid);
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        if sub_uid_first.is_some() && sub_gid_first.is_some() && !Self::has_newidmap_binaries() {
-            eprintln!(
-                "boxr: install the 'uidmap' package (newuidmap/newgidmap) for full rootless UID/GID ranges; \
-using single-ID mapping only (images requiring chown/--user may fail)"
-            );
-        }
-
         let mut uid_mappings = vec![IdMapping {
             container_id: 0,
             host_id: host_uid,
@@ -256,6 +212,17 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                 size: g_range.count,
             });
         }
+        if Self::apply_id_mappings(pid, &uid_mappings, &gid_mappings).is_ok() {
+            return Ok(());
+        }
+
+        if sub_uid_first.is_some() && sub_gid_first.is_some() && !Self::has_newidmap_binaries() {
+            eprintln!(
+                "boxr: install the 'uidmap' package (newuidmap/newgidmap) for full rootless UID/GID ranges; \
+using single-ID mapping only (images requiring chown/--user may fail)"
+            );
+        }
+
         let cfg = RootlessUserConfig {
             enabled: true,
             uid_mappings,
@@ -314,6 +281,14 @@ using single-ID mapping only (images requiring chown/--user may fail)"
 
     #[cfg(target_os = "linux")]
     pub fn apply_id_mappings(pid: i32, uid_maps: &[IdMapping], gid_maps: &[IdMapping]) -> Result<()> {
+        let cfg = RootlessUserConfig {
+            enabled: true,
+            uid_mappings: uid_maps.to_vec(),
+            gid_mappings: gid_maps.to_vec(),
+        };
+        if cfg.write_proc_mappings(pid).is_ok() {
+            return Ok(());
+        }
         if Self::has_newidmap_binaries() {
             let mut uid_args = vec![pid.to_string()];
             for m in uid_maps {
@@ -344,11 +319,6 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                 }
             }
         }
-        let cfg = RootlessUserConfig {
-            enabled: true,
-            uid_mappings: uid_maps.to_vec(),
-            gid_mappings: gid_maps.to_vec(),
-        };
         cfg.write_proc_mappings(pid)
     }
 
@@ -380,23 +350,32 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         fs::write(proc_dir.join("gid_map"), gid_content)
             .context("Failed to write gid_map in /proc")?;
 
-        Self::write_setgroups_allow(pid);
+        Self::write_setgroups_allow(pid).context("Failed to enable setgroups after gid_map")?;
 
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
-    fn write_setgroups_allow(pid: i32) {
+    fn write_setgroups_allow(pid: i32) -> Result<()> {
         let setgroups_path = Path::new("/proc").join(pid.to_string()).join("setgroups");
-        if setgroups_path.exists() {
-            let _ = fs::write(&setgroups_path, "allow");
+        if !setgroups_path.exists() {
+            return Ok(());
         }
+        fs::write(&setgroups_path, "allow").context("write /proc setgroups allow")?;
+        let mode = fs::read_to_string(&setgroups_path).unwrap_or_default();
+        if mode.trim() != "allow" {
+            return Err(anyhow::anyhow!(
+                "setgroups stuck at {} after writing allow",
+                mode.trim()
+            ));
+        }
+        Ok(())
     }
 
     /// Re-enable supplementary groups for a process in a rootless user namespace (075-exec parity).
     #[cfg(target_os = "linux")]
     pub fn reenable_setgroups_for_pid(pid: i32) {
-        Self::write_setgroups_allow(pid);
+        let _ = Self::write_setgroups_allow(pid);
     }
 
     /// Join `anchor_pid`'s user namespace as namespaced root and write `allow` for `target_pid`.

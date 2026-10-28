@@ -61,7 +61,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
-| 075-exec | 9 | 1 | **additional groups** — rootless `/proc/<pid>/setgroups` stays `deny` after mapping-parent writes; init inherits host supplementary GIDs as unmapped `65534`; `exec --user root:root id -G` needs exactly `0` (exec-userns socket + setns sync paths in progress in `src/runtime/linux.rs`) |
+| 075-exec | 9 | 1 | **additional groups** — on this Linux profile `/proc/<pid>/setgroups` stays `deny` after `gid_map` (parent `allow` write does not stick; `newuidmap` fallback same). Init/exec inherit host supplementary GIDs (shown as `65534` in the user ns); `exec --user root:root id -G` must be exactly `0`. boxr prefers `write_proc_mappings` (deny→map→allow) before `newuidmap`; full fix needs setgroups `allow` after maps (kernel/uidmap policy). |
 | 160-volumes | 24 | 1 | **--userns=keep-id** (multi-line `uid_map` via `newuidmap` + idmapped binds; `subuid overflow` on full keep-id map in this VM) |
 | **Total** | **153** | **2** | plus skips |
 
