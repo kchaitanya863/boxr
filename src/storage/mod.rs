@@ -1,4 +1,5 @@
 pub mod container_store;
+pub mod external;
 pub mod image_store;
 pub mod index_lock;
 pub mod overlay;

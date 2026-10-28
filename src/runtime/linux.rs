@@ -350,7 +350,8 @@ fn conmon_pidfile_from_spec(spec: &Spec) -> Option<String> {
 
 fn use_conmon_shim(spec: &Spec) -> bool {
     spec.annotations.as_ref().is_some_and(|a| {
-        a.contains_key("boxr.conmon_pidfile") || a.get("boxr.conmon_syslog") == Some(&"1".to_string())
+        a.contains_key("boxr.conmon_pidfile")
+            || a.get("boxr.conmon_syslog") == Some(&"1".to_string())
     })
 }
 
@@ -390,14 +391,9 @@ fn journal_line(line: &str) {
     unsafe extern "C" {
         fn sd_journal_send(fmt: *const c_char, ...) -> c_int;
     }
-    let msg = CString::new(line).unwrap_or_default();
-    let key = CString::new("MESSAGE=").unwrap();
+    let entry = CString::new(format!("MESSAGE={}", line)).unwrap_or_default();
     unsafe {
-        sd_journal_send(
-            key.as_ptr(),
-            msg.as_ptr(),
-            std::ptr::null::<c_char>(),
-        );
+        sd_journal_send(entry.as_ptr(), std::ptr::null::<c_char>());
     }
 }
 
@@ -406,24 +402,42 @@ fn tee_reader_to_journal<R: std::io::Read>(
     capture: Option<PathBuf>,
     stream: &str,
 ) {
+    tee_journald_capture_stream(pipe, capture, stream, false);
+}
+
+fn tee_journald_capture_stream<R: std::io::Read>(
+    pipe: R,
+    capture: Option<PathBuf>,
+    stream: &str,
+    attach: bool,
+) {
     use std::io::{BufRead, BufReader, Write};
     let mut reader = BufReader::new(pipe);
-    let mut file = capture.and_then(|p| {
+    let mut file = capture.map(|p| {
         if let Some(parent) = p.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(p)
-            .ok()
+        p
     });
+    let mut attach_out: Box<dyn Write + Send> = if attach {
+        if stream == "stderr" {
+            Box::new(std::io::stderr())
+        } else {
+            Box::new(std::io::stdout())
+        }
+    } else {
+        Box::new(std::io::sink())
+    };
     let mut line = String::new();
     while reader.read_line(&mut line).unwrap_or(0) > 0 {
         let trimmed = line.trim_end_matches(['\n', '\r']);
-        journal_line(trimmed);
-        if let Some(f) = &mut file {
-            let _ = writeln!(f, "{} {}", stream, trimmed);
+        if !trimmed.is_empty() {
+            journal_line(trimmed);
+            if let Some(path) = &file {
+                let _ = crate::logging::append_k8s_log_chunk(path, stream, trimmed.as_bytes());
+            }
+            let _ = writeln!(attach_out, "{}", trimmed);
+            let _ = attach_out.flush();
         }
         line.clear();
     }
@@ -673,16 +687,25 @@ pub fn execute_bundle(
             let stderr = child.stderr.take();
             let out_attach = io_policy.attach_stdout;
             let err_attach = io_policy.attach_stderr;
+            let journald = io_policy.log_driver.as_deref() == Some("journald");
             let h_out = stdout.map(|pipe| {
                 let path = log_path.clone();
                 thread::spawn(move || {
-                    crate::logging::tee_k8s_stream(pipe, path, "stdout", out_attach);
+                    if journald {
+                        tee_journald_capture_stream(pipe, Some(path), "stdout", out_attach);
+                    } else {
+                        crate::logging::tee_k8s_stream(pipe, path, "stdout", out_attach);
+                    }
                 })
             });
             let h_err = stderr.map(|pipe| {
                 let path = log_path.clone();
                 thread::spawn(move || {
-                    crate::logging::tee_k8s_stream(pipe, path, "stderr", err_attach);
+                    if journald {
+                        tee_journald_capture_stream(pipe, Some(path), "stderr", err_attach);
+                    } else {
+                        crate::logging::tee_k8s_stream(pipe, path, "stderr", err_attach);
+                    }
                 })
             });
             let status = child.wait().context("Failed to wait on trampoline")?;
@@ -1036,13 +1059,13 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if !uts_host {
                     flags |= CloneFlags::CLONE_NEWUTS;
                 }
-                let cgroup_private = spec
+                let cgroup_host = spec
                     .annotations
                     .as_ref()
                     .and_then(|a| a.get("boxr.cgroupns"))
-                    .map(|s| s == "private")
+                    .map(|s| s == "host")
                     .unwrap_or(false);
-                if cgroup_private {
+                if !cgroup_host {
                     flags |= CloneFlags::CLONE_NEWCGROUP;
                 }
 
@@ -2019,23 +2042,34 @@ fn run_container_child(
         .as_ref()
         .and_then(|a| a.get("boxr.cgroupns"))
         .map(|s| s.as_str());
-    if cgroupns == Some("host") || cgroupns == Some("private") {
-        let cg_path = rootfs.join("sys/fs/cgroup");
-        let _ = fs::create_dir_all(&cg_path);
-        if cgroupns == Some("host") {
+    let cg_path = rootfs.join("sys/fs/cgroup");
+    // sysfs mount replaces /sys; recreate cgroup mountpoint after sysfs is up.
+    let _ = fs::create_dir_all(&cg_path);
+    match cgroupns {
+        Some("host") => {
             let _ = mount(
                 Some("/sys/fs/cgroup"),
                 &cg_path,
                 None::<&str>,
-                MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                MsFlags::MS_BIND | MsFlags::MS_REC | MsFlags::MS_RDONLY,
                 None::<&str>,
             );
-        } else {
+        }
+        Some("private") => {
             let _ = mount(
                 Some("cgroup2"),
                 &cg_path,
                 Some("cgroup2"),
                 MsFlags::MS_RDONLY,
+                None::<&str>,
+            );
+        }
+        _ => {
+            let _ = mount(
+                Some("cgroup2"),
+                &cg_path,
+                Some("cgroup2"),
+                MsFlags::empty(),
                 None::<&str>,
             );
         }
@@ -2107,6 +2141,23 @@ fn run_container_child(
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&var_tmp_path, fs::Permissions::from_mode(0o1777));
+    }
+
+    let runs_systemd_init = spec
+        .process
+        .args
+        .iter()
+        .any(|a| a.ends_with("/init") || a == "init");
+    if runs_systemd_init {
+        let run_path = rootfs.join("run");
+        let _ = fs::create_dir_all(&run_path);
+        let _ = mount(
+            Some("tmpfs"),
+            &run_path,
+            Some("tmpfs"),
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_STRICTATIME,
+            Some("mode=755"),
+        );
     }
 
     // Mount external volumes/binds

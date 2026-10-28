@@ -114,6 +114,11 @@ run_manifest() {
   export PODMAN="$WRAPPER"
   export QUADLET="${QUADLET:-/bin/false}"
 
+  local buildah_stub_dir="$CACHE_DIR/buildah-stub-bin"
+  mkdir -p "$buildah_stub_dir"
+  install -m 0755 "$REPO_ROOT/tests/podman_bats/buildah-stub.sh" "$buildah_stub_dir/buildah"
+  export PATH="$buildah_stub_dir:$PATH"
+
   echo "BOXR_HOME=$BOXR_HOME"
   echo "PODMAN=$PODMAN"
   echo "Podman tests: $SRC_DIR"

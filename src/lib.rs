@@ -168,6 +168,31 @@ fn fail_missing_workdir(cwd: &str, container_id: &str) -> Result<i32> {
     Ok(126)
 }
 
+#[cfg(unix)]
+fn make_bundle_tree_removable(bundle_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let rootfs = bundle_path.join("rootfs");
+    if !rootfs.is_dir() {
+        return;
+    }
+    fn walk(dir: &Path) {
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o755));
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o755));
+                if path.is_dir() {
+                    walk(&path);
+                }
+            }
+        }
+    }
+    walk(&rootfs);
+}
+
+#[cfg(not(unix))]
+fn make_bundle_tree_removable(_bundle_path: &Path) {}
+
 fn run_dir_bind_blocks_containerenv(spec: &Spec, mounts: &[volume::MountSpec]) -> bool {
     for m in mounts {
         if m.destination.trim_end_matches('/') == "/run" {
@@ -313,6 +338,13 @@ fn add_container_record(
     record: ContainerRecord,
     ephemeral_pod: &Option<String>,
 ) -> Result<()> {
+    if storage::external::external_name_taken(&record.name) {
+        cleanup_ephemeral_pod(ephemeral_pod);
+        cli::usage_errors::exit_usage_error(format!(
+            "creating container storage: the container name \"{}\" is already in use by external You have to remove that container to be able to reuse that name: that name is already in use by an external entity, or use --replace to instruct Podman to do so.",
+            record.name
+        ));
+    }
     match store.add(record) {
         Err(e) if e.to_string().contains("already in use") => {
             cleanup_ephemeral_pod(ephemeral_pod);
@@ -2287,6 +2319,21 @@ pub async fn run_container_with_output(
         apply_namespace_to_linux(linux, &mut annotations, "ipc", &args.ipc)?;
         apply_namespace_to_linux(linux, &mut annotations, "uts", &args.uts)?;
         apply_namespace_to_linux(linux, &mut annotations, "pid", &args.pid)?;
+        if let Some(cgroupns) = &args.cgroupns {
+            annotations.insert("boxr.cgroupns".to_string(), cgroupns.clone());
+            if cgroupns == "host" {
+                linux.namespaces.retain(|ns| ns.ns_type != "cgroup");
+            } else if !cgroupns.is_empty() {
+                linux.namespaces.push(oci::runtime::LinuxNamespace {
+                    ns_type: "cgroup".to_string(),
+                    path: if cgroupns.starts_with('/') {
+                        Some(cgroupns.clone())
+                    } else {
+                        None
+                    },
+                });
+            }
+        }
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     apply_run_id_maps(&args, &mut spec, &mut annotations)?;
@@ -6374,6 +6421,13 @@ fn remove_container_opts_inner(
     let store = ContainerStore::new();
     let c = match store.find(container) {
         Some(c) => c,
+        None if storage::external::external_name_taken(container) => {
+            storage::external::remove_external_name(container)?;
+            if print_removed {
+                println!("{}", container);
+            }
+            return Ok(());
+        }
         None if force => return Ok(()),
         None => {
             return Err(anyhow!(
@@ -6412,6 +6466,7 @@ fn remove_container_opts_inner(
     }
 
     let bundle_path = PathBuf::from(&c.bundle_path);
+    make_bundle_tree_removable(&bundle_path);
     if let Ok(content) = fs::read_to_string(bundle_path.join("config.json")) {
         if let Ok(spec) = serde_json::from_str::<Spec>(&content) {
             if let Some(cidfile) = spec

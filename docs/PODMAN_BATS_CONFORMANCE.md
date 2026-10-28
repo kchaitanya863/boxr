@@ -74,7 +74,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
-| `030-run.bats` | **69/75** ok (latest `run-20261028-045456.log`): detached watcher, **`--hooks-dir`**, **`static_dir`**, **`--rmi`**, port **126**, testimage `/` **555** (**43**), global **`--syslog`** conmon shim (**70**); still red: journald (**18**), uidmap/hosts (**46**), cgroupns ro mount (**64**), **buildah** external (**71**), systemd init **`/run`** (**72**); **46** needs host `newuidmap` |
+| `030-run.bats` | **72/75** ok (latest `bats-030-run-2.log`): **`--cgroupns`** on run path, default **cgroup2** + **`/run` tmpfs 755** for systemd init (**72**), **buildah** stub + external name registry (**71**), journald **stdout/logs** via capture tee (**17**); still red: **journalctl** + conmon pidfile (**18**), **uidmap** /etc/hosts (**46**, needs host `newuidmap`), **cgroupns=host** ro bind in rootless (**64**) |
 | `040-ps.bats` | **7/8** passing in isolation (`MANIFEST` one-liner `040-ps`); see gaps below |
 | `045-start.bats` | **8/8** in isolation |
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
@@ -89,7 +89,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 
 ### Known gaps (`040-ps`)
 
-- **`podman ps --external`**: Requires **buildah** and Podman storage “external” containers; not installed in typical CI/agent images. `ps --external` with no externals prints the table header only (Podman-shaped).
+- **`podman ps --external`**: BATS uses a **`buildah` stub** on `PATH` (see `tests/podman_bats/buildah-stub.sh`) plus boxr’s `external-container-names` file for create/rm name collisions; real buildah storage is not integrated.
 - Full **manifest.txt** run still has many reds (`030-run`, `020-tag`, volumes, etc.); use per-file manifests to track focused progress.
 
 **100% pass** of upstream suites is not realistic until `info`, logging, networking, and storage output match Podman; the harness measures progress.
