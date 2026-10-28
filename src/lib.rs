@@ -2062,6 +2062,7 @@ pub async fn run_container_with_output(
         apply_namespace_to_linux(linux, &mut annotations, "uts", &args.uts)?;
         apply_namespace_to_linux(linux, &mut annotations, "pid", &args.pid)?;
     }
+    apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     if args.unsetenv_all {
         annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
@@ -3288,12 +3289,17 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
         .find(&args.container)
         .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
 
-    if !matches!(rec.status, ContainerStatus::Running) {
+    let bundle_path = PathBuf::from(&rec.bundle_path);
+    let process_alive = runtime::linux::bundle_process_is_alive(&bundle_path);
+    if !matches!(rec.status, ContainerStatus::Running) && !process_alive {
         return Err(anyhow!(
             "Container '{}' is not running: {}",
             args.container,
             rec.status
         ));
+    }
+    if !process_alive {
+        return Err(anyhow!("Container '{}' is not running", args.container));
     }
 
     if args.command.is_empty() {
@@ -3320,19 +3326,19 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
         }
     }
 
-    let bundle_path = PathBuf::from(&rec.bundle_path);
     let merged_env = merge_exec_environment(&bundle_path, &combined_env, args.tty);
     let exec_pid_path = bundle_path.join("exec_pid");
     let attach = runtime::ExecAttach {
         interactive: args.interactive,
         tty: args.tty,
     };
+    let exec_user = resolve_exec_user_spec(&bundle_path, args.user.as_deref());
     exec_in_bundle(
         &bundle_path,
         &args.command,
         &merged_env,
         args.workdir.as_deref(),
-        args.user.as_deref(),
+        exec_user.as_deref(),
         args.detach,
         attach,
         if args.detach {
@@ -3341,6 +3347,20 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
             None
         },
     )
+}
+
+fn resolve_exec_user_spec(bundle_path: &Path, explicit: Option<&str>) -> Option<String> {
+    if let Some(u) = explicit {
+        return Some(u.to_string());
+    }
+    let content = fs::read_to_string(bundle_path.join("config.json")).ok()?;
+    let spec: Spec = serde_json::from_str(&content).ok()?;
+    let uid = spec.process.user.uid;
+    let gid = spec.process.user.gid;
+    if uid == 0 && gid == 0 {
+        return None;
+    }
+    Some(format!("{}:{}", uid, gid))
 }
 
 fn merge_exec_environment(
@@ -5993,21 +6013,6 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         apply_namespace_to_linux(l, &mut annotations, "ipc", &args.ipc)?;
         apply_namespace_to_linux(l, &mut annotations, "uts", &args.uts)?;
         apply_namespace_to_linux(l, &mut annotations, "pid", &args.pid)?;
-        if let Some(userns) = args.userns.last() {
-            annotations.insert("boxr.userns".to_string(), userns.clone());
-            if userns == "host" {
-                l.namespaces.retain(|ns| ns.ns_type != "user");
-            } else if !userns.is_empty() {
-                l.namespaces.push(oci::runtime::LinuxNamespace {
-                    ns_type: "user".to_string(),
-                    path: if userns.starts_with('/') {
-                        Some(userns.clone())
-                    } else {
-                        None
-                    },
-                });
-            }
-        }
         if let Some(cgroupns) = &args.cgroupns {
             annotations.insert("boxr.cgroupns".to_string(), cgroupns.clone());
             if cgroupns == "host" {
@@ -6044,6 +6049,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
             });
         }
     }
+    apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     if args.security_opt.iter().any(|s| s == "seccomp=unconfined") {
         if let Some(l) = &mut spec.linux {
             l.seccomp = None;
@@ -6815,6 +6821,108 @@ fn parse_pod_share(share: &str) -> (bool, bool, bool, bool) {
         parts.iter().any(|p| p == "uts"),
         parts.iter().any(|p| p == "pid"),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn host_passwd_name_for_uid(uid: u32) -> String {
+    unsafe {
+        let pwd = libc::getpwuid(uid);
+        if pwd.is_null() {
+            return uid.to_string();
+        }
+        std::ffi::CStr::from_ptr((*pwd).pw_name)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn host_passwd_name_for_uid(uid: u32) -> String {
+    uid.to_string()
+}
+
+/// Podman #6829: ensure `id -un` works under `--userns=keep-id`.
+fn ensure_keep_id_passwd_entry(
+    rootfs: &Path,
+    container_uid: u32,
+    container_gid: u32,
+    host_uid: u32,
+    _host_gid: u32,
+) -> Result<()> {
+    let passwd_path = rootfs.join("etc/passwd");
+    let existing = fs::read_to_string(&passwd_path).unwrap_or_default();
+    let name = host_passwd_name_for_uid(host_uid);
+    let home = format!("/home/{}", name);
+    let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+    let mut replaced = false;
+    for line in &mut lines {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 4 && parts[2] == container_uid.to_string() && parts[0] == "root" {
+            *line = format!(
+                "{}:x:{}:{}::{home}:/bin/sh",
+                name,
+                container_uid,
+                container_gid
+            );
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced
+        && !lines
+            .iter()
+            .any(|l| l.split(':').next() == Some(name.as_str()))
+    {
+        lines.push(format!(
+            "{}:x:{}:{}::{home}:/bin/sh",
+            name,
+            container_uid,
+            container_gid
+        ));
+    }
+    if let Some(parent) = passwd_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&passwd_path, lines.join("\n"))?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        let mut file = fs::OpenOptions::new().append(true).open(&passwd_path)?;
+        use std::io::Write;
+        file.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+fn apply_podman_userns(
+    args: &RunArgs,
+    spec: &mut Spec,
+    annotations: &mut HashMap<String, String>,
+    merged_rootfs: &Path,
+) -> Result<()> {
+    if let Some(userns) = args.userns.last() {
+        annotations.insert("boxr.userns".to_string(), userns.clone());
+        let l = spec.linux.get_or_insert_with(Default::default);
+        if userns == "host" {
+            l.namespaces.retain(|ns| ns.ns_type != "user");
+        } else if !userns.is_empty() {
+            l.namespaces.push(oci::runtime::LinuxNamespace {
+                ns_type: "user".to_string(),
+                path: if userns.starts_with('/') {
+                    Some(userns.clone())
+                } else {
+                    None
+                },
+            });
+        }
+        if userns == "keep-id" {
+            // Rootless boxr maps container UID 0 to the invoking host user.
+            spec.process.user.uid = 0;
+            spec.process.user.gid = 0;
+            let host_uid = unsafe { libc::getuid() };
+            let host_gid = unsafe { libc::getgid() };
+            ensure_keep_id_passwd_entry(merged_rootfs, 0, 0, host_uid, host_gid)?;
+        }
+    }
+    Ok(())
 }
 
 fn apply_namespace_to_linux(

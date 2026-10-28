@@ -21,7 +21,7 @@ pub struct ExecAttach {
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{exec_in_bundle, execute_bundle};
+pub use linux::{bundle_process_is_alive, exec_in_bundle, execute_bundle};
 
 #[cfg(target_os = "macos")]
 pub mod darwin;
