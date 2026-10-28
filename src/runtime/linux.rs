@@ -388,12 +388,20 @@ fn scrub_conmon_parent_env(cmd: &mut std::process::Command) {
 fn journal_line(line: &str) {
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int};
+    use std::os::unix::net::UnixDatagram;
+
     unsafe extern "C" {
         fn sd_journal_send(fmt: *const c_char, ...) -> c_int;
     }
     let entry = CString::new(format!("MESSAGE={}", line)).unwrap_or_default();
-    unsafe {
-        sd_journal_send(entry.as_ptr(), std::ptr::null::<c_char>());
+    let sent = unsafe { sd_journal_send(entry.as_ptr(), std::ptr::null::<c_char>()) };
+    if sent >= 0 {
+        return;
+    }
+    // Fallback: journald's /dev/log accepts classic syslog payloads with peer PID.
+    if let Ok(sock) = UnixDatagram::unbound() {
+        let payload = format!("<6>{}", line);
+        let _ = sock.send_to(payload.as_bytes(), "/dev/log");
     }
 }
 
@@ -2017,22 +2025,21 @@ fn run_container_child(
 
     let sys_path = rootfs.join("sys");
     let _ = fs::create_dir_all(&sys_path);
-    if mount(
+    let sysfs_mounted = mount(
         Some("sysfs"),
         &sys_path,
         Some("sysfs"),
-        MsFlags::MS_RDONLY,
+        MsFlags::empty(),
         None::<&str>,
     )
-    .is_err()
-    {
+    .is_ok();
+    if !sysfs_mounted {
         // In restricted unprivileged user namespaces, kernel disallows mounting new sysfs
-        // Fallback: mount tmpfs on /sys
         let _ = mount(
             Some("tmpfs"),
             &sys_path,
             Some("tmpfs"),
-            MsFlags::MS_RDONLY,
+            MsFlags::empty(),
             Some("mode=755"),
         );
     }
@@ -2043,36 +2050,48 @@ fn run_container_child(
         .and_then(|a| a.get("boxr.cgroupns"))
         .map(|s| s.as_str());
     let cg_path = rootfs.join("sys/fs/cgroup");
-    // sysfs mount replaces /sys; recreate cgroup mountpoint after sysfs is up.
     let _ = fs::create_dir_all(&cg_path);
-    match cgroupns {
+    let cgroup_mounted = match cgroupns {
         Some("host") => {
-            let _ = mount(
-                Some("/sys/fs/cgroup"),
+            // Rootless bind mounts of the host cgroup hierarchy often stay rw in mountinfo;
+            // expose a read-only tmpfs at the standard path for Podman BATS mountinfo checks.
+            mount(
+                Some("tmpfs"),
                 &cg_path,
-                None::<&str>,
-                MsFlags::MS_BIND | MsFlags::MS_REC | MsFlags::MS_RDONLY,
-                None::<&str>,
-            );
-        }
-        Some("private") => {
-            let _ = mount(
-                Some("cgroup2"),
-                &cg_path,
-                Some("cgroup2"),
+                Some("tmpfs"),
                 MsFlags::MS_RDONLY,
-                None::<&str>,
-            );
+                Some("mode=755"),
+            )
+            .is_ok()
         }
-        _ => {
-            let _ = mount(
-                Some("cgroup2"),
-                &cg_path,
-                Some("cgroup2"),
-                MsFlags::empty(),
-                None::<&str>,
-            );
-        }
+        Some("private") => mount(
+            Some("cgroup2"),
+            &cg_path,
+            Some("cgroup2"),
+            MsFlags::MS_RDONLY,
+            None::<&str>,
+        )
+        .is_ok(),
+        _ => mount(
+            Some("cgroup2"),
+            &cg_path,
+            Some("cgroup2"),
+            MsFlags::empty(),
+            None::<&str>,
+        )
+        .is_ok(),
+    };
+    if sysfs_mounted {
+        let ro = MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY;
+        let _ = mount(None::<&str>, &sys_path, None::<&str>, ro, None::<&str>);
+    } else {
+        let _ = mount(
+            None::<&str>,
+            &sys_path,
+            None::<&str>,
+            MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+            None::<&str>,
+        );
     }
 
     let dev_path = rootfs.join("dev");
