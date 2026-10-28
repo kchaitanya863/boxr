@@ -102,6 +102,49 @@ pub struct ImageManifest {
     pub layers: Vec<Descriptor>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct DockerImageHealthcheck {
+    #[serde(rename = "Test", default)]
+    test: Vec<String>,
+    #[serde(rename = "Interval", default)]
+    interval_ns: Option<u64>,
+    #[serde(rename = "Timeout", default)]
+    timeout_ns: Option<u64>,
+    #[serde(rename = "StartPeriod", default)]
+    start_period_ns: Option<u64>,
+    #[serde(rename = "Retries", default)]
+    retries: Option<u32>,
+}
+
+impl From<DockerImageHealthcheck> for crate::health::HealthConfig {
+    fn from(h: DockerImageHealthcheck) -> Self {
+        let ns_to_secs = |ns: Option<u64>, default: u64| -> u64 {
+            ns.map(|n| (n / 1_000_000_000).max(1))
+                .unwrap_or(default)
+        };
+        crate::health::HealthConfig {
+            test: h.test,
+            interval_secs: ns_to_secs(h.interval_ns, 30),
+            timeout_secs: ns_to_secs(h.timeout_ns, 30),
+            start_period_secs: h
+                .start_period_ns
+                .map(|n| n / 1_000_000_000)
+                .unwrap_or(0),
+            retries: h.retries.unwrap_or(3),
+        }
+    }
+}
+
+fn deserialize_docker_healthcheck<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::health::HealthConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<DockerImageHealthcheck>::deserialize(deserializer)?;
+    Ok(raw.map(Into::into))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExecutionConfig {
     #[serde(rename = "User", skip_serializing_if = "Option::is_none")]
@@ -120,7 +163,12 @@ pub struct ExecutionConfig {
     pub volumes: Option<HashMap<String, serde_json::Value>>,
     #[serde(rename = "ExposedPorts", skip_serializing_if = "Option::is_none")]
     pub exposed_ports: Option<HashMap<String, serde_json::Value>>,
-    #[serde(rename = "Healthcheck", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "Healthcheck",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_docker_healthcheck",
+        default
+    )]
     pub healthcheck: Option<crate::health::HealthConfig>,
     #[serde(rename = "StopSignal", skip_serializing_if = "Option::is_none")]
     pub stop_signal: Option<String>,
