@@ -2305,7 +2305,11 @@ pub fn exec_in_bundle(
         .as_ref()
         .filter(|c| c.reset_supplementary_groups || c.uid != 0 || c.gid != 0);
     let needs_group_sync = bundle_needs_exec_group_sync(bundle_path);
-    let use_setns_exec = override_creds.is_some() || needs_group_sync;
+    let use_setns_exec = override_creds.is_some()
+        || needs_group_sync
+        || exec_creds
+            .as_ref()
+            .is_some_and(|c| c.uid == 0 && !c.reset_supplementary_groups);
     let same_userns = match (
         fs::read_link("/proc/self/ns/user"),
         fs::read_link(format!("/proc/{pid}/ns/user")),

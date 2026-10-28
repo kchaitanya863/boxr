@@ -69,6 +69,14 @@ Authoritative log: `.cache/podman-bats-results/run-20261028-130514.log` (153 ok 
 
 Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails (for future gating).
 
+On hosts where **`mount_setattr` idmap** fails (Cloud Agent / hardened kernels), **`160-volumes` keep-id** stays red while everything else passes. For a strict gate that matches boxr capability (not host idmap policy), run:
+
+```bash
+PODMAN_BATS_OMIT_HOST_GATED=1 PODMAN_BATS_STRICT=1 ./scripts/run_podman_bats_conformance.sh
+```
+
+This skips **`160-volumes`** only when `tools/check_podman_bats_prereqs.sh` reports idmap failure.
+
 ### Host prerequisites (075 / 160)
 
 Before treating **075-exec** or **160-volumes** keep-id failures as boxr regressions, run:

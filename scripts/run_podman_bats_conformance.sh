@@ -108,6 +108,25 @@ run_manifest() {
     exit 1
   fi
 
+  local log="$RESULTS_DIR/run-$(date +%Y%m%d-%H%M%S).log"
+  local failed=0
+
+  if [[ "${PODMAN_BATS_OMIT_HOST_GATED:-0}" == "1" ]]; then
+    local probe_out
+    probe_out="$("$REPO_ROOT/tools/check_podman_bats_prereqs.sh" 2>&1 || true)"
+    if ! grep -q 'mount_setattr ok' <<<"$probe_out"; then
+      local filtered=()
+      for p in "${patterns[@]}"; do
+        [[ "$p" == "160-volumes" ]] && continue
+        filtered+=("$p")
+      done
+      if [[ ${#filtered[@]} -lt ${#patterns[@]} ]]; then
+        echo "PODMAN_BATS_OMIT_HOST_GATED=1: skipping 160-volumes (idmap probe failed on this host)" | tee -a "$log"
+        patterns=("${filtered[@]}")
+      fi
+    fi
+  fi
+
   export PODMAN="$WRAPPER"
   export QUADLET="${QUADLET:-/bin/false}"
 
@@ -122,8 +141,6 @@ run_manifest() {
   echo "Podman tests: $SRC_DIR"
 
   cd "$SRC_DIR"
-  local log="$RESULTS_DIR/run-$(date +%Y%m%d-%H%M%S).log"
-  local failed=0
   for pat in "${patterns[@]}"; do
     export BOXR_HOME
     BOXR_HOME="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bats.XXXXXX")"
