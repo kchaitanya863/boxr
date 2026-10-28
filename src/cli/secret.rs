@@ -13,11 +13,13 @@ pub enum SecretAction {
     Create {
         /// Secret name
         #[arg(value_name = "NAME")]
-        #[arg(long = "name")]
-        name: Option<String>,
+        name: String,
+        /// Read secret from file (use - for stdin); optional second positional
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
         /// Read secret from file (use - for stdin)
         #[arg(short = 'f', long = "file")]
-        file: Option<String>,
+        file_flag: Option<String>,
         /// Set metadata labels (key=value)
         #[arg(long = "label")]
         labels: Vec<String>,

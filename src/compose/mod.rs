@@ -533,7 +533,7 @@ impl ComposeProject {
             let run_args = RunArgs {
                 registry_auth: Default::default(),
                 interactive: false,
-                tty: None,
+                tty: false,
                 detach,
                 rm: false,
                 rmi: false,
@@ -556,6 +556,15 @@ impl ComposeProject {
                 rootless: true,
                 restart: svc.restart.clone().unwrap_or_else(|| "no".to_string()),
                 health_cmd: None,
+                secret: Vec::new(),
+                health_startup_cmd: None,
+                health_startup_interval: None,
+                health_startup_timeout: None,
+                health_startup_retries: None,
+                health_startup_success: None,
+                health_max_log_count: None,
+                health_max_log_size: None,
+                health_log_destination: None,
                 platform: None,
                 privileged: false,
                 network: svc_net.clone(),
@@ -875,7 +884,7 @@ impl ComposeProject {
         run_args.rm = rm;
         run_args.detach = false;
         run_args.interactive = true;
-        run_args.tty = Some(true);
+        run_args.tty = true;
         if !command.is_empty() {
             run_args.command = command;
         }
@@ -963,7 +972,7 @@ impl ComposeProject {
         Ok(RunArgs {
             registry_auth: Default::default(),
             interactive: false,
-            tty: None,
+            tty: false,
             detach,
             rm: false,
             rmi: false,
@@ -986,6 +995,15 @@ impl ComposeProject {
             rootless: true,
             restart: svc.restart.clone().unwrap_or_else(|| "no".to_string()),
             health_cmd: None,
+            secret: Vec::new(),
+            health_startup_cmd: None,
+            health_startup_interval: None,
+            health_startup_timeout: None,
+            health_startup_retries: None,
+            health_startup_success: None,
+            health_max_log_count: None,
+            health_max_log_size: None,
+            health_log_destination: None,
             platform: None,
             privileged: false,
             network: svc_net,

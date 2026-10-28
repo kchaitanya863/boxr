@@ -126,7 +126,7 @@ pub async fn create_container(
     let run_args = crate::cli::RunArgs {
         registry_auth: Default::default(),
         interactive: false,
-        tty: None,
+        tty: false,
         detach: true,
         rm: false,
         rmi: false,
@@ -155,6 +155,15 @@ pub async fn create_container(
         rootless: true,
         restart,
         health_cmd: None,
+        secret: Vec::new(),
+        health_startup_cmd: None,
+        health_startup_interval: None,
+        health_startup_timeout: None,
+        health_startup_retries: None,
+        health_startup_success: None,
+        health_max_log_count: None,
+        health_max_log_size: None,
+        health_log_destination: None,
         platform: None,
         network: "auto".to_string(),
         disable_content_trust: false,
@@ -272,7 +281,7 @@ pub async fn start_container(
     State(state): State<DaemonState>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    match crate::start_container_with_home(&id, Some(&state.home)).await {
+    match crate::start_container_with_home(&id, Some(&state.home), true).await {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
     }
@@ -308,7 +317,7 @@ pub async fn restart_container(
 ) -> StatusCode {
     let _ = crate::stop_container_with_home(&id, None, Some(&state.home));
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    match crate::start_container_with_home(&id, Some(&state.home)).await {
+    match crate::start_container_with_home(&id, Some(&state.home), true).await {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
     }

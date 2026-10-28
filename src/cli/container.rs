@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use super::image::RegistryAuthArgs;
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RunArgs {
     #[command(flatten)]
@@ -10,16 +10,13 @@ pub struct RunArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
 
-    /// Allocate a pseudo-TTY (`-t`, `-t=true`, `-t=false`; Podman-compatible)
-    #[arg(
-        short = 't',
-        long = "tty",
-        action = clap::ArgAction::Set,
-        num_args = 0..=1,
-        default_missing_value = "true",
-        value_parser = clap::builder::BoolishValueParser::new()
-    )]
-    pub tty: Option<bool>,
+    /// Allocate a pseudo-TTY
+    #[arg(short = 't', long = "tty", action = clap::ArgAction::SetTrue)]
+    pub tty: bool,
+
+    /// Podman-compatible secret mounts (`source=name,type=env`, …)
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
 
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
@@ -375,6 +372,31 @@ pub struct RunArgs {
     #[arg(long = "no-healthcheck")]
     pub no_healthcheck: bool,
 
+    /// Startup healthcheck command (accepted for Podman e2e; stored in annotations)
+    #[arg(long = "health-startup-cmd")]
+    pub health_startup_cmd: Option<String>,
+
+    #[arg(long = "health-startup-interval")]
+    pub health_startup_interval: Option<String>,
+
+    #[arg(long = "health-startup-timeout")]
+    pub health_startup_timeout: Option<String>,
+
+    #[arg(long = "health-startup-retries")]
+    pub health_startup_retries: Option<u32>,
+
+    #[arg(long = "health-startup-success")]
+    pub health_startup_success: Option<u32>,
+
+    #[arg(long = "health-max-log-count")]
+    pub health_max_log_count: Option<u32>,
+
+    #[arg(long = "health-max-log-size")]
+    pub health_max_log_size: Option<u32>,
+
+    #[arg(long = "health-log-destination")]
+    pub health_log_destination: Option<String>,
+
     /// Attach to STDIN, STDOUT or STDERR
     #[arg(short = 'a', long = "attach")]
     pub attach: Vec<String>,
@@ -529,7 +551,7 @@ pub struct RunArgs {
 impl RunArgs {
     /// Whether `-t` / `--tty` requests a pseudo-TTY (default false).
     pub fn allocate_tty(&self) -> bool {
-        self.tty.unwrap_or(false)
+        self.tty
     }
 
     pub fn effective_read_only(&self) -> bool {
@@ -896,6 +918,10 @@ pub struct PsArgs {
     /// Display external containers (buildah, etc.)
     #[arg(long = "external")]
     pub external: bool,
+
+    /// Display namespace information (for custom --format templates)
+    #[arg(long = "ns")]
+    pub ns: bool,
 
     /// Container names or IDs (accepted only for validation; not supported with --latest)
     #[arg(value_name = "CONTAINER")]

@@ -207,6 +207,8 @@ pub enum NetworkAction {
         name: String,
     },
     Rm {
+        #[arg(short = 'f', long = "force")]
+        force: bool,
         name: String,
     },
     Prune(NetworkPruneArgs),
