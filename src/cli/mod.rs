@@ -28,15 +28,37 @@ use std::sync::OnceLock;
 pub static RUN_RM_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Strip `--rm=false` before clap parsing (Podman accepts `run --rmi --rm=false`).
+/// Podman global flags that take a value; stripped before clap (e2e / storage init).
+const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
+    "--root",
+    "--runroot",
+    "--tmpdir",
+    "--storage-driver",
+    "--runtime",
+    "--conmon",
+    "--network-config-dir",
+    "--cgroup-manager",
+    "--events-backend",
+    "--transient-store",
+];
+
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut rm_false = false;
-    for a in argv {
+    let mut i = 0;
+    while i < argv.len() {
+        let a = &argv[i];
         if a == "--rm=false" {
             rm_false = true;
+            i += 1;
             continue;
         }
-        out.push(a);
+        if PODMAN_GLOBAL_VALUE_FLAGS.contains(&a.as_str()) {
+            i += 2;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
     }
     if rm_false {
         let _ = RUN_RM_EXPLICIT_FALSE.set(true);
@@ -105,6 +127,9 @@ pub struct Cli {
     /// Write container ID to a file instead of stdout (Podman global flag)
     #[arg(global = true, long = "out", value_name = "FILE")]
     pub out: Option<String>,
+    /// Flags passed through to the OCI runtime (Podman global flag)
+    #[arg(global = true, long = "runtime-flag", value_name = "FLAG")]
+    pub runtime_flag: Vec<String>,
     #[command(subcommand)]
     pub command: Commands,
 }

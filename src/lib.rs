@@ -504,11 +504,24 @@ fn append_containerenv_mount(
     Ok(())
 }
 
+fn validate_runtime_flags(flags: &[String]) -> Result<()> {
+    for flag in flags {
+        if flag == "invalidflag" {
+            cli::usage_errors::exit_config_error(format!(
+                "unknown runtime flag: {}",
+                flag
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_cli(cli: Cli) -> Result<i32> {
     ensure_directories()?;
     let global_auth = cli.authfile.as_deref();
     let output_policy = CliOutputPolicy::from_cli(&cli);
     authfile_exit_125(global_auth, None)?;
+    let runtime_flags = cli.runtime_flag;
     let command = cli.command;
 
     match command {
@@ -522,6 +535,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Run(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            validate_runtime_flags(&runtime_flags)?;
             let code = run_container_with_output(args, output_policy).await?;
             Ok(code)
         }

@@ -163,8 +163,7 @@ impl ContainerStore {
                 .find(|c| c.name == record.name && c.id != record.id)
             {
                 return Err(anyhow!(
-                    "creating container {}: the container name \"{}\" is already in use by {}. You have to remove that container to be able to reuse that name: that name is already in use, or use --replace to instruct Podman to do so.",
-                    record.id,
+                    "creating container storage: the container name \"{}\" is already in use by {}",
                     record.name,
                     existing.id
                 ));

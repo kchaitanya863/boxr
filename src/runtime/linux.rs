@@ -1630,15 +1630,13 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
     const MS_PRIVATE: u64 = 1 << 18;
 
     #[repr(C)]
-    struct MountAttr {
+    struct MountAttrVer0 {
         attr_set: u64,
         attr_clr: u64,
         propagation: u64,
         userns_fd: u64,
-        uuid: u64,
-        size: u64,
-        padding: u64,
     }
+    const MOUNT_ATTR_SIZE_VER0: usize = 32;
 
     #[cfg(target_arch = "x86_64")]
     const SYS_OPEN_TREE: libc::c_long = 428;
@@ -1677,14 +1675,11 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
     }
     let tree_fd = tree_fd as i32;
 
-    let attr = MountAttr {
+    let attr = MountAttrVer0 {
         attr_set: MOUNT_ATTR_IDMAP,
         attr_clr: 0,
         propagation: MS_PRIVATE,
         userns_fd: user_ns.as_raw_fd() as u64,
-        uuid: 0,
-        size: 32, // MOUNT_ATTR_SIZE_VER0 (linux/mount.h)
-        padding: 0,
     };
     let rc = unsafe {
         libc::syscall(
@@ -1692,8 +1687,8 @@ fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
             tree_fd,
             std::ptr::null::<libc::c_char>(),
             (AT_EMPTY_PATH | AT_RECURSIVE) as libc::c_ulong,
-            &attr as *const MountAttr,
-            std::mem::size_of::<MountAttr>(),
+            &attr as *const MountAttrVer0,
+            MOUNT_ATTR_SIZE_VER0,
         )
     };
     if rc < 0 {
