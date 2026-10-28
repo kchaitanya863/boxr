@@ -545,13 +545,20 @@ impl RunArgs {
 
     /// File descriptors to pass into the container (Podman/crun semantics).
     pub fn resolved_preserve_fds(&self) -> Vec<u32> {
+        Self::resolved_preserve_fds_from(self.preserve_fds, &self.preserve_fd)
+    }
+
+    pub fn resolved_preserve_fds_from(
+        preserve_fds: Option<u32>,
+        preserve_fd: &[String],
+    ) -> Vec<u32> {
         let mut fds = Vec::new();
-        if let Some(n) = self.preserve_fds {
+        if let Some(n) = preserve_fds {
             for i in 0..n {
                 fds.push(3 + i);
             }
         }
-        for spec in &self.preserve_fd {
+        for spec in preserve_fd {
             for part in spec.split(',') {
                 let part = part.trim();
                 if part.is_empty() {
@@ -715,10 +722,24 @@ pub struct ExecArgs {
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
 
+    /// Pass down N additional file descriptors (starting at fd 3)
+    #[arg(long = "preserve-fds")]
+    pub preserve_fds: Option<u32>,
+
+    /// Pass down specific file descriptors (comma-separated, e.g. 9,40)
+    #[arg(long = "preserve-fd")]
+    pub preserve_fd: Vec<String>,
+
     pub container: String,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
+}
+
+impl ExecArgs {
+    pub fn resolved_preserve_fds(&self) -> Vec<u32> {
+        RunArgs::resolved_preserve_fds_from(self.preserve_fds, &self.preserve_fd)
+    }
 }
 
 #[derive(Args, Debug)]

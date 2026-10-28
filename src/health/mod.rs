@@ -180,6 +180,7 @@ pub fn check_container_health(
         false,
         crate::runtime::ExecAttach::default(),
         None,
+        &[],
     ) {
         Ok(c) => c,
         Err(_) => 1,

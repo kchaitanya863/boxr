@@ -23,6 +23,7 @@ impl ContainerTop {
             false,
             crate::runtime::ExecAttach::default(),
             None,
+            &[],
         )?;
         if code != 0 {
             // Fallback to simple ps without flags
@@ -36,6 +37,7 @@ impl ContainerTop {
                 false,
                 crate::runtime::ExecAttach::default(),
                 None,
+                &[],
             );
         }
 

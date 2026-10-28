@@ -27,6 +27,7 @@ pub trait ContainerRuntime: Send + Sync {
         detach: bool,
         attach: super::ExecAttach,
         exec_pid_path: Option<&Path>,
+        preserve_fds: &[u32],
     ) -> Result<i32>;
 }
 
@@ -56,6 +57,7 @@ impl ContainerRuntime for NativeContainerRuntime {
         detach: bool,
         attach: super::ExecAttach,
         exec_pid_path: Option<&Path>,
+        preserve_fds: &[u32],
     ) -> Result<i32> {
         super::exec_in_bundle(
             bundle_path,
@@ -66,6 +68,7 @@ impl ContainerRuntime for NativeContainerRuntime {
             detach,
             attach,
             exec_pid_path,
+            preserve_fds,
         )
     }
 }

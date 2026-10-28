@@ -1378,6 +1378,7 @@ pub fn run_trampoline_exec(args: &[String]) -> Result<i32> {
         false,
         crate::runtime::ExecAttach::default(),
         None,
+        &[],
     )
 }
 
@@ -1485,7 +1486,11 @@ fn apply_exec_user_credentials(bundle_path: &Path, user: &str) {
     if let Some((uid, gid)) = resolve_exec_uid_gid(bundle_path, user) {
         let gid = nix::unistd::Gid::from_raw(gid);
         let uid = nix::unistd::Uid::from_raw(uid);
-        let _ = nix::unistd::setgroups(&[gid]);
+        // Explicit `user:group` resets supplementary groups (Podman 075-exec).
+        if user.contains(':') {
+            let _ = fs::write("/proc/self/setgroups", "allow");
+            let _ = nix::unistd::setgroups(&[]);
+        }
         let _ = nix::unistd::setgid(gid);
         let _ = nix::unistd::setuid(uid);
     }
@@ -1517,7 +1522,11 @@ pub fn exec_in_bundle(
     detach: bool,
     attach: crate::runtime::ExecAttach,
     exec_pid_path: Option<&Path>,
+    preserve_fds: &[u32],
 ) -> Result<i32> {
+    if !preserve_fds.is_empty() {
+        clear_close_on_exec(preserve_fds);
+    }
     let pid = wait_for_live_container_pid(bundle_path)?;
 
     let umask = bundle_process_umask(bundle_path);
@@ -1542,6 +1551,7 @@ pub fn exec_in_bundle(
                 attach,
                 exec_pid_path,
                 umask,
+                preserve_fds,
             );
         }
     }
@@ -1646,6 +1656,7 @@ pub fn exec_in_bundle(
                     attach,
                     exec_pid_path,
                     umask,
+                    preserve_fds,
                 );
             }
             return Ok(code);
@@ -1661,6 +1672,7 @@ pub fn exec_in_bundle(
             attach,
             exec_pid_path,
             umask,
+            preserve_fds,
         ),
     }
 }
@@ -1676,6 +1688,7 @@ fn exec_in_bundle_via_setns(
     attach: crate::runtime::ExecAttach,
     exec_pid_path: Option<&Path>,
     umask: Option<u32>,
+    preserve_fds: &[u32],
 ) -> Result<i32> {
     use nix::sched::{CloneFlags, setns};
 
@@ -1763,6 +1776,9 @@ fn exec_in_bundle_via_setns(
                     nix::mount::MsFlags::empty(),
                     None::<&str>,
                 );
+            }
+            if !preserve_fds.is_empty() {
+                clear_close_on_exec(preserve_fds);
             }
             if let Some(u) = user {
                 apply_exec_user_credentials(bundle_path, u);

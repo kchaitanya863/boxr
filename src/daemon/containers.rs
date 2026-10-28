@@ -593,6 +593,7 @@ pub async fn start_exec_instance(
                             detach,
                             crate::runtime::ExecAttach::default(),
                             None,
+                            &[],
                         )
                             .unwrap_or(1);
                     let _ = fs::write(

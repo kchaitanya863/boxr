@@ -3828,6 +3828,7 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
         tty: args.tty,
     };
     let exec_user = resolve_exec_user_spec(&bundle_path, args.user.as_deref());
+    let preserve_fds = args.resolved_preserve_fds();
     exec_in_bundle(
         &bundle_path,
         &args.command,
@@ -3841,6 +3842,7 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
         } else {
             None
         },
+        &preserve_fds,
     )
 }
 
@@ -5489,6 +5491,8 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                 user: opts.user.clone(),
                 workdir: opts.workdir.clone(),
                 env: opts.env.clone(),
+                preserve_fds: None,
+                preserve_fd: Vec::new(),
                 container: c.name.clone(),
                 command: opts.command,
             };

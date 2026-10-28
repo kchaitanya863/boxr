@@ -102,6 +102,7 @@ pub fn exec_in_bundle(
     _detach: bool,
     _attach: crate::runtime::ExecAttach,
     _exec_pid_path: Option<&Path>,
+    _preserve_fds: &[u32],
 ) -> Result<i32> {
     let binary = &command[0];
     let args = &command[1..];

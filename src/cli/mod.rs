@@ -32,6 +32,22 @@ pub static READ_ONLY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Strip `--rm=false` before clap parsing (Podman accepts `run --rmi --rm=false`).
 /// Podman global flags that take a value; stripped before clap (e2e / storage init).
+/// Expand Podman/Docker combined short options (e.g. `run -td` → `-t` `-d`).
+fn expand_combined_short_flags(arg: &str) -> Vec<String> {
+    if arg.len() < 3 || !arg.starts_with('-') || arg.starts_with("--") {
+        return vec![arg.to_string()];
+    }
+    let body = &arg[1..];
+    if body.contains('=') {
+        return vec![arg.to_string()];
+    }
+    const RUN_EXEC_FLAGS: &[char] = &['a', 'd', 'i', 'q', 't'];
+    if body.len() > 1 && body.chars().all(|c| RUN_EXEC_FLAGS.contains(&c)) {
+        return body.chars().map(|c| format!("-{}", c)).collect();
+    }
+    vec![arg.to_string()]
+}
+
 const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
     "--root",
     "--runroot",
@@ -70,7 +86,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 2;
             continue;
         }
-        out.push(a.clone());
+        out.extend(expand_combined_short_flags(a));
         i += 1;
     }
     if rm_false {

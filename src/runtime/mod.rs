@@ -56,6 +56,7 @@ pub fn exec_in_bundle(
     _detach: bool,
     _attach: ExecAttach,
     _exec_pid_path: Option<&Path>,
+    _preserve_fds: &[u32],
 ) -> Result<i32> {
     anyhow::bail!("Container execution is only supported on Linux, macOS, and Windows");
 }

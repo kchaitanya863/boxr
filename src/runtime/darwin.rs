@@ -645,6 +645,7 @@ pub fn exec_in_bundle(
     detach: bool,
     _attach: crate::runtime::ExecAttach,
     _exec_pid_path: Option<&Path>,
+    _preserve_fds: &[u32],
 ) -> Result<i32> {
     let rootfs_path = bundle_path.join("rootfs");
     let pid_file = bundle_path.join("vm.pid");
