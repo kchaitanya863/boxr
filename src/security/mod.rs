@@ -537,11 +537,31 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                 let _ = nix::unistd::setresgid(root_gid, root_gid, root_gid);
                 let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
                 let _ = fs::write("/proc/self/setgroups", "allow");
-                Self::write_setgroups_allow(target_pid);
+                let _ = Self::write_setgroups_allow(target_pid);
                 std::process::exit(0);
             }
         }
     }
+
+    /// After the parent finishes `uid_map` / `gid_map`, re-enable supplementary groups inside
+    /// the user namespace. Rootless children write `deny` before mapping; without `allow`,
+    /// entrypoints that call `setgroups` (e.g. official `postgres` images) fail with EPERM.
+    #[cfg(target_os = "linux")]
+    pub fn try_enable_setgroups_after_mapping() {
+        let path = Path::new("/proc/self/setgroups");
+        if !path.exists() {
+            return;
+        }
+        if let Err(e) = fs::write(path, "allow") {
+            eprintln!(
+                "boxr: could not enable setgroups in user namespace (supplementary groups may fail): {}",
+                e
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn try_enable_setgroups_after_mapping() {}
 }
 
 /// Standard safe Linux Capabilities conforming to Docker/Podman default capability whitelist.

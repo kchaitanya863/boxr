@@ -1178,8 +1178,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     eprintln!("Failed to unshare user namespace: {:?}", e);
                     std::process::exit(1);
                 }
-                // Required before parent writes gid_map (newuidmap path skips write_proc_mappings).
-                let _ = fs::write("/proc/self/setgroups", "deny");
+                // Do not write "deny" here: once set in a user namespace it cannot be reverted to
+                // "allow", which breaks entrypoints using setgroups/gosu (e.g. postgres). Parent
+                // setup_child_mappings / newgidmap handle setgroups policy for gid_map writes.
 
                 // 2. Notify parent that user namespace has been created
                 if let Err(e) = child_sock.write_all(b"ready") {
@@ -1193,6 +1194,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     eprintln!("Failed to read mapping confirmation: {:?}", e);
                     std::process::exit(1);
                 }
+                crate::security::RootlessUserConfig::try_enable_setgroups_after_mapping();
 
                 // 4. Child is now root in user namespace.
                 crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe {
@@ -1602,6 +1604,7 @@ pub fn run_unshare_cli(args: &[String]) -> Result<i32> {
                 let mut buf = [0u8; 4];
                 child_sock.read_exact(&mut buf)?;
                 drop(child_sock);
+                crate::security::RootlessUserConfig::try_enable_setgroups_after_mapping();
 
                 let binary_c = CString::new(cmd[0].as_str())?;
                 let args_c: Vec<CString> = cmd
@@ -2800,6 +2803,7 @@ fn run_container_child(
                 .collect();
             let _ = nix::unistd::setgroups(&raw);
         }
+        crate::security::RootlessUserConfig::try_enable_setgroups_after_mapping();
     }
 
     if let Some(ann) = &spec.annotations {
