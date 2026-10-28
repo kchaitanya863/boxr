@@ -188,6 +188,7 @@ fn default_run_args(image: &str) -> RunArgs {
         annotations: Vec::new(),
         ulimits: Vec::new(),
         hooks_dir: None,
+        conmon_syslog: false,
         ipc: None,
         pid: None,
         uts: None,

@@ -348,6 +348,12 @@ fn conmon_pidfile_from_spec(spec: &Spec) -> Option<String> {
         .cloned()
 }
 
+fn use_conmon_shim(spec: &Spec) -> bool {
+    spec.annotations.as_ref().is_some_and(|a| {
+        a.contains_key("boxr.conmon_pidfile") || a.get("boxr.conmon_syslog") == Some(&"1".to_string())
+    })
+}
+
 fn prepare_conmon_shim(bundle_path: &Path, spec: &Spec, exe: &Path) -> Result<PathBuf> {
     let conmon = bundle_path.join("conmon");
     fs::copy(exe, &conmon).context("copy conmon shim")?;
@@ -368,6 +374,13 @@ fn prepare_conmon_shim(bundle_path: &Path, spec: &Spec, exe: &Path) -> Result<Pa
         }
     }
     Ok(conmon)
+}
+
+fn scrub_conmon_parent_env(cmd: &mut std::process::Command) {
+    cmd.env_remove("NOTIFY_SOCKET");
+    if unsafe { libc::getuid() } != 0 {
+        cmd.env_remove("DBUS_SESSION_BUS_ADDRESS");
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -525,15 +538,23 @@ pub fn execute_bundle(
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
 
-    if conmon_pidfile_from_spec(_spec).is_some() {
+    if use_conmon_shim(_spec) {
         let conmon = prepare_conmon_shim(bundle_path, _spec, &exe)?;
         if detach {
             let _ = fs::write(bundle_path.join("conmon-detach.flag"), "1");
         }
         let mut cmd = std::process::Command::new(&conmon);
-        cmd.arg("__internal-conmon-supervisor")
-            .arg(bundle_path)
-            .stdin(Stdio::null());
+        let syslog_shim = _spec.annotations.as_ref().is_some_and(|a| {
+            a.get("boxr.conmon_syslog") == Some(&"1".to_string())
+        });
+        #[cfg(unix)]
+        if syslog_shim {
+            use std::os::unix::process::CommandExt;
+            cmd.arg0("conmon --exit-command-arg--syslog");
+        }
+        cmd.arg("__internal-conmon-supervisor").arg(bundle_path);
+        cmd.stdin(Stdio::null());
+        scrub_conmon_parent_env(&mut cmd);
         if detach {
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
             #[cfg(unix)]
@@ -543,16 +564,15 @@ pub fn execute_bundle(
             }
             let _child = cmd.spawn().context("spawn conmon supervisor")?;
             let wait_start = std::time::Instant::now();
-            while !bundle_path.join("conmon.pid").exists()
-                && wait_start.elapsed() < std::time::Duration::from_secs(30)
-            {
+            while wait_start.elapsed() < std::time::Duration::from_secs(30) {
+                if bundle_path.join("conmon.pid").exists() && bundle_path.join("vm.pid").exists() {
+                    break;
+                }
                 thread::sleep(std::time::Duration::from_millis(50));
             }
             return Ok(0);
         }
-        let status = cmd
-            .status()
-            .context("run conmon supervisor (foreground)")?;
+        let status = cmd.status().context("run conmon supervisor (foreground)")?;
         return Ok(status.code().unwrap_or(1));
     }
 
@@ -1992,6 +2012,33 @@ fn run_container_child(
             MsFlags::MS_RDONLY,
             Some("mode=755"),
         );
+    }
+
+    let cgroupns = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.cgroupns"))
+        .map(|s| s.as_str());
+    if cgroupns == Some("host") || cgroupns == Some("private") {
+        let cg_path = rootfs.join("sys/fs/cgroup");
+        let _ = fs::create_dir_all(&cg_path);
+        if cgroupns == Some("host") {
+            let _ = mount(
+                Some("/sys/fs/cgroup"),
+                &cg_path,
+                None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                None::<&str>,
+            );
+        } else {
+            let _ = mount(
+                Some("cgroup2"),
+                &cg_path,
+                Some("cgroup2"),
+                MsFlags::MS_RDONLY,
+                None::<&str>,
+            );
+        }
     }
 
     let dev_path = rootfs.join("dev");

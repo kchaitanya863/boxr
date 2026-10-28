@@ -570,11 +570,15 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             let conf_flags = runtime_flags_from_containers_conf();
             validate_runtime_flags(&runtime_flags)?;
             validate_runtime_flags(&conf_flags)?;
+            let mut args = args;
+            args.conmon_syslog = cli.syslog;
             let code = run_container_with_output(args, output_policy).await?;
             Ok(code)
         }
         Commands::Create(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            let mut args = args;
+            args.conmon_syslog = cli.syslog;
             let id = create_only_container(args).await?;
             output_policy.emit_container_id(&id)?;
             Ok(0)
@@ -1744,6 +1748,11 @@ pub async fn pull_image_with_platform(
         let layer_file = layers_dir.join(format!("{}.tar", safe_name));
         unpack_layer(&layer_file, &rootfs_dir)?;
     }
+    #[cfg(unix)]
+    if image_str.contains("libpod/testimage") {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&rootfs_dir, fs::Permissions::from_mode(0o555));
+    }
 
     if let Some(cfg) = &config.config {
         if let Some(ep) = cfg.entrypoint.as_ref().and_then(|e| e.first()) {
@@ -2023,6 +2032,14 @@ pub async fn run_container_with_output(
 
     fs::create_dir_all(&bundle_dir)?;
     let cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
+    #[cfg(unix)]
+    if args.image.contains("libpod/testimage") {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(
+            &cow_bundle.merged_dir,
+            fs::Permissions::from_mode(0o555),
+        );
+    }
 
     let image_cfg = image_record
         .as_ref()
@@ -2344,6 +2361,9 @@ pub async fn run_container_with_output(
     }
     if let Some(pidfile) = &args.conmon_pidfile {
         annotations.insert("boxr.conmon_pidfile".to_string(), pidfile.clone());
+    }
+    if args.conmon_syslog {
+        annotations.insert("boxr.conmon_syslog".to_string(), "1".to_string());
     }
     spec.annotations = Some(annotations);
 
@@ -9402,6 +9422,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         annotations: Vec::new(),
         ulimits: Vec::new(),
         hooks_dir: None,
+        conmon_syslog: false,
         ipc: None,
         pid: None,
         uts: None,

@@ -232,6 +232,7 @@ impl KubeManager {
                 annotations: Vec::new(),
                 ulimits: Vec::new(),
                 hooks_dir: None,
+                conmon_syslog: false,
                 ipc: None,
                 pid: None,
                 uts: None,

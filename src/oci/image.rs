@@ -274,7 +274,7 @@ pub fn unpack_layer(layer_archive_path: &Path, target_dir: &Path) -> Result<()> 
                     let mut perms = meta.permissions();
                     let mode = perms.mode();
                     if mode & 0o700 != 0o700 {
-                        perms.set_mode(mode | 0o755);
+                        perms.set_mode(mode | 0o700);
                         let _ = fs::set_permissions(p, perms);
                     }
                 }
@@ -299,10 +299,11 @@ pub fn unpack_layer(layer_archive_path: &Path, target_dir: &Path) -> Result<()> 
         if dest.exists() {
             use std::os::unix::fs::PermissionsExt;
             if let Ok(header_mode) = entry.header().mode() {
-                let mut target_mode = header_mode;
-                if _is_dir && (target_mode & 0o700 != 0o700) {
-                    target_mode |= 0o755;
-                }
+                let target_mode = if _is_dir && header_mode == 0 {
+                    0o755
+                } else {
+                    header_mode
+                };
                 let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(target_mode));
             }
         }

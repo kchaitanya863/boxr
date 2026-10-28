@@ -259,6 +259,10 @@ pub struct RunArgs {
     #[arg(long = "hooks-dir")]
     pub hooks_dir: Option<String>,
 
+    /// Set when the global `--syslog` flag is used (not a `run` CLI flag).
+    #[arg(skip)]
+    pub conmon_syslog: bool,
+
     /// IPC mode to use
     #[arg(long = "ipc")]
     pub ipc: Option<String>,

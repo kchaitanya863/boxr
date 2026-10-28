@@ -634,6 +634,7 @@ mod tests {
             annotations: vec![],
             ulimits: vec![],
             hooks_dir: None,
+            conmon_syslog: false,
             ipc: None,
             pid: None,
             uts: None,
