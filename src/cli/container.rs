@@ -345,6 +345,14 @@ pub struct RunArgs {
     #[arg(short = 'a', long = "attach")]
     pub attach: Vec<String>,
 
+    /// Pass down N additional file descriptors (starting at fd 3)
+    #[arg(long = "preserve-fds")]
+    pub preserve_fds: Option<u32>,
+
+    /// Pass down specific file descriptors (comma-separated, e.g. 9,40)
+    #[arg(long = "preserve-fd")]
+    pub preserve_fd: Vec<String>,
+
     /// Pull image before running ("always", "missing", "never")
     #[arg(long = "pull")]
     pub pull: Option<String>,
@@ -488,6 +496,44 @@ impl RunArgs {
     /// Whether `-t` / `--tty` requests a pseudo-TTY (default false).
     pub fn allocate_tty(&self) -> bool {
         self.tty.unwrap_or(false)
+    }
+
+    /// File descriptors to pass into the container (Podman/crun semantics).
+    pub fn resolved_preserve_fds(&self) -> Vec<u32> {
+        let mut fds = Vec::new();
+        if let Some(n) = self.preserve_fds {
+            for i in 0..n {
+                fds.push(3 + i);
+            }
+        }
+        for spec in &self.preserve_fd {
+            for part in spec.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                if let Ok(fd) = part.parse::<u32>() {
+                    fds.push(fd);
+                }
+            }
+        }
+        fds.sort_unstable();
+        fds.dedup();
+        fds
+    }
+
+    /// Podman prints the container ID when attaching stdin without stdout.
+    pub fn attach_stdin_emits_container_id(&self) -> bool {
+        !self.detach
+            && !self.attach.is_empty()
+            && self
+                .attach
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("stdin"))
+            && !self
+                .attach
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("stdout"))
     }
 }
 

@@ -657,6 +657,8 @@ mod tests {
             health_start_interval: None,
             no_healthcheck: false,
             attach: vec![],
+            preserve_fds: None,
+            preserve_fd: vec![],
             pull: None,
             quiet: false,
             log_driver: vec![],

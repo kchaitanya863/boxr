@@ -211,6 +211,8 @@ fn default_run_args(image: &str) -> RunArgs {
         health_start_interval: None,
         no_healthcheck: true,
         attach: Vec::new(),
+        preserve_fds: None,
+        preserve_fd: Vec::new(),
         pull: None,
         quiet: false,
         log_driver: vec![],

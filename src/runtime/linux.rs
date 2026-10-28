@@ -206,6 +206,56 @@ fn uses_capture_logging(policy: &BundleIoPolicy) -> bool {
     }
 }
 
+fn read_preserve_fds(bundle_path: &Path) -> Vec<u32> {
+    let path = bundle_path.join("preserve_fds.json");
+    if !path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn clear_close_on_exec(fds: &[u32]) {
+    for &fd in fds {
+        if fd > i32::MAX as u32 {
+            continue;
+        }
+        unsafe {
+            let flags = libc::fcntl(fd as i32, libc::F_GETFD);
+            if flags >= 0 {
+                libc::fcntl(fd as i32, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            }
+        }
+    }
+}
+
+/// Close inherited host fds except stdio and explicitly preserved ones (Podman/crun parity).
+fn close_fds_except(keep: &[u32]) {
+    use std::collections::HashSet;
+    let mut keep_set: HashSet<i32> = HashSet::from([0, 1, 2]);
+    for &fd in keep {
+        if fd <= i32::MAX as u32 {
+            keep_set.insert(fd as i32);
+        }
+    }
+    let max_fd = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+    let max_fd = if max_fd > 0 {
+        max_fd as i32
+    } else {
+        1024
+    };
+    for fd in 0..max_fd {
+        if keep_set.contains(&fd) {
+            continue;
+        }
+        unsafe {
+            libc::close(fd);
+        }
+    }
+}
+
 fn configure_stdio(
     cmd: &mut std::process::Command,
     policy: &BundleIoPolicy,
@@ -581,6 +631,8 @@ pub fn execute_bundle(
             Ok(status.code().unwrap_or(1))
         } else {
             configure_stdio(&mut cmd, &io_policy, bundle_path)?;
+            let preserve = read_preserve_fds(bundle_path);
+            clear_close_on_exec(&preserve);
             let status = cmd
                 .status()
                 .context("Failed to execute container trampoline process")?;
@@ -1767,6 +1819,9 @@ fn run_container_child(
     spec: &Spec,
     mounts: &[MountSpec],
 ) -> Result<()> {
+    let preserve_fds = read_preserve_fds(bundle_path);
+    clear_close_on_exec(&preserve_fds);
+
     if let Some(ann) = &spec.annotations {
         if ann.get("boxr.init").map(|v| v == "true").unwrap_or(false) {
             unsafe {
@@ -2308,6 +2363,10 @@ fn run_container_child(
             fn tzset();
         }
         tzset();
+    }
+
+    if !preserve_fds.is_empty() {
+        close_fds_except(&preserve_fds);
     }
 
     // Execute container binary

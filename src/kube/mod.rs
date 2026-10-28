@@ -255,6 +255,8 @@ impl KubeManager {
                 health_start_interval: None,
                 no_healthcheck: false,
                 attach: Vec::new(),
+                preserve_fds: None,
+                preserve_fd: Vec::new(),
                 pull: None,
                 quiet: false,
                 log_driver: vec![],

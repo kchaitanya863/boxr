@@ -2536,6 +2536,14 @@ pub async fn run_container_with_output(
     )?;
     spec.save_to_bundle(&bundle_dir)?;
 
+    let preserve_fds = args.resolved_preserve_fds();
+    if !preserve_fds.is_empty() {
+        let _ = fs::write(
+            bundle_dir.join("preserve_fds.json"),
+            serde_json::to_string(&preserve_fds)?,
+        );
+    }
+
     if run_auto_remove_enabled(&args) {
         let _ = fs::write(bundle_dir.join("auto_remove"), "1");
     }
@@ -2632,7 +2640,7 @@ pub async fn run_container_with_output(
         );
     }
 
-    if args.detach {
+    if args.detach || args.attach_stdin_emits_container_id() {
         output_policy.emit_container_id(&container_id)?;
     }
 
@@ -6868,6 +6876,13 @@ async fn create_only_container_after_pod_prep(
         &image_id_for_env,
     )?;
     spec.save_to_bundle(&bundle_dir)?;
+    let preserve_fds = args.resolved_preserve_fds();
+    if !preserve_fds.is_empty() {
+        let _ = fs::write(
+            bundle_dir.join("preserve_fds.json"),
+            serde_json::to_string(&preserve_fds)?,
+        );
+    }
     if run_auto_remove_enabled(&args) {
         let _ = fs::write(bundle_dir.join("auto_remove"), "1");
     }
@@ -9089,6 +9104,8 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         health_start_interval: None,
         no_healthcheck: true,
         attach: Vec::new(),
+        preserve_fds: None,
+        preserve_fd: Vec::new(),
         pull: None,
         quiet: false,
         log_driver: vec![],
