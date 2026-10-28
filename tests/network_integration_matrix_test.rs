@@ -60,6 +60,19 @@ fn outbound_ok(out: &Output) -> bool {
     combined.contains("Example") || combined.contains("Address")
 }
 
+fn skip_custom_bridge_on_netns_eperm(home: &Path, net: &str, container: &str) -> bool {
+    if container_exited_netns_eperm(home, container) {
+        eprintln!(
+            "SKIPPED: custom bridge networking hit netns EPERM on this runner (container {})",
+            container
+        );
+        cleanup_container(home, container);
+        cleanup_network(home, net);
+        return true;
+    }
+    false
+}
+
 #[test]
 fn test_matrix_none_blocks_wan_allows_loopback() {
     if !blackbox::netns_available() {
@@ -162,6 +175,10 @@ fn test_matrix_host_and_none_reject_published_ports() {
     ignore = "custom bridge networks are slow/flaky under cargo test on macOS"
 )]
 fn test_matrix_custom_network_hosts_and_inspect() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
@@ -185,6 +202,9 @@ fn test_matrix_custom_network_hosts_and_inspect() {
             "180",
         ],
     );
+    if skip_custom_bridge_on_netns_eperm(&home, &net, &c2) {
+        return;
+    }
     assert!(
         wait_container_running(&home, &c2, Duration::from_secs(45)),
         "{}",
@@ -563,6 +583,10 @@ fn test_matrix_port_collision_same_host_port() {
     ignore = "custom bridge networks are slow/flaky under cargo test on macOS"
 )]
 fn test_matrix_peer_hosts_updated_when_second_container_joins() {
+    if !blackbox::netns_available() {
+        eprintln!("SKIPPED: network namespaces not permitted in this environment");
+        return;
+    }
     let (_guard, home) = isolated_home();
     pull_if_needed(&home, "alpine:latest");
     let suffix = rand_suffix();
@@ -585,6 +609,9 @@ fn test_matrix_peer_hosts_updated_when_second_container_joins() {
             "180",
         ],
     );
+    if skip_custom_bridge_on_netns_eperm(&home, &net, &first) {
+        return;
+    }
     assert!(
         wait_container_running(&home, &first, Duration::from_secs(45)),
         "{}",

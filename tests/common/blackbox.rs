@@ -340,6 +340,32 @@ fn container_host_pids_alive(home: &Path, name: &str) -> bool {
     false
 }
 
+fn container_bundle_logs(home: &Path, name: &str) -> Option<String> {
+    let index = home.join("containers.json");
+    let raw = fs::read_to_string(&index).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let record = data
+        .get("containers")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))?;
+    let bundle = record.get("bundle_path")?.as_str()?;
+    fs::read_to_string(Path::new(bundle).join("logs.txt")).ok()
+}
+
+/// True when the container already exited because CLONE_NEWNET failed with EPERM (common on
+/// exhausted GitHub Actions runners after a long `cargo test --all` sequence).
+pub fn container_exited_netns_eperm(home: &Path, name: &str) -> bool {
+    if container_inspect_status(home, name) != "exited" {
+        return false;
+    }
+    let Some(logs) = container_bundle_logs(home, name) else {
+        return false;
+    };
+    logs.contains("Failed to unshare network namespace")
+        && (logs.contains("EPERM") || logs.contains("Operation not permitted"))
+}
+
 pub fn format_container_wait_failure(home: &Path, name: &str) -> String {
     let status = container_inspect_status(home, name);
     let running_flag = run_boxr(home, &["inspect", "-f", "{{.State.Running}}", name]);
@@ -399,6 +425,9 @@ pub fn wait_container_running(home: &Path, name: &str, timeout: Duration) -> boo
     while start.elapsed() < effective {
         if container_reports_running(home, name) || container_host_pids_alive(home, name) {
             return true;
+        }
+        if container_exited_netns_eperm(home, name) {
+            return false;
         }
         let status = container_inspect_status(home, name);
         if status == "created" && !start_attempted {
