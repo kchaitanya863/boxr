@@ -13,8 +13,11 @@ use std::path::{Path, PathBuf};
 use std::os::unix::io::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::storage::container_store::{ContainerRecord, ContainerStatus, ContainerStore};
 
 struct NamespaceJoinState {
     ipc: bool,
@@ -558,6 +561,61 @@ fn tee_journald_capture_stream<R: std::io::Read>(
     }
 }
 
+fn flush_deferred_bundle_rmdir(bundle_path: &Path) {
+    if bundle_path.join("deferred-bundle-rm").exists() {
+        let _ = fs::remove_dir_all(bundle_path);
+    }
+}
+
+fn wait_for_detached_conmon_start(
+    bundle_path: &Path,
+    supervisor: &mut Child,
+) -> Result<()> {
+    let container_id = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let store = ContainerStore::new();
+    let wait_start = Instant::now();
+    while wait_start.elapsed() < Duration::from_secs(30) {
+        if bundle_path.join("conmon.pid").exists() {
+            return Ok(());
+        }
+        if !container_id.is_empty() {
+            match store.find(&container_id) {
+                None => return Ok(()),
+                Some(ContainerRecord { status: ContainerStatus::Exited(_), .. })
+                    if bundle_path.join("boxr-exitcode").exists() =>
+                {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        match supervisor.try_wait() {
+            Ok(Some(status)) => {
+                if bundle_path.join("conmon.pid").exists() {
+                    return Ok(());
+                }
+                if status.success() {
+                    return Ok(());
+                }
+                return Err(anyhow!(
+                    "Container failed to start: conmon supervisor exited with {}",
+                    status
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => return Err(e.into()),
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(anyhow!(
+        "Container failed to start: conmon supervisor did not start"
+    ))
+}
+
 /// Podman-compatible conmon parent: executable path ends with `conmon`, writes pidfile + ConmonPid.
 pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
     if args.is_empty() {
@@ -632,6 +690,7 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                     exit_code,
                 )
             {
+                flush_deferred_bundle_rmdir(bundle_path);
                 return Ok(exit_code);
             }
         }
@@ -666,11 +725,15 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         if let Some(h) = h_err {
             let _ = h.join();
         }
-        return Ok(status.code().unwrap_or(1));
+        let code = status.code().unwrap_or(1);
+        flush_deferred_bundle_rmdir(bundle_path);
+        return Ok(code);
     }
 
     let status = child.wait()?;
-    Ok(status.code().unwrap_or(1))
+    let code = status.code().unwrap_or(1);
+    flush_deferred_bundle_rmdir(bundle_path);
+    Ok(code)
 }
 
 pub fn execute_bundle(
@@ -728,19 +791,8 @@ pub fn execute_bundle(
                 use std::os::unix::process::CommandExt;
                 cmd.process_group(0);
             }
-            let _child = cmd.spawn().context("spawn conmon supervisor")?;
-            let wait_start = std::time::Instant::now();
-            while wait_start.elapsed() < std::time::Duration::from_secs(30) {
-                if bundle_path.join("conmon.pid").exists() {
-                    break;
-                }
-                thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if !bundle_path.join("conmon.pid").exists() {
-                return Err(anyhow!(
-                    "Container failed to start: conmon supervisor did not start"
-                ));
-            }
+            let mut supervisor = cmd.spawn().context("spawn conmon supervisor")?;
+            wait_for_detached_conmon_start(bundle_path, &mut supervisor)?;
             return Ok(0);
         }
         let status = cmd.status().context("run conmon supervisor (foreground)")?;

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub fn rand_id() -> [u8; 6] {
@@ -346,7 +346,11 @@ impl ContainerStore {
                         }
                     }
 
-                    let _ = fs::remove_dir_all(bundle);
+                    if bundle_conmon_is_current_process(&bundle) {
+                        let _ = fs::write(bundle.join("deferred-bundle-rm"), "1");
+                    } else {
+                        let _ = fs::remove_dir_all(bundle);
+                    }
                 }
 
                 Ok(removed)
@@ -355,6 +359,21 @@ impl ContainerStore {
             }
         })
     }
+}
+
+#[cfg(unix)]
+fn bundle_conmon_is_current_process(bundle: &Path) -> bool {
+    if let Ok(s) = fs::read_to_string(bundle.join("conmon.pid")) {
+        if let Ok(cp) = s.trim().parse::<i32>() {
+            return cp == unsafe { libc::getpid() };
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn bundle_conmon_is_current_process(_bundle: &Path) -> bool {
+    false
 }
 
 impl super::traits::ContainerReader for ContainerStore {
