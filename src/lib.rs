@@ -5216,9 +5216,10 @@ fn remove_container_opts_inner(
 
 pub fn remove_image(image: &str, force: bool, no_prune: bool) -> Result<()> {
     let img_store = ImageStore::new();
-    let img = img_store
-        .find(image)
-        .ok_or_else(|| anyhow!("Image '{}' not found", image))?;
+    let img = find_image_with_shortname(&img_store, image, None).ok_or_else(|| {
+        anyhow!("Image '{}' not found", image)
+    })?;
+    let remove_query = img.qualified_name();
 
     if !force {
         let c_store = ContainerStore::new();
@@ -5243,9 +5244,9 @@ pub fn remove_image(image: &str, force: bool, no_prune: bool) -> Result<()> {
     }
 
     let removed = if no_prune {
-        img_store.remove_metadata_only(image)?
+        img_store.remove_metadata_only(&remove_query)?
     } else {
-        img_store.remove(image)?
+        img_store.remove(&remove_query)?
     };
     println!("Untagged: {}:{}", removed.reference, removed.tag);
     // Only report "Deleted" when the image data was actually removed: if
