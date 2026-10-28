@@ -80,7 +80,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `050-stop.bats` | **8–9/9** in isolation (`unlock while waiting` can be timing-sensitive) |
 | `055-rm.bats` | **6/10** (`--depend` green); buildah external / conmon cases red |
 | `075-exec.bats` | **9/10** in isolation (leak check, stdin, keep-id, umask, TTY, exec_pid/`GraphRoot`); red: **additional groups** `id -G` for `root:root` (rootless user-ns unmapped supplementary GIDs `65534`) |
-| `160-volumes.bats` | **24/26** in isolation (+2 skips): `--image-volume` + `Containerfile` build, tmpfs/copyup/prune/mount; red: `:U` recursive chown (`11`), `--userns=keep-id` bind ownership (`12`) |
+| `160-volumes.bats` | **25/26** in isolation (+2 skips): `:U`/`start --attach`, tmpfs/copyup/prune/mount, `--image-volume`; red: `--userns=keep-id` bind `stat` (`12`) when host `newuidmap` rejects Podman keep-id maps and idmapped bind (`mount_setattr`) is unavailable |
 | `ps --format` Labels / PodName | `{{.Labels}}`, `{{json .Labels}}`, `{{ .Label "k" }}`, `{{ .PodName }}` |
 | Pod infra + BATS leak check | Infra uses `alpine:3.20`; `leak_check` whitelists `alpine:*` (not auto-rmi’d on `pod rm`) |
 

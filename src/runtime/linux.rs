@@ -630,7 +630,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     .context("Failed to read sync from container child (unshare failed)")?;
 
                 // 2. Configure UID and GID mapping for child PID in parent namespace
-                crate::security::RootlessUserConfig::setup_child_mappings(child.as_raw())
+                let userns_mode = userns_mapping_mode_from_spec(&spec);
+                crate::security::RootlessUserConfig::setup_child_mappings_with_mode(
+                    child.as_raw(),
+                    userns_mode,
+                )
                     .context("Failed to setup rootless UID/GID mappings")?;
 
                 // 3. Notify child that mapping is complete
@@ -1037,6 +1041,27 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             }
         }
     }
+}
+
+/// Chown a host path from a rootless user namespace (for `:U` volume mounts).
+pub fn chown_path_rootless(path: &Path, uid: u32, gid: u32, recursive: bool) -> Result<()> {
+    let mut args = vec!["chown".to_string()];
+    if recursive {
+        args.push("-R".to_string());
+    }
+    args.push(format!("{}:{}", uid, gid));
+    args.push(path.to_string_lossy().to_string());
+    let code = run_unshare_cli(&args)?;
+    if code != 0 {
+        return Err(anyhow!(
+            "chown {}:{} on {:?} failed with exit {}",
+            uid,
+            gid,
+            path,
+            code
+        ));
+    }
+    Ok(())
 }
 
 /// Run an unshare command in a new user namespace (boxr unshare)
@@ -1550,6 +1575,158 @@ fn attach_stdio_to_bundle_pty(bundle_path: &Path) {
     }
 }
 
+fn userns_mapping_mode_from_spec(spec: &Spec) -> crate::security::UsernsMappingMode {
+    let userns = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.userns"))
+        .map(|s| s.as_str());
+    match userns {
+        Some("keep-id") => crate::security::UsernsMappingMode {
+            keep_id: true,
+            nomap: false,
+        },
+        Some("nomap") => crate::security::UsernsMappingMode {
+            keep_id: false,
+            nomap: true,
+        },
+        _ => crate::security::UsernsMappingMode::default(),
+    }
+}
+
+fn userns_idmapped_bind_mounts(spec: &Spec) -> bool {
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.userns"))
+        .is_some_and(|u| u == "keep-id" || u == "nomap")
+}
+
+#[cfg(target_os = "linux")]
+fn bind_mount_path(source: &Path, target: &Path, idmap: bool) -> Result<()> {
+    if idmap {
+        if idmapped_bind_mount(source, target).is_ok() {
+            return Ok(());
+        }
+    }
+    mount(
+        Some(source),
+        target,
+        None::<&str>,
+        MsFlags::MS_BIND | MsFlags::MS_REC,
+        None::<&str>,
+    )
+    .map_err(|e| anyhow!("bind mount {:?} -> {:?}: {}", source, target, e))
+}
+
+#[cfg(target_os = "linux")]
+fn idmapped_bind_mount(source: &Path, target: &Path) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    const MOUNT_ATTR_IDMAP: u64 = 0x0010_0000;
+    const AT_EMPTY_PATH: i32 = 0x1000;
+    const AT_RECURSIVE: i32 = 0x8000;
+    const OPEN_TREE_CLONE: u32 = 1;
+    const MOVE_MOUNT_F_EMPTY_PATH: u32 = 0x0000_0004;
+    const MS_PRIVATE: u64 = 1 << 18;
+
+    #[repr(C)]
+    struct MountAttr {
+        attr_set: u64,
+        attr_clr: u64,
+        propagation: u64,
+        userns_fd: u64,
+        uuid: u64,
+        size: u64,
+        padding: u64,
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    const SYS_OPEN_TREE: libc::c_long = 428;
+    #[cfg(target_arch = "x86_64")]
+    const SYS_MOUNT_SETATTR: libc::c_long = 442;
+    #[cfg(target_arch = "x86_64")]
+    const SYS_MOVE_MOUNT: libc::c_long = 429;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_OPEN_TREE: libc::c_long = 428;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_MOUNT_SETATTR: libc::c_long = 442;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_MOVE_MOUNT: libc::c_long = 439;
+
+    let source = source.canonicalize().context("idmap bind source")?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let user_ns = fs::File::open("/proc/self/ns/user").context("open user ns")?;
+    let source_c = CString::new(source.to_string_lossy().as_ref())?;
+    let tree_fd = unsafe {
+        libc::syscall(
+            SYS_OPEN_TREE,
+            libc::AT_FDCWD,
+            source_c.as_ptr(),
+            OPEN_TREE_CLONE,
+        )
+    };
+    if tree_fd < 0 {
+        return Err(anyhow!(
+            "open_tree {:?}: {}",
+            source,
+            std::io::Error::last_os_error()
+        ));
+    }
+    let tree_fd = tree_fd as i32;
+
+    let attr = MountAttr {
+        attr_set: MOUNT_ATTR_IDMAP,
+        attr_clr: 0,
+        propagation: MS_PRIVATE,
+        userns_fd: user_ns.as_raw_fd() as u64,
+        uuid: 0,
+        size: 32, // MOUNT_ATTR_SIZE_VER0 (linux/mount.h)
+        padding: 0,
+    };
+    let rc = unsafe {
+        libc::syscall(
+            SYS_MOUNT_SETATTR,
+            tree_fd,
+            std::ptr::null::<libc::c_char>(),
+            (AT_EMPTY_PATH | AT_RECURSIVE) as libc::c_ulong,
+            &attr as *const MountAttr,
+            std::mem::size_of::<MountAttr>(),
+        )
+    };
+    if rc < 0 {
+        let _ = unsafe { libc::close(tree_fd) };
+        return Err(anyhow!(
+            "mount_setattr {:?}: {}",
+            source,
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    let target_c = CString::new(target.to_string_lossy().as_ref())?;
+    let mv = unsafe {
+        libc::syscall(
+            SYS_MOVE_MOUNT,
+            tree_fd,
+            std::ptr::null::<libc::c_char>(),
+            0i32,
+            target_c.as_ptr(),
+            MOVE_MOUNT_F_EMPTY_PATH,
+        )
+    };
+    let _ = unsafe { libc::close(tree_fd) };
+    if mv < 0 {
+        return Err(anyhow!(
+            "move_mount {:?}: {}",
+            target,
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 fn run_container_child(
     rootfs: &Path,
     bundle_path: &Path,
@@ -1693,6 +1870,7 @@ fn run_container_child(
 
     // Mount external volumes/binds
     let canon_rootfs = rootfs.canonicalize()?;
+    let idmap_user_binds = userns_idmapped_bind_mounts(spec);
     for m in mounts {
         let target = prepare_bind_mount_target(rootfs, &m.destination, &m.source);
         if let Ok(canon_target) = target.canonicalize() {
@@ -1718,14 +1896,7 @@ fn run_container_child(
             );
             continue;
         }
-        let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
-        mount(
-            Some(&m.source),
-            &target,
-            None::<&str>,
-            bind_flags,
-            None::<&str>,
-        )?;
+        bind_mount_path(Path::new(&m.source), &target, idmap_user_binds)?;
         let mut remount_flags = MsFlags::MS_REMOUNT | MsFlags::MS_BIND;
         if m.read_only {
             remount_flags |= MsFlags::MS_RDONLY;
@@ -1761,14 +1932,7 @@ fn run_container_child(
                 .as_ref()
                 .map(|opts| opts.iter().any(|o| o == "ro"))
                 .unwrap_or(false);
-            let bind_flags = MsFlags::MS_BIND | MsFlags::MS_REC;
-            mount(
-                Some(Path::new(&m.source)),
-                &target,
-                None::<&str>,
-                bind_flags,
-                None::<&str>,
-            )?;
+            bind_mount_path(Path::new(&m.source), &target, false)?;
             if ro {
                 mount(
                     None::<&str>,

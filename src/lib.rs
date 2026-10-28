@@ -1900,6 +1900,8 @@ pub async fn run_container_with_output(
     )
     .await?;
 
+    apply_containers_conf_defaults(&mut args);
+
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
     }
@@ -3090,6 +3092,7 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
             let spec: Spec = serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
             let _ = sync_host_nproc_ulimit(&bundle_path);
             let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
+            apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
             store.update_status(&rec.id, ContainerStatus::Running)?;
             let code = runtime::execute_bundle(&bundle_path, &spec, &[], &ports, false)?;
             store.update_status(&rec.id, ContainerStatus::Exited(code))?;
@@ -3255,6 +3258,7 @@ pub async fn start_container_with_home(container: &str, home_opt: Option<&Path>)
 
     let _ = sync_host_nproc_ulimit(&bundle_path);
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
+    apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
     store.update_status(&rec.id, ContainerStatus::Running)?;
     execute_bundle(&bundle_path, &spec, &[], &ports, true)?;
     if !ports.is_empty() {
@@ -4359,7 +4363,7 @@ pub fn kill_container(args: &cli::KillArgs) -> Result<()> {
     runtime::kill::ContainerKiller::kill(&cont, args.signal.as_deref())
 }
 
-fn image_volume_mode_from_containers_conf() -> Option<String> {
+fn containers_conf_toml_value(key: &str) -> Option<String> {
     let path = std::env::var("CONTAINERS_CONF_OVERRIDE").ok()?;
     let content = fs::read_to_string(&path).ok()?;
     for line in content.lines() {
@@ -4367,7 +4371,7 @@ fn image_volume_mode_from_containers_conf() -> Option<String> {
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        if let Some(rest) = line.strip_prefix("image_volume_mode") {
+        if let Some(rest) = line.strip_prefix(key) {
             let rest = rest.trim_start_matches('=').trim();
             let mode = rest.trim_matches('"').trim();
             if !mode.is_empty() {
@@ -4376,6 +4380,22 @@ fn image_volume_mode_from_containers_conf() -> Option<String> {
         }
     }
     None
+}
+
+fn image_volume_mode_from_containers_conf() -> Option<String> {
+    containers_conf_toml_value("image_volume_mode")
+}
+
+fn userns_from_containers_conf() -> Option<String> {
+    containers_conf_toml_value("userns")
+}
+
+fn apply_containers_conf_defaults(args: &mut RunArgs) {
+    if args.userns.is_empty() {
+        if let Some(u) = userns_from_containers_conf() {
+            args.userns.push(u);
+        }
+    }
 }
 
 fn effective_image_volume_mode(args: &RunArgs) -> Option<String> {
@@ -5841,6 +5861,9 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         )
         .await?;
 
+    let mut args = args;
+    apply_containers_conf_defaults(&mut args);
+
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
     }
@@ -7257,6 +7280,9 @@ fn apply_podman_userns(
                 spec.process.env.retain(|e| !e.starts_with("HOME="));
                 spec.process.env.push(format!("HOME={}", home));
             }
+        } else if userns == "nomap" {
+            spec.process.user.uid = 65534;
+            spec.process.user.gid = 65534;
         }
     }
     Ok(())
@@ -7658,14 +7684,22 @@ fn prune_container_attached_volumes(bundle_path: PathBuf) {
     }
 }
 
-#[cfg(unix)]
-fn chown_mount_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
-    use nix::unistd::{chown, Gid, Uid};
-    let meta = fs::metadata(path)?;
-    chown(path, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid)))?;
-    if meta.is_dir() {
-        for entry in fs::read_dir(path)? {
-            chown_mount_path(&entry?.path(), uid, gid)?;
+fn apply_chown_u_from_bundle(bundle_path: &Path, spec: &Spec, recursive: bool) -> Result<()> {
+    let mounts_path = bundle_path.join("mounts.json");
+    if !mounts_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&mounts_path)?;
+    let mounts: Vec<volume::MountSpec> = serde_json::from_str(&content).unwrap_or_default();
+    #[cfg(unix)]
+    for m in mounts {
+        if m.chown_u && !m.is_volume {
+            crate::runtime::linux::chown_path_rootless(
+                &m.source,
+                spec.process.user.uid,
+                spec.process.user.gid,
+                recursive,
+            )?;
         }
     }
     Ok(())
@@ -7732,7 +7766,7 @@ fn apply_volume_mount_prep(
         if m.chown_u && !m.is_volume {
             #[cfg(unix)]
             {
-                let _ = chown_mount_path(&m.source, uid, gid);
+                let _ = crate::runtime::linux::chown_path_rootless(&m.source, uid, gid, true);
             }
         }
         if !m.is_volume {

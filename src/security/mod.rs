@@ -19,6 +19,12 @@ pub struct RootlessUserConfig {
     pub gid_mappings: Vec<IdMapping>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsernsMappingMode {
+    pub keep_id: bool,
+    pub nomap: bool,
+}
+
 impl Default for RootlessUserConfig {
     fn default() -> Self {
         #[cfg(unix)]
@@ -128,15 +134,32 @@ impl RootlessUserConfig {
     /// Configure UID and GID mapping for a target child PID in a new user namespace
     #[cfg(target_os = "linux")]
     pub fn setup_child_mappings(pid: i32) -> Result<()> {
-        let (host_uid, host_gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        Self::setup_child_mappings_with_mode(pid, UsernsMappingMode::default())
+    }
 
+    /// Podman-compatible maps for `--userns=keep-id` / `nomap`, with default-map fallback.
+    #[cfg(target_os = "linux")]
+    pub fn setup_child_mappings_with_mode(pid: i32, mode: UsernsMappingMode) -> Result<()> {
+        let (host_uid, host_gid) = unsafe { (libc::getuid(), libc::getgid()) };
         let sub_uid = Self::read_subordinate_range(false);
         let sub_gid = Self::read_subordinate_range(true);
 
-        // Attempt newuidmap/newgidmap if both binaries and subuid/subgid ranges are available
+        if mode.keep_id {
+            let uid_maps = Self::keep_id_uid_mappings(host_uid, sub_uid.as_ref());
+            let gid_maps = Self::keep_id_uid_mappings(host_gid, sub_gid.as_ref());
+            if Self::apply_id_mappings(pid, &uid_maps, &gid_maps).is_ok() {
+                return Ok(());
+            }
+        } else if mode.nomap {
+            let uid_maps = Self::nomap_uid_mappings(sub_uid.as_ref());
+            let gid_maps = Self::nomap_uid_mappings(sub_gid.as_ref());
+            if Self::apply_id_mappings(pid, &uid_maps, &gid_maps).is_ok() {
+                return Ok(());
+            }
+        }
+
         if Self::has_newidmap_binaries() {
             if let (Some(u_range), Some(g_range)) = (sub_uid.as_ref(), sub_gid.as_ref()) {
-                // newuidmap <pid> 0 <host_uid> 1 1 <sub_uid_start> <sub_uid_count>
                 let uid_status = std::process::Command::new("newuidmap")
                     .args([
                         &pid.to_string(),
@@ -147,9 +170,9 @@ impl RootlessUserConfig {
                         &u_range.start.to_string(),
                         &u_range.count.to_string(),
                     ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status();
-
-                // newgidmap <pid> 0 <host_gid> 1 1 <sub_gid_start> <sub_gid_count>
                 let gid_status = std::process::Command::new("newgidmap")
                     .args([
                         &pid.to_string(),
@@ -160,8 +183,9 @@ impl RootlessUserConfig {
                         &g_range.start.to_string(),
                         &g_range.count.to_string(),
                     ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status();
-
                 if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
                     if u_st.success() && g_st.success() {
                         return Ok(());
@@ -177,22 +201,119 @@ using single-ID mapping only (images requiring chown/--user may fail)"
             );
         }
 
-        // Fallback: write single UID/GID map directly to /proc/<pid>/uid_map and /proc/<pid>/gid_map
+        let mut uid_mappings = vec![IdMapping {
+            container_id: 0,
+            host_id: host_uid,
+            size: 1,
+        }];
+        let mut gid_mappings = vec![IdMapping {
+            container_id: 0,
+            host_id: host_gid,
+            size: 1,
+        }];
+        if let Some(u_range) = sub_uid {
+            uid_mappings.push(IdMapping {
+                container_id: 1,
+                host_id: u_range.start,
+                size: u_range.count,
+            });
+        }
+        if let Some(g_range) = sub_gid {
+            gid_mappings.push(IdMapping {
+                container_id: 1,
+                host_id: g_range.start,
+                size: g_range.count,
+            });
+        }
         let cfg = RootlessUserConfig {
             enabled: true,
-            uid_mappings: vec![IdMapping {
-                container_id: 0,
-                host_id: host_uid,
-                size: 1,
-            }],
-            gid_mappings: vec![IdMapping {
-                container_id: 0,
-                host_id: host_gid,
-                size: 1,
-            }],
+            uid_mappings,
+            gid_mappings,
         };
         cfg.write_proc_mappings(pid)?;
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn keep_id_uid_mappings(host_id: u32, sub: Option<&SubordinateRange>) -> Vec<IdMapping> {
+        let max_id = sub.map(|r| r.count).unwrap_or(0);
+        let mut maps = Vec::new();
+        if sub.is_some() && host_id != 0 {
+            maps.push(IdMapping {
+                container_id: 0,
+                host_id: 1,
+                size: host_id.min(max_id),
+            });
+        }
+        maps.push(IdMapping {
+            container_id: host_id,
+            host_id: 0,
+            size: 1,
+        });
+        if max_id > host_id {
+            maps.push(IdMapping {
+                container_id: host_id + 1,
+                host_id: host_id + 1,
+                size: max_id - host_id,
+            });
+        }
+        maps
+    }
+
+    #[cfg(target_os = "linux")]
+    fn nomap_uid_mappings(sub: Option<&SubordinateRange>) -> Vec<IdMapping> {
+        if let Some(r) = sub {
+            vec![IdMapping {
+                container_id: 0,
+                host_id: 1,
+                size: r.count,
+            }]
+        } else {
+            vec![IdMapping {
+                container_id: 0,
+                host_id: 0,
+                size: 1,
+            }]
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_id_mappings(pid: i32, uid_maps: &[IdMapping], gid_maps: &[IdMapping]) -> Result<()> {
+        if Self::has_newidmap_binaries() {
+            let mut uid_args = vec![pid.to_string()];
+            for m in uid_maps {
+                uid_args.push(m.container_id.to_string());
+                uid_args.push(m.host_id.to_string());
+                uid_args.push(m.size.to_string());
+            }
+            let mut gid_args = vec![pid.to_string()];
+            for m in gid_maps {
+                gid_args.push(m.container_id.to_string());
+                gid_args.push(m.host_id.to_string());
+                gid_args.push(m.size.to_string());
+            }
+            let uid_status = std::process::Command::new("newuidmap")
+                .args(&uid_args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let gid_status = std::process::Command::new("newgidmap")
+                .args(&gid_args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if let (Ok(u_st), Ok(g_st)) = (uid_status, gid_status) {
+                if u_st.success() && g_st.success() {
+                    return Ok(());
+                }
+            }
+        }
+        let cfg = RootlessUserConfig {
+            enabled: true,
+            uid_mappings: uid_maps.to_vec(),
+            gid_mappings: gid_maps.to_vec(),
+        };
+        cfg.write_proc_mappings(pid)
     }
 
     /// Configure UID and GID mapping for a target PID in Linux /proc/<pid>
