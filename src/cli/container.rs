@@ -457,10 +457,19 @@ pub struct RunArgs {
     #[arg(long = "pod")]
     pub pod: Option<String>,
 
+    /// Use the specified directory as the container root filesystem (no image)
+    #[arg(long = "rootfs")]
+    pub rootfs: Option<String>,
+
+    /// Read mounts from containers.conf-style mounts file (Podman-compatible)
+    #[arg(long = "default-mounts-file")]
+    pub default_mounts_file: Option<String>,
+
     /// Maximum time in seconds to run before killing the container
     #[arg(long = "timeout")]
     pub timeout: Option<u64>,
 
+    #[arg(default_value = "")]
     pub image: String,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]

@@ -300,13 +300,44 @@ fn validate_log_driver(driver: &str) -> Result<()> {
     }
 }
 
-fn add_container_record(store: &ContainerStore, record: ContainerRecord) -> Result<()> {
+fn cleanup_ephemeral_pod(name: &Option<String>) {
+    if let Some(n) = name {
+        let store = pod::PodStore::new();
+        let _ = store.remove_with_force(n, true);
+    }
+}
+
+fn add_container_record(
+    store: &ContainerStore,
+    record: ContainerRecord,
+    ephemeral_pod: &Option<String>,
+) -> Result<()> {
     match store.add(record) {
         Err(e) if e.to_string().contains("already in use") => {
+            cleanup_ephemeral_pod(ephemeral_pod);
             cli::usage_errors::exit_usage_error(e.to_string());
         }
         other => other,
     }
+}
+
+fn apply_default_mounts_file(args: &mut RunArgs) -> Result<()> {
+    let path = match &args.default_mounts_file {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    if !Path::new(path).exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(path)?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        args.volumes.push(line.to_string());
+    }
+    Ok(())
 }
 
 fn volume_mount_destination(spec: &str) -> String {
@@ -1855,10 +1886,10 @@ fn apply_capabilities_and_security(
     });
 }
 
-async fn prepare_run_pod(args: &mut RunArgs) -> Result<()> {
+async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
     let pod_spec = match &args.pod {
         Some(p) => p.clone(),
-        None => return Ok(()),
+        None => return Ok(None),
     };
 
     if let Some(new_name) = pod_spec.strip_prefix("new:") {
@@ -1872,7 +1903,7 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<()> {
         })?;
         let _ = ensure_pod_infra_container(&pod).await?;
         args.pod = Some(pod.name.clone());
-        return Ok(());
+        return Ok(Some(pod.name.clone()));
     }
 
     let pod_store = pod::PodStore::new();
@@ -1881,7 +1912,7 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("Pod '{}' not found", pod_spec))?;
     let infra_target = ensure_pod_infra_container(&pod_rec).await?;
     pod::apply_pod_to_run_args(&pod_rec, &infra_target, args);
-    Ok(())
+    Ok(None)
 }
 
 pub async fn run_container(mut args: RunArgs) -> Result<i32> {
@@ -1906,15 +1937,26 @@ pub async fn run_container_with_output(
         ));
     }
 
-    let image_record = resolve_container_image(
-        &args.image,
-        args.platform.as_deref(),
-        None,
-        args.pull.as_deref(),
-    )
-    .await?;
-
     apply_containers_conf_defaults(&mut args);
+    apply_default_mounts_file(&mut args)?;
+
+    let rootfs_only = args.rootfs.is_some();
+    if !rootfs_only && args.image.is_empty() {
+        cli::usage_errors::exit_usage_error("must specify image or --rootfs");
+    }
+    let image_record = if rootfs_only {
+        None
+    } else {
+        Some(
+            resolve_container_image(
+                &args.image,
+                args.platform.as_deref(),
+                None,
+                args.pull.as_deref(),
+            )
+            .await?,
+        )
+    };
 
     if let Some(pull) = &args.pull {
         validate_pull_option(pull)?;
@@ -1952,14 +1994,23 @@ pub async fn run_container_with_output(
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
 
-    prepare_run_pod(&mut args).await?;
+    let ephemeral_new_pod = prepare_run_pod(&mut args).await?;
 
     let home = storage::boxr_home();
     let bundle_dir = home.join("containers").join(&container_id);
-    let base_rootfs = PathBuf::from(&image_record.rootfs_path);
+    let base_rootfs = if let Some(rootfs) = &args.rootfs {
+        PathBuf::from(rootfs)
+    } else {
+        PathBuf::from(&image_record.as_ref().expect("image").rootfs_path)
+    };
 
     fs::create_dir_all(&bundle_dir)?;
     let cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
+
+    let image_cfg = image_record
+        .as_ref()
+        .and_then(|r| r.config.config.as_ref());
+    let image_ref = image_record.as_ref();
 
     // Configure cgroups v2 resource limits if specified
     let mut limits = cgroups::ResourceLimits::default();
@@ -2026,11 +2077,10 @@ pub async fn run_container_with_output(
         None
     };
 
-    let mut spec = Spec::new_default(
-        image_record.config.config.as_ref(),
-        cmd_override,
-        env_override,
-    );
+    let mut spec = Spec::new_default(image_cfg, cmd_override, env_override);
+    if rootfs_only && args.command.is_empty() && spec.process.args.is_empty() {
+        spec.process.args.push(String::new());
+    }
 
     if let Some(h) = &args.hostname {
         spec.hostname = Some(h.clone());
@@ -2103,7 +2153,9 @@ pub async fn run_container_with_output(
     let mut annotations = HashMap::new();
     annotations.insert(
         "org.opencontainers.image.architecture".to_string(),
-        image_record.config.architecture.clone(),
+        image_ref
+            .map(|r| r.config.architecture.clone())
+            .unwrap_or_else(|| "amd64".to_string()),
     );
     if let Some(p) = &args.platform {
         annotations.insert("boxr.platform".to_string(), p.clone());
@@ -2198,14 +2250,16 @@ pub async fn run_container_with_output(
         apply_namespace_to_linux(linux, &mut annotations, "pid", &args.pid)?;
     }
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
-    apply_image_config_volume_mounts(
-        &image_record,
-        &args,
-        &vol_store,
-        &cow_bundle.merged_dir,
-        &mut parsed_mounts,
-        &mut spec,
-    )?;
+    if let Some(img) = image_ref {
+        apply_image_config_volume_mounts(
+            img,
+            &args,
+            &vol_store,
+            &cow_bundle.merged_dir,
+            &mut parsed_mounts,
+            &mut spec,
+        )?;
+    }
     if args.unsetenv_all {
         annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
@@ -2432,10 +2486,14 @@ pub async fn run_container_with_output(
         });
         spec.windows = Some(win_spec);
     }
-    let image_id_for_env = if image_record.id.starts_with("sha256:") {
-        image_record.id.clone()
+    let image_id_for_env = if let Some(img) = image_ref {
+        if img.id.starts_with("sha256:") {
+            img.id.clone()
+        } else {
+            format!("sha256:{}", img.id)
+        }
     } else {
-        format!("sha256:{}", image_record.id)
+        String::new()
     };
     append_containerenv_mount(
         &bundle_dir,
@@ -2444,7 +2502,7 @@ pub async fn run_container_with_output(
         args.privileged,
         &container_name,
         &container_id,
-        &args.image,
+        if args.image.is_empty() { "scratch" } else { &args.image },
         &image_id_for_env,
     )?;
     spec.save_to_bundle(&bundle_dir)?;
@@ -2511,7 +2569,7 @@ pub async fn run_container_with_output(
         &container_name,
         event_attrs.clone(),
     ));
-    add_container_record(&container_store, record)?;
+    add_container_record(&container_store, record, &ephemeral_new_pod)?;
 
     if let Err(e) =
         guardrails::PortCollisionGuard::ensure_no_conflicts_excluding(
@@ -2519,6 +2577,7 @@ pub async fn run_container_with_output(
             Some(&container_id),
         )
     {
+        cleanup_ephemeral_pod(&ephemeral_new_pod);
         if args.rm {
             let _ = container_store.remove(&container_id);
             let _ = OverlayDriver::cleanup(&cow_bundle);
@@ -2677,6 +2736,7 @@ pub async fn run_container_with_output(
             );
         }
         if args.rm {
+            prune_container_attached_volumes(bundle_dir.clone());
             let _ = OverlayDriver::cleanup(&cow_bundle);
             let _ = container_store.remove(&container_id);
             let _ = fs::remove_dir_all(&bundle_dir);
@@ -5846,8 +5906,7 @@ pub fn prune_images(all: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn create_only_container(mut args: RunArgs) -> Result<String> {
-    prepare_run_pod(&mut args).await?;
+pub async fn create_only_container(args: RunArgs) -> Result<String> {
     create_only_container_with_home(args, None).await
 }
 
@@ -5855,10 +5914,16 @@ pub async fn create_only_container_with_home(
     args: RunArgs,
     home_opt: Option<&Path>,
 ) -> Result<String> {
-    create_only_container_impl(args, home_opt).await
+    let mut args = args;
+    let ephemeral_new_pod = prepare_run_pod(&mut args).await?;
+    create_only_container_after_pod_prep(args, home_opt, ephemeral_new_pod).await
 }
 
-async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> Result<String> {
+async fn create_only_container_after_pod_prep(
+    mut args: RunArgs,
+    home_opt: Option<&Path>,
+    ephemeral_new_pod: Option<String>,
+) -> Result<String> {
     let restart_policy = health::parse_restart_policy(&args.restart)?;
     if args.rm && !matches!(restart_policy, health::RestartPolicy::No) {
         return Err(anyhow!(
@@ -5968,7 +6033,6 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         cmd_override,
         env_override,
     );
-
     if let Some(h) = &args.hostname {
         spec.hostname = Some(h.clone());
     }
@@ -6510,7 +6574,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         event_attrs,
     ));
 
-    add_container_record(&container_store, record)?;
+    add_container_record(&container_store, record, &ephemeral_new_pod)?;
 
     if network::resolved_bridge_network_name(&args.network).is_some() {
         let _ = network::connect_container_to_bridge_network(
@@ -8688,12 +8752,14 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         volumes_from: Vec::new(),
         workdir: None,
         pod: None,
+        rootfs: None,
+        default_mounts_file: None,
         timeout: None,
         image: image_ref,
         command: vec!["sleep".to_string(), "infinity".to_string()],
     };
 
-    let cont_id = create_only_container_impl(infra_args, None).await?;
+    let cont_id = create_only_container_after_pod_prep(infra_args, None, None).await?;
     start_container(&infra_name).await?;
     let pod_store = pod::PodStore::new();
     let _ = pod_store.set_infra_container_id(&pod.name, &cont_id);

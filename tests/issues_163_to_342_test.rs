@@ -241,6 +241,8 @@ fn default_run_args(image: &str) -> RunArgs {
         volume_driver: None,
         volumes_from: Vec::new(),
         pod: None,
+        rootfs: None,
+        default_mounts_file: None,
         timeout: None,
         tz: Vec::new(),
         image: image.to_string(),

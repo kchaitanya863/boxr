@@ -238,6 +238,8 @@ pub async fn create_container(
         volume_driver: None,
         volumes_from: Vec::new(),
         pod: None,
+        rootfs: None,
+        default_mounts_file: None,
         timeout: None,
         image: payload.image,
         command: payload.cmd.unwrap_or_default(),

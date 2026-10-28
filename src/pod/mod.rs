@@ -688,6 +688,8 @@ mod tests {
             volumes_from: vec![],
             workdir: None,
             pod: Some("mypod".to_string()),
+            rootfs: None,
+            default_mounts_file: None,
             timeout: None,
             image: "alpine".to_string(),
             command: vec![],
