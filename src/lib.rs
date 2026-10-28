@@ -208,6 +208,60 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     }
 }
 
+fn podman_container_image_name(stored: &str) -> String {
+    let stored = stored.trim();
+    if stored.is_empty() || stored.contains('@') {
+        return stored.to_string();
+    }
+    let last = stored.rsplit('/').next().unwrap_or(stored);
+    if !last.contains(':') {
+        return format!("{}:latest", stored.trim_end_matches('/'));
+    }
+    stored.to_string()
+}
+
+fn container_inspect_image_fields(
+    c: &ContainerRecord,
+    i_store: &ImageStore,
+) -> (String, String, String) {
+    let image_name = podman_container_image_name(&c.image);
+    let img = i_store.find(&c.image).or_else(|| {
+        i_store.list().into_iter().find(|r| {
+            c.image == r.id
+                || c.image.strip_prefix("sha256:").is_some_and(|h| r.id.starts_with(h))
+                || format!("{}:{}", r.display_reference(), r.tag) == c.image
+                || r.qualified_name() == c.image
+        })
+    });
+    if let Some(i) = img {
+        let image_id = if i.id.starts_with("sha256:") {
+            i.id.clone()
+        } else {
+            format!("sha256:{}", i.id)
+        };
+        let digest = if i.manifest_digest.starts_with("sha256:") {
+            i.manifest_digest.clone()
+        } else {
+            format!("sha256:{}", i.manifest_digest)
+        };
+        (image_name, image_id, digest)
+    } else {
+        (image_name, String::new(), String::new())
+    }
+}
+
+fn image_repo_digest(i: &ImageRecord) -> String {
+    let name = i.qualified_name();
+    let at = name.rfind(':').unwrap_or(name.len());
+    let repo = name[..at].to_string();
+    let digest = if i.manifest_digest.starts_with("sha256:") {
+        i.manifest_digest.clone()
+    } else {
+        format!("sha256:{}", i.manifest_digest)
+    };
+    format!("{}@{}", repo, digest)
+}
+
 fn append_containerenv_mount(
     bundle_dir: &Path,
     spec: &mut Spec,
@@ -3091,6 +3145,9 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .and_then(|v| v.parse::<f64>().ok())
                     .map(|cpus| (cpus * 1_000_000_000.0) as i64);
 
+                let (image_name, image_id, image_digest) =
+                    container_inspect_image_fields(&c, &i_store);
+
                 let docker_compat_inspect = serde_json::json!({
                     "Id": c.id,
                     "Created": c.created_at.to_rfc3339(),
@@ -3112,7 +3169,9 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "StartedAt": c.created_at.to_rfc3339(),
                         "FinishedAt": c.created_at.to_rfc3339(),
                     },
-                    "Image": c.image,
+                    "Image": image_id,
+                    "ImageName": image_name,
+                    "ImageDigest": image_digest,
                     "Name": format!("/{}", c.name),
                     "RestartCount": c.restart_count,
                     "SizeRw": size_bytes,
@@ -3193,6 +3252,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let docker_compat_image = serde_json::json!({
                     "Id": format!("sha256:{}", i.id),
                     "RepoTags": repo_tags,
+                    "RepoDigests": [image_repo_digest(&i)],
                     "Size": i.size_bytes,
                     "Created": i.created_at.to_rfc3339(),
                     "Architecture": i.config.architecture,
@@ -5631,7 +5691,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     let record = ContainerRecord {
         id: container_id.clone(),
         name: container_name.clone(),
-        image: format!("{}:{}", image_record.reference, image_record.tag),
+        image: args.image.clone(),
         command: spec.process.args.clone(),
         created_at: Utc::now(),
         status: ContainerStatus::Created,
@@ -5644,10 +5704,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     };
 
     let mut event_attrs = HashMap::new();
-    event_attrs.insert(
-        "image".to_string(),
-        format!("{}:{}", image_record.reference, image_record.tag),
-    );
+    event_attrs.insert("image".to_string(), args.image.clone());
     event_attrs.insert("name".to_string(), container_name.clone());
     EventManager::record(ContainerEvent::new(
         "container",
@@ -6749,6 +6806,14 @@ fn format_container_ports(ports: &[network::PortMapping]) -> String {
 }
 
 fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> String {
+    for pat in ["{{json .RepoDigests}}", "{{ json .RepoDigests }}"] {
+        if template.contains(pat) {
+            if let Some(arr) = value.get("RepoDigests") {
+                return arr.to_string();
+            }
+            return "[]".to_string();
+        }
+    }
     if template.contains("range .HostConfig.Ulimits") && template.contains("RLIMIT_NPROC") {
         if let Some(arr) = value
             .get("HostConfig")
