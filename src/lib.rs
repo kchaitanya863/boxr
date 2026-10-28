@@ -1397,11 +1397,15 @@ fn find_image_with_shortname(
     if query.contains('/') || query.contains('@') {
         return None;
     }
+    let (repo, tag) = query
+        .split_once(':')
+        .map(|(r, t)| (r, t))
+        .unwrap_or((query, "latest"));
     for candidate in [
-        format!("localhost/{}:latest", query),
-        format!("localhost/{}", query),
-        format!("{}:latest", query),
-        format!("docker.io/library/{}:latest", query),
+        format!("localhost/{}:{}", repo, tag),
+        format!("localhost/{}", repo),
+        format!("{}:{}", repo, tag),
+        format!("docker.io/library/{}:{}", repo, tag),
     ] {
         if let Some(rec) = store.find_with_platform(&candidate, platform) {
             return Some(rec);
@@ -1411,13 +1415,14 @@ fn find_image_with_shortname(
         .list()
         .into_iter()
         .find(|rec| {
-            rec.reference == query
+            rec.reference == repo
                 || rec
                     .reference
                     .rsplit('/')
                     .next()
-                    .is_some_and(|short| short == query)
+                    .is_some_and(|short| short == repo)
         })
+        .filter(|rec| rec.tag == tag)
         .and_then(|rec| store.find_with_platform(&rec.qualified_name(), platform))
 }
 
@@ -1734,6 +1739,13 @@ pub async fn run_container_with_output(
     mut args: RunArgs,
     output_policy: CliOutputPolicy,
 ) -> Result<i32> {
+    if cli::RUN_RM_EXPLICIT_FALSE.get() == Some(&true) {
+        args.rm = false;
+    }
+    if args.rmi && cli::RUN_RM_EXPLICIT_FALSE.get() == Some(&true) {
+        cli::usage_errors::exit_usage_error("the --rmi option does not work without --rm");
+    }
+
     let restart_policy = health::parse_restart_policy(&args.restart)?;
     if args.rm && !matches!(restart_policy, health::RestartPolicy::No) {
         return Err(anyhow!(
@@ -1774,7 +1786,9 @@ pub async fn run_container_with_output(
     let container_id = new_container_id();
     let container_name = args
         .name
-        .clone()
+        .as_ref()
+        .map(|n| ContainerStore::normalize_container_name(n))
+        .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
 
     prepare_run_pod(&mut args).await?;
@@ -2259,6 +2273,13 @@ pub async fn run_container_with_output(
     )?;
     spec.save_to_bundle(&bundle_dir)?;
 
+    if args.rm || (args.rmi && args.detach) {
+        let _ = fs::write(bundle_dir.join("auto_remove"), "1");
+    }
+    if args.rmi {
+        let _ = fs::write(bundle_dir.join("auto_remove_image"), args.image.as_str());
+    }
+
     if !workdir_allowed_on_container(
         &cow_bundle.merged_dir,
         &spec.process.cwd,
@@ -2464,6 +2485,13 @@ pub async fn run_container_with_output(
     }
 
     if !args.detach {
+        if args.rmi {
+            try_rmi_with_in_use_warning(
+                &args.image,
+                Some(&container_id),
+                !args.rm,
+            );
+        }
         if args.rm {
             let _ = OverlayDriver::cleanup(&cow_bundle);
             let _ = container_store.remove(&container_id);
@@ -2549,6 +2577,76 @@ fn dependent_container_ids(store: &ContainerStore, parent: &ContainerRecord) -> 
 
 fn bundle_auto_remove(bundle_path: &Path) -> bool {
     bundle_path.join("auto_remove").exists()
+}
+
+fn bundle_auto_remove_image(bundle_path: &Path) -> bool {
+    bundle_path.join("auto_remove_image").exists()
+}
+
+fn container_uses_image_record(c: &ContainerRecord, img: &ImageRecord) -> bool {
+    let full_name = img.qualified_name();
+    let short_name = format!("{}:{}", img.reference, img.tag);
+    crate::storage::image_store::refs_equivalent(&c.image, &full_name)
+        || crate::storage::image_store::refs_equivalent(&c.image, &short_name)
+        || c.image == img.id
+        || c.image.starts_with(&img.id)
+}
+
+fn try_rmi_with_in_use_warning(
+    image: &str,
+    exclude_container_id: Option<&str>,
+    skip_exited_blockers: bool,
+) {
+    let img_store = ImageStore::new();
+    let img = match find_image_with_shortname(&img_store, image, None) {
+        Some(rec) => rec,
+        None => return,
+    };
+    let c_store = ContainerStore::new();
+    for c in c_store.list() {
+        if exclude_container_id == Some(c.id.as_str()) {
+            continue;
+        }
+        if skip_exited_blockers
+            && matches!(
+                c.status,
+                ContainerStatus::Exited(_) | ContainerStatus::Created
+            )
+        {
+            continue;
+        }
+        if container_uses_image_record(&c, &img) {
+            eprintln!(
+                "Warning: image {} could not be removed: image is in use by a container",
+                image
+            );
+            return;
+        }
+    }
+    let _ = remove_image_inner(image, false, false, exclude_container_id);
+}
+
+/// After a detached container's main process exits, honor `--rm` / `--rmi` markers.
+pub fn finalize_stopped_container(c: &ContainerRecord) {
+    let bundle = PathBuf::from(&c.bundle_path);
+    let auto_rm = bundle_auto_remove(&bundle);
+    let auto_rmi = bundle_auto_remove_image(&bundle);
+    if !auto_rm && !auto_rmi {
+        return;
+    }
+    let image_for_rmi = fs::read_to_string(bundle.join("auto_remove_image"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if auto_rmi {
+        if let Some(img) = image_for_rmi {
+            try_rmi_with_in_use_warning(&img, Some(&c.id), true);
+        }
+    }
+    if auto_rm {
+        let name = c.name.clone();
+        let _ = remove_container_quiet(&name, true, false);
+    }
 }
 
 pub(crate) fn get_process_tree_pids(root_pids: &[i32]) -> Vec<i32> {
@@ -3450,6 +3548,9 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "NanoCpus": nano_cpus,
                         "Ulimits": host_ulimits_for_inspect(&bundle_path),
                         "LogConfig": log_config,
+                        "AutoRemove": bundle_auto_remove(&bundle_path)
+                            || bundle_auto_remove_image(&bundle_path),
+                        "AutoRemoveImage": bundle_auto_remove_image(&bundle_path),
                     },
                     "NetworkSettings": {
                         "Bridge": "",
@@ -5215,6 +5316,15 @@ fn remove_container_opts_inner(
 }
 
 pub fn remove_image(image: &str, force: bool, no_prune: bool) -> Result<()> {
+    remove_image_inner(image, force, no_prune, None)
+}
+
+fn remove_image_inner(
+    image: &str,
+    force: bool,
+    no_prune: bool,
+    ignore_container_id: Option<&str>,
+) -> Result<()> {
     let img_store = ImageStore::new();
     let img = find_image_with_shortname(&img_store, image, None).ok_or_else(|| {
         anyhow!("Image '{}' not found", image)
@@ -5228,6 +5338,17 @@ pub fn remove_image(image: &str, force: bool, no_prune: bool) -> Result<()> {
         let short_name = format!("{}:{}", img.reference, img.tag);
 
         for c in containers {
+            if ignore_container_id == Some(c.id.as_str()) {
+                continue;
+            }
+            if ignore_container_id.is_some()
+                && matches!(
+                    c.status,
+                    ContainerStatus::Exited(_) | ContainerStatus::Created
+                )
+            {
+                continue;
+            }
             if crate::storage::image_store::refs_equivalent(&c.image, &full_name)
                 || crate::storage::image_store::refs_equivalent(&c.image, &short_name)
                 || c.image == img.id
@@ -5364,8 +5485,14 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     let container_id = new_container_id();
     let container_name = args
         .name
-        .clone()
+        .as_ref()
+        .map(|n| ContainerStore::normalize_container_name(n))
+        .filter(|n| !n.is_empty())
         .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
+
+    if args.rmi && cli::RUN_RM_EXPLICIT_FALSE.get() == Some(&true) {
+        cli::usage_errors::exit_usage_error("the --rmi option does not work without --rm");
+    }
 
     let home = home_opt
         .map(PathBuf::from)
@@ -5913,8 +6040,11 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
         &image_id_for_env,
     )?;
     spec.save_to_bundle(&bundle_dir)?;
-    if args.rm {
+    if args.rm || (args.rmi && args.detach) {
         let _ = fs::write(bundle_dir.join("auto_remove"), "1");
+    }
+    if args.rmi {
+        let _ = fs::write(bundle_dir.join("auto_remove_image"), args.image.as_str());
     }
 
     let restart_policy = health::parse_restart_policy(&args.restart)?;
@@ -7100,6 +7230,31 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
     if cleaned.starts_with("{{") && cleaned.ends_with("}}") {
         cleaned = cleaned[2..cleaned.len() - 2].trim();
     }
+    if let Some(rest) = cleaned.strip_prefix("join ") {
+        if let Some((field_path, sep)) = parse_join_template_args(rest) {
+            let node = resolve_template_path(value, field_path.trim_start_matches('.'));
+            if let Some(arr) = node.as_ref().and_then(|n| n.as_array()) {
+                return arr
+                    .iter()
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string().trim_matches('"').to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(sep.as_str());
+            }
+            return String::new();
+        }
+    }
+    if let Some(rest) = cleaned.strip_prefix("len ") {
+        let field_path = rest.trim().trim_start_matches('.');
+        if let Some(node) = resolve_template_path(value, field_path) {
+            if let Some(arr) = node.as_array() {
+                return arr.len().to_string();
+            }
+        }
+        return "0".to_string();
+    }
     let path = cleaned.trim_start_matches('.');
     let mut curr = value;
     for part in path.split('.') {
@@ -7124,6 +7279,30 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     }
+}
+
+fn resolve_template_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let mut curr = value.clone();
+    for part in path.split('.') {
+        if part.is_empty() {
+            continue;
+        }
+        let key = if part == "ID" { "Id" } else { part };
+        curr = curr.get(key).or_else(|| curr.get(part))?.clone();
+    }
+    Some(curr)
+}
+
+fn parse_join_template_args(rest: &str) -> Option<(String, String)> {
+    let rest = rest.trim();
+    let quote = rest.rfind('"')?;
+    let sep_start = rest[..quote].rfind('"')?;
+    let sep = rest[sep_start + 1..quote].to_string();
+    let field = rest[..sep_start].trim();
+    if field.is_empty() {
+        return None;
+    }
+    Some((field.to_string(), sep))
 }
 
 #[doc(hidden)]
@@ -7296,8 +7475,18 @@ pub fn ensure_container_exists(query: &str) -> Result<()> {
 }
 
 pub fn ensure_image_exists(reference: &str) -> Result<()> {
+    let _ = guardrails::ProcessReaper::reap_stale_containers();
+    let c_store = ContainerStore::new();
+    for c in c_store.list() {
+        if matches!(
+            c.status,
+            ContainerStatus::Exited(_) | ContainerStatus::Failed(_)
+        ) {
+            finalize_stopped_container(&c);
+        }
+    }
     let store = ImageStore::new();
-    if store.find(reference).is_none() {
+    if find_image_with_shortname(&store, reference, None).is_none() {
         return Err(anyhow!("Image '{}' not found", reference));
     }
     Ok(())
@@ -7611,6 +7800,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         tty: false,
         detach: true,
         rm: false,
+        rmi: false,
         name: Some(infra_name.clone()),
         env: Vec::new(),
         unsetenv: Vec::new(),
@@ -8609,5 +8799,19 @@ mod tests {
         });
         let out = apply_inspect_format_template("{{.State.Status}} {{.State.ExitCode}}", &v);
         assert_eq!(out, "exited 137");
+    }
+
+    #[test]
+    fn test_inspect_join_and_len_templates() {
+        let v = serde_json::json!({
+            "Args": ["-b"],
+            "Path": "top"
+        });
+        assert_eq!(
+            apply_inspect_format_template("{{join .Args \" \"}}", &v),
+            "-b"
+        );
+        assert_eq!(apply_inspect_format_template("{{len .Args}}", &v), "1");
+        assert_eq!(apply_inspect_format_template("{{len .Path}}", &v), "0");
     }
 }

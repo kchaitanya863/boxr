@@ -365,6 +365,7 @@ impl ProcessReaper {
                 }
                 let _ = fs::remove_file(&cont_pid_file);
                 let _ = store.update_status(&c.id, ContainerStatus::Exited(exit_code));
+                crate::finalize_stopped_container(c);
                 reaped_count += 1;
             }
         }

@@ -579,6 +579,7 @@ mod tests {
             tty: false,
             detach: true,
             rm: false,
+            rmi: false,
             name: Some("worker".to_string()),
             env: vec![],
             unsetenv: vec![],

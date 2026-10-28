@@ -22,6 +22,27 @@ pub use system::*;
 pub use volumes_networks::*;
 
 use clap::{Args, Parser, Subcommand};
+use std::sync::OnceLock;
+
+/// When argv contains `--rm=false`, clap would otherwise treat `--rm` as a boolean flag.
+pub static RUN_RM_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
+
+/// Strip `--rm=false` before clap parsing (Podman accepts `run --rmi --rm=false`).
+pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rm_false = false;
+    for a in argv {
+        if a == "--rm=false" {
+            rm_false = true;
+            continue;
+        }
+        out.push(a);
+    }
+    if rm_false {
+        let _ = RUN_RM_EXPLICIT_FALSE.set(true);
+    }
+    out
+}
 
 /// Help layout expected by Podman `test/system/015-help.bats` (`grep -A1 '^Usage:'`).
 pub const PODMAN_LEAF_HELP: &str = "\

@@ -117,8 +117,12 @@ impl ContainerStore {
     }
 
     #[allow(dead_code)]
+    pub fn normalize_container_name(name: &str) -> String {
+        name.trim().trim_start_matches('/').to_string()
+    }
+
     pub fn find(&self, query: &str) -> Option<ContainerRecord> {
-        let q = query.trim();
+        let q = Self::normalize_container_name(query);
         if q.is_empty() {
             return None;
         }
@@ -127,14 +131,14 @@ impl ContainerStore {
                 .load_unlocked()
                 .containers
                 .into_iter()
-                .find(|c| c.id == q || c.id.starts_with(q) || c.name == q))
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q))
         })
         .ok()
         .flatten()
     }
 
     pub fn add(&self, record: ContainerRecord) -> Result<()> {
-        let name = record.name.trim();
+        let name = Self::normalize_container_name(&record.name);
         if name.is_empty()
             || !name
                 .chars()
@@ -145,6 +149,11 @@ impl ContainerStore {
                 record.name
             ));
         }
+
+        let record = ContainerRecord {
+            name,
+            ..record
+        };
 
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
@@ -167,10 +176,11 @@ impl ContainerStore {
     }
 
     pub fn update_status(&self, id_or_name: &str, status: ContainerStatus) -> Result<()> {
+        let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             if let Some(c) = data.containers.iter_mut().find(|c| {
-                c.id == id_or_name || c.id.starts_with(id_or_name) || c.name == id_or_name
+                c.id == q || c.id.starts_with(&q) || c.name == q
             }) {
                 c.status = status;
                 self.save_unlocked(&data)?;
@@ -186,10 +196,11 @@ impl ContainerStore {
         id_or_name: &str,
         status: crate::health::HealthStatus,
     ) -> Result<()> {
+        let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             if let Some(c) = data.containers.iter_mut().find(|c| {
-                c.id == id_or_name || c.id.starts_with(id_or_name) || c.name == id_or_name
+                c.id == q || c.id.starts_with(&q) || c.name == q
             }) {
                 c.health_status = status;
                 self.save_unlocked(&data)?;
@@ -201,7 +212,7 @@ impl ContainerStore {
     }
 
     pub fn rename(&self, old_query: &str, new_name: &str) -> Result<()> {
-        let new_name_trimmed = new_name.trim();
+        let new_name_trimmed = Self::normalize_container_name(new_name);
         if new_name_trimmed.is_empty()
             || !new_name_trimmed
                 .chars()
@@ -216,10 +227,11 @@ impl ContainerStore {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
 
+            let old_q = Self::normalize_container_name(old_query);
             let old_container = data
                 .containers
                 .iter()
-                .find(|c| c.id == old_query || c.id.starts_with(old_query) || c.name == old_query)
+                .find(|c| c.id == old_q || c.id.starts_with(&old_q) || c.name == old_q)
                 .ok_or_else(|| anyhow!("Container not found: {}", old_query))?;
 
             let old_id = old_container.id.clone();
@@ -249,7 +261,7 @@ impl ContainerStore {
     }
 
     pub fn remove(&self, query: &str) -> Result<ContainerRecord> {
-        let q = query.trim();
+        let q = Self::normalize_container_name(query);
         if q.is_empty() {
             return Err(anyhow!("Container not found: ''"));
         }
@@ -258,7 +270,7 @@ impl ContainerStore {
             let pos = data
                 .containers
                 .iter()
-                .position(|c| c.id == q || c.id.starts_with(q) || c.name == q);
+                .position(|c| c.id == q || c.id.starts_with(&q) || c.name == q);
 
             if let Some(index) = pos {
                 let removed = data.containers.remove(index);

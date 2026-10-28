@@ -22,8 +22,12 @@ pub struct RunArgs {
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
 
-    #[arg(long = "rm")]
+    #[arg(long = "rm", action = clap::ArgAction::SetTrue, default_value_t = false)]
     pub rm: bool,
+
+    /// Remove the image after the container exits (requires --rm)
+    #[arg(long = "rmi", action = clap::ArgAction::SetTrue)]
+    pub rmi: bool,
 
     #[arg(long = "name")]
     pub name: Option<String>,

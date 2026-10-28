@@ -129,6 +129,7 @@ pub async fn create_container(
         tty: false,
         detach: true,
         rm: false,
+        rmi: false,
         name: query.name,
         env: payload.env.unwrap_or_default(),
         unsetenv: Vec::new(),

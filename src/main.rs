@@ -65,7 +65,7 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let argv: Vec<String> = std::env::args().collect();
+        let argv: Vec<String> = boxr::cli::preprocess_argv(std::env::args().collect());
         let cli = match boxr::cli::Cli::try_parse_from(&argv) {
             Ok(c) => c,
             Err(e) => {
