@@ -7732,8 +7732,20 @@ fn prune_container_attached_volumes(bundle_path: PathBuf) {
                     if !m.is_volume {
                         continue;
                     }
+                    let vol_name = m.volume_name.as_deref();
+                    if let Some(name) = vol_name {
+                        if let Some(v) = v_store.find(name) {
+                            if v.anonymous {
+                                let _ = v_store.delete_volume_record(name);
+                            }
+                            continue;
+                        }
+                    }
                     let src = m.source.to_string_lossy();
                     for v in v_store.list() {
+                        if !v.anonymous {
+                            continue;
+                        }
                         if src.contains(&format!("volumes/{}/_data", v.name))
                             || src.contains(&format!("/volumes/{}/", v.name))
                         {
@@ -7750,6 +7762,9 @@ fn prune_container_attached_volumes(bundle_path: PathBuf) {
             for m in spec.mounts {
                 let m_src = m.source;
                 for v in v_store.list() {
+                    if !v.anonymous {
+                        continue;
+                    }
                     if m_src.contains(&format!("volumes/{}/_data", v.name))
                         || m_src.contains(&format!("volumes/{}", v.name))
                         || m_src == v.name
