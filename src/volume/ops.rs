@@ -80,7 +80,10 @@ impl VolumeOps {
         }
 
         let store = VolumeStore::new();
-        let vol = store.create(Some(name), None)?;
+        let vol = match store.find(name) {
+            Some(v) => v,
+            None => store.create(Some(name), None)?,
+        };
 
         let mountpoint = PathBuf::from(&vol.mountpoint);
         fs::create_dir_all(&mountpoint)?;

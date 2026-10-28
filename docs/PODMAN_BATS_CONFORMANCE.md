@@ -87,7 +87,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `050-stop.bats` | **9/9** isolated: Podman **SIGKILL escalation** warnings on stderr when stop timeout **> 0**; **`stop -t 0`** stays silent on stderr (e2e cleanup) |
 | `055-rm.bats` | **10/10** isolated (prior runs; re-verify if agent hangs on full file) |
 | `075-exec.bats` | **9/10** isolated: **red: additional groups** — rootless `setgroups(2)` after `setns` into an existing user namespace returns EPERM in this environment (BATS expects explicit `user:group` to clear supplementary GIDs); comma-separated **`--group-add 1,2,3,...`** now lands in OCI `additional_gids` |
-| `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `volume import test`, `--userns=keep-id` (idmap; see gap below) |
+| `160-volumes.bats` | **24/26** + **2 skips** isolated; **red:** `--userns=keep-id` (idmap; see gap below); **volume import** fixed (import into existing volume) |
 | `030-run.bats` (spot) | **`--default-mounts-file`**, **`--rootfs`** (exit **127**), **`--pod new:`** rollback on duplicate name; many cases still red (journald, buildah); teardown may flag leaked `localhost/boxr-build:*` images from in-suite builds |
 | Podman global flags (e2e init) | `preprocess_argv` strips `--root`, `--runroot`, `--storage-driver`, … before clap |
 | Detached `-d` / restart | Short-lived commands (`true`/`false`) no longer fail start; conmon supervisor restart loop for `--restart=on-failure`; fast **`--rm`/`--rmi`** defers bundle rmdir from inside conmon so **`run -d`** does not race on **`conmon.pid`**; BATS restart+hooks green |
