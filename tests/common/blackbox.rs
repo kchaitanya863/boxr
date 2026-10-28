@@ -347,25 +347,33 @@ pub fn format_container_wait_failure(home: &Path, name: &str) -> String {
     let mut msg = format!(
         "container={} status={} inspect.Running={} pids_alive={}",
         name,
-        if status.is_empty() { "<missing>" } else { &status },
+        if status.is_empty() {
+            "<missing>"
+        } else {
+            &status
+        },
         running.trim(),
         container_host_pids_alive(home, name)
     );
     let index = home.join("containers.json");
     if let Ok(raw) = fs::read_to_string(&index) {
         if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(record) = data
-                .get("containers")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| {
-                    arr.iter()
-                        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
-                })
+            if let Some(record) =
+                data.get("containers")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| {
+                        arr.iter()
+                            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+                    })
             {
                 if let Some(bundle) = record.get("bundle_path").and_then(|v| v.as_str()) {
                     let log_path = Path::new(bundle).join("logs.txt");
                     if let Ok(logs) = fs::read_to_string(&log_path) {
-                        let tail: String = logs.chars().rev().take(800).collect::<String>()
+                        let tail: String = logs
+                            .chars()
+                            .rev()
+                            .take(800)
+                            .collect::<String>()
                             .chars()
                             .rev()
                             .collect();

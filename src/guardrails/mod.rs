@@ -359,9 +359,7 @@ impl ProcessReaper {
             } else {
                 match (vm_alive, cont_alive) {
                     (Some(true), _) | (_, Some(true)) => true,
-                    (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => {
-                        false
-                    }
+                    (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => false,
                     (None, None) => {
                         // Missing pid files during startup; do not reap a Running record yet.
                         true
@@ -611,11 +609,7 @@ mod tests {
             .arg("10")
             .spawn()
             .unwrap();
-        fs::write(
-            bundle_dir.join("conmon.pid"),
-            format!("{}", conmon.id()),
-        )
-        .unwrap();
+        fs::write(bundle_dir.join("conmon.pid"), format!("{}", conmon.id())).unwrap();
         fs::write(bundle_dir.join("vm.pid"), "99999999").unwrap();
 
         let store = ContainerStore::new();

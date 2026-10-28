@@ -185,7 +185,11 @@ fn test_matrix_custom_network_hosts_and_inspect() {
             "180",
         ],
     );
-    assert!(wait_container_running(&home, &c2, Duration::from_secs(45)), "{}", format_container_wait_failure(&home, &c2));
+    assert!(
+        wait_container_running(&home, &c2, Duration::from_secs(45)),
+        "{}",
+        format_container_wait_failure(&home, &c2)
+    );
     run_boxr_ok(
         &home,
         &[
@@ -200,7 +204,11 @@ fn test_matrix_custom_network_hosts_and_inspect() {
             "180",
         ],
     );
-    assert!(wait_container_running(&home, &c1, Duration::from_secs(45)), "{}", format_container_wait_failure(&home, &c1));
+    assert!(
+        wait_container_running(&home, &c1, Duration::from_secs(45)),
+        "{}",
+        format_container_wait_failure(&home, &c1)
+    );
 
     let inspect_raw = run_boxr_ok(&home, &["network", "inspect", &net]);
     let inspect: Vec<serde_json::Value> =
