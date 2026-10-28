@@ -3146,6 +3146,94 @@ pub fn stop_container_with_home(
     stop_container_with_home_and_timeout(container, signal, None, home_opt, false, None)
 }
 
+#[cfg(unix)]
+fn collect_container_stop_pids(bundle_path: &std::path::Path) -> (Vec<i32>, Vec<i32>) {
+    let mut workload_pids = Vec::new();
+    let mut all_pids = Vec::new();
+    if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            all_pids.push(pid);
+        }
+    }
+    if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            workload_pids.push(pid);
+            all_pids.push(pid);
+        }
+    }
+    if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("forwarder.pid")) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            workload_pids.push(pid);
+            all_pids.push(pid);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        workload_pids = get_process_tree_pids(&workload_pids);
+        all_pids = get_process_tree_pids(&all_pids);
+    }
+    (workload_pids, all_pids)
+}
+
+#[cfg(unix)]
+fn sigkill_live_pids(pids: &[i32]) -> bool {
+    let mut any = false;
+    for pid in pids {
+        if unsafe { libc::kill(*pid, 0) == 0 } {
+            any = true;
+            unsafe {
+                libc::kill(*pid, libc::SIGKILL);
+                let _ = libc::kill(-*pid, libc::SIGKILL);
+            }
+        }
+    }
+    any
+}
+
+#[cfg(unix)]
+fn stop_wait_clear_pid_files(bundle_path: &std::path::Path, container_id: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let cgroup_dir = std::path::PathBuf::from("/sys/fs/cgroup/boxr").join(container_id);
+        let procs_file = cgroup_dir.join("cgroup.procs");
+        if procs_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(procs_file) {
+                for line in content.lines() {
+                    if let Ok(pid) = line.trim().parse::<i32>() {
+                        if unsafe { libc::kill(pid, 0) == 0 } {
+                            unsafe {
+                                libc::kill(pid, libc::SIGKILL);
+                                let _ = libc::kill(-pid, libc::SIGKILL);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = wait_for_container_stopped(bundle_path, std::time::Duration::from_secs(30));
+    let _ = std::fs::remove_file(bundle_path.join("vm.pid"));
+    let _ = std::fs::remove_file(bundle_path.join("container.pid"));
+    let _ = std::fs::remove_file(bundle_path.join("forwarder.pid"));
+}
+
+#[cfg(unix)]
+fn finalize_container_exited_status(
+    store: &ContainerStore,
+    id: &str,
+    bundle_path: &std::path::Path,
+    used_sigkill: bool,
+) -> Result<()> {
+    let exit_code = resolve_stop_exit_code(store, id, bundle_path, used_sigkill);
+    if let Err(e) = store.update_status(id, ContainerStatus::Exited(exit_code)) {
+        if store.find(id).is_none() {
+            return Ok(());
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn resolve_stop_exit_code(
     store: &ContainerStore,
     id: &str,
@@ -3220,8 +3308,13 @@ pub fn stop_container_with_home_and_timeout(
     if let Ok(conmon_str) = std::fs::read_to_string(bundle_path.join("conmon.pid")) {
         if let Ok(conmon_pid) = conmon_str.trim().parse::<i32>() {
             if conmon_pid > 0 && unsafe { libc::kill(conmon_pid, 0) != 0 } {
+                let _ = store.update_status(&c.id, ContainerStatus::Stopping);
+                let (_, all_pids) = collect_container_stop_pids(&bundle_path);
+                let _ = sigkill_live_pids(&all_pids);
+                stop_wait_clear_pid_files(&bundle_path, &c.id);
+                let _ = finalize_container_exited_status(&store, &c.id, &bundle_path, true);
                 cli::usage_errors::exit_usage_error(format!(
-                    "Error: container {} conmon exited prematurely, exit code could not be retrieved: conmon process killed",
+                    "container {} conmon exited prematurely, exit code could not be retrieved: conmon process killed",
                     output_label.unwrap_or(container)
                 ));
             }
@@ -3232,30 +3325,7 @@ pub fn stop_container_with_home_and_timeout(
 
     #[cfg(unix)]
     {
-        let mut workload_pids = Vec::new();
-        let mut all_pids = Vec::new();
-        if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                all_pids.push(pid);
-            }
-        }
-        if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                workload_pids.push(pid);
-                all_pids.push(pid);
-            }
-        }
-        if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("forwarder.pid")) {
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                workload_pids.push(pid);
-                all_pids.push(pid);
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            workload_pids = get_process_tree_pids(&workload_pids);
-            all_pids = get_process_tree_pids(&all_pids);
-        }
+        let (workload_pids, all_pids) = collect_container_stop_pids(&bundle_path);
         let pids = &all_pids;
         let stop_pids = if workload_pids.is_empty() {
             all_pids.clone()
@@ -3280,39 +3350,10 @@ pub fn stop_container_with_home_and_timeout(
         for _i in 0..iters {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        for pid in pids {
-            if unsafe { libc::kill(*pid, 0) == 0 } {
-                used_sigkill = true;
-                unsafe {
-                    libc::kill(*pid, libc::SIGKILL);
-                    let _ = libc::kill(-*pid, libc::SIGKILL);
-                }
-            }
+        if sigkill_live_pids(pids) {
+            used_sigkill = true;
         }
-        #[cfg(target_os = "linux")]
-        {
-            let cgroup_dir = std::path::PathBuf::from("/sys/fs/cgroup/boxr").join(&c.id);
-            let procs_file = cgroup_dir.join("cgroup.procs");
-            if procs_file.exists() {
-                if let Ok(content) = std::fs::read_to_string(procs_file) {
-                    for line in content.lines() {
-                        if let Ok(pid) = line.trim().parse::<i32>() {
-                            if unsafe { libc::kill(pid, 0) == 0 } {
-                                used_sigkill = true;
-                                unsafe {
-                                    libc::kill(pid, libc::SIGKILL);
-                                    let _ = libc::kill(-pid, libc::SIGKILL);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        let _ = wait_for_container_stopped(&bundle_path, std::time::Duration::from_secs(30));
-        let _ = std::fs::remove_file(bundle_path.join("vm.pid"));
-        let _ = std::fs::remove_file(bundle_path.join("container.pid"));
-        let _ = std::fs::remove_file(bundle_path.join("forwarder.pid"));
+        stop_wait_clear_pid_files(&bundle_path, &c.id);
         if used_sigkill && sig_num == libc::SIGTERM {
             let label = output_label.unwrap_or(container);
             if let Some(t) = timeout_secs {

@@ -667,7 +667,8 @@ pub fn execute_bundle(
 
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
 
-    if use_conmon_shim(_spec) {
+    // Podman uses a conmon parent for detached containers (ConmonPid, stop/teardown semantics).
+    if use_conmon_shim(_spec) || detach {
         let conmon = prepare_conmon_shim(bundle_path, _spec, &exe)?;
         if detach {
             let _ = fs::write(bundle_path.join("conmon-detach.flag"), "1");
