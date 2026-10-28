@@ -950,13 +950,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // 4. Child is now root in user namespace.
-                let allow_res = fs::write("/proc/self/setgroups", "allow");
-                let sg_after = fs::read_to_string("/proc/self/setgroups").unwrap_or_default();
-                eprintln!(
-                    "boxr: mapping-child setgroups allow={:?} after={:?}",
-                    allow_res,
-                    sg_after.trim()
-                );
+                let _ = fs::write("/proc/self/setgroups", "allow");
                 // Host TCP/DNS relay must start before CLONE_NEWNET (TAP worker cannot setns to host).
                 let mut usernet_relay_pid = None;
                 if network_mode.should_use_native_usernet() && !use_pasta {
