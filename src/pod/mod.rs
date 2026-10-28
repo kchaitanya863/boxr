@@ -633,6 +633,7 @@ mod tests {
             stop_signal: None,
             annotations: vec![],
             ulimits: vec![],
+            hooks_dir: None,
             ipc: None,
             pid: None,
             uts: None,

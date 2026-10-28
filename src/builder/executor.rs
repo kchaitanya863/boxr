@@ -527,7 +527,7 @@ impl ImageBuilder {
                     let spec = Spec::new_default(Some(&current_config), Some(&run_args), None);
                     spec.save_to_bundle(&step_bundle)?;
 
-                    let code = execute_bundle(&step_bundle, &spec, &[], &[], false)?;
+                    let code = execute_bundle(&step_bundle, &spec, &[], &[], false, false)?;
                     if code != 0 {
                         return Err(anyhow!(
                             "The command '{}' returned a non-zero code: {}",

@@ -2013,7 +2013,7 @@ pub async fn run_container_with_output(
 
     let ephemeral_new_pod = prepare_run_pod(&mut args).await?;
 
-    let home = storage::boxr_home();
+    let home = storage::container_state_home();
     let bundle_dir = home.join("containers").join(&container_id);
     let base_rootfs = if let Some(rootfs) = &args.rootfs {
         PathBuf::from(rootfs)
@@ -2397,6 +2397,9 @@ pub async fn run_container_with_output(
         );
         let _ = ulimit::write_inspect_ulimits(&bundle_dir, &args.ulimits);
     }
+    if let Some(hooks) = &args.hooks_dir {
+        let _ = fs::write(bundle_dir.join("hooks_dir"), hooks);
+    }
     if let Some(cidfile) = &args.cidfile {
         fs::write(cidfile, &container_id)?;
     }
@@ -2683,11 +2686,13 @@ pub async fn run_container_with_output(
     )?;
 
     // Execute the container with restart policy support
+    let _ = runtime::oci_hooks::run_hooks_from_bundle(&bundle_dir, "prestart");
     let mut exit_code = execute_bundle(
         &bundle_dir,
         &spec,
         &parsed_mounts,
         &parsed_ports,
+        args.detach,
         args.detach,
     )?;
 
@@ -2743,6 +2748,7 @@ pub async fn run_container_with_output(
     let mut restart_count = 0;
 
     while !args.detach {
+        let _ = runtime::oci_hooks::run_hooks_from_bundle(&bundle_dir, "poststop");
         let should_restart = match &restart_policy {
             health::RestartPolicy::Always => true,
             health::RestartPolicy::OnFailure { max_retries } => {
@@ -2753,11 +2759,20 @@ pub async fn run_container_with_output(
 
         if should_restart {
             restart_count += 1;
+            let _ = container_store.increment_restart_count(&container_id);
             println!(
                 "Container {} exited with code {}, restarting (attempt {})...",
                 container_id, exit_code, restart_count
             );
-            exit_code = execute_bundle(&bundle_dir, &spec, &parsed_mounts, &parsed_ports, false)?;
+            let _ = runtime::oci_hooks::run_hooks_from_bundle(&bundle_dir, "prestart");
+            exit_code = execute_bundle(
+                &bundle_dir,
+                &spec,
+                &parsed_mounts,
+                &parsed_ports,
+                false,
+                false,
+            )?;
         } else {
             break;
         }
@@ -2932,11 +2947,57 @@ fn try_rmi_with_in_use_warning(
 }
 
 /// Update store state and honor `--rm` / `--rmi` after a detached trampoline exits.
+fn load_bundle_for_restart(bundle_path: &Path) -> Result<(Spec, Vec<volume::MountSpec>, Vec<PortMapping>)> {
+    let spec: Spec =
+        serde_json::from_str(&fs::read_to_string(bundle_path.join("config.json"))?)?;
+    let mounts: Vec<volume::MountSpec> = if bundle_path.join("mounts.json").exists() {
+        serde_json::from_str(&fs::read_to_string(bundle_path.join("mounts.json"))?)?
+    } else {
+        Vec::new()
+    };
+    let ports = network::resolve_bundle_ports(bundle_path, &[]);
+    Ok((spec, mounts, ports))
+}
+
+fn try_restart_detached_container(container_id: &str, bundle_path: &Path, stored_exit: i32) -> bool {
+    let store = ContainerStore::new();
+    let c = match store.find(container_id) {
+        Some(c) => c,
+        None => return false,
+    };
+    let should_restart = match &c.restart_policy {
+        health::RestartPolicy::Always => true,
+        health::RestartPolicy::OnFailure { max_retries } => {
+            stored_exit != 0 && c.restart_count < *max_retries
+        }
+        _ => false,
+    };
+    if !should_restart {
+        return false;
+    }
+    let _ = runtime::oci_hooks::run_hooks_from_bundle(bundle_path, "poststop");
+    if store.increment_restart_count(container_id).is_err() {
+        return false;
+    }
+    let _ = runtime::oci_hooks::run_hooks_from_bundle(bundle_path, "prestart");
+    let (spec, mounts, ports) = match load_bundle_for_restart(bundle_path) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let _ = store.update_status(container_id, ContainerStatus::Running);
+    if execute_bundle(bundle_path, &spec, &mounts, &ports, true, false).is_err() {
+        let _ = store.update_status(container_id, ContainerStatus::Exited(stored_exit));
+        return false;
+    }
+    true
+}
+
+/// Returns `true` when the container was restarted and a detached watcher should keep waiting.
 pub fn detached_container_process_exited(
     container_id: &str,
     bundle_path: &Path,
     exit_code: i32,
-) {
+) -> bool {
     let stored = if exit_code == 255 {
         fs::read_to_string(bundle_path.join("boxr-exitcode"))
             .ok()
@@ -2945,13 +3006,18 @@ pub fn detached_container_process_exited(
     } else {
         exit_code
     };
+    if try_restart_detached_container(container_id, bundle_path, stored) {
+        return true;
+    }
     let store = ContainerStore::new();
+    let _ = runtime::oci_hooks::run_hooks_from_bundle(bundle_path, "poststop");
     let _ = store.update_status(container_id, ContainerStatus::Exited(stored));
     let _ = fs::remove_file(bundle_path.join("vm.pid"));
     let _ = fs::remove_file(bundle_path.join("container.pid"));
     if let Some(c) = store.find(container_id) {
         finalize_stopped_container(&c);
     }
+    false
 }
 
 /// After a detached container's main process exits, honor `--rm` / `--rmi` markers.
@@ -3252,7 +3318,7 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
             let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
             apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
             store.update_status(&rec.id, ContainerStatus::Running)?;
-            let code = runtime::execute_bundle(&bundle_path, &spec, &[], &ports, false)?;
+            let code = runtime::execute_bundle(&bundle_path, &spec, &[], &ports, false, false)?;
             store.update_status(&rec.id, ContainerStatus::Exited(code))?;
             if bundle_auto_remove(&bundle_path) {
                 let _ = remove_container_quiet(name, true, false);
@@ -3418,7 +3484,7 @@ pub async fn start_container_with_home(container: &str, home_opt: Option<&Path>)
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
     apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
     store.update_status(&rec.id, ContainerStatus::Running)?;
-    execute_bundle(&bundle_path, &spec, &[], &ports, true)?;
+    execute_bundle(&bundle_path, &spec, &[], &ports, true, true)?;
     if !ports.is_empty() {
         network::wait_for_forwarder_pid(&bundle_path, std::time::Duration::from_secs(15))?;
         network::wait_for_published_ports(&ports, std::time::Duration::from_secs(120))?;
@@ -6544,7 +6610,7 @@ async fn create_only_container_after_pod_prep(
 
     let home = home_opt
         .map(PathBuf::from)
-        .unwrap_or_else(storage::boxr_home);
+        .unwrap_or_else(storage::container_state_home);
     let bundle_dir = home.join("containers").join(&container_id);
     fs::create_dir_all(&bundle_dir)?;
 
@@ -6843,6 +6909,9 @@ async fn create_only_container_after_pod_prep(
             serde_json::to_string(&args.ulimits)?,
         );
         let _ = ulimit::write_inspect_ulimits(&bundle_dir, &args.ulimits);
+    }
+    if let Some(hooks) = &args.hooks_dir {
+        let _ = fs::write(bundle_dir.join("hooks_dir"), hooks);
     }
     if let Some(cidfile) = &args.cidfile {
         fs::write(cidfile, &container_id)?;
@@ -9326,6 +9395,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         stop_signal: None,
         annotations: Vec::new(),
         ulimits: Vec::new(),
+        hooks_dir: None,
         ipc: None,
         pid: None,
         uts: None,

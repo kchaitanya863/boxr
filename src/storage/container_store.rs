@@ -1,4 +1,4 @@
-use crate::storage::boxr_home;
+use crate::storage::container_state_home;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,7 @@ pub struct ContainerStore {
 
 impl ContainerStore {
     pub fn new() -> Self {
-        Self::with_home(boxr_home())
+        Self::with_home(container_state_home())
     }
 
     pub fn with_home(home: PathBuf) -> Self {
@@ -185,6 +185,23 @@ impl ContainerStore {
                 c.status = status;
                 self.save_unlocked(&data)?;
                 Ok(())
+            } else {
+                Err(anyhow!("Container not found: {}", id_or_name))
+            }
+        })
+    }
+
+    pub fn increment_restart_count(&self, id_or_name: &str) -> Result<u32> {
+        let q = Self::normalize_container_name(id_or_name);
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            if let Some(c) = data.containers.iter_mut().find(|c| {
+                c.id == q || c.id.starts_with(&q) || c.name == q
+            }) {
+                c.restart_count += 1;
+                let count = c.restart_count;
+                self.save_unlocked(&data)?;
+                Ok(count)
             } else {
                 Err(anyhow!("Container not found: {}", id_or_name))
             }

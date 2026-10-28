@@ -461,6 +461,7 @@ pub fn execute_bundle(
     mounts: &[MountSpec],
     _ports: &[PortMapping],
     detach: bool,
+    spawn_detached_watcher: bool,
 ) -> Result<i32> {
     if !mounts.is_empty() {
         let mounts_json = serde_json::to_string(mounts)?;
@@ -569,19 +570,22 @@ pub fn execute_bundle(
             if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(&container_id) {
                 let _ = cgroup_mgr.add_process(child_pid);
             }
-            let bundle_watch = bundle_path.to_path_buf();
-            thread::spawn(move || {
-                let exit_code = match child.wait() {
-                    Ok(status) => status.code().unwrap_or(1),
-                    Err(_) => 137,
-                };
-                write_container_exit_code(&bundle_watch, exit_code);
-                crate::detached_container_process_exited(
-                    &container_id,
-                    &bundle_watch,
-                    exit_code,
-                );
-            });
+            if spawn_detached_watcher {
+                let mut waiter = std::process::Command::new(&exe);
+                waiter
+                    .arg("__internal-detached-wait")
+                    .arg(bundle_path)
+                    .arg(child_pid.to_string())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    waiter.process_group(0);
+                }
+                let _ = waiter.spawn();
+            }
         }
         Ok(0)
     } else {
@@ -639,6 +643,55 @@ pub fn execute_bundle(
             Ok(status.code().unwrap_or(1))
         }
     }
+}
+
+/// Outlives the `podman run -d` CLI process; handles restart policy and `--rm`.
+pub fn run_detached_wait(args: &[String]) -> Result<i32> {
+    if args.len() < 2 {
+        return Err(anyhow!("detached-wait: need bundle_path and trampoline_pid"));
+    }
+    let bundle_path = Path::new(&args[0]);
+    let mut pid = args[1]
+        .parse::<i32>()
+        .map_err(|_| anyhow!("invalid trampoline pid"))?;
+    let container_id = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    loop {
+        let exit_code = match waitpid(Pid::from_raw(pid), None) {
+            Ok(WaitStatus::Exited(_, code)) => code,
+            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+            _ => 1,
+        };
+        write_container_exit_code(bundle_path, exit_code);
+        if container_id.is_empty() {
+            break;
+        }
+        if !crate::detached_container_process_exited(&container_id, bundle_path, exit_code) {
+            break;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut next_pid = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(content) = fs::read_to_string(bundle_path.join("vm.pid")) {
+                if let Ok(p) = content.trim().parse::<i32>() {
+                    if p != pid {
+                        next_pid = Some(p);
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if let Some(p) = next_pid {
+            pid = p;
+            continue;
+        }
+        break;
+    }
+    Ok(0)
 }
 
 /// Single-threaded trampoline entry point invoked before Tokio runtime initialization.

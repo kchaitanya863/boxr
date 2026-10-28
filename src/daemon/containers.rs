@@ -184,6 +184,7 @@ pub async fn create_container(
         stop_signal: None,
         annotations: Vec::new(),
         ulimits: Vec::new(),
+        hooks_dir: None,
         ipc: None,
         pid: None,
         uts: None,

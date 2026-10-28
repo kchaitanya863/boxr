@@ -18,6 +18,7 @@ pub fn execute_bundle(
     _mounts: &[MountSpec],
     _ports: &[PortMapping],
     detach: bool,
+    _spawn_detached_watcher: bool,
 ) -> Result<i32> {
     let raw_rootfs = PathBuf::from(&spec.root.path);
     let rootfs_path = if raw_rootfs.is_absolute() {

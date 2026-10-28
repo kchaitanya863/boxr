@@ -43,7 +43,7 @@ impl ContainerRuntime for NativeContainerRuntime {
         ports: &[PortMapping],
         detach: bool,
     ) -> Result<i32> {
-        super::execute_bundle(bundle_path, spec, mounts, ports, detach)
+        super::execute_bundle(bundle_path, spec, mounts, ports, detach, detach)
     }
 
     fn exec_in_bundle(

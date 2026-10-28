@@ -255,6 +255,10 @@ pub struct RunArgs {
     #[arg(long = "ulimit")]
     pub ulimits: Vec<String>,
 
+    /// OCI hooks directory (Podman-compatible)
+    #[arg(long = "hooks-dir")]
+    pub hooks_dir: Option<String>,
+
     /// IPC mode to use
     #[arg(long = "ipc")]
     pub ipc: Option<String>,

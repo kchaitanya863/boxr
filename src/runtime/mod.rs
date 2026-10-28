@@ -4,6 +4,7 @@ pub mod checkpoint;
 pub mod cp;
 pub mod diff;
 pub mod kill;
+pub mod oci_hooks;
 pub mod top;
 pub mod traits;
 
@@ -40,6 +41,7 @@ pub fn execute_bundle(
     _mounts: &[MountSpec],
     _ports: &[PortMapping],
     _detach: bool,
+    _spawn_detached_watcher: bool,
 ) -> Result<i32> {
     anyhow::bail!("Container execution is only supported on Linux, macOS, and Windows");
 }
