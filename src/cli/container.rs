@@ -1209,15 +1209,45 @@ pub struct ContainerCleanupArgs {
 #[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerCloneArgs {
-    /// Container to clone from
-    pub source: String,
-
     /// Name for the cloned container
-    pub target: String,
+    #[arg(long = "name")]
+    pub name: Option<String>,
 
     /// Start the container after cloning
     #[arg(long = "run")]
     pub run: bool,
+
+    /// Destroy the original container after cloning
+    #[arg(long = "destroy")]
+    pub destroy: bool,
+
+    /// Force removing the original container (requires --destroy)
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
+
+    /// CPU limit for the cloned container
+    #[arg(long = "cpus")]
+    pub cpus: Option<String>,
+
+    /// Memory limit for the cloned container
+    #[arg(long = "memory")]
+    pub memory: Option<String>,
+
+    /// Join an existing pod
+    #[arg(long = "pod")]
+    pub pod: Option<String>,
+
+    /// Container to clone from
+    #[arg(value_name = "CONTAINER")]
+    pub source: String,
+
+    /// Name for the clone (positional)
+    #[arg(value_name = "NAME")]
+    pub positional_name: Option<String>,
+
+    /// Image for the clone (positional)
+    #[arg(value_name = "IMAGE")]
+    pub positional_image: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

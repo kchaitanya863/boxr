@@ -889,41 +889,8 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ContainerAction::Clone(clone_args) => {
-                let store = ContainerStore::new();
-                let src = store
-                    .find(&clone_args.source)
-                    .ok_or_else(|| anyhow!("Container '{}' not found", clone_args.source))?;
-                let new_id = new_container_id();
-                let home = storage::boxr_home();
-                let new_bundle = home.join("containers").join(&new_id);
-                let src_bundle = PathBuf::from(&src.bundle_path);
-                fs::create_dir_all(&new_bundle)?;
-                if src_bundle.exists() {
-                    let _ = fs::copy(
-                        src_bundle.join("config.json"),
-                        new_bundle.join("config.json"),
-                    );
-                    let _ = fs::create_dir_all(new_bundle.join("rootfs"));
-                }
-                let new_cont = ContainerRecord {
-                    id: new_id.clone(),
-                    name: clone_args.target.clone(),
-                    image: src.image.clone(),
-                    command: src.command.clone(),
-                    created_at: Utc::now(),
-                    status: ContainerStatus::Created,
-                    bundle_path: new_bundle.to_string_lossy().to_string(),
-                    restart_policy: src.restart_policy.clone(),
-                    health_status: src.health_status.clone(),
-                    restart_count: 0,
-                    ports: src.ports.clone(),
-                    exposed_ports: src.exposed_ports.clone(),
-                };
-                store.add(new_cont)?;
-                if clone_args.run {
-                    start_container(&clone_args.target).await?;
-                }
-                println!("{}", new_id);
+                let id = clone_container(&clone_args).await?;
+                println!("{}", id);
                 Ok(0)
             }
             cli::ContainerAction::Init { container } => {
@@ -4076,6 +4043,14 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .and_then(|v| v.parse::<f64>().ok())
                     .map(|cpus| (cpus * 1_000_000_000.0) as i64);
 
+                let memory_swappiness = annotations
+                    .get("boxr.memory_swappiness")
+                    .and_then(|v| v.parse::<i64>().ok());
+                let network_mode = annotations
+                    .get("boxr.network")
+                    .cloned()
+                    .unwrap_or_else(|| "bridge".to_string());
+
                 let (image_name, image_id, image_digest) =
                     container_inspect_image_fields(&c, &i_store);
 
@@ -4132,8 +4107,9 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Image": image_id,
                     "ImageName": image_name,
                     "ImageDigest": image_digest,
-                    "Name": format!("/{}", c.name),
+                    "Name": c.name.clone(),
                     "RestartCount": c.restart_count,
+                    "Pod": annotations.get("boxr.pod").cloned().unwrap_or_default(),
                     "SizeRw": size_bytes,
                     "Config": {
                         "Image": c.image,
@@ -4155,6 +4131,11 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "CapAdd": cap_add,
                         "CapDrop": cap_drop,
                         "Memory": memory,
+                        "MemorySwap": memory,
+                        "MemorySwappiness": memory_swappiness
+                            .map(serde_json::Value::from)
+                            .unwrap_or(serde_json::Value::Null),
+                        "NetworkMode": network_mode,
                         "NanoCpus": nano_cpus,
                         "Ulimits": host_ulimits_for_inspect(&bundle_path),
                         "LogConfig": log_config,
@@ -8755,6 +8736,135 @@ fn apply_chown_u_from_bundle(bundle_path: &Path, spec: &Spec, recursive: bool) -
         }
     }
     Ok(())
+}
+
+fn check_clone_container_name(store: &ContainerStore, base: &str) -> String {
+    if base.contains("-clone") {
+        let ind = base.find("-clone").unwrap_or(0) + 6;
+        let suffix = &base[ind..];
+        let mut prefix = base[..ind].to_string();
+        if suffix.parse::<i32>().ok().filter(|&n| n != 0).is_none() {
+            let candidate = format!("{}1", base);
+            if store.find(&candidate).is_none() {
+                return candidate;
+            }
+            prefix = base[..ind].to_string();
+        }
+        let mut count = suffix.parse::<i32>().unwrap_or(0);
+        loop {
+            count += 1;
+            let candidate = format!("{}{}", prefix, count);
+            if store.find(&candidate).is_none() {
+                return candidate;
+            }
+        }
+    }
+    let candidate = format!("{base}-clone");
+    if store.find(&candidate).is_none() {
+        return candidate;
+    }
+    check_clone_container_name(store, &candidate)
+}
+
+async fn clone_container(args: &cli::ContainerCloneArgs) -> Result<String> {
+    if args.force && !args.destroy {
+        cli::usage_errors::exit_usage_error("cannot set --force without --destroy");
+    }
+    let store = ContainerStore::new();
+    let src = store
+        .find(&args.source)
+        .ok_or_else(|| anyhow!("Container '{}' not found", args.source))?;
+
+    let target_name = args
+        .name
+        .clone()
+        .or_else(|| args.positional_name.clone())
+        .unwrap_or_else(|| check_clone_container_name(&store, &src.name));
+
+    let mut image = src.image.clone();
+    if let Some(img) = &args.positional_image {
+        pull_image_with_platform(img, None).await?;
+        image = img.clone();
+    }
+
+    let new_id = new_container_id();
+    let home = storage::boxr_home();
+    let new_bundle = home.join("containers").join(&new_id);
+    let src_bundle = PathBuf::from(&src.bundle_path);
+    fs::create_dir_all(&new_bundle)?;
+    if src_bundle.exists() {
+        copy_dir_contents(&src_bundle, &new_bundle)?;
+    }
+
+    let config_path = new_bundle.join("config.json");
+    if config_path.exists() {
+        let content = fs::read_to_string(&config_path)?;
+        if let Ok(mut spec) = serde_json::from_str::<oci::runtime::Spec>(&content) {
+            let ann = spec
+                .annotations
+                .get_or_insert_with(std::collections::HashMap::new);
+            if let Some(cpus) = &args.cpus {
+                ann.insert("boxr.cpus".to_string(), cpus.clone());
+            }
+            if let Some(mem) = &args.memory {
+                ann.insert("boxr.memory".to_string(), mem.clone());
+            }
+            if let Some(pod_ref) = &args.pod {
+                let pod_store = pod::PodStore::new();
+                let pod_id = pod_store
+                    .find(pod_ref)
+                    .map(|p| p.id)
+                    .unwrap_or_else(|| pod_ref.clone());
+                ann.insert("boxr.pod".to_string(), pod_id);
+            } else if let Some(src_cfg) = fs::read_to_string(src_bundle.join("config.json")).ok() {
+                if let Ok(src_spec) = serde_json::from_str::<oci::runtime::Spec>(&src_cfg) {
+                    if let Some(src_ann) = src_spec.annotations {
+                        if let Some(pod_id) = src_ann.get("boxr.pod") {
+                            ann.insert("boxr.pod".to_string(), pod_id.clone());
+                        }
+                    }
+                }
+            }
+            if args.positional_image.is_some() {
+                ann.insert("boxr.clone_image".to_string(), image.clone());
+            }
+            fs::write(&config_path, serde_json::to_string_pretty(&spec)?)?;
+        }
+    } else if let Some(pod_ref) = &args.pod {
+        let pod_store = pod::PodStore::new();
+        let pod_id = pod_store
+            .find(pod_ref)
+            .map(|p| p.id)
+            .unwrap_or_else(|| pod_ref.clone());
+        let _ = fs::write(
+            new_bundle.join("pod.json"),
+            serde_json::json!({ "pod": pod_id }).to_string(),
+        );
+    }
+
+    let new_cont = ContainerRecord {
+        id: new_id.clone(),
+        name: target_name.clone(),
+        image,
+        command: src.command.clone(),
+        created_at: Utc::now(),
+        status: ContainerStatus::Created,
+        bundle_path: new_bundle.to_string_lossy().to_string(),
+        restart_policy: src.restart_policy.clone(),
+        health_status: src.health_status.clone(),
+        restart_count: 0,
+        ports: src.ports.clone(),
+        exposed_ports: src.exposed_ports.clone(),
+    };
+    store.add(new_cont)?;
+
+    if args.destroy {
+        remove_container(&src.id, args.force)?;
+    }
+    if args.run {
+        start_container(&target_name).await?;
+    }
+    Ok(new_id)
 }
 
 fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
