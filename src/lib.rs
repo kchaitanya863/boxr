@@ -7951,6 +7951,30 @@ pub fn untag_image(query: &str, tags: &[String]) -> Result<()> {
         } else {
             let removed = i_store.remove_metadata_only(&img.qualified_name())?;
             println!("Untagged: {}:{}", removed.display_reference(), removed.tag);
+            let still_tagged = i_store
+                .list()
+                .iter()
+                .any(|r| r.id == removed.id && r.reference != "<none>");
+            if !still_tagged
+                && !i_store
+                    .list()
+                    .iter()
+                    .any(|r| r.id == removed.id && r.reference == "<none>")
+            {
+                let dangling = ImageRecord {
+                    id: removed.id.clone(),
+                    reference: "<none>".to_string(),
+                    tag: "<none>".to_string(),
+                    registry: removed.registry.clone(),
+                    manifest_digest: removed.manifest_digest.clone(),
+                    config_digest: removed.config_digest.clone(),
+                    size_bytes: removed.size_bytes,
+                    created_at: removed.created_at,
+                    rootfs_path: removed.rootfs_path.clone(),
+                    config: removed.config.clone(),
+                };
+                i_store.add(dangling)?;
+            }
         }
     } else {
         for t in tags {
