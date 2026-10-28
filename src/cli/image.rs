@@ -26,6 +26,8 @@ pub struct PullArgs {
 pub struct SaveArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<String>,
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
     pub image: String,
 }
 

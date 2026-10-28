@@ -11,6 +11,7 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::thread;
 
 /// Podman/crun-style message and exit code when exec fails in the container child.
 fn container_exec_failure(executable: &str, err: nix::errno::Errno) -> ! {
@@ -134,6 +135,7 @@ struct BundleIoPolicy {
     attach_stdin: bool,
     log_driver: Option<String>,
     log_path: Option<PathBuf>,
+    journald_capture: Option<PathBuf>,
 }
 
 fn bundle_io_policy(spec: &Spec, bundle_path: &Path) -> BundleIoPolicy {
@@ -154,13 +156,31 @@ fn bundle_io_policy(spec: &Spec, bundle_path: &Path) -> BundleIoPolicy {
             .or_else(|| {
                 if ann
                     .and_then(|a| a.get("boxr.log_driver"))
-                    .is_some_and(|d| d == "k8s-file")
+                    .is_some_and(|d| d == "k8s-file" || d == "json-file")
                 {
                     Some(bundle_path.join("ctr.log"))
                 } else {
                     None
                 }
             }),
+        journald_capture: ann
+            .and_then(|a| a.get("boxr.journald_capture"))
+            .map(PathBuf::from),
+    }
+}
+
+fn capture_log_path(policy: &BundleIoPolicy, bundle_path: &Path) -> PathBuf {
+    policy
+        .log_path
+        .clone()
+        .or(policy.journald_capture.clone())
+        .unwrap_or_else(|| bundle_path.join("ctr.log"))
+}
+
+fn uses_capture_logging(policy: &BundleIoPolicy) -> bool {
+    match policy.log_driver.as_deref() {
+        Some("k8s-file") | Some("json-file") | Some("journald") => true,
+        _ => false,
     }
 }
 
@@ -271,12 +291,54 @@ pub fn execute_bundle(
         let io_policy = bundle_io_policy(_spec, bundle_path);
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("__internal-trampoline").arg(bundle_path);
-        configure_stdio(&mut cmd, &io_policy, bundle_path)?;
-        let status = cmd
-            .status()
-            .context("Failed to execute container trampoline process")?;
 
-        Ok(status.code().unwrap_or(1))
+        if uses_capture_logging(&io_policy) {
+            let log_path = capture_log_path(&io_policy, bundle_path);
+            if let Some(parent) = log_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if io_policy.attach_stdin {
+                cmd.stdin(Stdio::inherit());
+            } else {
+                cmd.stdin(Stdio::null());
+            }
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = cmd
+                .spawn()
+                .context("Failed to execute container trampoline process")?;
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let out_attach = io_policy.attach_stdout;
+            let err_attach = io_policy.attach_stderr;
+            let h_out = stdout.map(|pipe| {
+                let path = log_path.clone();
+                thread::spawn(move || {
+                    crate::logging::tee_k8s_stream(pipe, path, "stdout", out_attach);
+                })
+            });
+            let h_err = stderr.map(|pipe| {
+                let path = log_path.clone();
+                thread::spawn(move || {
+                    crate::logging::tee_k8s_stream(pipe, path, "stderr", err_attach);
+                })
+            });
+            let status = child.wait().context("Failed to wait on trampoline")?;
+            if let Some(h) = h_out {
+                let _ = h.join();
+            }
+            if let Some(h) = h_err {
+                let _ = h.join();
+            }
+            Ok(status.code().unwrap_or(1))
+        } else {
+            configure_stdio(&mut cmd, &io_policy, bundle_path)?;
+            let status = cmd
+                .status()
+                .context("Failed to execute container trampoline process")?;
+            Ok(status.code().unwrap_or(1))
+        }
     }
 }
 

@@ -46,6 +46,7 @@ pub mod farm;
 pub mod guardrails;
 pub mod health;
 pub mod kube;
+pub mod logging;
 pub mod mount;
 pub mod network;
 pub mod oci;
@@ -205,6 +206,27 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     }
     if !spec.process.env.iter().any(|e| e.starts_with("container=")) {
         spec.process.env.push("container=podman".to_string());
+    }
+}
+
+fn parse_entrypoint_override(ep: &str) -> Vec<String> {
+    let trimmed = ep.trim();
+    if trimmed.starts_with('[') {
+        if let Ok(parts) = serde_json::from_str::<Vec<String>>(trimmed) {
+            return parts;
+        }
+    }
+    vec![ep.to_string()]
+}
+
+fn validate_log_driver(driver: &str) -> Result<()> {
+    match driver {
+        "none" | "journald" | "k8s-file" | "json-file" => Ok(()),
+        _ => {
+            cli::usage_errors::exit_usage_error(
+                "running container create option: invalid log driver: invalid argument",
+            );
+        }
     }
 }
 
@@ -402,7 +424,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Save(args) => {
             let output_path = args.output.map(PathBuf::from);
-            auth::ImageArchiver::save(&args.image, output_path.as_deref())?;
+            auth::ImageArchiver::save(&args.image, output_path.as_deref(), args.quiet)?;
             Ok(0)
         }
         Commands::Load(args) => {
@@ -716,7 +738,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             }
             cli::ImageAction::Save(save_args) => {
                 let output_path = save_args.output.map(PathBuf::from);
-                auth::ImageArchiver::save(&save_args.image, output_path.as_deref())?;
+                auth::ImageArchiver::save(
+                    &save_args.image,
+                    output_path.as_deref(),
+                    save_args.quiet,
+                )?;
                 Ok(0)
             }
             cli::ImageAction::Load(load_args) => {
@@ -1745,7 +1771,7 @@ pub async fn run_container_with_output(
     }
 
     if let Some(ep) = &args.entrypoint {
-        let mut new_args = vec![ep.clone()];
+        let mut new_args = parse_entrypoint_override(ep);
         if !args.command.is_empty() {
             new_args.extend(args.command.clone());
         }
@@ -1884,12 +1910,19 @@ pub async fn run_container_with_output(
             .to_string(),
     );
     if let Some(driver) = &args.log_driver {
+        validate_log_driver(driver)?;
         annotations.insert("boxr.log_driver".to_string(), driver.clone());
-        if driver == "k8s-file" {
+        if driver == "k8s-file" || driver == "json-file" {
             let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
             annotations.insert(
                 "boxr.log_path".to_string(),
                 log_path.to_string_lossy().to_string(),
+            );
+        } else if driver == "journald" {
+            let capture = bundle_dir.join(".journald-capture");
+            annotations.insert(
+                "boxr.journald_capture".to_string(),
+                capture.to_string_lossy().to_string(),
             );
         }
     }
@@ -2854,10 +2887,33 @@ pub fn container_logs(args: &LogsArgs) -> Result<()> {
         .find(&args.container)
         .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
 
+    let bundle_path = PathBuf::from(&rec.bundle_path);
+    let spec: Option<Spec> = fs::read_to_string(bundle_path.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let annotations = spec
+        .as_ref()
+        .and_then(|s| s.annotations.clone())
+        .unwrap_or_default();
+    if annotations.get("boxr.log_driver").is_some_and(|d| d == "none") {
+        cli::usage_errors::exit_usage_error(
+            "this container is using the 'none' log driver, cannot read logs",
+        );
+    }
+
+    let ctr_log = if annotations.get("boxr.log_driver").is_some_and(|d| d == "journald") {
+        annotations
+            .get("boxr.journald_capture")
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+    } else {
+        annotations
+            .get("boxr.log_path")
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+    };
     let log_path = PathBuf::from(&rec.bundle_path).join("logs.txt");
-    let rootfs_log = PathBuf::from(&rec.bundle_path)
-        .join("rootfs")
-        .join("logs.txt");
+    let rootfs_log = bundle_path.join("rootfs").join("logs.txt");
 
     let print_line = |line: &str| {
         if args.timestamps {
@@ -2867,7 +2923,9 @@ pub fn container_logs(args: &LogsArgs) -> Result<()> {
         }
     };
 
-    let content = if log_path.exists()
+    let content = if let Some(path) = ctr_log {
+        logging::decode_k8s_log_file(&path)?
+    } else if log_path.exists()
         && fs::metadata(&log_path)
             .map(|m| m.len() > 0)
             .unwrap_or(false)
@@ -3175,11 +3233,11 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let (image_name, image_id, image_digest) =
                     container_inspect_image_fields(&c, &i_store);
 
-                let log_config = if let Some(path) = annotations.get("boxr.log_path") {
-                    let driver = annotations
-                        .get("boxr.log_driver")
+                let log_config = if let Some(driver) = annotations.get("boxr.log_driver") {
+                    let path = annotations
+                        .get("boxr.log_path")
                         .map(|s| s.as_str())
-                        .unwrap_or("k8s-file");
+                        .unwrap_or("");
                     serde_json::json!({
                         "Type": driver,
                         "Path": path,
@@ -5263,7 +5321,7 @@ async fn create_only_container_impl(args: RunArgs, home_opt: Option<&Path>) -> R
     }
 
     if let Some(ep) = &args.entrypoint {
-        let mut new_args = vec![ep.clone()];
+        let mut new_args = parse_entrypoint_override(ep);
         if !args.command.is_empty() {
             new_args.extend(args.command.clone());
         }

@@ -211,12 +211,17 @@ pub struct ImageArchiver;
 
 impl ImageArchiver {
     /// Export an image to a standard tar archive (boxr save)
-    pub fn save(image_query: &str, dest_path: Option<&Path>) -> Result<()> {
-        Self::save_with_home(image_query, dest_path, &boxr_home())
+    pub fn save(image_query: &str, dest_path: Option<&Path>, quiet: bool) -> Result<()> {
+        Self::save_with_home(image_query, dest_path, &boxr_home(), quiet)
     }
 
     /// Export an image to a tar archive, using `home` as the boxr home.
-    pub fn save_with_home(image_query: &str, dest_path: Option<&Path>, home: &Path) -> Result<()> {
+    pub fn save_with_home(
+        image_query: &str,
+        dest_path: Option<&Path>,
+        home: &Path,
+        quiet: bool,
+    ) -> Result<()> {
         let store = ImageStore::with_home(home.to_path_buf());
         let image = store
             .find(image_query)
@@ -227,7 +232,9 @@ impl ImageArchiver {
                 .with_context(|| format!("Failed to create archive at {:?}", path))?;
             let mut builder = Builder::new(file);
             Self::pack_image_tar(&image, &mut builder)?;
-            println!("Exported image {} to {:?}", image.reference, path);
+            if !quiet {
+                println!("Exported image {} to {:?}", image.reference, path);
+            }
         } else {
             let stdout = std::io::stdout();
             let mut builder = Builder::new(stdout.lock());
@@ -655,7 +662,8 @@ mod tests {
 
         // Save, wipe the original, then load.
         let tar_path = home.path().join("testimg.tar");
-        ImageArchiver::save_with_home("testimg:latest", Some(&tar_path), home.path()).unwrap();
+        ImageArchiver::save_with_home("testimg:latest", Some(&tar_path), home.path(), false)
+            .unwrap();
         store.remove("testimg:latest").unwrap();
         assert!(store.find("testimg:latest").is_none());
 
