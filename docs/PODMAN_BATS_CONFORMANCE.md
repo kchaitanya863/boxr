@@ -81,7 +81,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 
 Authoritative log: `.cache/podman-bats-results/run-20261028-130514.log` (153 ok / 2 not ok). Earlier scorecards predated `--uidmap` rootfs-setup identity; re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest.
 
-Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails (for future gating).
+Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails. CI runs curated strict as a **progress tracker** (`continue-on-error`) until the manifest is fully green; then remove `continue-on-error` on that workflow step to hard-gate merges.
 
 On hosts where **`mount_setattr` idmap** fails (Cloud Agent / hardened kernels), **`160-volumes` keep-id** stays red while everything else passes. For a strict gate that matches boxr capability (not host idmap policy), run:
 

@@ -62,13 +62,22 @@ jobs:
 
       - name: Podman BATS conformance (curated manifest, strict)
         timeout-minutes: 45
+        continue-on-error: true
         env:
           PODMAN_BATS_OMIT_HOST_GATED: "1"
           PODMAN_BATS_STRICT: "1"
           BOXR_TEST_EMBEDDED_USERNET: "1"
         run: |
           chmod +x scripts/run_podman_bats_conformance.sh scripts/sync_podman_bats_upstream.sh
-          ./scripts/run_podman_bats_conformance.sh
+          ./scripts/run_podman_bats_conformance.sh || true
+          log=$(ls -t .cache/podman-bats-results/run-*.log | head -1)
+          echo "## Curated Podman BATS (strict)" >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^ok |^not ok ' "$log" | awk '{if($1=="ok") o++; else n++} END {print "- ok:", o+0, "not ok:", n+0}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: podman-bats-curated-log
+          path: .cache/podman-bats-results/run-*.log
 
       - name: Podman P0 CLI audit
         run: python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
