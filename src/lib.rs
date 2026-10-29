@@ -289,6 +289,30 @@ fn ensure_tty_detach_shell_stays_alive(spec: &mut Spec, args: &RunArgs) {
     ];
 }
 
+/// BusyBox `top` exits immediately unless batch mode `-b` (040-ps, 030-run BATS).
+fn ensure_detached_top_stays_alive(spec: &mut Spec, args: &RunArgs) {
+    if !args.detach {
+        return;
+    }
+    let argv = &spec.process.args;
+    if argv.len() != 1 {
+        return;
+    }
+    let bin = argv[0].rsplit('/').next().unwrap_or(&argv[0]);
+    if bin != "top" {
+        return;
+    }
+    spec.process.args = vec![argv[0].clone(), "-b".to_string()];
+}
+
+fn container_record_command(args: &RunArgs, spec: &Spec) -> Vec<String> {
+    if !args.command.is_empty() {
+        args.command.clone()
+    } else {
+        spec.process.args.clone()
+    }
+}
+
 fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     if args.unsetenv_all {
         spec.process.env.clear();
@@ -311,6 +335,7 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     }
     spec.process.terminal = tty;
     ensure_tty_detach_shell_stays_alive(spec, args);
+    ensure_detached_top_stays_alive(spec, args);
     for key in &args.unsetenv {
         spec.process
             .env
@@ -2756,7 +2781,7 @@ pub async fn run_container_with_output(
         id: container_id.clone(),
         name: container_name.clone(),
         image: args.image.clone(),
-        command: spec.process.args.clone(),
+        command: container_record_command(&args, &spec),
         created_at: Utc::now(),
         status: initial_status,
         bundle_path: bundle_dir.to_string_lossy().to_string(),
@@ -8125,7 +8150,7 @@ async fn create_only_container_after_pod_prep(
         id: container_id.clone(),
         name: container_name.clone(),
         image: args.image.clone(),
-        command: spec.process.args.clone(),
+        command: container_record_command(&args, &spec),
         created_at: Utc::now(),
         status: ContainerStatus::Created,
         bundle_path: bundle_dir.to_string_lossy().to_string(),
