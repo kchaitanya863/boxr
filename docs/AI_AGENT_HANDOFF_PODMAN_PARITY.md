@@ -26,12 +26,34 @@ Log from verification run: `.cache/podman-bats-results/run-20261029-045731.log`.
 - **Timestamps**: `--timestamps` uses entry times from k8s records, not wall clock at print.
 - **Noise**: drops synthetic `Terminated` payloads from displayed logs.
 
+## Black-box E2E status: **green** (Oct 29, 2026 PT)
+
+All Podman-oriented **boxr black-box** gates pass on Linux rootless CI/VM:
+
+| Gate | Count |
+|------|-------|
+| `podman_parity_audit.py` P0 | 14/14 |
+| `podman_parity_blackbox_test` | 16/16 |
+| `podman_upstream_parity_test` | 18/18 |
+| `run_blackbox_qa.sh -s podman` | 19/19 (K1–K19) |
+
+One command:
+
+```bash
+cargo build
+./scripts/run_podman_blackbox_e2e.sh ./target/debug/boxr
+```
+
+Artifacts from last agent run: `/opt/cursor/artifacts/podman-blackbox-cargo.log`, `blackbox-qa-podman.log`, `podman-parity-audit-run.log`.
+
+Upstream Podman **BATS/Ginkgo** suites are conformance trackers, not this black-box gate (see below).
+
 ## How to verify (agents)
 
 ```bash
 cargo build
 cargo test --lib logging::tests
-cargo test --test podman_upstream_parity_test --test podman_parity_blackbox_test -- --test-threads=1
+./scripts/run_podman_blackbox_e2e.sh ./target/debug/boxr
 
 # Single BATS file (preferred):
 PODMAN_BATS_PATTERN=035-logs ./scripts/run_podman_bats_conformance.sh

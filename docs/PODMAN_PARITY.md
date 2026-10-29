@@ -11,11 +11,13 @@ Track **Podman-compatible** CLI and behavior for `boxr`. Status meanings:
 
 **P0** rows must stay at least **partial** on Linux and macOS (or **n/a** with explicit errors).
 
-Automated checks:
+Automated checks (single gate):
 
-- `python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr`
-- `cargo test --test podman_parity_blackbox_test --test podman_upstream_parity_test -- --test-threads=1`
-- `./scripts/run_blackbox_qa.sh -s podman -b ./target/debug/boxr`
+```bash
+./scripts/run_podman_blackbox_e2e.sh ./target/debug/boxr
+```
+
+Expands to: P0 CLI audit, `podman_parity_blackbox_test`, `podman_upstream_parity_test`, and black-box QA section `podman` (K1–K19). Upstream Podman BATS/Ginkgo conformance is separate: [PODMAN_BATS_CONFORMANCE.md](PODMAN_BATS_CONFORMANCE.md).
 
 ## Matrix
 

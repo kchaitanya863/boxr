@@ -60,14 +60,11 @@ jobs:
       - name: Podman P0 CLI audit
         run: python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
 
-      - name: Podman parity blackbox (P0)
-        run: cargo test --test podman_parity_blackbox_test -- --test-threads=1
+      - name: Podman black-box E2E (audit + Rust + shell QA)
+        run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_podman_blackbox_e2e.sh ./target/debug/boxr
 
       - name: Run Test Suite
         run: cargo test --all --verbose -- --test-threads=1
-
-      - name: Black-Box QA (podman P0 shell + embedded K6)
-        run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s podman
 
       - name: Run Black-Box QA (shell smoke)
         run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s negative
