@@ -306,6 +306,7 @@ pub fn execute_bundle(
     mounts: &[MountSpec],
     ports: &[PortMapping],
     detach: bool,
+    _spawn_detached_watcher: bool,
 ) -> Result<i32> {
     let raw_rootfs = PathBuf::from(&spec.root.path);
     let rootfs_path = if raw_rootfs.is_absolute() {
@@ -435,6 +436,11 @@ pub fn execute_bundle(
                         .options
                         .as_ref()
                         .map(|opts| opts.iter().any(|o| o == "ro"))
+                        .unwrap_or(false),
+                    noexec: m
+                        .options
+                        .as_ref()
+                        .map(|opts| opts.iter().any(|o| o == "noexec"))
                         .unwrap_or(false),
                     is_volume: false,
                 });
@@ -637,6 +643,9 @@ pub fn exec_in_bundle(
     workdir: Option<&str>,
     user: Option<&str>,
     detach: bool,
+    _attach: crate::runtime::ExecAttach,
+    _exec_pid_path: Option<&Path>,
+    _preserve_fds: &[u32],
 ) -> Result<i32> {
     let rootfs_path = bundle_path.join("rootfs");
     let pid_file = bundle_path.join("vm.pid");

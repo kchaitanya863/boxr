@@ -25,6 +25,9 @@ pub trait ContainerRuntime: Send + Sync {
         workdir: Option<&str>,
         user: Option<&str>,
         detach: bool,
+        attach: super::ExecAttach,
+        exec_pid_path: Option<&Path>,
+        preserve_fds: &[u32],
     ) -> Result<i32>;
 }
 
@@ -41,7 +44,7 @@ impl ContainerRuntime for NativeContainerRuntime {
         ports: &[PortMapping],
         detach: bool,
     ) -> Result<i32> {
-        super::execute_bundle(bundle_path, spec, mounts, ports, detach)
+        super::execute_bundle(bundle_path, spec, mounts, ports, detach, detach)
     }
 
     fn exec_in_bundle(
@@ -52,7 +55,20 @@ impl ContainerRuntime for NativeContainerRuntime {
         workdir: Option<&str>,
         user: Option<&str>,
         detach: bool,
+        attach: super::ExecAttach,
+        exec_pid_path: Option<&Path>,
+        preserve_fds: &[u32],
     ) -> Result<i32> {
-        super::exec_in_bundle(bundle_path, command, env, workdir, user, detach)
+        super::exec_in_bundle(
+            bundle_path,
+            command,
+            env,
+            workdir,
+            user,
+            detach,
+            attach,
+            exec_pid_path,
+            preserve_fds,
+        )
     }
 }

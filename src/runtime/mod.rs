@@ -1,7 +1,10 @@
+use std::path::Path;
+
 pub mod checkpoint;
 pub mod cp;
 pub mod diff;
 pub mod kill;
+pub mod oci_hooks;
 pub mod top;
 pub mod traits;
 
@@ -9,10 +12,19 @@ pub use checkpoint::CheckpointManager;
 pub use kill::{ContainerKiller, ProcessKiller};
 pub use traits::{ContainerRuntime, NativeContainerRuntime};
 
+/// Stdin/TTY attachment for `exec_in_bundle` (Podman `exec -i` / `exec -t`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExecAttach {
+    pub interactive: bool,
+    pub tty: bool,
+    /// Do not inherit probe stdout/stderr to the boxr process (health checks, etc.).
+    pub quiet: bool,
+}
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::{exec_in_bundle, execute_bundle};
+pub use linux::{bundle_process_is_alive, exec_in_bundle, execute_bundle};
 
 #[cfg(target_os = "macos")]
 pub mod darwin;
@@ -31,6 +43,7 @@ pub fn execute_bundle(
     _mounts: &[MountSpec],
     _ports: &[PortMapping],
     _detach: bool,
+    _spawn_detached_watcher: bool,
 ) -> Result<i32> {
     anyhow::bail!("Container execution is only supported on Linux, macOS, and Windows");
 }
@@ -43,6 +56,9 @@ pub fn exec_in_bundle(
     _workdir: Option<&str>,
     _user: Option<&str>,
     _detach: bool,
+    _attach: ExecAttach,
+    _exec_pid_path: Option<&Path>,
+    _preserve_fds: &[u32],
 ) -> Result<i32> {
     anyhow::bail!("Container execution is only supported on Linux, macOS, and Windows");
 }

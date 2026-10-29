@@ -18,6 +18,7 @@ pub fn execute_bundle(
     _mounts: &[MountSpec],
     _ports: &[PortMapping],
     detach: bool,
+    _spawn_detached_watcher: bool,
 ) -> Result<i32> {
     let raw_rootfs = PathBuf::from(&spec.root.path);
     let rootfs_path = if raw_rootfs.is_absolute() {
@@ -99,6 +100,9 @@ pub fn exec_in_bundle(
     workdir: Option<&str>,
     _user: Option<&str>,
     _detach: bool,
+    _attach: crate::runtime::ExecAttach,
+    _exec_pid_path: Option<&Path>,
+    _preserve_fds: &[u32],
 ) -> Result<i32> {
     let binary = &command[0];
     let args = &command[1..];

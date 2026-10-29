@@ -43,21 +43,13 @@ fn test_validate_network_port_compatibility_matrix() {
         container_port: 80,
         protocol: "tcp".to_string(),
     }];
-    for ok_net in ["bridge", "boxr0", "custom", "usernet", "pasta", "auto", ""] {
+    for ok_net in [
+        "bridge", "boxr0", "custom", "usernet", "pasta", "auto", "", "none", "host",
+    ] {
         assert!(
             validate_network_port_compatibility(ok_net, &ports).is_ok(),
-            "ports should be allowed on {}",
+            "validate should not hard-fail on {}",
             ok_net
-        );
-    }
-    for bad_net in ["none", "host"] {
-        let err = validate_network_port_compatibility(bad_net, &ports).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("published ports are not supported"),
-            "bad_net={}: {}",
-            bad_net,
-            err
         );
     }
     assert!(validate_network_port_compatibility("none", &[]).is_ok());

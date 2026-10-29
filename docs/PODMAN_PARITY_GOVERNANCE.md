@@ -22,6 +22,6 @@ Close a child issue when the matrix row reaches **partial** or **full** with tes
 Before tagging a release:
 
 1. `python3 tools/podman_parity_audit.py --boxr ./target/release/boxr`
-2. `cargo test --test podman_parity_blackbox_test -- --test-threads=1`
+2. `cargo test --test podman_parity_blackbox_test --test podman_upstream_parity_test -- --test-threads=1`
 3. `BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_blackbox_qa.sh -b ./target/release/boxr --no-rust -s podman` (Linux)
 4. All P0 matrix rows ≥ **partial** (or **n/a** with documented errors)

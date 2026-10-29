@@ -150,14 +150,41 @@ impl OverlayDriver {
                     }
                 }
             } else {
-                // Always copy to guarantee isolation between container writes and base layer
+                let meta = fs::metadata(&from);
                 let _ = fs::copy(&from, &to);
+                if let Ok(meta) = meta {
+                    Self::preserve_file_timestamps(&from, &to, &meta);
+                }
             }
         }
         Ok(())
     }
 
     /// Tear down and cleanup OverlayFS/CoW bundle
+    #[cfg(unix)]
+    fn preserve_file_timestamps(_from: &Path, to: &Path, meta: &fs::Metadata) {
+        use std::ffi::CString;
+        use std::os::unix::fs::MetadataExt;
+        let times = [
+            libc::timespec {
+                tv_sec: meta.atime(),
+                tv_nsec: meta.atime_nsec(),
+            },
+            libc::timespec {
+                tv_sec: meta.mtime(),
+                tv_nsec: meta.mtime_nsec(),
+            },
+        ];
+        if let Ok(path) = CString::new(to.as_os_str().as_encoded_bytes()) {
+            unsafe {
+                libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn preserve_file_timestamps(_from: &Path, _to: &Path, _meta: &fs::Metadata) {}
+
     pub fn cleanup(bundle: &OverlayBundle) -> Result<()> {
         #[cfg(target_os = "linux")]
         if bundle.is_mounted {

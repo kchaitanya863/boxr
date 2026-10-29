@@ -1,10 +1,10 @@
-use crate::storage::boxr_home;
+use crate::storage::container_state_home;
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub fn rand_id() -> [u8; 6] {
@@ -26,6 +26,7 @@ pub fn rand_id() -> [u8; 6] {
 pub enum ContainerStatus {
     Created,
     Running,
+    Stopping,
     Paused,
     Exited(i32),
     Failed(String),
@@ -36,6 +37,7 @@ impl std::fmt::Display for ContainerStatus {
         match self {
             ContainerStatus::Created => write!(f, "Created"),
             ContainerStatus::Running => write!(f, "Up"),
+            ContainerStatus::Stopping => write!(f, "Stopping"),
             ContainerStatus::Paused => write!(f, "Paused"),
             ContainerStatus::Exited(code) => write!(f, "Exited ({})", code),
             ContainerStatus::Failed(err) => write!(f, "Failed: {}", err),
@@ -79,7 +81,7 @@ pub struct ContainerStore {
 
 impl ContainerStore {
     pub fn new() -> Self {
-        Self::with_home(boxr_home())
+        Self::with_home(container_state_home())
     }
 
     pub fn with_home(home: PathBuf) -> Self {
@@ -115,8 +117,12 @@ impl ContainerStore {
     }
 
     #[allow(dead_code)]
+    pub fn normalize_container_name(name: &str) -> String {
+        name.trim().trim_start_matches('/').to_string()
+    }
+
     pub fn find(&self, query: &str) -> Option<ContainerRecord> {
-        let q = query.trim();
+        let q = Self::normalize_container_name(query);
         if q.is_empty() {
             return None;
         }
@@ -125,14 +131,14 @@ impl ContainerStore {
                 .load_unlocked()
                 .containers
                 .into_iter()
-                .find(|c| c.id == q || c.id.starts_with(q) || c.name == q))
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q))
         })
         .ok()
         .flatten()
     }
 
     pub fn add(&self, record: ContainerRecord) -> Result<()> {
-        let name = record.name.trim();
+        let name = Self::normalize_container_name(&record.name);
         if name.is_empty()
             || !name
                 .chars()
@@ -144,6 +150,8 @@ impl ContainerStore {
             ));
         }
 
+        let record = ContainerRecord { name, ..record };
+
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             if let Some(existing) = data
@@ -152,7 +160,7 @@ impl ContainerStore {
                 .find(|c| c.name == record.name && c.id != record.id)
             {
                 return Err(anyhow!(
-                    "Conflict. The container name \"/{}\" is already in use by container \"{}\". You have to remove (or rename) that container to be able to reuse that name.",
+                    "creating container storage: the container name \"{}\" is already in use by {} You have to remove that container to be able to reuse that name: that name is already in use, or use --replace to instruct Podman to do so.",
                     record.name,
                     existing.id
                 ));
@@ -165,14 +173,42 @@ impl ContainerStore {
     }
 
     pub fn update_status(&self, id_or_name: &str, status: ContainerStatus) -> Result<()> {
+        let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(c) = data.containers.iter_mut().find(|c| {
-                c.id == id_or_name || c.id.starts_with(id_or_name) || c.name == id_or_name
-            }) {
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
+                // SIGKILL during `podman stop` (separate process) must not be downgraded.
+                if matches!(c.status, ContainerStatus::Exited(137))
+                    && !matches!(status, ContainerStatus::Exited(137))
+                {
+                    return Ok(());
+                }
                 c.status = status;
                 self.save_unlocked(&data)?;
                 Ok(())
+            } else {
+                Err(anyhow!("Container not found: {}", id_or_name))
+            }
+        })
+    }
+
+    pub fn increment_restart_count(&self, id_or_name: &str) -> Result<u32> {
+        let q = Self::normalize_container_name(id_or_name);
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
+                c.restart_count += 1;
+                let count = c.restart_count;
+                self.save_unlocked(&data)?;
+                Ok(count)
             } else {
                 Err(anyhow!("Container not found: {}", id_or_name))
             }
@@ -184,11 +220,14 @@ impl ContainerStore {
         id_or_name: &str,
         status: crate::health::HealthStatus,
     ) -> Result<()> {
+        let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(c) = data.containers.iter_mut().find(|c| {
-                c.id == id_or_name || c.id.starts_with(id_or_name) || c.name == id_or_name
-            }) {
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
                 c.health_status = status;
                 self.save_unlocked(&data)?;
                 Ok(())
@@ -199,7 +238,7 @@ impl ContainerStore {
     }
 
     pub fn rename(&self, old_query: &str, new_name: &str) -> Result<()> {
-        let new_name_trimmed = new_name.trim();
+        let new_name_trimmed = Self::normalize_container_name(new_name);
         if new_name_trimmed.is_empty()
             || !new_name_trimmed
                 .chars()
@@ -214,10 +253,11 @@ impl ContainerStore {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
 
+            let old_q = Self::normalize_container_name(old_query);
             let old_container = data
                 .containers
                 .iter()
-                .find(|c| c.id == old_query || c.id.starts_with(old_query) || c.name == old_query)
+                .find(|c| c.id == old_q || c.id.starts_with(&old_q) || c.name == old_q)
                 .ok_or_else(|| anyhow!("Container not found: {}", old_query))?;
 
             let old_id = old_container.id.clone();
@@ -247,7 +287,7 @@ impl ContainerStore {
     }
 
     pub fn remove(&self, query: &str) -> Result<ContainerRecord> {
-        let q = query.trim();
+        let q = Self::normalize_container_name(query);
         if q.is_empty() {
             return Err(anyhow!("Container not found: ''"));
         }
@@ -256,7 +296,7 @@ impl ContainerStore {
             let pos = data
                 .containers
                 .iter()
-                .position(|c| c.id == q || c.id.starts_with(q) || c.name == q);
+                .position(|c| c.id == q || c.id.starts_with(&q) || c.name == q);
 
             if let Some(index) = pos {
                 let removed = data.containers.remove(index);
@@ -309,7 +349,11 @@ impl ContainerStore {
                         }
                     }
 
-                    let _ = fs::remove_dir_all(bundle);
+                    if bundle_conmon_is_current_process(&bundle) {
+                        let _ = fs::write(bundle.join("deferred-bundle-rm"), "1");
+                    } else {
+                        let _ = fs::remove_dir_all(bundle);
+                    }
                 }
 
                 Ok(removed)
@@ -318,6 +362,21 @@ impl ContainerStore {
             }
         })
     }
+}
+
+#[cfg(unix)]
+fn bundle_conmon_is_current_process(bundle: &Path) -> bool {
+    if let Ok(s) = fs::read_to_string(bundle.join("conmon.pid")) {
+        if let Ok(cp) = s.trim().parse::<i32>() {
+            return cp == unsafe { libc::getpid() };
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn bundle_conmon_is_current_process(_bundle: &Path) -> bool {
+    false
 }
 
 impl super::traits::ContainerReader for ContainerStore {

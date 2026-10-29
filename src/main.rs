@@ -20,6 +20,42 @@ fn main() -> Result<()> {
                 std::process::exit(0);
             }
         }
+        if args[1] == "__internal-conmon-supervisor" {
+            #[cfg(target_os = "linux")]
+            {
+                let code = boxr::runtime::linux::run_conmon_supervisor(&args[2..])?;
+                std::process::exit(code);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::process::exit(0);
+            }
+        }
+        if args[1] == "__internal-health-supervisor" {
+            #[cfg(target_os = "linux")]
+            {
+                let bundle = std::path::Path::new(&args[2]);
+                let code = boxr::health::supervisor::run_internal_health_supervisor(bundle)
+                    .map(|_| 0)
+                    .unwrap_or(1);
+                std::process::exit(code);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::process::exit(0);
+            }
+        }
+        if args[1] == "__internal-detached-wait" {
+            #[cfg(target_os = "linux")]
+            {
+                let code = boxr::runtime::linux::run_detached_wait(&args[2..])?;
+                std::process::exit(code);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::process::exit(0);
+            }
+        }
         if args[1] == "__internal-trampoline-exec" {
             #[cfg(target_os = "linux")]
             {
@@ -32,10 +68,14 @@ fn main() -> Result<()> {
             }
         }
         if args[1] == "unshare" {
-            #[cfg(target_os = "linux")]
-            {
-                let code = boxr::runtime::linux::run_unshare_cli(&args[2..])?;
-                std::process::exit(code);
+            let sub = &args[2..];
+            let wants_help = sub.is_empty() || sub.iter().any(|a| a == "--help" || a == "-h");
+            if !wants_help {
+                #[cfg(target_os = "linux")]
+                {
+                    let code = boxr::runtime::linux::run_unshare_cli(sub)?;
+                    std::process::exit(code);
+                }
             }
         }
         if args[1] == "__internal-port-forward" {
@@ -60,8 +100,20 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let cli = boxr::cli::Cli::parse();
-        let code = boxr::run_cli(cli).await?;
+        let argv: Vec<String> = boxr::cli::preprocess_argv(std::env::args().collect());
+        let cli = match boxr::cli::Cli::try_parse_from(&argv) {
+            Ok(c) => c,
+            Err(e) => {
+                boxr::cli::usage_errors::exit_on_clap_error(e, &argv);
+            }
+        };
+        let code = match boxr::run_cli(cli).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        };
         std::process::exit(code);
     })
 }

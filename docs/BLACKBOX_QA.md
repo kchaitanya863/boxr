@@ -63,7 +63,9 @@ Examples:
 | [tests/fixtures/compose/](../tests/fixtures/compose/) | Compose YAML fixtures |
 | [tests/compose_docker_replacement_test.rs](../tests/compose_docker_replacement_test.rs) | Docker/Podman replacement compose (CLI service args, `.env`, `${VAR:-default}`) |
 | [tests/podman_parity_blackbox_test.rs](../tests/podman_parity_blackbox_test.rs) | Podman P0 black-box (exists, kube, specgen, quadlet, checkpoint, …) |
+| [tests/podman_upstream_parity_test.rs](../tests/podman_upstream_parity_test.rs) | Podman e2e-themed smokes (secret, pod pause/stats, generate kube/systemd, network disconnect, …) |
 | [docs/PODMAN_PARITY.md](PODMAN_PARITY.md) | Living Podman parity matrix and status definitions |
+| [docs/PODMAN_TEST_MAPPING.md](PODMAN_TEST_MAPPING.md) | Upstream Podman test file → boxr test mapping and non-goals |
 
 ## Isolated state
 

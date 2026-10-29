@@ -97,24 +97,41 @@ fn dummy_image_record(repo: &str, tag: &str, home: &Path) -> ImageRecord {
 
 fn default_run_args(image: &str) -> RunArgs {
     RunArgs {
+        registry_auth: Default::default(),
         interactive: false,
         tty: false,
         detach: false,
         rm: false,
+        rmi: false,
         name: None,
         env: Vec::new(),
+        unsetenv: Vec::new(),
+        unsetenv_all: false,
+        systemd: None,
         ports: Vec::new(),
         volumes: Vec::new(),
+        image_volume: None,
         workdir: None,
         memory: None,
+        kernel_memory: None,
         labels: Vec::new(),
         dns: Vec::new(),
         cidfile: None,
+        conmon_pidfile: None,
         cpus: None,
         pids_limit: None,
         rootless: true,
         restart: "no".to_string(),
         health_cmd: None,
+        secret: Vec::new(),
+        health_startup_cmd: None,
+        health_startup_interval: None,
+        health_startup_timeout: None,
+        health_startup_retries: None,
+        health_startup_success: None,
+        health_max_log_count: None,
+        health_max_log_size: None,
+        health_log_destination: None,
         platform: None,
         network: "none".to_string(),
         disable_content_trust: false,
@@ -123,12 +140,17 @@ fn default_run_args(image: &str) -> RunArgs {
         entrypoint: None,
         env_file: None,
         user: None,
+        hostuser: Vec::new(),
+        group_entry: Vec::new(),
         hostname: None,
+        no_hostname: false,
         add_host: Vec::new(),
         shm_size: None,
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
         read_only: false,
+        http_proxy: false,
+        read_only_tmpfs: None,
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
@@ -145,10 +167,15 @@ fn default_run_args(image: &str) -> RunArgs {
         stop_signal: None,
         annotations: Vec::new(),
         ulimits: Vec::new(),
+        hooks_dir: None,
+        conmon_syslog: false,
+        tz: Vec::new(),
         ipc: None,
         pid: None,
         uts: None,
-        userns: None,
+        userns: Vec::new(),
+        uidmap: Vec::new(),
+        gidmap: Vec::new(),
         cgroupns: None,
         cgroup_parent: None,
         isolation: None,
@@ -167,12 +194,15 @@ fn default_run_args(image: &str) -> RunArgs {
         health_timeout: None,
         health_retries: None,
         health_start_period: None,
+        health_on_failure: None,
         health_start_interval: None,
         no_healthcheck: true,
         attach: Vec::new(),
+        preserve_fds: None,
+        preserve_fd: Vec::new(),
         pull: None,
         quiet: false,
-        log_driver: None,
+        log_driver: vec![],
         log_opt: Vec::new(),
         oom_kill_disable: false,
         oom_score_adj: None,
@@ -202,6 +232,9 @@ fn default_run_args(image: &str) -> RunArgs {
         volume_driver: None,
         volumes_from: Vec::new(),
         pod: None,
+        rootfs: None,
+        default_mounts_file: None,
+        timeout: None,
         image: image.to_string(),
         command: vec!["true".to_string()],
     }
@@ -396,7 +429,7 @@ async fn test_issue_120_shm_size_validation() {
 #[test]
 fn test_issue_121_update_memory_rejects_negative() {
     assert!(ResourceLimits::parse_memory("-10m").is_err());
-    assert!(ResourceLimits::parse_memory("0m").is_err());
+    assert!(ResourceLimits::parse_memory("0m").is_ok());
     assert!(ResourceLimits::parse_memory("128m").is_ok());
 }
 
@@ -590,6 +623,7 @@ fn test_issue_130_inspect_multiple_targets() {
         format: None,
         size: false,
         obj_type: None,
+        latest: false,
     };
     assert_eq!(args.targets.len(), 2);
 }
@@ -658,6 +692,7 @@ fn test_issue_135_inspect_type_invalid_error() {
         format: None,
         size: false,
         obj_type: Some("invalid_type_name".to_string()),
+        latest: false,
     };
 
     let res = boxr::inspect_target(&args);
@@ -701,7 +736,7 @@ fn test_issue_138_tag_empty_repo_rejected() {
 
     let args = TagArgs {
         source: "alpine:latest".to_string(),
-        target: ":v1".to_string(),
+        targets: vec![":v1".to_string()],
     };
 
     let res = boxr::tag_image(&args);
@@ -763,6 +798,7 @@ fn test_issue_140_history_layer_sizes() {
 #[tokio::test]
 async fn test_issue_141_search_respects_limit() {
     let args = cli::SearchArgs {
+        registry_auth: Default::default(),
         term: "alpine".to_string(),
         limit: 2,
         filter: Vec::new(),

@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct MachineSubcommands {
     #[command(subcommand)]
     pub command: MachineAction,
@@ -58,6 +59,7 @@ pub enum MachineAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct MachineSetArgs {
     /// Machine name
     pub name: Option<String>,
@@ -76,6 +78,7 @@ pub struct MachineSetArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct MachineOsArgs {
     #[command(subcommand)]
     pub action: MachineOsAction,

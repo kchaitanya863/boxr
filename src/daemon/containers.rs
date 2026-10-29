@@ -124,38 +124,61 @@ pub async fn create_container(
     }
 
     let run_args = crate::cli::RunArgs {
+        registry_auth: Default::default(),
         interactive: false,
         tty: false,
         detach: true,
         rm: false,
+        rmi: false,
         name: query.name,
         env: payload.env.unwrap_or_default(),
+        unsetenv: Vec::new(),
+        unsetenv_all: false,
+        systemd: None,
         ports,
         volumes,
+        image_volume: None,
         workdir: payload.working_dir,
         user: payload.user,
+        hostuser: Vec::new(),
+        group_entry: Vec::new(),
         hostname: None,
+        no_hostname: false,
         add_host: Vec::new(),
         dns: Vec::new(),
         labels: Vec::new(),
         cidfile: None,
+        conmon_pidfile: None,
         memory,
+        kernel_memory: None,
         cpus: None,
         pids_limit: None,
         rootless: true,
         restart,
         health_cmd: None,
+        secret: Vec::new(),
+        health_startup_cmd: None,
+        health_startup_interval: None,
+        health_startup_timeout: None,
+        health_startup_retries: None,
+        health_startup_success: None,
+        health_max_log_count: None,
+        health_max_log_size: None,
+        health_log_destination: None,
         platform: None,
         network: "auto".to_string(),
         disable_content_trust: false,
         privileged: false,
         gpus: None,
         entrypoint: None,
+        tz: Vec::new(),
         env_file: None,
         shm_size: None,
         cap_add: Vec::new(),
         cap_drop: Vec::new(),
         read_only: false,
+        http_proxy: false,
+        read_only_tmpfs: None,
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
@@ -172,10 +195,14 @@ pub async fn create_container(
         stop_signal: None,
         annotations: Vec::new(),
         ulimits: Vec::new(),
+        hooks_dir: None,
+        conmon_syslog: false,
         ipc: None,
         pid: None,
         uts: None,
-        userns: None,
+        userns: Vec::new(),
+        uidmap: Vec::new(),
+        gidmap: Vec::new(),
         cgroupns: None,
         cgroup_parent: None,
         isolation: None,
@@ -194,12 +221,15 @@ pub async fn create_container(
         health_timeout: None,
         health_retries: None,
         health_start_period: None,
+        health_on_failure: None,
         health_start_interval: None,
         no_healthcheck: false,
         attach: Vec::new(),
+        preserve_fds: None,
+        preserve_fd: Vec::new(),
         pull: None,
         quiet: false,
-        log_driver: None,
+        log_driver: vec![],
         log_opt: Vec::new(),
         oom_kill_disable: false,
         oom_score_adj: None,
@@ -229,6 +259,9 @@ pub async fn create_container(
         volume_driver: None,
         volumes_from: Vec::new(),
         pod: None,
+        rootfs: None,
+        default_mounts_file: None,
+        timeout: None,
         image: payload.image,
         command: payload.cmd.unwrap_or_default(),
     };
@@ -249,7 +282,7 @@ pub async fn start_container(
     State(state): State<DaemonState>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    match crate::start_container_with_home(&id, Some(&state.home)).await {
+    match crate::start_container_with_home(&id, Some(&state.home), true).await {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
     }
@@ -271,6 +304,8 @@ pub async fn stop_container(
         query.signal.as_deref(),
         query.t,
         Some(&state.home),
+        true,
+        None,
     ) {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
@@ -283,7 +318,7 @@ pub async fn restart_container(
 ) -> StatusCode {
     let _ = crate::stop_container_with_home(&id, None, Some(&state.home));
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    match crate::start_container_with_home(&id, Some(&state.home)).await {
+    match crate::start_container_with_home(&id, Some(&state.home), true).await {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(_) => StatusCode::NOT_FOUND,
     }
@@ -426,6 +461,7 @@ pub async fn inspect_container(
 
     let status_str = match c.status {
         ContainerStatus::Running => "running",
+        ContainerStatus::Stopping => "stopping",
         ContainerStatus::Paused => "paused",
         ContainerStatus::Created => "created",
         ContainerStatus::Exited(_) => "exited",
@@ -558,9 +594,18 @@ pub async fn start_exec_instance(
                         .unwrap_or(false);
 
                     let log_path = bundle.join(format!("exec-{}.log", exec_id));
-                    let code =
-                        crate::runtime::exec_in_bundle(&bundle, &cmd, &env, wd, user, detach)
-                            .unwrap_or(1);
+                    let code = crate::runtime::exec_in_bundle(
+                        &bundle,
+                        &cmd,
+                        &env,
+                        wd,
+                        user,
+                        detach,
+                        crate::runtime::ExecAttach::default(),
+                        None,
+                        &[],
+                    )
+                    .unwrap_or(1);
                     let _ = fs::write(
                         bundle.join(format!("exec-{}.done", exec_id)),
                         code.to_string(),

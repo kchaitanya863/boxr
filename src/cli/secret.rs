@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct SecretSubcommands {
     #[command(subcommand)]
     pub command: SecretAction,
@@ -10,13 +11,17 @@ pub struct SecretSubcommands {
 pub enum SecretAction {
     /// Create a secret from a file or stdin
     Create {
-        /// Secret name
-        #[arg(value_name = "NAME")]
-        #[arg(long = "name")]
-        name: Option<String>,
+        /// Secret name (Podman: positional NAME or `--name`)
+        #[arg(long = "name", group = "secret_name")]
+        name_flag: Option<String>,
+        #[arg(value_name = "NAME", group = "secret_name")]
+        name_pos: Option<String>,
+        /// Read secret from file (use - for stdin); optional second positional
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
         /// Read secret from file (use - for stdin)
         #[arg(short = 'f', long = "file")]
-        file: Option<String>,
+        file_flag: Option<String>,
         /// Set metadata labels (key=value)
         #[arg(long = "label")]
         labels: Vec<String>,

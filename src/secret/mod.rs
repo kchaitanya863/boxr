@@ -100,7 +100,9 @@ impl SecretStore {
                 .unwrap_or_else(|| format!("secret-{}", &random_id[..8]));
 
             if store.secrets.iter().any(|s| s.name == secret_name) {
-                return Err(anyhow!("Secret name '{}' already exists", secret_name));
+                if let Some(existing) = store.secrets.iter().find(|s| s.name == secret_name) {
+                    return Ok(existing.clone());
+                }
             }
 
             let secret_dir = self.secrets_dir.join(&secret_name);

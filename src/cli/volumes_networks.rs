@@ -1,6 +1,7 @@
 use clap::Args;
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct VolumeSubcommands {
     #[command(subcommand)]
     pub command: VolumeAction,
@@ -8,61 +9,15 @@ pub struct VolumeSubcommands {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum VolumeAction {
-    Create {
-        /// Volume name via --name
-        #[arg(long = "name")]
-        name_flag: Option<String>,
-        /// Volume name (positional)
-        name: Option<String>,
-        /// Specify volume driver name (default "local")
-        #[arg(short = 'd', long = "driver", default_value = "local")]
-        driver: String,
-        /// Set driver specific options
-        #[arg(short = 'o', long = "opt")]
-        opts: Vec<String>,
-        /// Set metadata for a volume
-        #[arg(long = "label")]
-        labels: Vec<String>,
-        /// Cluster Volume availability (active, pause, drain)
-        #[arg(long = "availability")]
-        availability: Option<String>,
-        /// Cluster Volume group
-        #[arg(long = "group")]
-        group: Option<String>,
-        /// Minimum size of the Cluster Volume in bytes
-        #[arg(long = "limit-bytes")]
-        limit_bytes: Option<String>,
-        /// Maximum size of the Cluster Volume in bytes
-        #[arg(long = "required-bytes")]
-        required_bytes: Option<String>,
-        /// Cluster Volume access scope (single, multi)
-        #[arg(long = "scope")]
-        scope: Option<String>,
-        /// Cluster Volume secrets
-        #[arg(long = "secret")]
-        secret: Vec<String>,
-        /// Cluster Volume access sharing
-        #[arg(long = "sharing")]
-        sharing: Option<String>,
-        /// Topology that the Cluster Volume would be preferred in
-        #[arg(long = "topology-preferred")]
-        topology_preferred: Vec<String>,
-        /// Topology that the Cluster Volume must be accessible from
-        #[arg(long = "topology-required")]
-        topology_required: Vec<String>,
-        /// Cluster Volume access type (mount, block)
-        #[arg(long = "type")]
-        vol_type: Option<String>,
-    },
+    Create(VolumeCreateArgs),
+    #[command(alias = "list")]
     Ls(VolumeLsArgs),
     Inspect {
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
         name: String,
     },
-    Rm {
-        name: String,
-    },
+    Rm(VolumeRmArgs),
     Prune(VolumePruneArgs),
     /// Export volume data to a tar archive
     Export(VolumeExportArgs),
@@ -74,8 +29,8 @@ pub enum VolumeAction {
     },
     /// Rename a volume
     Rename {
-        old_name: String,
-        new_name: String,
+        #[arg(value_name = "NAME", num_args = 1..=2)]
+        names: Vec<String>,
     },
     /// Mount a volume filesystem
     Mount {
@@ -93,6 +48,73 @@ pub enum VolumeAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct VolumeCreateArgs {
+    /// Volume name via --name
+    #[arg(long = "name")]
+    pub name_flag: Option<String>,
+    /// Volume name (positional)
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+    /// Specify volume driver name (default "local")
+    #[arg(short = 'd', long = "driver", default_value = "local")]
+    pub driver: String,
+    /// Set driver specific options
+    #[arg(short = 'o', long = "opt")]
+    pub opts: Vec<String>,
+    /// Set metadata for a volume
+    #[arg(long = "label")]
+    pub labels: Vec<String>,
+    /// Do not fail if the volume already exists
+    #[arg(long = "ignore")]
+    pub ignore: bool,
+    /// Cluster Volume availability (active, pause, drain)
+    #[arg(long = "availability")]
+    pub availability: Option<String>,
+    /// Cluster Volume group
+    #[arg(long = "group")]
+    pub group: Option<String>,
+    /// Minimum size of the Cluster Volume in bytes
+    #[arg(long = "limit-bytes")]
+    pub limit_bytes: Option<String>,
+    /// Maximum size of the Cluster Volume in bytes
+    #[arg(long = "required-bytes")]
+    pub required_bytes: Option<String>,
+    /// Cluster Volume access scope (single, multi)
+    #[arg(long = "scope")]
+    pub scope: Option<String>,
+    /// Cluster Volume secrets
+    #[arg(long = "secret")]
+    pub secret: Vec<String>,
+    /// Cluster Volume access sharing
+    #[arg(long = "sharing")]
+    pub sharing: Option<String>,
+    /// Topology that the Cluster Volume would be preferred in
+    #[arg(long = "topology-preferred")]
+    pub topology_preferred: Vec<String>,
+    /// Topology that the Cluster Volume must be accessible from
+    #[arg(long = "topology-required")]
+    pub topology_required: Vec<String>,
+    /// Cluster Volume access type (mount, block)
+    #[arg(long = "type")]
+    pub vol_type: Option<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct VolumeRmArgs {
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+    /// Accepted for Podman teardown compatibility (ignored for volumes)
+    #[arg(short = 't', long = "time", hide = true, allow_hyphen_values = true)]
+    pub time: Option<i32>,
+    pub names: Vec<String>,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct VolumeLsArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
@@ -100,9 +122,12 @@ pub struct VolumeLsArgs {
     pub filter: Vec<String>,
     #[arg(long = "format")]
     pub format: Option<String>,
+    #[arg(short = 'n', long = "noheading")]
+    pub noheading: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct VolumePruneArgs {
     #[arg(short = 'f', long = "force")]
     pub force: bool,
@@ -113,6 +138,7 @@ pub struct VolumePruneArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct NetworkSubcommands {
     #[command(subcommand)]
     pub command: NetworkAction,
@@ -181,6 +207,8 @@ pub enum NetworkAction {
         name: String,
     },
     Rm {
+        #[arg(short = 'f', long = "force")]
+        force: bool,
         name: String,
     },
     Prune(NetworkPruneArgs),
@@ -206,6 +234,7 @@ pub enum NetworkAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct NetworkLsArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
@@ -215,9 +244,12 @@ pub struct NetworkLsArgs {
     pub format: Option<String>,
     #[arg(long = "no-trunc")]
     pub no_trunc: bool,
+    #[arg(short = 'n', long = "noheading")]
+    pub noheading: bool,
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct NetworkPruneArgs {
     #[arg(short = 'f', long = "force")]
     pub force: bool,
@@ -226,6 +258,7 @@ pub struct NetworkPruneArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct VolumeExportArgs {
     /// Volume name
     pub name: String,
@@ -235,6 +268,7 @@ pub struct VolumeExportArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct VolumeImportArgs {
     /// Volume name
     pub name: String,
@@ -243,6 +277,7 @@ pub struct VolumeImportArgs {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct NetworkUpdateArgs {
     /// Network name to update
     pub network: String,

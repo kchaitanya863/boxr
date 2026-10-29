@@ -135,6 +135,10 @@ pub fn run_boxr(home: &Path, args: &[&str]) -> Output {
     let mut cmd = Command::new(&bin);
     cmd.env_remove("DOCKER_HOST");
     cmd.env("BOXR_HOME", home);
+    #[cfg(target_os = "linux")]
+    if std::env::var("CI").is_ok() && std::env::var("BOXR_FORCE_EMBEDDED_USERNET").is_err() {
+        cmd.env("BOXR_FORCE_EMBEDDED_USERNET", "1");
+    }
     cmd.args(args);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -287,19 +291,173 @@ pub fn wait_http_ok(url: &str, timeout: Duration) -> bool {
     false
 }
 
-pub fn wait_container_running(home: &Path, name: &str, timeout: Duration) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        let out = run_boxr(home, &["inspect", "-f", "{{.State.Running}}", name]);
-        if out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.trim() == "true" {
-                return true;
+fn pid_file_alive(pid_file: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        fs::read_to_string(pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .map(|pid| pid > 1 && unsafe { libc::kill(pid, 0) == 0 })
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid_file;
+        false
+    }
+}
+
+fn container_host_pids_alive(home: &Path, name: &str) -> bool {
+    let index = home.join("containers.json");
+    let Ok(raw) = fs::read_to_string(&index) else {
+        return false;
+    };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(record) = data
+        .get("containers")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+        })
+    else {
+        return false;
+    };
+    let Some(bundle) = record
+        .get("bundle_path")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+    else {
+        return false;
+    };
+    for name in ["container.pid", "vm.pid", "conmon.pid"] {
+        if pid_file_alive(&bundle.join(name)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn container_bundle_logs(home: &Path, name: &str) -> Option<String> {
+    let index = home.join("containers.json");
+    let raw = fs::read_to_string(&index).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let record = data
+        .get("containers")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))?;
+    let bundle = record.get("bundle_path")?.as_str()?;
+    fs::read_to_string(Path::new(bundle).join("logs.txt")).ok()
+}
+
+/// True when the container already exited because CLONE_NEWNET failed with EPERM (common on
+/// exhausted GitHub Actions runners after a long `cargo test --all` sequence).
+pub fn container_exited_netns_eperm(home: &Path, name: &str) -> bool {
+    if container_inspect_status(home, name) != "exited" {
+        return false;
+    }
+    let Some(logs) = container_bundle_logs(home, name) else {
+        return false;
+    };
+    logs.contains("Failed to unshare network namespace")
+        && (logs.contains("EPERM") || logs.contains("Operation not permitted"))
+}
+
+pub fn format_container_wait_failure(home: &Path, name: &str) -> String {
+    let status = container_inspect_status(home, name);
+    let running_flag = run_boxr(home, &["inspect", "-f", "{{.State.Running}}", name]);
+    let running = String::from_utf8_lossy(&running_flag.stdout);
+    let mut msg = format!(
+        "container={} status={} inspect.Running={} pids_alive={}",
+        name,
+        if status.is_empty() {
+            "<missing>"
+        } else {
+            &status
+        },
+        running.trim(),
+        container_host_pids_alive(home, name)
+    );
+    let index = home.join("containers.json");
+    if let Ok(raw) = fs::read_to_string(&index) {
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(record) =
+                data.get("containers")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| {
+                        arr.iter()
+                            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(name))
+                    })
+            {
+                if let Some(bundle) = record.get("bundle_path").and_then(|v| v.as_str()) {
+                    let log_path = Path::new(bundle).join("logs.txt");
+                    if let Ok(logs) = fs::read_to_string(&log_path) {
+                        let tail: String = logs
+                            .chars()
+                            .rev()
+                            .take(800)
+                            .collect::<String>()
+                            .chars()
+                            .rev()
+                            .collect();
+                        if !tail.is_empty() {
+                            msg.push_str(&format!(" logs_tail={:?}", tail));
+                        }
+                    }
+                }
             }
+        }
+    }
+    msg
+}
+
+pub fn wait_container_running(home: &Path, name: &str, timeout: Duration) -> bool {
+    let effective = if cfg!(target_os = "macos") || std::env::var("CI").is_ok() {
+        timeout.max(Duration::from_secs(120))
+    } else {
+        timeout
+    };
+    let start = Instant::now();
+    let mut start_attempted = false;
+    while start.elapsed() < effective {
+        if container_reports_running(home, name) || container_host_pids_alive(home, name) {
+            return true;
+        }
+        if container_exited_netns_eperm(home, name) {
+            return false;
+        }
+        let status = container_inspect_status(home, name);
+        if status == "created" && !start_attempted {
+            start_attempted = true;
+            let _ = run_boxr(home, &["start", name]);
         }
         std::thread::sleep(Duration::from_millis(500));
     }
     false
+}
+
+fn container_inspect_status(home: &Path, name: &str) -> String {
+    let out = run_boxr(home, &["inspect", "-f", "{{.State.Status}}", name]);
+    if !out.status.success() {
+        return String::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn container_reports_running(home: &Path, name: &str) -> bool {
+    let out = run_boxr(home, &["inspect", "-f", "{{.State.Running}}", name]);
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if stdout.trim() == "true" {
+            return true;
+        }
+    }
+    container_inspect_status(home, name) == "running"
 }
 
 pub fn wait_exec_success(home: &Path, container: &str, cmd: &[&str], timeout: Duration) -> bool {

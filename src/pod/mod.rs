@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Podman-compatible pod configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,19 +410,30 @@ pub fn container_namespace_path(container_query: &str, ns: &str) -> Result<Strin
     container_pid_namespace_path(&cont, ns)
 }
 
-pub fn container_pid_namespace_path(cont: &ContainerRecord, ns: &str) -> Result<String> {
-    let pid_file = PathBuf::from(&cont.bundle_path).join("container.pid");
-    if pid_file.exists() {
-        let pid = fs::read_to_string(&pid_file)?.trim().to_string();
-        if !pid.is_empty() {
-            return Ok(format!("/proc/{}/ns/{}", pid, ns));
+pub fn read_container_pid_from_bundle(bundle_path: &Path) -> Option<i32> {
+    for name in ["container.pid", "vm.pid"] {
+        let pid_path = bundle_path.join(name);
+        if let Ok(raw) = fs::read_to_string(&pid_path) {
+            if let Ok(pid) = raw.trim().parse::<i32>() {
+                if pid > 0 {
+                    return Some(pid);
+                }
+            }
         }
     }
-    Err(anyhow!(
-        "Container '{}' is not running; cannot join {} namespace",
-        cont.name,
-        ns
-    ))
+    None
+}
+
+pub fn container_pid_namespace_path(cont: &ContainerRecord, ns: &str) -> Result<String> {
+    let bundle = PathBuf::from(&cont.bundle_path);
+    let pid = read_container_pid_from_bundle(&bundle).ok_or_else(|| {
+        anyhow!(
+            "Container '{}' is not running; cannot join {} namespace",
+            cont.name,
+            ns
+        )
+    })?;
+    Ok(format!("/proc/{}/ns/{}", pid, ns))
 }
 
 /// Parse `container:<name>` or return the value as a namespace path.
@@ -500,193 +511,4 @@ impl PodWriter for PodStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_pod_store_lifecycle() {
-        let temp = tempdir().unwrap();
-        let store = PodStore::with_home(temp.path().to_path_buf());
-
-        let pod = store.create(Some("test-pod"), Vec::new()).unwrap();
-        assert_eq!(pod.name, "test-pod");
-        assert_eq!(store.list().len(), 1);
-        assert!(pod.share_ipc);
-        assert!(pod.share_net);
-
-        assert!(store.find("test-pod").is_some());
-        assert!(store.exists("test-pod"));
-
-        store.add_container_to_pod("test-pod", "cont123").unwrap();
-        let updated = store.find("test-pod").unwrap();
-        assert_eq!(updated.containers, vec!["cont123".to_string()]);
-        assert_eq!(updated.status, "Running");
-
-        store.remove("test-pod").unwrap();
-        assert_eq!(store.list().len(), 0);
-    }
-
-    #[test]
-    fn test_pod_config_defaults() {
-        let cfg = PodConfig::default();
-        assert!(cfg.share_ipc);
-        assert!(cfg.share_net);
-        assert!(!cfg.share_pid);
-    }
-
-    #[test]
-    fn test_resolve_namespace_spec_host() {
-        let r = resolve_namespace_spec("host", "net").unwrap();
-        assert_eq!(r, Some("host".to_string()));
-    }
-
-    #[test]
-    fn test_pod_prune_removes_exited() {
-        let temp = tempdir().unwrap();
-        let store = PodStore::with_home(temp.path().to_path_buf());
-        let pod = store.create(Some("exited-pod"), Vec::new()).unwrap();
-        store.update_status(&pod.name, "Exited").unwrap();
-        let pruned = store.prune().unwrap();
-        assert!(pruned.contains(&"exited-pod".to_string()));
-        assert!(store.find("exited-pod").is_none());
-    }
-
-    #[test]
-    fn test_apply_pod_to_run_args() {
-        let pod = PodRecord {
-            id: "abc".to_string(),
-            name: "mypod".to_string(),
-            created_at: Utc::now(),
-            status: "Created".to_string(),
-            infra_container_id: "mypod-infra".to_string(),
-            containers: vec![],
-            ports: vec![],
-            hostname: Some("podhost".to_string()),
-            labels: HashMap::from([("app".to_string(), "web".to_string())]),
-            dns: vec!["8.8.8.8".to_string()],
-            memory: Some("512m".to_string()),
-            cpus: None,
-            share_ipc: true,
-            share_net: true,
-            share_uts: true,
-            share_pid: false,
-            network: None,
-        };
-        let mut args = crate::cli::RunArgs {
-            interactive: false,
-            tty: false,
-            detach: true,
-            rm: false,
-            name: Some("worker".to_string()),
-            env: vec![],
-            ports: vec![],
-            volumes: vec![],
-            memory: None,
-            labels: vec![],
-            dns: vec![],
-            cidfile: None,
-            cpus: None,
-            pids_limit: None,
-            rootless: true,
-            restart: "no".to_string(),
-            health_cmd: None,
-            platform: None,
-            privileged: false,
-            network: "bridge".to_string(),
-            disable_content_trust: false,
-            gpus: None,
-            entrypoint: None,
-            env_file: None,
-            user: None,
-            hostname: None,
-            add_host: vec![],
-            shm_size: None,
-            cap_add: vec![],
-            cap_drop: vec![],
-            read_only: false,
-            init: false,
-            tmpfs: vec![],
-            devices: vec![],
-            security_opt: vec![],
-            cpu_shares: None,
-            cpuset_cpus: None,
-            memory_swap: None,
-            memory_reservation: None,
-            dns_search: vec![],
-            dns_option: vec![],
-            expose: vec![],
-            sysctl: vec![],
-            stop_timeout: None,
-            stop_signal: None,
-            annotations: vec![],
-            ulimits: vec![],
-            ipc: None,
-            pid: None,
-            uts: None,
-            userns: None,
-            cgroupns: None,
-            cgroup_parent: None,
-            isolation: None,
-            cpu_count: None,
-            cpu_percent: None,
-            io_maxbandwidth: None,
-            io_maxiops: None,
-            publish_all: false,
-            ip: None,
-            ip6: None,
-            mac_address: None,
-            link: vec![],
-            network_alias: vec![],
-            mount: vec![],
-            health_interval: None,
-            health_timeout: None,
-            health_retries: None,
-            health_start_period: None,
-            health_start_interval: None,
-            no_healthcheck: false,
-            attach: vec![],
-            pull: None,
-            quiet: false,
-            log_driver: None,
-            log_opt: vec![],
-            oom_kill_disable: false,
-            oom_score_adj: None,
-            group_add: vec![],
-            label_file: None,
-            umask: None,
-            domainname: None,
-            detach_keys: None,
-            blkio_weight: None,
-            blkio_weight_device: vec![],
-            cpu_period: None,
-            cpu_quota: None,
-            cpu_rt_period: None,
-            cpu_rt_runtime: None,
-            cpuset_mems: None,
-            device_cgroup_rule: vec![],
-            device_read_bps: vec![],
-            device_read_iops: vec![],
-            device_write_bps: vec![],
-            device_write_iops: vec![],
-            link_local_ip: vec![],
-            memory_swappiness: None,
-            runtime: None,
-            sig_proxy: true,
-            storage_opt: vec![],
-            use_api_socket: false,
-            volume_driver: None,
-            volumes_from: vec![],
-            workdir: None,
-            pod: Some("mypod".to_string()),
-            image: "alpine".to_string(),
-            command: vec![],
-        };
-        apply_pod_to_run_args(&pod, "mypod-infra", &mut args);
-        assert_eq!(args.network, "container:mypod-infra");
-        assert_eq!(args.ipc, Some("container:mypod-infra".to_string()));
-        assert_eq!(args.hostname, Some("podhost".to_string()));
-        assert_eq!(args.dns, vec!["8.8.8.8".to_string()]);
-        assert!(args.labels.iter().any(|l| l.contains("app=web")));
-    }
-}
+mod tests;

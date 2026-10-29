@@ -1,22 +1,50 @@
 use clap::{Args, Subcommand};
 
+pub use super::image_ops::*;
+pub use super::manifest::*;
+pub use super::trust::*;
+
+#[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+pub struct RegistryAuthArgs {
+    /// Path of the authentication file
+    #[arg(long = "authfile")]
+    pub authfile: Option<String>,
+
+    /// Path to a directory with TLS certificates for registry access
+    #[arg(long = "cert-dir")]
+    pub cert_dir: Option<String>,
+
+    /// Username:password for registry operations
+    #[arg(long = "creds")]
+    pub creds: Option<String>,
+}
+
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PullArgs {
     /// Set platform if server is multi-platform (e.g. linux/amd64, linux/arm64)
     #[arg(long = "platform")]
     pub platform: Option<String>,
 
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
+
     pub image: String,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct SaveArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<String>,
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
     pub image: String,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LoadArgs {
     #[arg(short = 'i', long = "input")]
     pub input: Option<String>,
@@ -25,12 +53,21 @@ pub struct LoadArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PushArgs {
-    pub image: String,
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
+    /// Source image
+    pub source: String,
+    /// Destination name on the registry (optional)
+    pub destination: Option<String>,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LoginArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     #[arg(short = 'u', long = "username")]
     pub username: Option<String>,
     #[arg(short = 'p', long = "password")]
@@ -41,12 +78,18 @@ pub struct LoginArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LogoutArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     pub server: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct BuildArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     #[arg(short = 't', long = "tag")]
     pub tags: Vec<String>,
 
@@ -124,6 +167,14 @@ pub struct BuildArgs {
     #[arg(long = "squash")]
     pub squash: bool,
 
+    /// Accepted for Podman BATS compatibility (boxr does not layer-cache builds)
+    #[arg(long = "layers")]
+    pub layers: Option<String>,
+
+    /// Add Linux capabilities during build (accepted; applied at run time in boxr)
+    #[arg(long = "cap-add")]
+    pub cap_add: Vec<String>,
+
     #[arg(long = "disable-content-trust")]
     pub disable_content_trust: bool,
 
@@ -144,6 +195,7 @@ pub struct BuildArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct BuilderSubcommands {
     #[command(subcommand)]
     pub command: BuilderAction,
@@ -160,6 +212,7 @@ pub enum BuilderAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct BuilderPruneArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
@@ -172,6 +225,7 @@ pub struct BuilderPruneArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ComposeArgs {
     #[arg(short = 'f', long = "file", default_value = "docker-compose.yml")]
     pub file: String,
@@ -211,6 +265,7 @@ pub enum ComposeSubcommand {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeUpArgs {
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
@@ -249,6 +304,7 @@ pub struct ComposeUpArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeDownArgs {
     #[arg(short = 'v', long = "volumes")]
     pub volumes: bool,
@@ -261,6 +317,7 @@ pub struct ComposeDownArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposePsArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
@@ -277,6 +334,7 @@ pub struct ComposePsArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeLogsArgs {
     pub service: Option<String>,
     #[arg(short = 'f', long = "follow")]
@@ -296,6 +354,7 @@ pub struct ComposeLogsArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeRestartArgs {
     pub service: Option<String>,
     #[arg(long = "no-deps")]
@@ -303,6 +362,7 @@ pub struct ComposeRestartArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeExecArgs {
     pub service: String,
 
@@ -342,6 +402,7 @@ pub struct ComposeExecArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeBuildArgs {
     pub service: Option<String>,
     #[arg(long = "no-cache")]
@@ -357,11 +418,13 @@ pub struct ComposeBuildArgs {
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeServiceArgs {
     pub service: Option<String>,
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeRmArgs {
     #[arg(short = 'f', long = "force")]
     pub force: bool,
@@ -371,12 +434,14 @@ pub struct ComposeRmArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeCpArgs {
     pub src: String,
     pub dest: String,
 }
 
 #[derive(Args, Debug, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposeRunArgs {
     pub service: String,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -384,12 +449,14 @@ pub struct ComposeRunArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ComposePortArgs {
     pub service: String,
     pub private_port: u16,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ImageSubcommands {
     #[command(subcommand)]
     pub command: ImageAction,
@@ -439,6 +506,7 @@ pub enum ImageAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImagePruneArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
@@ -446,11 +514,15 @@ pub struct ImagePruneArgs {
     #[arg(short = 'f', long = "force")]
     pub force: bool,
 
+    #[arg(long = "external")]
+    pub external: bool,
+
     #[arg(long = "filter")]
     pub filter: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImagesArgs {
     /// Only show numeric IDs
     #[arg(short = 'q', long = "quiet")]
@@ -479,10 +551,19 @@ pub struct ImagesArgs {
     /// Filter output based on conditions provided
     #[arg(short = 'f', long = "filter")]
     pub filter: Vec<String>,
+
+    /// Sort by repository, tag, id, or created (Podman-compatible)
+    #[arg(long = "sort")]
+    pub sort: Option<String>,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RmiArgs {
+    /// Remove all images
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
     /// Force removal of the image
     #[arg(short = 'f', long = "force")]
     pub force: bool,
@@ -496,58 +577,22 @@ pub struct RmiArgs {
     pub platform: Option<String>,
 
     /// Image references or IDs to remove
-    #[arg(required = true)]
     pub images: Vec<String>,
 }
 
 #[derive(Args, Debug)]
-pub struct ManifestSubcommands {
-    #[command(subcommand)]
-    pub command: ManifestAction,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ManifestAction {
-    /// Display an image manifest, or manifest list
-    Inspect {
-        image: String,
-        #[arg(long = "insecure")]
-        insecure: bool,
-    },
-    /// Create a local manifest list for annotating and pushing to a registry
-    Create {
-        target: String,
-        #[arg(required = true)]
-        sources: Vec<String>,
-    },
-    /// Push a manifest list to a repository
-    Push {
-        target: String,
-        #[arg(long = "insecure")]
-        insecure: bool,
-        #[arg(long = "purge")]
-        purge: bool,
-    },
-    /// Remove one or more manifest lists
-    Rm { target: String },
-    /// Add or update annotations on a manifest list
-    Annotate {
-        target: String,
-        #[arg(long = "annotation")]
-        annotation: Vec<String>,
-    },
-}
-
-#[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct TagArgs {
     /// Source image
     pub source: String,
 
-    /// Target image and tag
-    pub target: String,
+    /// Target image and tag (one or more)
+    #[arg(required = true)]
+    pub targets: Vec<String>,
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImportArgs {
     /// The URL or - to read from STDIN
     pub file: String,
@@ -566,6 +611,7 @@ pub struct ImportArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct HistoryArgs {
     /// Image to show history for
     pub image: String,
@@ -584,7 +630,10 @@ pub struct HistoryArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct SearchArgs {
+    #[command(flatten)]
+    pub registry_auth: RegistryAuthArgs,
     /// Max number of search results
     #[arg(long = "limit", default_value_t = 25)]
     pub limit: usize,
@@ -600,93 +649,4 @@ pub struct SearchArgs {
 
     /// Search term
     pub term: String,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct ImageDiffArgs {
-    /// Base image (or first image)
-    pub image1: String,
-
-    /// Second image to compare against (optional)
-    pub image2: Option<String>,
-
-    /// Format output
-    #[arg(long = "format")]
-    pub format: Option<String>,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct ImageScpArgs {
-    /// Source image spec (e.g. [user@]host::image)
-    pub source: String,
-
-    /// Destination image spec
-    pub destination: String,
-
-    /// Suppress status output
-    #[arg(short = 'q', long = "quiet")]
-    pub quiet: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct ImageSignArgs {
-    /// Image to sign
-    pub image: String,
-
-    /// Key identity to sign with
-    #[arg(long = "sign-by")]
-    pub sign_by: Option<String>,
-
-    /// Directory for signatures
-    #[arg(long = "directory")]
-    pub directory: Option<String>,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct ImageTreeArgs {
-    /// Image to show tree for
-    pub image: String,
-
-    /// Show what images require this image
-    #[arg(long = "whatrequires")]
-    pub whatrequires: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct ImageTrustSubcommands {
-    #[command(subcommand)]
-    pub command: ImageTrustAction,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum ImageTrustAction {
-    /// Show trust policy
-    Show {
-        /// Registry or scope
-        registry: Option<String>,
-        /// Display raw policy JSON
-        #[arg(long = "raw")]
-        raw: bool,
-    },
-    /// Set trust policy
-    Set {
-        /// Trust type (accept, reject, signedBy)
-        #[arg(short = 't', long = "type", default_value = "accept")]
-        trust_type: String,
-        /// Registry or scope
-        registry: String,
-        /// Public keys for signedBy
-        #[arg(long = "pubkeys")]
-        pubkeys: Vec<String>,
-    },
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct UntagArgs {
-    /// Image to untag
-    pub image: String,
-
-    /// Tags to remove
-    #[arg(trailing_var_arg = true)]
-    pub tags: Vec<String>,
 }

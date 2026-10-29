@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct ArtifactSubcommands {
     #[command(subcommand)]
     pub command: ArtifactAction,

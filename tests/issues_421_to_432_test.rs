@@ -1,7 +1,7 @@
 //! Regression tests for networking issues #421–#432 (port forwarding, guardrails,
 //! compose exec flags, bridge registration, rootless EPERM, UDP protocol).
 
-use boxr::guardrails::validate_network_port_compatibility;
+use boxr::guardrails::{validate_network_port_compatibility, warn_discard_incompatible_ports};
 use boxr::network::pasta::NetworkMode;
 use boxr::network::rootless::{forward_sock_name, forward_udp_sock_name};
 use boxr::network::{
@@ -10,29 +10,21 @@ use boxr::network::{
 use tempfile::tempdir;
 
 #[test]
-fn test_issue_423_none_and_host_reject_published_ports() {
+fn test_issue_423_none_and_host_discard_published_ports_with_warning() {
     let ports = vec![PortMapping {
         host_ip: None,
         host_port: 8080,
         container_port: 80,
         protocol: "tcp".to_string(),
     }];
-    let err = validate_network_port_compatibility("none", &ports).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("published ports are not supported"),
-        "expected none+p rejection, got: {}",
-        err
-    );
-    let err = validate_network_port_compatibility("host", &ports).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("published ports are not supported"),
-        "expected host+p rejection, got: {}",
-        err
-    );
-    assert!(validate_network_port_compatibility("bridge", &ports).is_ok());
-    assert!(validate_network_port_compatibility("custom_net", &ports).is_ok());
+    assert!(validate_network_port_compatibility("none", &ports).is_ok());
+    assert!(validate_network_port_compatibility("host", &ports).is_ok());
+    let mut none_ports = ports.clone();
+    warn_discard_incompatible_ports("none", &mut none_ports);
+    assert!(none_ports.is_empty());
+    let mut host_ports = ports;
+    warn_discard_incompatible_ports("host", &mut host_ports);
+    assert!(host_ports.is_empty());
     assert!(validate_network_port_compatibility("bridge", &[]).is_ok());
 }
 

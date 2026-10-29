@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 #[derive(Args, Debug)]
+#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
 pub struct FarmSubcommands {
     #[command(subcommand)]
     pub command: FarmAction,
@@ -50,6 +51,7 @@ pub enum FarmAction {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct FarmBuildArgs {
     /// Farm name to build on
     #[arg(long = "farm")]

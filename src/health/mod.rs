@@ -88,9 +88,31 @@ impl std::fmt::Display for RestartPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HealthOnFailureAction {
+    #[default]
+    None,
+    Stop,
+    Kill,
+    Restart,
+}
+
+pub fn parse_health_on_failure(input: &str) -> Result<HealthOnFailureAction> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "none" => Ok(HealthOnFailureAction::None),
+        "stop" => Ok(HealthOnFailureAction::Stop),
+        "kill" => Ok(HealthOnFailureAction::Kill),
+        "restart" => Ok(HealthOnFailureAction::Restart),
+        other => Err(anyhow!(
+            "invalid health-on-failure action '{}': expected none, stop, kill, or restart",
+            other
+        )),
+    }
+}
+
 pub fn parse_restart_policy(input: &str) -> Result<RestartPolicy> {
     let input = input.trim().to_lowercase();
-    if input == "no" || input.is_empty() {
+    if input == "no" || input == "none" || input.is_empty() {
         Ok(RestartPolicy::No)
     } else if input == "always" {
         Ok(RestartPolicy::Always)
@@ -133,7 +155,7 @@ impl HealthProbe for DefaultHealthProbe {
         config: &HealthConfig,
         current: &mut HealthCheckResult,
     ) -> Result<HealthStatus> {
-        check_container_health(bundle_path, config, current)
+        check_container_health(bundle_path, config, current, false)
     }
 }
 
@@ -142,13 +164,30 @@ pub fn check_container_health(
     bundle_path: &Path,
     config: &HealthConfig,
     current: &mut HealthCheckResult,
+    start_period_active: bool,
 ) -> Result<HealthStatus> {
     if config.test.is_empty() {
         current.status = HealthStatus::None;
         return Ok(HealthStatus::None);
     }
 
-    let code = exec_in_bundle(bundle_path, &config.test, &[], None, None, false)?;
+    let code = match exec_in_bundle(
+        bundle_path,
+        &config.test,
+        &[],
+        None,
+        None,
+        false,
+        crate::runtime::ExecAttach {
+            quiet: true,
+            ..Default::default()
+        },
+        None,
+        &[],
+    ) {
+        Ok(c) => c,
+        Err(_) => 1,
+    };
     current.last_checked = Utc::now();
 
     if code == 0 {
@@ -158,7 +197,7 @@ pub fn check_container_health(
     } else {
         current.failing_streak += 1;
         current.last_output = format!("Probe exited with code {}", code);
-        if current.failing_streak >= config.retries {
+        if current.failing_streak >= config.retries && !start_period_active {
             current.status = HealthStatus::Unhealthy;
         } else {
             current.status = HealthStatus::Starting;
@@ -167,6 +206,8 @@ pub fn check_container_health(
 
     Ok(current.status.clone())
 }
+
+pub mod supervisor;
 
 #[cfg(test)]
 mod tests {

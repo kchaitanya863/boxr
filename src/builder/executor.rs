@@ -527,7 +527,7 @@ impl ImageBuilder {
                     let spec = Spec::new_default(Some(&current_config), Some(&run_args), None);
                     spec.save_to_bundle(&step_bundle)?;
 
-                    let code = execute_bundle(&step_bundle, &spec, &[], &[], false)?;
+                    let code = execute_bundle(&step_bundle, &spec, &[], &[], false, false)?;
                     if code != 0 {
                         return Err(anyhow!(
                             "The command '{}' returned a non-zero code: {}",
@@ -635,12 +635,24 @@ impl ImageBuilder {
                 digest: None,
             },
         );
+        let name_only = full_tag
+            .split('@')
+            .next()
+            .unwrap_or(&full_tag)
+            .split(':')
+            .next()
+            .unwrap_or(&full_tag);
+        let (registry, reference) = if !name_only.contains('/') {
+            ("localhost".to_string(), name_only.to_string())
+        } else {
+            (parsed_tag.registry.clone(), parsed_tag.repository.clone())
+        };
 
         let record = ImageRecord {
             id: random_id[..12].to_string(),
-            reference: parsed_tag.repository,
+            reference,
             tag: parsed_tag.tag,
-            registry: parsed_tag.registry,
+            registry,
             manifest_digest: image_id.clone(),
             config_digest: image_id.clone(),
             size_bytes: 1024 * 1024,

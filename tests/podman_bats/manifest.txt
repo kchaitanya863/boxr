@@ -1,0 +1,13 @@
+# Curated Podman test/system files for boxr BATS conformance (Linux rootless).
+# One pattern per line; passed to hack/bats (filename substring match).
+# Expand as boxr gains Podman-compatible flags and output shapes.
+015-help
+020-tag
+030-run
+035-logs
+040-ps
+045-start
+050-stop
+055-rm
+075-exec
+160-volumes

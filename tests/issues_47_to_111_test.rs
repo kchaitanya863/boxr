@@ -563,7 +563,7 @@ fn test_issue_81_rm_paused_without_force_fails() {
 #[test]
 fn test_issue_82_rm_volumes_flag_cleans_volumes() {
     let lib_rs = include_str!("../src/lib.rs");
-    assert!(lib_rs.contains("remove_container_opts(c, args.force, args.volumes)"));
+    assert!(lib_rs.contains("remove_container_opts_inner(target, args.force, args.volumes"));
 }
 
 // Issue #83: boxr rmi --no-prune flag is parsed but ignored during image removal

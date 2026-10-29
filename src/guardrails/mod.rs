@@ -148,32 +148,57 @@ impl DiskGuard {
 /// Host Port Collision Guard
 pub struct PortCollisionGuard;
 
-/// Reject published ports on network modes where forwarding is meaningless.
+/// Podman prints a warning and drops port mappings on host/none/container network modes.
+pub fn warn_discard_incompatible_ports(
+    network: &str,
+    ports: &mut Vec<crate::network::PortMapping>,
+) {
+    if ports.is_empty() {
+        return;
+    }
+    let mode = crate::network::pasta::NetworkMode::parse(network);
+    let label = match mode {
+        crate::network::pasta::NetworkMode::Host => Some("host"),
+        crate::network::pasta::NetworkMode::None => Some("none"),
+        crate::network::pasta::NetworkMode::Container(_) => Some("container"),
+        _ => None,
+    };
+    if let Some(label) = label {
+        eprintln!(
+            "Port mappings have been discarded because \"{}\" network namespace mode does not support them",
+            label
+        );
+        ports.clear();
+    }
+}
+
+/// Warn (Podman-compatible) when `-p` is ignored on host/none/container network modes.
+/// Callers should invoke `warn_discard_incompatible_ports` to clear mappings before run.
 pub fn validate_network_port_compatibility(
     network: &str,
     ports: &[crate::network::PortMapping],
 ) -> Result<()> {
-    if ports.is_empty() {
-        return Ok(());
-    }
-    let mode = crate::network::pasta::NetworkMode::parse(network);
-    if matches!(
-        mode,
-        crate::network::pasta::NetworkMode::None | crate::network::pasta::NetworkMode::Host
-    ) {
-        return Err(anyhow!(
-            "published ports are not supported with --network {}",
-            network
-        ));
-    }
+    let _ = (network, ports);
     Ok(())
 }
 
 impl PortCollisionGuard {
     /// Ensure none of the requested host ports are already bound by other running containers
     pub fn ensure_no_conflicts(requested_ports: &[crate::network::PortMapping]) -> Result<()> {
+        Self::ensure_no_conflicts_excluding(requested_ports, None)
+    }
+
+    pub fn ensure_no_conflicts_excluding(
+        requested_ports: &[crate::network::PortMapping],
+        exclude_container: Option<&str>,
+    ) -> Result<()> {
         let store = ContainerStore::new();
-        Self::ensure_no_conflicts_with_reader(requested_ports, &store)
+        let containers: Vec<_> = store
+            .list()
+            .into_iter()
+            .filter(|c| exclude_container.is_none_or(|ex| c.id != ex && c.name != ex))
+            .collect();
+        Self::ensure_no_conflicts_with_containers(requested_ports, &containers)
     }
 
     /// Dependency Inversion: Validate port conflicts against any ContainerReader abstraction
@@ -226,7 +251,10 @@ impl PortCollisionGuard {
             let req_ip = req.host_ip.as_deref().unwrap_or("0.0.0.0");
 
             for c in containers {
-                if !matches!(c.status, ContainerStatus::Running) {
+                if matches!(
+                    c.status,
+                    ContainerStatus::Exited(_) | ContainerStatus::Failed(_)
+                ) {
                     continue;
                 }
 
@@ -240,7 +268,7 @@ impl PortCollisionGuard {
 
                         if ips_overlap {
                             return Err(anyhow!(
-                                "Port conflict: host port {}:{}/{} is already in use by running container '{}' ({})",
+                                "address already in use: host port {}:{}/{} bound by container '{}' ({})",
                                 req_ip,
                                 req.host_port,
                                 req.protocol,
@@ -313,9 +341,22 @@ impl ProcessReaper {
                 None
             };
 
-            let is_alive = check_pid_alive(&vm_pid_file)
-                .or_else(|| check_pid_alive(&cont_pid_file))
-                .unwrap_or(false);
+            let vm_alive = check_pid_alive(&vm_pid_file);
+            let cont_alive = check_pid_alive(&cont_pid_file);
+            // Detached conmon may restart the trampoline while vm.pid is briefly stale.
+            let conmon_supervising = check_pid_alive(&bundle.join("conmon.pid")) == Some(true);
+            let is_alive = if conmon_supervising {
+                true
+            } else {
+                match (vm_alive, cont_alive) {
+                    (Some(true), _) | (_, Some(true)) => true,
+                    (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => false,
+                    (None, None) => {
+                        // Missing pid files during startup; do not reap a Running record yet.
+                        true
+                    }
+                }
+            };
 
             if !is_alive {
                 // Container process is gone; self-heal state to Exited(code)
@@ -338,6 +379,18 @@ impl ProcessReaper {
                 }
                 let _ = fs::remove_file(&cont_pid_file);
                 let _ = store.update_status(&c.id, ContainerStatus::Exited(exit_code));
+                crate::finalize_stopped_container(c);
+                reaped_count += 1;
+            }
+        }
+
+        for c in &containers {
+            if !matches!(c.status, ContainerStatus::Exited(_)) {
+                continue;
+            }
+            let bundle = PathBuf::from(&c.bundle_path);
+            if crate::bundle_auto_remove(&bundle) || crate::bundle_auto_remove_image(&bundle) {
+                crate::finalize_stopped_container(c);
                 reaped_count += 1;
             }
         }
@@ -532,6 +585,48 @@ mod tests {
 
         let _ = store.remove("reap-test-alive-1234");
         let _ = unsafe { libc::kill(child_pid, libc::SIGKILL) };
+    }
+
+    #[test]
+    fn test_process_reaper_preserves_running_while_conmon_alive() {
+        use crate::storage::{ContainerRecord, ContainerStatus, ContainerStore};
+        use chrono::Utc;
+
+        let temp = tempdir().unwrap();
+        let bundle_dir = temp.path().join("conmon-bundle");
+        fs::create_dir_all(&bundle_dir).unwrap();
+
+        let mut conmon = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        fs::write(bundle_dir.join("conmon.pid"), format!("{}", conmon.id())).unwrap();
+        fs::write(bundle_dir.join("vm.pid"), "99999999").unwrap();
+
+        let store = ContainerStore::new();
+        let record = ContainerRecord {
+            id: "reap-conmon-1234".to_string(),
+            name: "reap-conmon".to_string(),
+            image: "alpine:latest".to_string(),
+            command: vec!["sleep".to_string()],
+            created_at: Utc::now(),
+            status: ContainerStatus::Running,
+            bundle_path: bundle_dir.to_string_lossy().to_string(),
+            restart_policy: crate::health::RestartPolicy::No,
+            health_status: crate::health::HealthStatus::None,
+            restart_count: 0,
+            ports: Vec::new(),
+            exposed_ports: Vec::new(),
+        };
+        store.add(record).unwrap();
+
+        let _ = ProcessReaper::reap_stale_containers();
+        let cont = store.find("reap-conmon-1234").unwrap();
+        assert_eq!(cont.status, ContainerStatus::Running);
+
+        let _ = store.remove("reap-conmon-1234");
+        let _ = conmon.kill();
+        let _ = conmon.wait();
     }
 
     #[test]

@@ -6,6 +6,7 @@ description = "A fast, lightweight OCI container engine and runtime written in R
 authors = ["Boxr Contributors"]
 license = "MIT"
 readme = "README.md"
+build = "build.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "cargo"] }
@@ -26,9 +27,13 @@ futures-util = "0.3"
 serde_yaml = "0.9.34"
 axum = "0.8.9"
 libc = "0.2"
+regex = "1.11"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+
+[build-dependencies]
+pkg-config = "0.3.32"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.29", features = ["mount", "sched", "user", "signal", "process", "fs"] }
