@@ -66,7 +66,7 @@ This document maps [Podman](https://github.com/podman-container-tools/podman) te
 ./scripts/run_podman_bats_conformance.sh
 ```
 
-See [PODMAN_BATS_CONFORMANCE.md](PODMAN_BATS_CONFORMANCE.md). Uses `PODMAN=boxr` via a wrapper and `tests/podman_bats/manifest.txt`. Default exit code is **0** unless `PODMAN_BATS_STRICT=1` (failures are expected while parity is partial).
+See [PODMAN_BATS_CONFORMANCE.md](PODMAN_BATS_CONFORMANCE.md) and agent notes in [AI_AGENT_HANDOFF_PODMAN_PARITY.md](AI_AGENT_HANDOFF_PODMAN_PARITY.md). Uses `PODMAN=boxr` via a wrapper and `tests/podman_bats/manifest.txt`. Default exit code is **0** unless `PODMAN_BATS_STRICT=1` (failures are expected while parity is partial).
 
 ## Verification
 
