@@ -123,6 +123,7 @@ jobs:
       - name: Run all vendored upstream BATS (progress tracker)
         env:
           PODMAN_BATS_OMIT_HOST_GATED: "1"
+          PODMAN_BATS_STRICT: "1"
           BOXR_TEST_EMBEDDED_USERNET: "1"
         run: |
           chmod +x scripts/run_podman_bats_all_upstream.sh scripts/run_podman_bats_conformance.sh
