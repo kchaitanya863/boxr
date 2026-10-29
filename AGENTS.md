@@ -64,4 +64,11 @@ cargo test -- --test-threads=1
 # 5. Podman parity (P0 CLI audit + black-box E2E)
 ./scripts/run_podman_blackbox_e2e.sh ./target/debug/boxr
 # Matrix: docs/PODMAN_PARITY.md
+
+# 6. Podman upstream BATS (Linux rootless; PODMAN=boxr)
+cargo test --test podman_bats_manifest_test
+./scripts/run_podman_bats_offline_gate.sh
+# Full curated manifest: ./scripts/run_podman_bats_conformance.sh
+# All 77 upstream files: ./scripts/run_podman_bats_all_upstream.sh
+# See docs/PODMAN_BATS_CONFORMANCE.md
 ```
