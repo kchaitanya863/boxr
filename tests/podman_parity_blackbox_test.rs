@@ -77,31 +77,64 @@ fn test_exists_exit_codes() {
 }
 
 #[test]
-fn test_volume_exists_and_network_exists() {
-    if !blackbox::netns_available() {
-        eprintln!("SKIPPED: network namespaces not permitted");
-        return;
-    }
+fn test_image_volume_network_exists_exit_codes() {
     let bin = blackbox::boxr_bin();
-    if !bin.exists() {
-        return;
-    }
+    assert!(bin.exists(), "boxr binary not found at {}", bin.display());
     let (_guard, home) = blackbox::isolated_home();
-    let vol = format!("vol-{}", blackbox::rand_suffix());
-    assert!(
-        blackbox::run_boxr(&home, &["volume", "create", &vol])
-            .status
-            .success()
+
+    let missing_image = format!("missing-{}:latest", blackbox::rand_suffix());
+    let missing_image_result = blackbox::run_boxr(&home, &["image", "exists", &missing_image]);
+    assert_eq!(
+        missing_image_result.status.code(),
+        Some(1),
+        "missing image should return Podman's not-found exit code"
     );
+    blackbox::pull_if_needed(&home, "alpine:3.20");
+    let image_result = blackbox::run_boxr(&home, &["image", "exists", "alpine:3.20"]);
     assert!(
-        Command::new(&bin)
-            .env("BOXR_HOME", home.as_path())
-            .args(["volume", "exists", &vol])
-            .status()
-            .unwrap()
-            .success()
+        image_result.status.success(),
+        "existing image should be found: {}",
+        String::from_utf8_lossy(&image_result.stderr)
+    );
+
+    let vol = format!("vol-{}", blackbox::rand_suffix());
+    let missing_volume = format!("missing-{}", blackbox::rand_suffix());
+    let missing_volume_result = blackbox::run_boxr(&home, &["volume", "exists", &missing_volume]);
+    assert_eq!(
+        missing_volume_result.status.code(),
+        Some(1),
+        "missing volume should return Podman's not-found exit code"
+    );
+    assert!(blackbox::run_boxr(&home, &["volume", "create", &vol])
+        .status
+        .success());
+    let volume_result = blackbox::run_boxr(&home, &["volume", "exists", &vol]);
+    assert!(
+        volume_result.status.success(),
+        "existing volume should be found: {}",
+        String::from_utf8_lossy(&volume_result.stderr)
     );
     let _ = blackbox::run_boxr(&home, &["volume", "rm", &vol]);
+
+    let net = format!("net-{}", blackbox::rand_suffix());
+    let missing_network = format!("missing-{}", blackbox::rand_suffix());
+    let missing_network_result =
+        blackbox::run_boxr(&home, &["network", "exists", &missing_network]);
+    assert_eq!(
+        missing_network_result.status.code(),
+        Some(1),
+        "missing network should return Podman's not-found exit code"
+    );
+    assert!(blackbox::run_boxr(&home, &["network", "create", &net])
+        .status
+        .success());
+    let network_result = blackbox::run_boxr(&home, &["network", "exists", &net]);
+    assert!(
+        network_result.status.success(),
+        "existing network should be found: {}",
+        String::from_utf8_lossy(&network_result.stderr)
+    );
+    let _ = blackbox::run_boxr(&home, &["network", "rm", &net]);
 }
 
 #[test]
