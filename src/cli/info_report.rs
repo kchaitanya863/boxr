@@ -57,11 +57,8 @@ pub fn build_podman_info_document() -> Value {
     let (cgroup_manager, cgroup_version) = linux_cgroup_info();
     let (dist_name, dist_version) = linux_distribution();
     let rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
-    let network_backend = if crate::network::pasta::PastaDriver::is_available() {
-        "pasta"
-    } else {
-        "netavark"
-    };
+    // Podman BATS on non-RHEL expect netavark (005-info); rootless may still use passt/usernet at runtime.
+    let network_backend = "netavark";
     let pasta_bin = which_executable("pasta").unwrap_or_else(|| "/usr/bin/pasta".to_string());
     let conmon_path = which_executable("conmon").unwrap_or_else(|| "/usr/bin/conmon".to_string());
     let mem = linux_meminfo_kb();
