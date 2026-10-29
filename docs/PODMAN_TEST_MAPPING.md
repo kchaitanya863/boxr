@@ -71,11 +71,10 @@ See [PODMAN_BATS_CONFORMANCE.md](PODMAN_BATS_CONFORMANCE.md) and agent notes in 
 ## Verification
 
 ```bash
-cargo test --test podman_upstream_parity_test -- --test-threads=1
-cargo test --test podman_parity_blackbox_test -- --test-threads=1
-python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
-./scripts/run_blackbox_qa.sh -b ./target/debug/boxr -s podman
+./scripts/run_podman_blackbox_e2e.sh ./target/debug/boxr
 ```
+
+Upstream BATS/Ginkgo: `./scripts/run_podman_bats_conformance.sh` (see [PODMAN_BATS_CONFORMANCE.md](PODMAN_BATS_CONFORMANCE.md)).
 
 ## Adding coverage
 
