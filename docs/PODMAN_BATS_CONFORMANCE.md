@@ -127,7 +127,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 | `--cert-dir` / `--creds` | Parsed on pull/run/create/push; BATS local registry TLS via skip built-in roots + `localhost`→127.0.0.1 resolve; **`030-run:cert-dir`** green |
 | Registry **push** | Upload exact config/layer bytes from pull; manifest `Content-Type` from stored manifest (OCI vs Docker v2) |
 | `image rm` / `rmi -a` | **`--all`** removes all local images (BATS registry teardown `rmi -a -f`) |
-| Help text / `info` JSON / conmon fields | Still Podman-specific — most BATS/e2e cases remain red |
+| Help / `info` / globals / `--log-level` | **`015-help`**, **`005-info`**, **`001-basic`** (non-run), **`CONTAINERS_CONF*`**, remote help hiding — see curated manifest on ubuntu-24.04 |
 | `020-tag.bats` | **2/2** (tag/untag, untag all, `images --sort`, localhost short names) |
 | `015-help.bats` | **1/1** (`inspect -l` + extra arg → exit **125**) |
 | `030-run.bats` | **81/81** isolated (incl. **host env leak** via skopeo stub + kube play teardown); **8 skips** |
