@@ -1,5 +1,9 @@
 use clap::{Args, Subcommand};
 
+pub use super::image_ops::*;
+pub use super::manifest::*;
+pub use super::trust::*;
+
 #[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RegistryAuthArgs {
@@ -577,66 +581,6 @@ pub struct RmiArgs {
 }
 
 #[derive(Args, Debug)]
-#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
-pub struct ManifestSubcommands {
-    #[command(flatten)]
-    pub registry_auth: RegistryAuthArgs,
-    #[command(subcommand)]
-    pub command: ManifestAction,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ManifestAction {
-    /// Display an image manifest, or manifest list
-    Inspect {
-        #[arg(long = "authfile")]
-        authfile: Option<String>,
-        image: String,
-        #[arg(long = "insecure")]
-        insecure: bool,
-    },
-    /// Create a local manifest list for annotating and pushing to a registry
-    Create {
-        #[arg(long = "authfile")]
-        authfile: Option<String>,
-        target: String,
-        #[arg(required = true)]
-        sources: Vec<String>,
-    },
-    /// Push a manifest list to a repository
-    Push {
-        #[arg(long = "authfile")]
-        authfile: Option<String>,
-        target: String,
-        #[arg(long = "insecure")]
-        insecure: bool,
-        #[arg(long = "purge")]
-        purge: bool,
-    },
-    /// Remove one or more manifest lists
-    Rm {
-        #[arg(long = "authfile")]
-        authfile: Option<String>,
-        target: String,
-    },
-    /// Add or update annotations on a manifest list
-    Annotate {
-        #[arg(long = "authfile")]
-        authfile: Option<String>,
-        target: String,
-        #[arg(long = "annotation")]
-        annotation: Vec<String>,
-    },
-    /// Add an image to a manifest list
-    Add {
-        #[arg(long = "authfile")]
-        authfile: Option<String>,
-        manifest_list: String,
-        source: String,
-    },
-}
-
-#[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct TagArgs {
     /// Source image
@@ -705,99 +649,4 @@ pub struct SearchArgs {
 
     /// Search term
     pub term: String,
-}
-
-#[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
-pub struct ImageDiffArgs {
-    /// Base image (or first image)
-    pub image1: String,
-
-    /// Second image to compare against (optional)
-    pub image2: Option<String>,
-
-    /// Format output
-    #[arg(long = "format")]
-    pub format: Option<String>,
-}
-
-#[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
-pub struct ImageScpArgs {
-    /// Source image spec (e.g. [user@]host::image)
-    pub source: String,
-
-    /// Destination image spec
-    pub destination: String,
-
-    /// Suppress status output
-    #[arg(short = 'q', long = "quiet")]
-    pub quiet: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
-pub struct ImageSignArgs {
-    /// Image to sign
-    pub image: String,
-
-    /// Key identity to sign with
-    #[arg(long = "sign-by")]
-    pub sign_by: Option<String>,
-
-    /// Directory for signatures
-    #[arg(long = "directory")]
-    pub directory: Option<String>,
-}
-
-#[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
-pub struct ImageTreeArgs {
-    /// Image to show tree for
-    pub image: String,
-
-    /// Show what images require this image
-    #[arg(long = "whatrequires")]
-    pub whatrequires: bool,
-}
-
-#[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_GROUP_HELP, subcommand_required = true, arg_required_else_help = false)]
-pub struct ImageTrustSubcommands {
-    #[command(subcommand)]
-    pub command: ImageTrustAction,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum ImageTrustAction {
-    /// Show trust policy
-    Show {
-        /// Registry or scope
-        registry: Option<String>,
-        /// Display raw policy JSON
-        #[arg(long = "raw")]
-        raw: bool,
-    },
-    /// Set trust policy
-    Set {
-        /// Trust type (accept, reject, signedBy)
-        #[arg(short = 't', long = "type", default_value = "accept")]
-        trust_type: String,
-        /// Registry or scope
-        registry: String,
-        /// Public keys for signedBy
-        #[arg(long = "pubkeys")]
-        pubkeys: Vec<String>,
-    },
-}
-
-#[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
-pub struct UntagArgs {
-    /// Image to untag
-    pub image: String,
-
-    /// Tags to remove
-    #[arg(trailing_var_arg = true)]
-    pub tags: Vec<String>,
 }
