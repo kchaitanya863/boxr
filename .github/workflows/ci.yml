@@ -60,6 +60,13 @@ jobs:
       - name: Verify vendored Podman BATS catalog
         run: cargo test --test podman_bats_manifest_test
 
+      - name: Podman BATS offline gate (015-help, 020-tag strict)
+        env:
+          BOXR_TEST_EMBEDDED_USERNET: "1"
+        run: |
+          chmod +x scripts/run_podman_bats_offline_gate.sh scripts/run_podman_bats_conformance.sh
+          ./scripts/run_podman_bats_offline_gate.sh
+
       - name: Podman BATS conformance (curated manifest, strict)
         timeout-minutes: 45
         continue-on-error: true
