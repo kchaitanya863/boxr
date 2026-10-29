@@ -662,7 +662,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Version(args) => {
-            show_version(&args)?;
+            show_version(&args, &output_policy)?;
             Ok(0)
         }
         Commands::Stop(args) => {
@@ -1146,24 +1146,32 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             SystemAction::Connection(conn_args) => {
                 match conn_args.command {
                     cli::SystemConnectionAction::Ls => {
-                        println!("{:<20} {:<10} {:<40}", "NAME", "DEFAULT", "URI");
-                        println!(
-                            "{:<20} {:<10} {:<40}",
-                            "local", "true", "unix:///run/boxr/boxr.sock"
-                        );
+                        if !output_policy.suppress_stdout() {
+                            println!("{:<20} {:<10} {:<40}", "NAME", "DEFAULT", "URI");
+                            println!(
+                                "{:<20} {:<10} {:<40}",
+                                "local", "true", "unix:///run/boxr/boxr.sock"
+                            );
+                        }
                     }
                     cli::SystemConnectionAction::Add {
                         name,
                         uri,
                         default: _,
                     } => {
-                        println!("Added connection '{}' ({})", name, uri);
+                        if !output_policy.suppress_stdout() {
+                            println!("Added connection '{}' ({})", name, uri);
+                        }
                     }
                     cli::SystemConnectionAction::Rm { name } => {
-                        println!("Removed connection '{}'", name);
+                        if !output_policy.suppress_stdout() {
+                            println!("Removed connection '{}'", name);
+                        }
                     }
                     cli::SystemConnectionAction::Default { name } => {
-                        println!("Set default connection to '{}'", name);
+                        if !output_policy.suppress_stdout() {
+                            println!("Set default connection to '{}'", name);
+                        }
                     }
                 }
                 Ok(0)
@@ -1246,7 +1254,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Unshare(args) => {
-            let code = handle_unshare(args)?;
+            let code = handle_unshare(args, &output_policy)?;
             Ok(code)
         }
         Commands::Alias(args) => {
@@ -1693,6 +1701,12 @@ async fn resolve_container_image(
     home: Option<&Path>,
     pull: Option<&str>,
 ) -> Result<ImageRecord> {
+    if let Some((scheme, _rest)) = image_str.split_once("://") {
+        match scheme {
+            "docker" | "oci" | "docker-archive" | "oci-archive" | "containers-storage" | "dir" => {}
+            _ => exit_run_image_error(format!("invalid source name {image_str}")),
+        }
+    }
     let home_path = home
         .map(|p| p.to_path_buf())
         .unwrap_or_else(storage::boxr_home);
@@ -1710,10 +1724,7 @@ async fn resolve_container_image(
                 println!("Trying to pull {}...", image_str);
                 match pull_image_with_platform(image_str, target_platform).await {
                     Ok(r) => Ok(r),
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(125);
-                    }
+                    Err(e) => exit_run_image_error(e),
                 }
             } else {
                 Ok(record)
@@ -1727,14 +1738,45 @@ async fn resolve_container_image(
                 println!("Trying to pull {}...", image_str);
                 match pull_image_with_platform(image_str, target_platform).await {
                     Ok(r) => Ok(r),
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(125);
-                    }
+                    Err(e) => exit_run_image_error(e),
                 }
             }
         },
     }
+}
+
+fn exit_run_image_error(err: impl std::fmt::Display) -> ! {
+    eprintln!("Error: {}", err);
+    cli::log_level::emit_shutdown_engines();
+    std::process::exit(125);
+}
+
+fn digest_tag_alias(reference: &ImageReference) -> Option<String> {
+    reference
+        .digest
+        .as_ref()
+        .map(|d| format!("{}@{}", reference.tag, d))
+}
+
+fn ensure_digest_tag_alias(
+    store: &ImageStore,
+    reference: &ImageReference,
+    base: &ImageRecord,
+) -> Result<()> {
+    let Some(alias_tag) = digest_tag_alias(reference) else {
+        return Ok(());
+    };
+    let already = store
+        .list()
+        .iter()
+        .any(|r| r.id == base.id && r.reference == base.reference && r.tag == alias_tag);
+    if already {
+        return Ok(());
+    }
+    let mut alias = base.clone();
+    alias.tag = alias_tag;
+    store.add(alias)?;
+    Ok(())
 }
 
 pub async fn pull_image_with_platform(
@@ -1774,6 +1816,7 @@ pub async fn pull_image_with_platform(
         if let Some(existing) =
             find_up_to_date_image(&store, image_str, target_platform, &manifest_digest)
         {
+            ensure_digest_tag_alias(&store, &reference, &existing)?;
             pull_user_message(format!(
                 "Status: Image is up to date for {}",
                 reference.display_name()
@@ -1874,6 +1917,7 @@ pub async fn pull_image_with_platform(
 
     let store = ImageStore::new();
     store.add(record.clone())?;
+    ensure_digest_tag_alias(&store, &reference, &record)?;
 
     pull_user_message(format!("Digest: {}", manifest_digest));
     pull_user_message(format!(
@@ -2820,6 +2864,7 @@ pub async fn run_container_with_output(
                 health_on_failure,
             );
         }
+        cli::log_level::emit_shutdown_engines();
         return Ok(exit_code);
     }
 
@@ -2895,6 +2940,7 @@ pub async fn run_container_with_output(
         }
     }
 
+    cli::log_level::emit_shutdown_engines();
     Ok(exit_code)
 }
 
@@ -4421,8 +4467,14 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .as_ref()
                     .and_then(|c| c.env.clone())
                     .unwrap_or_default();
+                let digest = if i.manifest_digest.starts_with("sha256:") {
+                    i.manifest_digest.clone()
+                } else {
+                    format!("sha256:{}", i.manifest_digest)
+                };
                 let docker_compat_image = serde_json::json!({
                     "Id": format!("sha256:{}", i.id),
+                    "Digest": digest,
                     "RepoTags": repo_tags,
                     "RepoDigests": [image_repo_digest(&i)],
                     "Size": i.size_bytes,
@@ -5008,6 +5060,102 @@ fn containers_conf_content() -> Option<String> {
         }
     }
     None
+}
+
+/// Default container env entries from `CONTAINERS_CONF*` (override replaces `[containers].env`).
+pub fn containers_conf_default_env() -> Vec<String> {
+    if let Ok(path) = std::env::var("CONTAINERS_CONF_OVERRIDE") {
+        if let Ok(content) = fs::read_to_string(&path) {
+            return parse_containers_section_env(&content);
+        }
+    }
+    if let Ok(path) = std::env::var("CONTAINERS_CONF") {
+        if let Ok(content) = fs::read_to_string(&path) {
+            return parse_containers_section_env(&content);
+        }
+    }
+    Vec::new()
+}
+
+/// Volume plugin names from `[engine.volume_plugins]`; CONF and OVERRIDE maps are merged.
+pub fn containers_conf_volume_plugin_keys() -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for var in ["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"] {
+        let Ok(path) = std::env::var(var) else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for key in parse_engine_volume_plugin_keys(&content) {
+            if seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+fn parse_containers_section_env(content: &str) -> Vec<String> {
+    let mut in_containers = false;
+    let mut in_array = false;
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_containers = trimmed == "[containers]";
+            in_array = false;
+            continue;
+        }
+        if !in_containers {
+            continue;
+        }
+        if !in_array {
+            if trimmed.starts_with("env") && trimmed.contains('[') {
+                in_array = true;
+                out.extend(extract_toml_quoted_strings(trimmed));
+                if trimmed.contains(']') {
+                    in_array = false;
+                }
+            }
+            continue;
+        }
+        out.extend(extract_toml_quoted_strings(trimmed));
+        if trimmed.contains(']') {
+            in_array = false;
+        }
+    }
+    out
+}
+
+fn parse_engine_volume_plugin_keys(content: &str) -> Vec<String> {
+    let mut in_section = false;
+    let mut keys = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_section = trimmed == "[engine.volume_plugins]";
+            continue;
+        }
+        if !in_section || trimmed.is_empty() {
+            continue;
+        }
+        let Some((k, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = k.trim();
+        if !key.is_empty() {
+            keys.push(key.to_string());
+        }
+    }
+    keys
 }
 
 fn containers_conf_toml_value(key: &str) -> Option<String> {
@@ -5666,6 +5814,12 @@ fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs) {
 }
 
 fn apply_containers_conf_defaults(args: &mut RunArgs) {
+    let conf_env = containers_conf_default_env();
+    if !conf_env.is_empty() {
+        let mut merged = conf_env;
+        merged.extend(args.env.drain(..));
+        args.env = merged;
+    }
     if args.userns.is_empty() {
         if let Some(u) = userns_from_containers_conf() {
             args.userns.push(u);
@@ -6150,6 +6304,9 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
 }
 
 pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
+    if let Err(e) = storage::db_config::ensure_storage_db_config() {
+        crate::cli::usage_errors::exit_podman_error(e);
+    }
     let store = VolumeStore::new();
     match args.command {
         VolumeAction::Create(args) => {
@@ -8484,110 +8641,42 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn render_info_format(fmt: &str, doc: &serde_json::Value) -> String {
+    if fmt.contains("\\n") {
+        return fmt
+            .split("\\n")
+            .map(|part| crate::evaluate_template_for_test(part.trim(), doc))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    crate::evaluate_template_for_test(fmt, doc)
+}
+
 pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
-    let c_store = ContainerStore::new();
-    let i_store = ImageStore::new();
-    let containers = c_store.list();
-    let running = containers
-        .iter()
-        .filter(|c| matches!(c.status, ContainerStatus::Running))
-        .count();
-    let paused = containers
-        .iter()
-        .filter(|c| matches!(c.status, ContainerStatus::Paused))
-        .count();
-    let stopped = containers
-        .iter()
-        .filter(|c| matches!(c.status, ContainerStatus::Exited(_)))
-        .count();
-
-    let storage_driver = if cfg!(target_os = "linux") {
-        "overlayfs"
-    } else if cfg!(target_os = "macos") {
-        "clonefile/virtiofs"
-    } else {
-        "windows-cow"
-    };
-
-    let cgroup_ver =
-        if cfg!(target_os = "linux") && Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
-            "2"
-        } else if cfg!(target_os = "linux") {
-            "1"
-        } else {
-            "none"
-        };
-
-    let os_type = if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "linux"
-    };
+    if let Err(e) = storage::db_config::ensure_storage_db_config() {
+        cli::usage_errors::exit_podman_error(e);
+    }
+    if let Err(e) = storage::db_config::check_oci_runtime_exit_dir() {
+        cli::usage_errors::exit_podman_error(e);
+    }
+    let doc = cli::info_report::build_podman_info_document();
 
     if let Some(fmt) = &args.format {
-        let graph_root = storage::boxr_home().display().to_string();
-        let oci_runtime = configured_oci_runtime_name();
-        let oci_runtime_path = oci_runtime_path();
-        let info_json = serde_json::json!({
-            "Containers": containers.len(),
-            "ContainersRunning": running,
-            "ContainersPaused": paused,
-            "ContainersStopped": stopped,
-            "Images": i_store.list().len(),
-            "Driver": storage_driver,
-            "ServerVersion": env!("CARGO_PKG_VERSION"),
-            "CgroupVersion": cgroup_ver,
-            "Architecture": std::env::consts::ARCH,
-            "OSType": os_type,
-            "OperatingSystem": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
-            "DockerRootDir": graph_root,
-            "Host": {
-                "OCIRuntime": {
-                    "Name": oci_runtime,
-                    "Path": oci_runtime_path
-                }
-            },
-            "Store": {
-                "GraphRoot": graph_root,
-                "GraphDriverName": "overlay"
-            }
-        });
-        if fmt == "json" || fmt == "{{json .}}" {
-            println!("{}", serde_json::to_string_pretty(&info_json)?);
-        } else {
-            println!("{}", evaluate_simple_template(fmt, &info_json));
+        let normalized = fmt.trim();
+        if normalized.eq_ignore_ascii_case("json") || normalized == "{{json .}}" {
+            let bats_json = cli::info_report::podman_info_json_for_bats(&doc);
+            println!("{}", serde_json::to_string_pretty(&bats_json)?);
+            return Ok(());
         }
+        println!("{}", render_info_format(fmt, &doc));
         return Ok(());
     }
 
-    println!("Containers: {}", containers.len());
-    println!(" Running: {}", running);
-    println!(" Paused: {}", paused);
-    println!(" Stopped: {}", stopped);
-    println!("Images: {}", i_store.list().len());
-    println!("Server Version: {}", env!("CARGO_PKG_VERSION"));
-    println!("Storage Driver: {}", storage_driver);
-    println!("Logging Driver: json-file");
-    println!("Cgroup Version: {}", cgroup_ver);
-    println!("Plugins:");
-    println!(" Volume: local");
-    println!(" Network: bridge");
-    println!("Architecture: {}", std::env::consts::ARCH);
-    println!(
-        "Operating System: {} {}",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
-    println!("OSType: {}", os_type);
-    #[cfg(unix)]
-    println!("Rootless Mode: {}", unsafe { libc::getuid() != 0 });
-    #[cfg(not(unix))]
-    println!("Rootless Mode: true");
-    println!("Docker Root Dir: {}", storage::boxr_home().display());
+    print!("{}", cli::info_report::print_podman_info_text(&doc));
     Ok(())
 }
 
-pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
+pub fn show_version(args: &cli::FormatArgs, policy: &CliOutputPolicy) -> Result<()> {
     /// Matches bundled `podman.git` for upstream e2e `version.Version.String()` checks.
     const PODMAN_VERSION: &str = "6.3.0-dev";
     let version_json = serde_json::json!({
@@ -8611,9 +8700,32 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
         }
     });
 
+    let emit = |body: String| -> Result<()> {
+        if policy.noout {
+            return Ok(());
+        }
+        if let Some(path) = &policy.out {
+            fs::write(path, body)?;
+            return Ok(());
+        }
+        print!("{}", body);
+        Ok(())
+    };
+
+    if cli::VERSION_SHORT_OUTPUT.get() == Some(&true) {
+        return emit(format!("podman version {PODMAN_VERSION}\n"));
+    }
+
     if let Some(fmt) = &args.format {
         if version_format_is_json(fmt) {
-            println!("{}", serde_json::to_string_pretty(&version_json)?);
+            let body = serde_json::to_string_pretty(&version_json)?;
+            let body = if body.ends_with('\n') {
+                body
+            } else {
+                format!("{body}\n")
+            };
+            emit(body)?;
+            cli::log_level::emit_version_diagnostic_logs();
             return Ok(());
         }
         if version_format_is_invalid_json_template(fmt) {
@@ -8623,33 +8735,37 @@ pub fn show_version(args: &cli::FormatArgs) -> Result<()> {
         if fmt.trim().starts_with("{{") && rendered.is_empty() && fmt.contains("json") {
             crate::cli::usage_errors::exit_usage_error("invalid template");
         }
-        println!("{}", rendered);
+        emit(format!("{rendered}\n"))?;
+        cli::log_level::emit_version_diagnostic_logs();
         return Ok(());
     }
 
-    println!("Client: Podman Engine");
-    println!(" Version:           {}", PODMAN_VERSION);
-    println!(" API version:       1.45");
-    println!(
-        " Go version:        {}",
+    let mut text = String::new();
+    text.push_str("Client: Podman Engine\n");
+    text.push_str(&format!("Version:           {PODMAN_VERSION}\n"));
+    text.push_str(" API Version:       1.45\n");
+    text.push_str(&format!(
+        " Go Version:        {}\n",
         option_env!("RUSTC_VERSION").unwrap_or("unknown")
-    );
-    println!(" Git commit:        main");
-    println!(" Built:             2026-09-14");
-    println!(
-        " OS/Arch:           {}/{}",
+    ));
+    text.push_str(" Git commit:        main\n");
+    text.push_str(" Built:             2026-09-14\n");
+    text.push_str(&format!(
+        " OS/Arch:           {}/{}\n",
         std::env::consts::OS,
         std::env::consts::ARCH
-    );
-    println!("\nServer: Podman Engine");
-    println!(" Engine:");
-    println!("  Version:          {}", PODMAN_VERSION);
-    println!("  API version:      1.45");
-    println!(
-        "  OS/Arch:          {}/{}",
+    ));
+    text.push_str("\nServer: Podman Engine\n");
+    text.push_str(" Engine:\n");
+    text.push_str(&format!("  Version:          {PODMAN_VERSION}\n"));
+    text.push_str("  API version:      1.45\n");
+    text.push_str(&format!(
+        "  OS/Arch:          {}/{}\n",
         std::env::consts::OS,
         std::env::consts::ARCH
-    );
+    ));
+    emit(text)?;
+    cli::log_level::emit_version_diagnostic_logs();
     Ok(())
 }
 
@@ -10034,6 +10150,18 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
     if cleaned.starts_with("{{") && cleaned.ends_with("}}") {
         cleaned = cleaned[2..cleaned.len() - 2].trim();
     }
+    if let Some(rest) = cleaned.strip_prefix("index ") {
+        if let Some((field_path, key)) = parse_index_template_args(rest) {
+            let node = resolve_template_path(value, field_path.trim_start_matches('.'));
+            if let Some(map) = node.as_ref().and_then(|n| n.as_object()) {
+                let lookup = key.trim().trim_matches('"');
+                if let Some(v) = map.get(lookup) {
+                    return format_template_value(v);
+                }
+            }
+            return String::new();
+        }
+    }
     if let Some(rest) = cleaned.strip_prefix("join ") {
         if let Some((field_path, sep)) = parse_join_template_args(rest) {
             let node = resolve_template_path(value, field_path.trim_start_matches('.'));
@@ -10096,8 +10224,34 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => String::new(),
+        other => format_template_value(other),
+    }
+}
+
+fn format_template_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Object(map) if map.is_empty() => "map[]".to_string(),
+        serde_json::Value::Array(arr) => {
+            let inner: Vec<String> = arr.iter().map(format_template_value).collect();
+            format!("[{}]", inner.join(" "))
+        }
         other => other.to_string(),
     }
+}
+
+fn parse_index_template_args(rest: &str) -> Option<(String, String)> {
+    let rest = rest.trim();
+    let space = rest.find(' ')?;
+    let field = rest[..space].trim();
+    let key_part = rest[space..].trim();
+    if key_part.is_empty() {
+        return None;
+    }
+    Some((field.to_string(), key_part.to_string()))
 }
 
 fn format_inspect_ulimit_val(v: &serde_json::Value) -> String {
@@ -11099,13 +11253,13 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
     Ok(())
 }
 
-pub fn handle_unshare(args: UnshareArgs) -> Result<i32> {
+pub fn handle_unshare(args: UnshareArgs, output: &CliOutputPolicy) -> Result<i32> {
     if let Some(first) = args.command.first() {
         if first.starts_with("--") {
             crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
         }
     }
-    kube::KubeManager::unshare_command(&args.command)
+    kube::KubeManager::unshare_command(&args.command, output.suppress_stdout())
 }
 
 pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
@@ -11339,6 +11493,23 @@ pub fn untag_image(query: &str, tags: &[String]) -> Result<()> {
     } else {
         for t in tags {
             let target = t.trim();
+            if let Ok(r) = ImageReference::parse(target) {
+                if let Some(alias_tag) = digest_tag_alias(&r) {
+                    let removed = i_store
+                        .list()
+                        .into_iter()
+                        .find(|rec| {
+                            rec.id == img.id
+                                && rec.reference == r.repository
+                                && rec.registry == r.registry
+                                && rec.tag == alias_tag
+                        })
+                        .ok_or_else(|| anyhow!("{}: tag not known", target))?;
+                    let removed = i_store.remove_metadata_only(&removed.qualified_name())?;
+                    println!("Untagged: {}:{}", removed.display_reference(), removed.tag);
+                    continue;
+                }
+            }
             if i_store.find(target).is_none() {
                 cli::usage_errors::exit_usage_error(format!("{}: tag not known", target));
             }
@@ -11724,6 +11895,27 @@ mod tests {
 
     // Issue #404: rmi must only report "Deleted" when no other tag still
     // references the image data.
+    #[test]
+    fn containers_conf_env_override_replaces_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.conf");
+        std::fs::write(&base, "[containers]\nenv = [ \"CONF1=conf1\" ]\n").unwrap();
+        let over = dir.path().join("override.conf");
+        std::fs::write(&over, "[containers]\nenv = [ \"CONF2=conf2\" ]\n").unwrap();
+        unsafe {
+            std::env::set_var("CONTAINERS_CONF", &base);
+            std::env::set_var("CONTAINERS_CONF_OVERRIDE", &over);
+        }
+        assert_eq!(
+            containers_conf_default_env(),
+            vec!["CONF2=conf2".to_string()]
+        );
+        unsafe {
+            std::env::remove_var("CONTAINERS_CONF");
+            std::env::remove_var("CONTAINERS_CONF_OVERRIDE");
+        }
+    }
+
     #[test]
     fn test_containers_conf_log_driver_from_override() {
         let dir = tempfile::tempdir().unwrap();

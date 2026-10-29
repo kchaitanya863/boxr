@@ -3,9 +3,12 @@ pub mod container;
 pub mod farm;
 pub mod image;
 pub mod image_ops;
+pub mod info_report;
 pub mod kube;
+pub mod log_level;
 pub mod machine;
 pub mod manifest;
+pub mod podman_globals;
 pub mod quadlet;
 pub mod secret;
 pub mod system;
@@ -33,6 +36,8 @@ use std::sync::OnceLock;
 /// When argv contains `--rm=false`, clap would otherwise treat `--rm` as a boolean flag.
 pub static RUN_RM_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 pub static RUN_TTY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
+/// Set when argv uses `-v` (Podman short version line).
+pub static VERSION_SHORT_OUTPUT: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run --read-only=false` (clap `SetTrue` cannot represent this).
 pub static READ_ONLY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
@@ -69,6 +74,7 @@ const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
     "--root",
     "--runroot",
     "--tmpdir",
+    "--volumepath",
     "--storage-driver",
     "--storage-opt",
     "--conmon",
@@ -79,17 +85,22 @@ const PODMAN_GLOBAL_VALUE_FLAGS: &[&str] = &[
     "--runtime",
     "--log-level",
     "--syslog",
+    "--url",
+    "--connection",
 ];
 
 fn is_podman_global_flag_token(a: &str) -> bool {
     if PODMAN_GLOBAL_VALUE_FLAGS.iter().any(|f| *f == a) {
         return true;
     }
+    if a == "--remote" {
+        return true;
+    }
     a.starts_with("--log-level=") || a.starts_with("--syslog=")
 }
 
 /// Index of the first Podman subcommand token (skip flags before it).
-fn podman_subcommand_index(argv: &[String]) -> usize {
+pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
     const SUBCOMMANDS: &[&str] = &[
         "help",
         "pull",
@@ -128,6 +139,8 @@ fn podman_subcommand_index(argv: &[String]) -> usize {
         "login",
         "logout",
         "push",
+        "save",
+        "load",
         "build",
         "manifest",
         "volume",
@@ -135,6 +148,8 @@ fn podman_subcommand_index(argv: &[String]) -> usize {
         "pod",
         "container",
         "image",
+        "images",
+        "rmi",
         "system",
         "events",
         "farm",
@@ -143,7 +158,6 @@ fn podman_subcommand_index(argv: &[String]) -> usize {
         "kube",
         "compose",
         "quadlet",
-        "update",
         "unshare",
         "checkpoint",
         "healthcheck",
@@ -151,6 +165,20 @@ fn podman_subcommand_index(argv: &[String]) -> usize {
         "trust",
         "diff",
         "rename",
+        "daemon",
+        "builder",
+        "completion",
+        "alias",
+        "service",
+        "spec",
+        "context",
+        "play",
+        "swarm",
+        "plugin",
+        "config",
+        "node",
+        "auto-update",
+        "untag",
     ];
     for i in 1..argv.len() {
         let a = argv[i].as_str();
@@ -165,7 +193,18 @@ fn podman_subcommand_index(argv: &[String]) -> usize {
 }
 
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
+    let globals = podman_globals::parse_podman_global_options(&argv);
+    let _ = podman_globals::set_podman_global_options(globals);
+
+    let hide_remote = std::env::var_os("CONTAINER_HOST").is_some()
+        || std::env::var_os("CONTAINER_CONNECTION").is_some()
+        || argv
+            .iter()
+            .any(|a| a.starts_with("--url") || a.starts_with("--connection"));
+    crate::cli::usage_errors::set_hide_remote_help(hide_remote);
+
     if argv.len() == 2 && argv[1] == "-v" {
+        let _ = VERSION_SHORT_OUTPUT.set(true);
         return vec![argv[0].clone(), "version".to_string()];
     }
     let mut out = Vec::new();
@@ -194,6 +233,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
+        if a == "--debug" || a == "-D" {
+            i += 1;
+            continue;
+        }
         if a == "--infra=false" {
             let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
             i += 1;
@@ -214,12 +257,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
-        if is_podman_global_flag_token(a) && i < subcommand_idx {
-            if a.contains('=') {
-                i += 1;
-            } else {
-                i += 2;
-            }
+        if podman_globals::should_strip_global_flag_at(&argv, i, subcommand_idx) {
+            let skip = podman_globals::global_flag_skip_width(a).unwrap_or(1);
+            i += skip;
             continue;
         }
         out.extend(expand_combined_short_flags(a));
@@ -307,6 +347,15 @@ pub struct Cli {
     /// Log container output via syslog (accepted for Podman BATS; no-op in boxr)
     #[arg(global = true, long = "syslog")]
     pub syslog: bool,
+    /// Remote client (Podman-compatible; local engine only in boxr)
+    #[arg(global = true, long = "remote")]
+    pub remote: bool,
+    /// URL to remote Podman service (accepted for help/CLI parity)
+    #[arg(global = true, long = "url")]
+    pub url: Option<String>,
+    /// Connection name (accepted for help/CLI parity)
+    #[arg(global = true, long = "connection")]
+    pub connection: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }

@@ -1594,7 +1594,7 @@ pub fn chown_path_rootless(path: &Path, uid: u32, gid: u32, recursive: bool) -> 
     }
     args.push(format!("{}:{}", uid, gid));
     args.push(path.to_string_lossy().to_string());
-    let code = run_unshare_cli(&args)?;
+    let code = run_unshare_cli(&args, false)?;
     if code != 0 {
         return Err(anyhow!(
             "chown {}:{} on {:?} failed with exit {}",
@@ -1608,7 +1608,7 @@ pub fn chown_path_rootless(path: &Path, uid: u32, gid: u32, recursive: bool) -> 
 }
 
 /// Run an unshare command in a new user namespace (boxr unshare)
-pub fn run_unshare_cli(args: &[String]) -> Result<i32> {
+pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
     if let Some(first) = args.first() {
         if first.starts_with("--") {
             crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
@@ -1640,6 +1640,9 @@ pub fn run_unshare_cli(args: &[String]) -> Result<i32> {
             }
             ForkResult::Child => {
                 drop(parent_sock);
+                if suppress_stdout {
+                    redirect_stdout_to_dev_null();
+                }
                 unshare(CloneFlags::CLONE_NEWUSER)?;
                 child_sock.write_all(b"ready")?;
                 let mut buf = [0u8; 4];
@@ -1659,12 +1662,27 @@ pub fn run_unshare_cli(args: &[String]) -> Result<i32> {
             }
         }
     } else {
+        use std::process::Stdio;
         let mut child = std::process::Command::new(&cmd[0]);
         if cmd.len() > 1 {
             child.args(&cmd[1..]);
         }
+        if suppress_stdout {
+            child.stdout(Stdio::null());
+        }
         let status = child.status()?;
         Ok(status.code().unwrap_or(0))
+    }
+}
+
+fn redirect_stdout_to_dev_null() {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+    if let Ok(devnull) = OpenOptions::new().read(true).write(true).open("/dev/null") {
+        let fd = devnull.as_raw_fd();
+        unsafe {
+            libc::dup2(fd, libc::STDOUT_FILENO);
+        }
     }
 }
 

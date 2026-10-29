@@ -237,9 +237,10 @@ fn test_issue_58_save_preserves_permissions_timestamps() {
 // Issue #59: boxr info reports hardcoded static values for OS, cgroup version, and plugins
 #[test]
 fn test_issue_59_info_system_cgroups_and_storage_driver() {
-    let lib_rs = include_str!("../src/lib.rs");
-    assert!(lib_rs.contains("cgroup_ver"));
-    assert!(lib_rs.contains("storage_driver"));
+    let info_rs = include_str!("../src/cli/info_report.rs");
+    let globals_rs = include_str!("../src/cli/podman_globals.rs");
+    assert!(info_rs.contains("cgroup_version"));
+    assert!(globals_rs.contains("storage_driver"));
 }
 
 // Issue #60: boxr search hub returns a static hardcoded array instead of querying Docker Hub Registry API

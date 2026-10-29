@@ -455,7 +455,7 @@ impl KubeManager {
     }
 
     /// Run a command in a new user namespace (boxr unshare)
-    pub fn unshare_command(command: &[String]) -> Result<i32> {
+    pub fn unshare_command(command: &[String], suppress_stdout: bool) -> Result<i32> {
         let default_cmd = vec!["/bin/sh".to_string()];
         let cmd = if command.is_empty() {
             &default_cmd
@@ -465,13 +465,17 @@ impl KubeManager {
 
         #[cfg(target_os = "linux")]
         {
-            crate::runtime::linux::run_unshare_cli(cmd)
+            crate::runtime::linux::run_unshare_cli(cmd, suppress_stdout)
         }
         #[cfg(not(target_os = "linux"))]
         {
+            use std::process::Stdio;
             let mut child = std::process::Command::new(&cmd[0]);
             if cmd.len() > 1 {
                 child.args(&cmd[1..]);
+            }
+            if suppress_stdout {
+                child.stdout(Stdio::null());
             }
             let status = child.status()?;
             Ok(status.code().unwrap_or(0))

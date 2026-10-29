@@ -820,7 +820,7 @@ fn test_issue_142_info_and_version_format_flag() {
     let ver_args = FormatArgs {
         format: Some("{{.Client.Version}}".to_string()),
     };
-    assert!(boxr::show_version(&ver_args).is_ok());
+    assert!(boxr::show_version(&ver_args, &boxr::CliOutputPolicy::default()).is_ok());
 }
 
 // Issue #143: boxr info outputs non-standard OSType: macos instead of container engine OSType: linux

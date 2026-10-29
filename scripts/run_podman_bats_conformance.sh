@@ -47,6 +47,20 @@ clone_or_update() {
   fi
 }
 
+# Pin test/system content to the vendored copy in this repo (see scripts/sync_podman_bats_upstream.sh).
+apply_vendored_upstream() {
+  local vendored="$REPO_ROOT/tests/podman_bats/upstream"
+  [[ -d "$vendored" ]] || return 0
+  rsync -a \
+    --include='*.bats' \
+    --include='helpers*.bash' \
+    --include='setup_suite.bash' \
+    --include='build-testimage' \
+    --include='build-systemd-image' \
+    --exclude='*' \
+    "$vendored/" "$SRC_DIR/test/system/"
+}
+
 apply_boxr_patches() {
   local stamp="$CACHE_DIR/.boxr-patches-applied"
   local helpers="$SRC_DIR/test/system/helpers.bash"
@@ -75,6 +89,9 @@ write_wrapper() {
 set -euo pipefail
 export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-$HOME/.boxr-bats}}"
 mkdir -p "\$BOXR_HOME"
+if [[ "\${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" ]]; then
+  export BOXR_FORCE_EMBEDDED_USERNET=1
+fi
 # Podman BATS expect '[options]' (lower case) in usage lines.
 podmanize_help() {
   sed -e 's/^Usage: podman /Usage:\\n  podman /' \
@@ -149,7 +166,7 @@ run_manifest() {
   cd "$SRC_DIR"
   for pat in "${patterns[@]}"; do
     export BOXR_HOME
-    BOXR_HOME="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bats.XXXXXX")"
+    BOXR_HOME="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bats.XXXXXX" | tr '[:upper:]' '[:lower:]')"
     export BOXR_BATS_HOME="$BOXR_HOME"
     echo "======== BATS pattern: $pat (BOXR_HOME=$BOXR_HOME) ========" | tee -a "$log"
     if ! hack/bats --rootless "$pat" 2>&1 | tee -a "$log"; then
@@ -169,6 +186,7 @@ run_manifest() {
 }
 
 clone_or_update
+apply_vendored_upstream
 apply_boxr_patches
 write_wrapper
 run_manifest

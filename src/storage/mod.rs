@@ -1,4 +1,5 @@
 pub mod container_store;
+pub mod db_config;
 pub mod external;
 pub mod image_store;
 pub mod index_lock;
@@ -18,6 +19,10 @@ pub use traits::{
 
 /// Get the base boxr directory (default: ~/.boxr)
 pub fn boxr_home() -> PathBuf {
+    let globals = crate::cli::podman_globals::podman_global_options();
+    if let Some(root) = &globals.root {
+        return root.clone();
+    }
     if let Ok(custom) = std::env::var("BOXR_HOME") {
         return PathBuf::from(custom);
     }

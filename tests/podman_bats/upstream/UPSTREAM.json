@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/podman-container-tools/podman.git",
+  "ref": "main",
+  "commit": "a5d52f17b9fa23de912c6ba14159537d67a54852",
+  "synced_at": "2026-10-29T08:34:06Z",
+  "path_in_repo": "test/system"
+}

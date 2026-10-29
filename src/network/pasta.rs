@@ -38,10 +38,13 @@ impl Default for NetworkMode {
 impl NetworkMode {
     /// When set, `--network usernet` uses the embedded TAP stack even if passt is installed (tests/CI).
     pub fn force_embedded_usernet() -> bool {
-        matches!(
-            std::env::var("BOXR_FORCE_EMBEDDED_USERNET").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
-        )
+        fn truthy(var: &str) -> bool {
+            matches!(
+                std::env::var(var).as_deref(),
+                Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+            )
+        }
+        truthy("BOXR_FORCE_EMBEDDED_USERNET") || truthy("BOXR_TEST_EMBEDDED_USERNET")
     }
 
     pub fn parse(s: &str) -> Self {
@@ -289,10 +292,35 @@ mod tests {
     }
 
     #[test]
-    fn test_network_mode_requirements() {
-        let saved_force_embedded = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+    fn test_embedded_usernet_ci_env_alias() {
+        let saved_force = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+        let saved_test = std::env::var("BOXR_TEST_EMBEDDED_USERNET").ok();
         unsafe {
             std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+            std::env::set_var("BOXR_TEST_EMBEDDED_USERNET", "1");
+        }
+        assert!(NetworkMode::force_embedded_usernet());
+        unsafe {
+            if let Some(v) = saved_force {
+                std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", v);
+            } else {
+                std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+            }
+            if let Some(v) = saved_test {
+                std::env::set_var("BOXR_TEST_EMBEDDED_USERNET", v);
+            } else {
+                std::env::remove_var("BOXR_TEST_EMBEDDED_USERNET");
+            }
+        }
+    }
+
+    #[test]
+    fn test_network_mode_requirements() {
+        let saved_force_embedded = std::env::var("BOXR_FORCE_EMBEDDED_USERNET").ok();
+        let saved_test_embedded = std::env::var("BOXR_TEST_EMBEDDED_USERNET").ok();
+        unsafe {
+            std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+            std::env::remove_var("BOXR_TEST_EMBEDDED_USERNET");
         }
 
         assert!(NetworkMode::Pasta.should_use_pasta());
@@ -319,6 +347,19 @@ mod tests {
         if let Some(v) = saved_force_embedded {
             unsafe {
                 std::env::set_var("BOXR_FORCE_EMBEDDED_USERNET", v);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("BOXR_FORCE_EMBEDDED_USERNET");
+            }
+        }
+        if let Some(v) = saved_test_embedded {
+            unsafe {
+                std::env::set_var("BOXR_TEST_EMBEDDED_USERNET", v);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("BOXR_TEST_EMBEDDED_USERNET");
             }
         }
     }

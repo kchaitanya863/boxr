@@ -73,7 +73,7 @@ fn main() -> Result<()> {
             if !wants_help {
                 #[cfg(target_os = "linux")]
                 {
-                    let code = boxr::runtime::linux::run_unshare_cli(sub)?;
+                    let code = boxr::runtime::linux::run_unshare_cli(sub, false)?;
                     std::process::exit(code);
                 }
             }
@@ -100,7 +100,12 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     rt.block_on(async {
-        let argv: Vec<String> = boxr::cli::preprocess_argv(std::env::args().collect());
+        boxr::cli::log_level::init_from_process_args();
+        let raw_argv: Vec<String> = std::env::args().collect();
+        if boxr::cli::usage_errors::try_print_argv_help(&raw_argv) {
+            unreachable!();
+        }
+        let argv: Vec<String> = boxr::cli::preprocess_argv(raw_argv);
         let cli = match boxr::cli::Cli::try_parse_from(&argv) {
             Ok(c) => c,
             Err(e) => {

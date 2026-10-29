@@ -71,7 +71,7 @@ impl VolumeStore {
     }
 
     pub fn with_home(home: PathBuf) -> Self {
-        let volumes_dir = home.join("volumes");
+        let volumes_dir = crate::storage::db_config::effective_volume_path();
         let _ = fs::create_dir_all(&volumes_dir);
         Self {
             index_file: home.join("volumes.json"),

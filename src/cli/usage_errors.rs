@@ -1,7 +1,182 @@
 //! Podman-compatible usage / missing-subcommand messages for BATS help tests.
 
+use std::sync::OnceLock;
+
+static HIDE_REMOTE_HELP: OnceLock<bool> = OnceLock::new();
+
+pub fn set_hide_remote_help(hide: bool) {
+    let _ = HIDE_REMOTE_HELP.set(hide);
+}
+
+fn hide_remote_in_help(argv: &[String]) -> bool {
+    if *HIDE_REMOTE_HELP.get().unwrap_or(&false) {
+        return true;
+    }
+    if std::env::var_os("CONTAINER_HOST").is_some()
+        || std::env::var_os("CONTAINER_CONNECTION").is_some()
+    {
+        return true;
+    }
+    argv.iter()
+        .any(|a| a.starts_with("--url") || a.starts_with("--connection"))
+}
+
 use clap::error::{ContextKind, ErrorKind};
-use clap::{Error, Parser};
+use clap::{CommandFactory, Error, Parser};
+
+fn normalize_help_for_bats(help: &str, sub_path: &[&str]) -> String {
+    let has_options = help.lines().any(|l| l.trim() == "Options:");
+    let has_subcommands = help.lines().any(|l| l.trim() == "Available Commands:");
+    let mut out = String::new();
+    let mut lines = help.lines();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed == "Usage:" {
+            out.push_str(line);
+            out.push('\n');
+            if let Some(usage) = lines.next() {
+                out.push_str(&normalize_usage_line(
+                    usage,
+                    sub_path,
+                    has_options,
+                    has_subcommands,
+                ));
+                out.push('\n');
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Usage:") {
+            out.push_str("Usage:\n");
+            out.push_str(&normalize_usage_line(
+                rest.trim(),
+                sub_path,
+                has_options,
+                has_subcommands,
+            ));
+            out.push('\n');
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn normalize_usage_line(
+    usage: &str,
+    sub_path: &[&str],
+    has_options_section: bool,
+    has_subcommands: bool,
+) -> String {
+    if sub_path.is_empty() {
+        return "  podman [command] [options]".to_string();
+    }
+    let full = format!("podman {}", sub_path.join(" "));
+    if has_subcommands {
+        return format!("  {full} [command] [options]");
+    }
+
+    let mut u = usage.trim().to_string();
+    u = u.replace("[OPTIONS]", "[options]");
+    u = u.replace('<', "").replace('>', "");
+    if u.starts_with("podman ") {
+        // already prefixed
+    } else if let Some(leaf) = sub_path.last() {
+        if let Some(rest) = u.strip_prefix(&format!("{leaf} ")) {
+            u = format!("{full} {rest}");
+        } else if u == *leaf {
+            u = full.clone();
+        } else {
+            u = format!("{full} {u}");
+        }
+    } else {
+        u = format!("{full} {u}");
+    }
+
+    if has_options_section && !u.contains("[options]") {
+        if let Some(rest) = u.strip_prefix(&format!("{full} ")) {
+            u = format!("{full} [options] {rest}");
+        } else if u == full {
+            u = format!("{full} [options]");
+        }
+    }
+
+    format!("  {u}")
+}
+
+fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
+    let mut cmd = crate::cli::Cli::command();
+    for part in sub_path {
+        let Some(sub) = cmd.find_subcommand(part) else {
+            let mut full: Vec<String> = vec!["podman".into(), "help".into()];
+            full.extend(sub_path.iter().map(|s| (*s).to_string()));
+            print_unrecognized(&full);
+            std::process::exit(125);
+        };
+        cmd = sub.clone();
+    }
+    let help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    print!("{}", filter_remote_help(&help, argv));
+    std::process::exit(0);
+}
+
+/// When argv includes `--help` after a subcommand, render that command's help (015-help.bats).
+pub fn try_print_argv_help(argv: &[String]) -> bool {
+    if !argv.iter().any(|a| a == "--help" || a == "-h") {
+        return false;
+    }
+    let idx = super::podman_subcommand_index(argv);
+    if idx >= argv.len() {
+        render_command_help(&[], argv);
+    }
+    if argv[idx] == "help" {
+        let mut has_command = false;
+        for a in argv.iter().skip(idx + 1) {
+            if *a == "--help" || *a == "-h" {
+                break;
+            }
+            if a.starts_with('-') {
+                continue;
+            }
+            has_command = true;
+            break;
+        }
+        if !has_command {
+            print_help_leaf_help();
+        }
+    }
+    let mut sub_path: Vec<&str> = Vec::new();
+    let mut i = idx;
+    while i < argv.len() {
+        let a = argv[i].as_str();
+        if a == "--help" || a == "-h" {
+            break;
+        }
+        if a.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        sub_path.push(a);
+        i += 1;
+    }
+    if sub_path.len() >= 2 && sub_path.last() == Some(&"help") {
+        print_group_help_leaf(&sub_path[..sub_path.len() - 1]);
+    }
+    render_command_help(&sub_path, argv);
+}
+
+/// `podman help` / `podman help <cmd>` — show help for the root or nested command.
+pub fn run_help_command(path: &[String]) -> ! {
+    let argv: Vec<String> = std::env::args().collect();
+    let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+    render_command_help(&parts, &argv);
+}
+
+/// Podman/libpod runtime or storage failures (BATS expect exit 125).
+pub fn exit_podman_error(err: impl std::fmt::Display) -> ! {
+    eprintln!("{}", err);
+    std::process::exit(125);
+}
 
 /// Emit Podman-shaped errors and exit 125 (do not use clap's default print).
 pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
@@ -45,7 +220,12 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
             std::process::exit(125);
         }
         ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
-            let _ = err.print();
+            if try_print_argv_help(argv) {
+                unreachable!();
+            }
+            let mut cmd = crate::cli::Cli::command();
+            let help = cmd.render_help().to_string();
+            print!("{}", filter_remote_help(&help, argv));
             std::process::exit(0);
         }
         _ => {
@@ -76,31 +256,37 @@ pub fn exit_config_error(msg: impl AsRef<str>) -> ! {
     std::process::exit(126);
 }
 
-/// `podman help` / `podman help <cmd>` — show help for the root or nested command.
-pub fn run_help_command(path: &[String]) -> ! {
-    let bin = std::env::args()
-        .next()
-        .unwrap_or_else(|| "podman".to_string());
-    let mut argv = vec![bin.clone()];
-    if path.is_empty() {
-        argv.push("--help".to_string());
-    } else {
-        argv.extend(path.iter().cloned());
-        argv.push("--help".to_string());
-    }
-    match crate::cli::Cli::try_parse_from(&argv) {
-        Err(e) if e.kind() == ErrorKind::DisplayHelp => {
-            let _ = e.print();
-            std::process::exit(0);
-        }
-        Err(_) => {
-            let mut full = vec![bin, "help".to_string()];
-            full.extend(path.iter().cloned());
-            print_unrecognized(&full);
-            std::process::exit(125);
-        }
-        Ok(_) => std::process::exit(0),
-    }
+/// Usage for `podman help --help` (015-help.bats).
+pub fn print_help_leaf_help() -> ! {
+    print!(
+        "\
+Help about any command
+Usage:
+  podman help [command] [options]
+
+Arguments:
+  [command]...  Command to show help for
+
+Options:
+  -h, --help  Print help
+"
+    );
+    std::process::exit(0);
+}
+
+fn print_group_help_leaf(group_path: &[&str]) -> ! {
+    let full = format!("podman {} help", group_path.join(" "));
+    print!(
+        "\
+Help about any command
+Usage:
+  {full} [command] [options]
+
+Options:
+  -h, --help  Print help
+"
+    );
+    std::process::exit(0);
 }
 
 fn is_bats_numeric_token(s: &str) -> bool {
@@ -165,4 +351,15 @@ fn print_unrecognized(argv: &[String]) {
     parts.extend(parents);
     parts.push(bad.as_str());
     eprintln!("Error: unrecognized command \"{}\"", parts.join(" "));
+}
+
+fn filter_remote_help(help: &str, argv: &[String]) -> String {
+    if !hide_remote_in_help(argv) {
+        return help.to_string();
+    }
+    help.lines()
+        .filter(|line| !line.contains("--remote"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }

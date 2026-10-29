@@ -52,10 +52,23 @@ jobs:
       - name: Install Linux rootless runtime deps
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq
 
       - name: Build boxr binary
         run: cargo build
+
+      - name: Verify vendored Podman BATS catalog
+        run: cargo test --test podman_bats_manifest_test
+
+      - name: Podman BATS conformance (curated manifest, strict)
+        timeout-minutes: 45
+        env:
+          PODMAN_BATS_OMIT_HOST_GATED: "1"
+          PODMAN_BATS_STRICT: "1"
+          BOXR_TEST_EMBEDDED_USERNET: "1"
+        run: |
+          chmod +x scripts/run_podman_bats_conformance.sh scripts/sync_podman_bats_upstream.sh
+          ./scripts/run_podman_bats_conformance.sh
 
       - name: Podman P0 CLI audit
         run: python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
@@ -75,6 +88,37 @@ jobs:
                      --test blackbox_resources_test \
                      --test blackbox_volumes_test \
                      -- --test-threads=1
+
+  podman-bats-full-catalog:
+    name: Podman BATS (full upstream catalog)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq
+      - name: Build
+        run: cargo build
+      - name: Run all vendored upstream BATS (progress tracker)
+        env:
+          PODMAN_BATS_OMIT_HOST_GATED: "1"
+          BOXR_TEST_EMBEDDED_USERNET: "1"
+        run: |
+          chmod +x scripts/run_podman_bats_all_upstream.sh scripts/run_podman_bats_conformance.sh
+          ./scripts/run_podman_bats_all_upstream.sh || true
+          log=$(ls -t .cache/podman-bats-results/run-*.log | head -1)
+          echo "## Full upstream BATS summary" >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^ok |^not ok ' "$log" | awk '{if($1=="ok") o++; else n++} END {print "- ok:", o+0, "not ok:", n+0}' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: podman-bats-full-log
+          path: .cache/podman-bats-results/run-*.log
 
   bump-and-tag:
     name: Bump Version & Create Git Tag
