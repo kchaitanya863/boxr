@@ -16,6 +16,8 @@ Upstream `clean_setup` uses flags like `rm -t 0 --ignore` and `ps --external`. T
 - Linux, rootless-friendly (`newuidmap` / subuid for `boxr unshare` paths)
 - `bats` (bats-core ≥ 1.8)
 - `git`, `openssl`, network for image pulls
+- **`apache2-utils`** (`htpasswd`) for `030-run` **`--cert-dir`** / local registry BATS
+- **`uidmap`** (`newuidmap` / subuid) for `030-run` **`--uidmap`** / `/etc/hosts` cases
 - Built `boxr`: `cargo build`
 
 ## Run
@@ -31,7 +33,8 @@ Environment:
 |----------|---------|---------|
 | `BOXR_BIN` | `target/debug/boxr` | boxr binary (script resolves to an **absolute** path in the wrapper; relative paths break BATS because tests `cd` into the podman clone) |
 | `PODMAN_BATS_CACHE` | `.cache/podman-bats` | Shallow podman git clone |
-| `MANIFEST` | `tests/podman_bats/manifest.txt` | BATS filename patterns |
+| `MANIFEST` | `tests/podman_bats/manifest.txt` | BATS filename patterns (file path) |
+| `PODMAN_BATS_PATTERN` | (unset) | Single pattern; writes a temp manifest (e.g. `035-logs`) |
 | `PODMAN_TESTS_REF` | `main` | Git ref for clone |
 
 Each pattern in `./scripts/run_podman_bats_conformance.sh` gets its own fresh `BOXR_HOME` (via `boxr-podman-wrapper.sh`).
@@ -61,6 +64,7 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 045-start | 8 | 0 | |
 | 050-stop | 9 | 0 | |
 | 055-rm | 10 | 0 | |
+| 035-logs | 19 | 0 | **k8s-file** tail/since/until/follow/restart/partial lines via `src/logging/mod.rs`; journald cases skip without rootless journald |
 | 075-exec | 10 | 0 | **`--group-add`** — setns exec joins mnt + proc remount, applies bundle supplementary GIDs (double-fork after remount for `/proc/self`); skips userns socket when group sync needed. |
 | 160-volumes | 25 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
 | **Total** | **154** | **1** | plus skips (160-volumes keep-id on some hosts) |
