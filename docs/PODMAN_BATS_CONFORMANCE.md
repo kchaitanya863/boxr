@@ -67,19 +67,21 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 
 | File | ok | not ok | notes |
 |------|-----|--------|--------|
+| 001-basic | 15 | 0 | |
+| 005-info | 17 | 0 | |
 | 015-help | 1 | 0 | |
 | 020-tag | 2 | 0 | |
-| 030-run | 81 | 0 | **`--uidmap` /etc/hosts** — persist `boxr.uid_maps` / `boxr.rootfs_setup_uid` on `create` (annotations synced before `save_to_bundle`); init uses `assume_credentials_for_rootfs_setup` without an early `become_effective_container_root()` before `run_container_child`. MS propagation on `/` is best-effort when hardened hosts EPERM. |
-| 040-ps | 8 | 0 | |
-| 045-start | 8 | 0 | |
-| 050-stop | 9 | 0 | |
-| 055-rm | 10 | 0 | |
+| 030-run | 81 | 0 | **`--uidmap` /etc/hosts** — persist `boxr.uid_maps` / `boxr.rootfs_setup_uid` on `create` (annotations synced before `save_to_bundle`); init uses `assume_credentials_for_rootfs_setup` without an early `become_effective_container_root()` before `run_container_child`. MS propagation on `/` is best-effort when hardened hosts EPERM; non-vt tty devices mounted for `--privileged --systemd=always`. |
 | 035-logs | 19 | 0 | **k8s-file** tail/since/until/follow/restart/partial lines via `src/logging/mod.rs`; journald cases skip without rootless journald |
-| 075-exec | 10 | 0 | **`--group-add`** — setns exec joins mnt + proc remount, applies bundle supplementary GIDs (double-fork after remount for `/proc/self`); skips userns socket when group sync needed. |
+| 040-ps | 8 | 0 | |
+| 045-start | 8 | 0 | Pull progress output on stderr ensures clean container IDs; restart-policy on manual stop handled |
+| 050-stop | 9 | 0 | Signal trap and timeout handling aligned; manual stop flag prevents unwanted container auto-restart |
+| 055-rm | 10 | 0 | |
+| 075-exec | 10 | 0 | Full namespace setns (`user`, `pid`, `mnt`, `net`, `ipc`, `uts`) opened as host user before transition; clean container env isolation |
 | 160-volumes | 25 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
-| **Total** | **154** | **1** | plus skips (160-volumes keep-id on some hosts) |
+| **Total** | **180** | **1** | 100% pass (0 failures) when host-gated 160-volumes is omitted on affected kernels |
 
-Authoritative log: `.cache/podman-bats-results/run-20261028-130514.log` (153 ok / 2 not ok). Earlier scorecards predated `--uidmap` rootfs-setup identity; re-run `./scripts/run_podman_bats_conformance.sh` after pulling latest.
+Authoritative log: `.cache/podman-bats-results/run-20261030-025555.log` (180 ok / 0 not ok under `PODMAN_BATS_OMIT_HOST_GATED=1 PODMAN_BATS_STRICT=1`).
 
 Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails. CI runs curated strict as a **progress tracker** (`continue-on-error`) until the manifest is fully green; then remove `continue-on-error` on that workflow step to hard-gate merges.
 

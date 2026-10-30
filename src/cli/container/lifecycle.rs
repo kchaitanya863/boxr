@@ -99,7 +99,7 @@ pub struct LogsArgs {
 }
 
 #[derive(Args, Debug, Clone)]
-#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+#[command(help_template = crate::cli::PODMAN_LEAF_HELP, disable_help_flag = true)]
 pub struct ExecArgs {
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,

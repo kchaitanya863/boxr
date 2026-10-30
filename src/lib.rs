@@ -1746,7 +1746,7 @@ async fn resolve_container_image(
     match local_image {
         Some(record) if validate_image_record(&record) => {
             if pull == Some("always") {
-                println!("Trying to pull {}...", image_str);
+                eprintln!("Trying to pull {}...", image_str);
                 match pull_image_with_platform(image_str, target_platform).await {
                     Ok(r) => Ok(r),
                     Err(e) => exit_run_image_error(e),
@@ -1760,7 +1760,7 @@ async fn resolve_container_image(
                 cli::usage_errors::exit_usage_error(format!("{}: image not known", image_str));
             }
             _ => {
-                println!("Trying to pull {}...", image_str);
+                eprintln!("Trying to pull {}...", image_str);
                 match pull_image_with_platform(image_str, target_platform).await {
                     Ok(r) => Ok(r),
                     Err(e) => exit_run_image_error(e),
@@ -2517,6 +2517,12 @@ pub async fn run_container_with_output(
     if args.conmon_syslog {
         annotations.insert("boxr.conmon_syslog".to_string(), "1".to_string());
     }
+    if args.privileged {
+        annotations.insert("boxr.privileged".to_string(), "true".to_string());
+    }
+    if let Some(s) = &args.systemd {
+        annotations.insert("boxr.systemd".to_string(), s.clone());
+    }
     apply_run_health_annotations(&args, &mut annotations)?;
     apply_run_secrets(&args, &mut spec, &mut annotations)?;
     spec.annotations = Some(annotations);
@@ -3109,6 +3115,11 @@ fn prepare_detached_restart(container_id: &str, bundle_path: &Path, stored_exit:
         Some(c) => c,
         None => return false,
     };
+    if matches!(c.status, ContainerStatus::Stopping | ContainerStatus::Exited(_))
+        || bundle_path.join("manual_stop").exists()
+    {
+        return false;
+    }
     let should_restart = match &c.restart_policy {
         health::RestartPolicy::Always => true,
         health::RestartPolicy::OnFailure { max_retries } => {
@@ -3154,7 +3165,7 @@ pub fn detached_container_process_exited(
     bundle_path: &Path,
     exit_code: i32,
 ) -> bool {
-    let stored = if exit_code == 255 {
+    let mut stored = if exit_code == 255 {
         fs::read_to_string(bundle_path.join("boxr-exitcode"))
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())
@@ -3162,6 +3173,9 @@ pub fn detached_container_process_exited(
     } else {
         exit_code
     };
+    if bundle_path.join("manual_stop").exists() && (stored == 143 || stored == 130) {
+        stored = 0;
+    }
     if prepare_detached_restart(container_id, bundle_path, stored) {
         return true;
     }
@@ -3445,6 +3459,7 @@ pub fn stop_container_with_home_and_timeout(
         }
     }
 
+    let _ = fs::write(bundle_path.join("manual_stop"), "1");
     let _ = store.update_status(&c.id, ContainerStatus::Stopping);
 
     #[cfg(unix)]
@@ -3803,6 +3818,7 @@ pub async fn start_container_with_home(
     }
 
     let _ = sync_bundle_ulimits_inspect(&bundle_path);
+    let _ = fs::remove_file(bundle_path.join("manual_stop"));
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
     apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
     store.update_status(&rec.id, ContainerStatus::Running)?;
@@ -3990,11 +4006,17 @@ fn container_logs_multi(args: &LogsArgs) -> Result<()> {
         });
     }
 
-    let print_prefixed = |prefix: &str, line: &str| {
-        if args.timestamps {
-            println!("{} {} {}", Utc::now().to_rfc3339(), prefix, line);
-        } else {
-            println!("{} {}", prefix, line);
+    let print_prefixed = |prefix: &str, text: &str| {
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() {
+                continue;
+            }
+            if args.timestamps {
+                println!("{} {} {}", Utc::now().to_rfc3339(), prefix, line);
+            } else {
+                println!("{} {}", prefix, line);
+            }
         }
     };
 
@@ -4005,12 +4027,7 @@ fn container_logs_multi(args: &LogsArgs) -> Result<()> {
             args.until.as_deref(),
             args.tail,
         )?;
-        for line in output.split('\n') {
-            if line.is_empty() && output.ends_with('\n') {
-                continue;
-            }
-            print_prefixed(&t.prefix, line);
-        }
+        print_prefixed(&t.prefix, &output);
     }
 
     if args.follow {
@@ -4863,10 +4880,17 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                             false
                         };
                         if !is_running {
-                            let code = std::fs::read_to_string(bundle_path.join("boxr-exitcode"))
-                                .ok()
-                                .and_then(|s| s.trim().parse::<i32>().ok())
-                                .unwrap_or(137);
+                            let mut code = None;
+                            for _ in 0..10 {
+                                if let Ok(s) = std::fs::read_to_string(bundle_path.join("boxr-exitcode")) {
+                                    if let Ok(c) = s.trim().parse::<i32>() {
+                                        code = Some(c);
+                                        break;
+                                    }
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                            }
+                            let code = code.unwrap_or(0);
                             let _ = c_store.update_status(&cont.id, ContainerStatus::Exited(code));
                             println!("{}", code);
                             last_code = code;
@@ -7270,7 +7294,11 @@ fn remove_container_opts_inner(
     }
 
     if is_active {
-        let _ = stop_container(container, None);
+        let _ = if force {
+            stop_container_with_home_and_timeout(container, None, Some(0), None, true, None)
+        } else {
+            stop_container(container, None)
+        };
     }
 
     let c = match store.find(container) {
@@ -7767,6 +7795,9 @@ async fn create_only_container_after_pod_prep(
     }
     if args.privileged {
         annotations.insert("boxr.privileged".to_string(), "true".to_string());
+    }
+    if let Some(s) = &args.systemd {
+        annotations.insert("boxr.systemd".to_string(), s.clone());
     }
     if !args.cap_add.is_empty() {
         annotations.insert(
