@@ -121,6 +121,7 @@ mod tests {
         assert_eq!(&r_icmp[4..8], &icmp_echo[4..8]); // ID and Sequence match
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_usernet_tcp_syn_and_handshake() {
         use std::net::TcpListener;
@@ -195,6 +196,7 @@ mod tests {
         assert_eq!(r_tcp.ack_num, 501); // ACK = SEQ + 1
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn test_usernet_tcp_payload_forwarding() {
         use std::io::{Read, Write};

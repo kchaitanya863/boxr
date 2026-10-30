@@ -105,9 +105,11 @@ fn test_image_volume_network_exists_exit_codes() {
         Some(1),
         "missing volume should return Podman's not-found exit code"
     );
-    assert!(blackbox::run_boxr(&home, &["volume", "create", &vol])
-        .status
-        .success());
+    assert!(
+        blackbox::run_boxr(&home, &["volume", "create", &vol])
+            .status
+            .success()
+    );
     let volume_result = blackbox::run_boxr(&home, &["volume", "exists", &vol]);
     assert!(
         volume_result.status.success(),
@@ -125,9 +127,11 @@ fn test_image_volume_network_exists_exit_codes() {
         Some(1),
         "missing network should return Podman's not-found exit code"
     );
-    assert!(blackbox::run_boxr(&home, &["network", "create", &net])
-        .status
-        .success());
+    assert!(
+        blackbox::run_boxr(&home, &["network", "create", &net])
+            .status
+            .success()
+    );
     let network_result = blackbox::run_boxr(&home, &["network", "exists", &net]);
     assert!(
         network_result.status.success(),

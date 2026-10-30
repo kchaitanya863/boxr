@@ -36,6 +36,7 @@ Expands to: P0 CLI audit, `podman_parity_blackbox_test`, `podman_upstream_parity
 | **quadlet** | partial | partial | partial | partial | `podman_parity_blackbox_test` | install + print round-trip |
 | **checkpoint / restore** | partial | partial | partial | partial | `podman_parity_blackbox_test` | Metadata tarball subset (not CRIU) |
 | **volume export/import** | partial | partial | partial | partial | `podman_parity_blackbox_test` | Tarball round-trip |
+| **container export / import** | full | full | full | full | `podman_upstream_parity_test`, `import_test.go`, `125-import.bats` | Tarball export with symlinks, `--change`, `--message`, `--signature-policy`, platform overrides |
 | **artifact** | partial | partial | partial | partial | `podman_parity_blackbox_test` | add / ls / rm |
 | **machine** | partial | stub | **n/a** | partial | `podman_parity_blackbox_test` | Linux: clear error; macOS: VZ state |
 | **farm** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `podman_parity_test` | Local farm metadata create/ls/rm |

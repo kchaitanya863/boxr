@@ -16,6 +16,7 @@ pub fn relay_socket_path(bundle_path: &Path) -> std::path::PathBuf {
 }
 
 /// Fork a relay child that serves `bundle/usernet-relay.sock`. Returns child PID.
+#[cfg(target_os = "linux")]
 pub fn spawn_host_relay(bundle_path: &Path) -> Result<i32> {
     let sock_path = relay_socket_path(bundle_path);
     let _ = fs::remove_file(&sock_path);
@@ -37,6 +38,11 @@ pub fn spawn_host_relay(bundle_path: &Path) -> Result<i32> {
             std::process::exit(0);
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_host_relay(_bundle_path: &Path) -> Result<i32> {
+    anyhow::bail!("usernet relay is only supported on Linux")
 }
 
 fn run_relay_server(listener: UnixListener) -> Result<()> {

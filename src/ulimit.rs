@@ -11,23 +11,53 @@ pub struct ParsedUlimit {
     pub hard: i64,
 }
 
+#[cfg(target_os = "linux")]
+const RLIMIT_LOCKS: u32 = libc::RLIMIT_LOCKS;
+#[cfg(not(target_os = "linux"))]
+const RLIMIT_LOCKS: u32 = 10;
+
+#[cfg(target_os = "linux")]
+const RLIMIT_MSGQUEUE: u32 = libc::RLIMIT_MSGQUEUE;
+#[cfg(not(target_os = "linux"))]
+const RLIMIT_MSGQUEUE: u32 = 12;
+
+#[cfg(target_os = "linux")]
+const RLIMIT_NICE: u32 = libc::RLIMIT_NICE;
+#[cfg(not(target_os = "linux"))]
+const RLIMIT_NICE: u32 = 13;
+
+#[cfg(target_os = "linux")]
+const RLIMIT_RTPRIO: u32 = libc::RLIMIT_RTPRIO;
+#[cfg(not(target_os = "linux"))]
+const RLIMIT_RTPRIO: u32 = 14;
+
+#[cfg(target_os = "linux")]
+const RLIMIT_RTTIME: u32 = libc::RLIMIT_RTTIME;
+#[cfg(not(target_os = "linux"))]
+const RLIMIT_RTTIME: u32 = 15;
+
+#[cfg(target_os = "linux")]
+const RLIMIT_SIGPENDING: u32 = libc::RLIMIT_SIGPENDING;
+#[cfg(not(target_os = "linux"))]
+const RLIMIT_SIGPENDING: u32 = 11;
+
 fn rlimit_name_parts(name: &str) -> Option<(&'static str, u32)> {
     match name {
-        "core" => Some(("RLIMIT_CORE", libc::RLIMIT_CORE)),
-        "cpu" => Some(("RLIMIT_CPU", libc::RLIMIT_CPU)),
-        "data" => Some(("RLIMIT_DATA", libc::RLIMIT_DATA)),
-        "fsize" => Some(("RLIMIT_FSIZE", libc::RLIMIT_FSIZE)),
-        "locks" => Some(("RLIMIT_LOCKS", libc::RLIMIT_LOCKS)),
-        "memlock" => Some(("RLIMIT_MEMLOCK", libc::RLIMIT_MEMLOCK)),
-        "msgqueue" => Some(("RLIMIT_MSGQUEUE", libc::RLIMIT_MSGQUEUE)),
-        "nice" => Some(("RLIMIT_NICE", libc::RLIMIT_NICE)),
-        "nofile" => Some(("RLIMIT_NOFILE", libc::RLIMIT_NOFILE)),
-        "nproc" => Some(("RLIMIT_NPROC", libc::RLIMIT_NPROC)),
-        "rss" => Some(("RLIMIT_RSS", libc::RLIMIT_RSS)),
-        "rtprio" => Some(("RLIMIT_RTPRIO", libc::RLIMIT_RTPRIO)),
-        "rttime" => Some(("RLIMIT_RTTIME", libc::RLIMIT_RTTIME)),
-        "sigpending" => Some(("RLIMIT_SIGPENDING", libc::RLIMIT_SIGPENDING)),
-        "stack" => Some(("RLIMIT_STACK", libc::RLIMIT_STACK)),
+        "core" => Some(("RLIMIT_CORE", libc::RLIMIT_CORE as u32)),
+        "cpu" => Some(("RLIMIT_CPU", libc::RLIMIT_CPU as u32)),
+        "data" => Some(("RLIMIT_DATA", libc::RLIMIT_DATA as u32)),
+        "fsize" => Some(("RLIMIT_FSIZE", libc::RLIMIT_FSIZE as u32)),
+        "locks" => Some(("RLIMIT_LOCKS", RLIMIT_LOCKS)),
+        "memlock" => Some(("RLIMIT_MEMLOCK", libc::RLIMIT_MEMLOCK as u32)),
+        "msgqueue" => Some(("RLIMIT_MSGQUEUE", RLIMIT_MSGQUEUE)),
+        "nice" => Some(("RLIMIT_NICE", RLIMIT_NICE)),
+        "nofile" => Some(("RLIMIT_NOFILE", libc::RLIMIT_NOFILE as u32)),
+        "nproc" => Some(("RLIMIT_NPROC", libc::RLIMIT_NPROC as u32)),
+        "rss" => Some(("RLIMIT_RSS", libc::RLIMIT_RSS as u32)),
+        "rtprio" => Some(("RLIMIT_RTPRIO", RLIMIT_RTPRIO)),
+        "rttime" => Some(("RLIMIT_RTTIME", RLIMIT_RTTIME)),
+        "sigpending" => Some(("RLIMIT_SIGPENDING", RLIMIT_SIGPENDING)),
+        "stack" => Some(("RLIMIT_STACK", libc::RLIMIT_STACK as u32)),
         _ => None,
     }
 }
@@ -118,16 +148,24 @@ pub fn apply_ulimits_from_bundle(bundle_path: &Path) -> Result<()> {
     let specs: Vec<String> = serde_json::from_str(&content)?;
     for spec in &specs {
         let p = parse_ulimit_option(spec)?;
-        let lim = libc::rlimit {
-            rlim_cur: rlim_from_i64(p.soft),
-            rlim_max: rlim_from_i64(p.hard),
-        };
-        if unsafe { libc::setrlimit(p.rlimit_resource as libc::__rlimit_resource_t, &lim) } != 0 {
-            return Err(anyhow!(
-                "setrlimit {}: {}",
-                p.inspect_name,
-                std::io::Error::last_os_error()
-            ));
+        #[cfg(target_os = "linux")]
+        {
+            let lim = libc::rlimit {
+                rlim_cur: rlim_from_i64(p.soft),
+                rlim_max: rlim_from_i64(p.hard),
+            };
+            if unsafe { libc::setrlimit(p.rlimit_resource as libc::__rlimit_resource_t, &lim) } != 0
+            {
+                return Err(anyhow!(
+                    "setrlimit {}: {}",
+                    p.inspect_name,
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = p;
         }
     }
     Ok(())

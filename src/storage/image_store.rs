@@ -136,11 +136,32 @@ impl ImageStore {
     }
 
     fn load_unlocked(&self) -> ImageStoreData {
-        if let Ok(content) = fs::read_to_string(&self.index_file) {
+        let mut data: ImageStoreData = if let Ok(content) = fs::read_to_string(&self.index_file) {
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             ImageStoreData::default()
+        };
+
+        let globals = crate::cli::podman_globals::podman_global_options();
+        for opt in &globals.storage_opts {
+            if let Some((k, v)) = opt.split_once('=') {
+                if k.ends_with(".imagestore") {
+                    let alt_file = PathBuf::from(v).join("images.json");
+                    if alt_file.exists() && alt_file != self.index_file {
+                        if let Ok(content) = fs::read_to_string(&alt_file) {
+                            if let Ok(alt_data) = serde_json::from_str::<ImageStoreData>(&content) {
+                                for alt_img in alt_data.images {
+                                    if !data.images.iter().any(|i| i.id == alt_img.id) {
+                                        data.images.push(alt_img);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
+        data
     }
 
     fn save_unlocked(&self, data: &ImageStoreData) -> Result<()> {
@@ -172,18 +193,16 @@ impl ImageStore {
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let data = self.load_unlocked();
-
-            Ok(data.images.into_iter().find(|img| {
-                if !query_matches_image(img, query_trimmed) {
-                    return false;
-                }
-
-                let host_arch = match std::env::consts::ARCH {
-                    "x86_64" => "amd64",
-                    "aarch64" => "arm64",
-                    other => other,
-                };
-                let (target_os, norm_arch) = if let Some(target_plat) = platform {
+            let matching: Vec<ImageRecord> = data
+                .images
+                .into_iter()
+                .filter(|img| query_matches_image(img, query_trimmed))
+                .collect();
+            if matching.is_empty() {
+                return Ok(None);
+            }
+            if let Some(target_plat) = platform {
+                let (target_os, norm_arch) = {
                     let (os, arch) = if let Some((os, arch)) = target_plat.split_once('/') {
                         (Some(os), arch)
                     } else {
@@ -195,30 +214,47 @@ impl ImageStore {
                         other => other,
                     };
                     (os, norm)
-                } else {
-                    let default_os = if cfg!(target_os = "windows") {
-                        Some("windows")
-                    } else {
-                        Some("linux")
-                    };
-                    (default_os, host_arch)
                 };
+                return Ok(matching.into_iter().find(|img| {
+                    let img_arch = match img.config.architecture.as_str() {
+                        "x86_64" => "amd64",
+                        "aarch64" => "arm64",
+                        other => other,
+                    };
+                    let arch_matches = img_arch == norm_arch;
+                    let os_matches = if let Some(tos) = target_os {
+                        img.config.os.eq_ignore_ascii_case(tos)
+                    } else {
+                        true
+                    };
+                    arch_matches && os_matches
+                }));
+            }
 
+            // When no specific platform requested: prefer matching host arch & os,
+            // but if none match, fall back to the first matching image in the store.
+            let host_arch = match std::env::consts::ARCH {
+                "x86_64" => "amd64",
+                "aarch64" => "arm64",
+                other => other,
+            };
+            let default_os = if cfg!(target_os = "windows") {
+                "windows"
+            } else {
+                "linux"
+            };
+            if let Some(preferred) = matching.iter().find(|img| {
                 let img_arch = match img.config.architecture.as_str() {
                     "x86_64" => "amd64",
                     "aarch64" => "arm64",
                     other => other,
                 };
+                img_arch == host_arch && img.config.os.eq_ignore_ascii_case(default_os)
+            }) {
+                return Ok(Some(preferred.clone()));
+            }
 
-                let arch_matches = img_arch == norm_arch;
-                let os_matches = if let Some(tos) = target_os {
-                    img.config.os.eq_ignore_ascii_case(tos)
-                } else {
-                    true
-                };
-
-                arch_matches && os_matches
-            }))
+            Ok(matching.into_iter().next())
         })
         .ok()
         .flatten()

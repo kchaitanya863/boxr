@@ -57,6 +57,7 @@ This document maps [Podman](https://github.com/podman-container-tools/podman) te
 | `volume_rename_test.go`, BATS `160-volumes` | `test_volume_rename_updates_store` |
 | `container_clone_test.go` | `test_container_clone_created_state`, `test_container_clone_run_starts_target` |
 | `unshare_test.go`, BATS `170-run-userns` | `test_unshare_runs_command_in_user_namespace` |
+| `import_test.go`, BATS `125-import` | `test_export_import_roundtrip` |
 | `run_test.go`, `create_test.go` | `docker_parity_test`, `blackbox_runtime_test` |
 | `compose` (850) | `compose_docker_replacement_test`, blackbox K3 |
 

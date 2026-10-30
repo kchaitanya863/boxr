@@ -342,7 +342,7 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         cfg.write_proc_mappings(pid)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     pub fn augment_maps_for_rootfs_setup(
         uid_maps: &[IdMapping],
         gid_maps: &[IdMapping],
@@ -384,6 +384,14 @@ using single-ID mapping only (images requiring chown/--user may fail)"
             size: 1,
         });
         (u, g, true)
+    }
+
+    #[cfg(not(unix))]
+    pub fn augment_maps_for_rootfs_setup(
+        uid_maps: &[IdMapping],
+        gid_maps: &[IdMapping],
+    ) -> (Vec<IdMapping>, Vec<IdMapping>, bool) {
+        (uid_maps.to_vec(), gid_maps.to_vec(), false)
     }
 
     /// Shift a host path to container uid/gid 0 on disk using the same ID maps as the container.
@@ -461,6 +469,15 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                 std::process::exit(0);
             }
         }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn chown_path_as_mapped_root(
+        _path: &Path,
+        _uid_maps: &[IdMapping],
+        _gid_maps: &[IdMapping],
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Configure UID and GID mapping for a target PID in Linux /proc/<pid>
