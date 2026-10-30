@@ -6,16 +6,25 @@ Living notes for cloud and local agents continuing **Podman-compatible** work on
 
 Bring **`035-logs.bats`** (k8s-file / CRI logging) to green under `PODMAN=boxr`, and keep `boxr logs` behavior aligned with Podman for tail, since/until, follow, partial lines, and restart scenarios.
 
-## Status: **035-logs complete** (Oct 28, 2026 PT)
+## Status: **Curated BATS manifest 100% green under STRICT=1** (Oct 30, 2026 PT)
 
 | Check | Result |
 |-------|--------|
-| `035-logs.bats` (11 k8s-file cases + partial-line test) | **19/19 ok** (8 journald cases skipped on rootless without journald) |
-| Implementation | `src/logging/mod.rs` — CRI k8s-file parse/reconstruct, filters, follow |
-| CLI routing | `logging::stream_k8s_container_logs` from `src/lib.rs` |
-| Detached runtime | conmon tees to `{bundle}-ctr.log` (see `src/runtime/linux.rs`) |
+| `001-basic.bats` | **15/15 ok** |
+| `005-info.bats` | **17/17 ok** |
+| `015-help.bats` | **1/1 ok** |
+| `020-tag.bats` | **2/2 ok** |
+| `030-run.bats` | **81/81 ok** |
+| `035-logs.bats` | **19/19 ok** (journald cases skipped on rootless without journald) |
+| `040-ps.bats` | **8/8 ok** |
+| `045-start.bats` | **8/8 ok** |
+| `050-stop.bats` | **9/9 ok** |
+| `055-rm.bats` | **10/10 ok** |
+| `075-exec.bats` | **10/10 ok** |
+| `run_podman_bats_offline_gate.sh` | **OK** |
+| Full curated suite (`STRICT=1`) | **180 ok, 0 failed** (exit code 0) |
 
-Log from verification run: `.cache/podman-bats-results/run-20261029-045731.log`.
+Authoritative run log: `.cache/podman-bats-results/run-20261030-025555.log`.
 
 ### What was implemented (logging)
 

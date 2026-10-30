@@ -68,7 +68,7 @@ apply_boxr_patches() {
   head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo none)"
   local overrides_id
   overrides_id="$(sha256sum "$OVERRIDES" | awk '{print $1}')"
-  if [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "${head}:${overrides_id}" ]]; then
+  if grep -q 'BOXR_BATS_OVERRIDES' "$helpers" 2>/dev/null && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "${head}:${overrides_id}" ]]; then
     return 0
   fi
   # Re-apply overrides on each upstream bump (strip previous block first).
@@ -104,7 +104,17 @@ podmanize_help() {
       -e 's/\\[options\\] \\[command\\]/[command] [options]/g' \
       -e 's/podman help \\[options\\] \\[command\\]/podman help [command] [options]/g'
 }
-if [[ "\${1:-}" == "help" ]] || [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
+is_help=0
+if [[ "\${1:-}" == "help" ]]; then
+  is_help=1
+elif [[ "\${1:-}" != "run" && "\${1:-}" != "exec" ]]; then
+  if [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
+    is_help=1
+  fi
+elif [[ "\${2:-}" == "--help" || "\${2:-}" == "-h" ]]; then
+  is_help=1
+fi
+if [[ \$is_help -eq 1 ]]; then
   "$BOXR_BIN" "\$@" | podmanize_help
   exit "\${PIPESTATUS[0]}"
 fi

@@ -156,6 +156,11 @@ pub fn try_print_argv_help(argv: &[String]) -> bool {
             i += 1;
             continue;
         }
+        if (sub_path.first() == Some(&"exec") || sub_path.first() == Some(&"run"))
+            && sub_path.len() >= 1
+        {
+            return false;
+        }
         sub_path.push(a);
         i += 1;
     }

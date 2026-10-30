@@ -1932,9 +1932,8 @@ fn exec_run_worker_in_holder_context(
         become_effective_container_root();
         apply_exec_supplementary_groups(init_pid, None, Some(bundle_path));
     }
-    // Mount namespace only when a container workdir requires the container root view.
+    exec_join_init_namespaces(init_pid, true)?;
     if let Some(wd) = job.workdir.as_deref() {
-        exec_join_init_namespaces(init_pid, true)?;
         let _ = chdir(Path::new(wd.trim_start_matches('/')));
     }
     let _ = init_pid;
@@ -1951,7 +1950,26 @@ fn exec_run_worker_in_holder_context(
         .iter()
         .filter_map(|s| CString::new(s.as_str()).ok())
         .collect();
-    let _ = nix::unistd::execvp(&binary_c, &args_c);
+    if let Err(e) = nix::unistd::execvp(&binary_c, &args_c) {
+        match e {
+            nix::errno::Errno::ENOENT => {
+                eprintln!("Error: no such file or directory");
+                std::process::exit(127);
+            }
+            nix::errno::Errno::EACCES => {
+                eprintln!("Error: permission denied");
+                std::process::exit(126);
+            }
+            nix::errno::Errno::EISDIR => {
+                eprintln!("Error: is a directory");
+                std::process::exit(126);
+            }
+            _ => {
+                eprintln!("Error: {}", e.desc());
+                std::process::exit(126);
+            }
+        }
+    }
     Err(anyhow!("execvp failed"))
 }
 
@@ -2316,11 +2334,7 @@ pub fn exec_in_bundle(
         .as_ref()
         .filter(|c| c.reset_supplementary_groups || c.uid != 0 || c.gid != 0);
     let needs_group_sync = bundle_needs_exec_group_sync(bundle_path);
-    let use_setns_exec = override_creds.is_some()
-        || needs_group_sync
-        || exec_creds
-            .as_ref()
-            .is_some_and(|c| c.uid == 0 && !c.reset_supplementary_groups);
+    let use_setns_exec = true;
     let same_userns = match (
         fs::read_link("/proc/self/ns/user"),
         fs::read_link(format!("/proc/{pid}/ns/user")),
@@ -2329,23 +2343,6 @@ pub fn exec_in_bundle(
         _ => false,
     };
     if use_setns_exec {
-        if !needs_group_sync {
-            let sock = exec_userns_socket_path(bundle_path);
-            if sock.exists() {
-                if let Ok(code) = exec_in_bundle_via_userns_socket(
-                    bundle_path,
-                    pid,
-                    &command,
-                    env,
-                    workdir,
-                    exec_creds.as_ref(),
-                    umask,
-                    attach,
-                ) {
-                    return Ok(code);
-                }
-            }
-        }
         return exec_in_bundle_via_setns(
             bundle_path,
             pid,
@@ -2558,14 +2555,25 @@ fn exec_in_bundle_via_setns(
     use std::io::Read;
     use std::os::unix::net::UnixStream;
 
-    // Always sync with the parent after joining the container user namespace so
-    // we can write setgroups allow before matching init supplementary groups (075-exec).
-    let sync_pair =
+    let (mut parent_sock, mut child_sock) =
         UnixStream::pair().context("Failed to create UnixStream pair for exec setgroups sync")?;
+
+    let user_f = std::fs::File::open(format!("/proc/{pid}/ns/user")).ok();
+    let pid_f = std::fs::File::open(format!("/proc/{pid}/ns/pid")).ok();
+    let mnt_f = std::fs::File::open(format!("/proc/{pid}/ns/mnt")).ok();
+    let net_f = std::fs::File::open(format!("/proc/{pid}/ns/net")).ok();
+    let ipc_f = std::fs::File::open(format!("/proc/{pid}/ns/ipc")).ok();
+    let uts_f = std::fs::File::open(format!("/proc/{pid}/ns/uts")).ok();
 
     match unsafe { fork() }? {
         ForkResult::Parent { child } => {
-            let (mut parent_sock, _) = sync_pair;
+            drop(child_sock);
+            drop(user_f);
+            drop(pid_f);
+            drop(mnt_f);
+            drop(net_f);
+            drop(ipc_f);
+            drop(uts_f);
             let mut ready = [0u8; 5];
             parent_sock
                 .read_exact(&mut ready)
@@ -2626,38 +2634,56 @@ fn exec_in_bundle_via_setns(
             }
         }
         ForkResult::Child => {
-            // Drop host supplementary groups before joining the container user
-            // namespace (setgroups is often EPERM after setns when /proc/pid/setgroups is deny).
+            drop(parent_sock);
             let _ = fs::write("/proc/self/setgroups", "allow");
             let _ = nix::unistd::setgroups(&[]);
-            let (_, mut child_sock) = sync_pair;
-            if exec_join_user_namespace(pid).is_err() {
-                std::process::exit(125);
+
+            if let Some(f) = &user_f {
+                if setns(f, CloneFlags::CLONE_NEWUSER).is_err() {
+                    std::process::exit(125);
+                }
             }
             child_sock.write_all(b"ready").ok();
             let mut done = [0u8; 4];
             let _ = child_sock.read_exact(&mut done);
-            if exec_join_pid_namespace(pid).is_err() {
-                std::process::exit(125);
+
+            if let Some(f) = &pid_f {
+                let _ = setns(f, CloneFlags::CLONE_NEWPID);
             }
+            if let Some(f) = &mnt_f {
+                let _ = setns(f, CloneFlags::CLONE_NEWNS);
+            }
+            if let Some(f) = &net_f {
+                let _ = setns(f, CloneFlags::CLONE_NEWNET);
+            }
+            if let Some(f) = &ipc_f {
+                let _ = setns(f, CloneFlags::CLONE_NEWIPC);
+            }
+            if let Some(f) = &uts_f {
+                let _ = setns(f, CloneFlags::CLONE_NEWUTS);
+            }
+
             child_sock.write_all(b"ready").ok();
             let _ = child_sock.read_exact(&mut done);
             drop(child_sock);
-            let needs_mnt_for_groups = bundle_needs_exec_group_sync(bundle_path);
-            if needs_mnt_for_groups {
-                let _ = exec_join_init_namespaces(pid, true);
-                exec_remount_proc_for_pid_namespace();
-            }
+
             let rootfs = bundle_path.join("rootfs");
             if let Some(wd) = workdir {
                 let wd_path = rootfs.join(wd.trim_start_matches('/'));
                 if wd_path.is_dir() {
                     let _ = chdir(&wd_path);
+                } else {
+                    let _ = chdir(Path::new(wd));
                 }
             }
             if let Some(u) = umask {
                 unsafe {
                     libc::umask(u as libc::mode_t);
+                }
+            }
+            for (k, _) in std::env::vars() {
+                unsafe {
+                    std::env::remove_var(k);
                 }
             }
             for e in env {
@@ -2685,19 +2711,18 @@ fn exec_in_bundle_via_setns(
             // After joining the container PID namespace, init is always PID 1.
             const INIT_PID_IN_CONTAINER: i32 = 1;
             let command = exec_rootfs_command(&rootfs, command);
-            if needs_mnt_for_groups {
-                match unsafe { fork() }? {
-                    ForkResult::Parent { child: grand } => {
-                        let code = match waitpid(grand, None) {
-                            Ok(WaitStatus::Exited(_, c)) => c,
-                            Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
-                            _ => 1,
-                        };
-                        std::process::exit(code as i32);
-                    }
-                    ForkResult::Child => {}
+            match unsafe { fork() }? {
+                ForkResult::Parent { child: grand } => {
+                    let code = match waitpid(grand, None) {
+                        Ok(WaitStatus::Exited(_, c)) => c,
+                        Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
+                        _ => 1,
+                    };
+                    std::process::exit(code as i32);
                 }
+                ForkResult::Child => {}
             }
+            exec_remount_proc_for_pid_namespace();
             become_effective_container_root();
             crate::security::RootlessUserConfig::reenable_setgroups_for_pid(unsafe {
                 libc::getpid()
@@ -2717,7 +2742,26 @@ fn exec_in_bundle_via_setns(
                 .iter()
                 .filter_map(|s| CString::new(s.as_str()).ok())
                 .collect();
-            let _ = nix::unistd::execvp(&binary_c, &args_c);
+            if let Err(e) = nix::unistd::execvp(&binary_c, &args_c) {
+                match e {
+                    nix::errno::Errno::ENOENT => {
+                        eprintln!("Error: no such file or directory");
+                        std::process::exit(127);
+                    }
+                    nix::errno::Errno::EACCES => {
+                        eprintln!("Error: permission denied");
+                        std::process::exit(126);
+                    }
+                    nix::errno::Errno::EISDIR => {
+                        eprintln!("Error: is a directory");
+                        std::process::exit(126);
+                    }
+                    _ => {
+                        eprintln!("Error: {}", e.desc());
+                        std::process::exit(126);
+                    }
+                }
+            }
             std::process::exit(127);
         }
     }
@@ -3105,6 +3149,43 @@ fn run_container_child(
                 MsFlags::MS_BIND,
                 None::<&str>,
             );
+        }
+    }
+
+    let is_privileged = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.privileged"))
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let has_systemd = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.systemd"))
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(false);
+    if is_privileged && has_systemd {
+        if let Ok(entries) = fs::read_dir("/dev") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("tty") && name_str.len() > 3 {
+                    if let Some(c) = name_str.chars().nth(3) {
+                        if !c.is_ascii_digit() {
+                            let host_dev = Path::new("/dev").join(&*name_str);
+                            let guest_dev = dev_path.join(&*name_str);
+                            let _ = fs::File::create(&guest_dev);
+                            let _ = mount(
+                                Some(&host_dev),
+                                &guest_dev,
+                                None::<&str>,
+                                MsFlags::MS_BIND,
+                                None::<&str>,
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     let pts_path = dev_path.join("pts");
@@ -3557,10 +3638,9 @@ fn run_container_child(
         }
     }
 
-    if let Some(u) = spec.process.umask {
-        unsafe {
-            libc::umask(u as libc::mode_t);
-        }
+    let umask = spec.process.umask.unwrap_or(0o022);
+    unsafe {
+        libc::umask(umask as libc::mode_t);
     }
     if let Some(adj) = spec.process.oom_score_adj {
         let _ = fs::write("/proc/self/oom_score_adj", adj.to_string());

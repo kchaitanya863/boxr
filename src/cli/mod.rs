@@ -233,7 +233,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
-        if a == "--debug" || a == "-D" {
+        if (a == "--debug" || a == "-D") && i < subcommand_idx {
             i += 1;
             continue;
         }
