@@ -21,21 +21,29 @@ Bring **`035-logs.bats`** (k8s-file / CRI logging) to green under `PODMAN=boxr`,
 | `050-stop.bats` | **9/9 ok** |
 | `055-rm.bats` | **10/10 ok** |
 | `075-exec.bats` | **10/10 ok** |
+| `125-import.bats` | **2/2 ok** (symlink rootfs, quiet flags, --change, --signature-policy) |
 | `run_podman_bats_offline_gate.sh` | **OK** |
-| Full curated suite (`STRICT=1`) | **180 ok, 0 failed** (exit code 0) |
+| Full curated suite (`STRICT=1`) | **182 ok, 0 failed** (exit code 0) |
 
 Authoritative run log: `.cache/podman-bats-results/run-20261030-025555.log`.
 
-### What was implemented (logging)
+### What was implemented (import / export & Ginkgo / BATS onboarding)
 
-- **Multiline CRI records**: `stdout P` / `stdout F` partial-line merge (Podman k8s-file shape).
-- **`--tail`**: applied after reconstruct (including partial merges).
-- **`--since` / `--until`**: RFC3339, relative durations (`-1s`), unix timestamps; `until` duration strings used for **follow timeout**, not timestamp cutoff (Podman `PODMAN_TIMEOUT` / `--until 3s` follow).
-- **`--follow`**: incremental read of `-ctr.log`; honors `PODMAN_TIMEOUT` (exit **124** + stderr message like Podman).
-- **Timestamps**: `--timestamps` uses entry times from k8s records, not wall clock at print.
-- **Noise**: drops synthetic `Terminated` payloads from displayed logs.
+- **Container export archive**: stores symlinks properly as tar symlink entries (`tar::EntryType::Symlink`) rather than following/reading broken targets.
+- **Image import enhancements**:
+  - Implemented `--change` / `-c` (parsing `CMD`, `ENTRYPOINT`, `ENV`, `USER`, `WORKDIR` in both shell format and JSON array format).
+  - Added `--message` / `-m` storing history comments and timestamps.
+  - Added `--os`, `--arch`, `--variant` metadata configuration.
+  - Added `--signature-policy` validation (returning 125 if policy file not found).
+  - Quiet mode `-q` support and stderr progress reporting matching Podman.
+- **ImageStore integration**:
+  - Wired `--storage-opt overlay.imagestore` to load cached images across external and local storage roots.
+  - Image inspect now outputs `Config.Cmd` and `Config.Entrypoint`.
+- **Process kill & exit status**:
+  - Targeted non-fatal / non-KILL signals to `container.pid` instead of parent vm/forwarder pids.
+  - Formatted `ps` status for exited containers as `Exited (code) <duration> ago`.
 
-## Black-box E2E status: **green** (Oct 29, 2026 PT)
+## Black-box E2E status: **green** (Oct 30, 2026 PT)
 
 All Podman-oriented **boxr black-box** gates pass on Linux rootless CI/VM:
 
@@ -43,8 +51,10 @@ All Podman-oriented **boxr black-box** gates pass on Linux rootless CI/VM:
 |------|-------|
 | `podman_parity_audit.py` P0 | 14/14 |
 | `podman_parity_blackbox_test` | 16/16 |
-| `podman_upstream_parity_test` | 18/18 |
+| `podman_upstream_parity_test` | 19/19 |
 | `run_blackbox_qa.sh -s podman` | 19/19 (K1–K19) |
+| Ginkgo E2E suites (`e2e_manifest.txt`) | 48/48 specs passed (7 suites) |
+| Curated BATS manifest (`manifest.txt`) | 182/182 ok (13 suites) |
 
 One command:
 

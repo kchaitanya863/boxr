@@ -600,7 +600,7 @@ pub struct ImportArgs {
     /// Repository and optional tag to apply
     pub reference: Option<String>,
 
-    #[arg(long = "change")]
+    #[arg(short = 'c', long = "change")]
     pub change: Vec<String>,
 
     #[arg(short = 'm', long = "message")]
@@ -608,6 +608,21 @@ pub struct ImportArgs {
 
     #[arg(long = "platform")]
     pub platform: Option<String>,
+
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    #[arg(long = "os")]
+    pub os: Option<String>,
+
+    #[arg(long = "arch")]
+    pub arch: Option<String>,
+
+    #[arg(long = "variant")]
+    pub variant: Option<String>,
+
+    #[arg(long = "signature-policy")]
+    pub signature_policy: Option<String>,
 }
 
 #[derive(Args, Debug)]

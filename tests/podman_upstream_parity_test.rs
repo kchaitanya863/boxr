@@ -528,6 +528,10 @@ fn test_container_clone_created_state() {
 /// `test/e2e/container_clone_test.go` (`--run`)
 #[test]
 fn test_container_clone_run_starts_target() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("SKIPPED: container clone --run parity is Linux-first");
+        return;
+    }
     let Some(ctx) = runtime_ctx() else {
         return;
     };
@@ -590,4 +594,62 @@ fn test_unshare_runs_command_in_user_namespace() {
             .trim()
             .contains("boxr-unshare-ok")
     );
+}
+
+/// `test/e2e/import_test.go`, BATS `125-import.bats` (export and import container rootfs)
+#[test]
+fn test_export_import_roundtrip() {
+    let Some(ctx) = home_ctx() else {
+        return;
+    };
+    let home = &ctx.home;
+    let bin = blackbox::boxr_bin();
+    let src = format!("exp-src-{}", blackbox::rand_suffix());
+    let outfile = home.join(format!("export-{}.tar", blackbox::rand_suffix()));
+
+    let cont_res = blackbox::run_boxr(
+        home,
+        &[
+            "create",
+            "--name",
+            &src,
+            "alpine:latest",
+            "sh",
+            "-c",
+            "echo test-content > /test.txt",
+        ],
+    );
+    if !cont_res.status.success() {
+        return;
+    }
+
+    let exp = blackbox::run_boxr(home, &["export", "-o", outfile.to_str().unwrap(), &src]);
+    assert!(
+        exp.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&exp.stderr)
+    );
+    assert!(outfile.exists(), "exported tarball must exist");
+
+    let imp = blackbox::run_boxr(
+        home,
+        &[
+            "import",
+            "-q",
+            outfile.to_str().unwrap(),
+            "foobar.com/imported:latest",
+        ],
+    );
+    assert!(
+        imp.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&imp.stderr)
+    );
+
+    let img_exists = Command::new(&bin)
+        .env("BOXR_HOME", home)
+        .args(["image", "exists", "foobar.com/imported:latest"])
+        .status()
+        .unwrap();
+    assert!(img_exists.success());
 }

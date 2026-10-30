@@ -52,12 +52,21 @@ impl ContainerKiller {
         {
             let bundle_path = std::path::PathBuf::from(&container.bundle_path);
             let mut pids = Vec::new();
-            for pid_filename in &["vm.pid", "container.pid", "forwarder.pid"] {
-                let pid_file = bundle_path.join(pid_filename);
-                if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
-                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                        if pid > 1 {
-                            pids.push(pid);
+            if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    if pid > 1 {
+                        pids.push(pid);
+                    }
+                }
+            }
+            if pids.is_empty() || sig == 9 {
+                for pid_filename in &["vm.pid", "forwarder.pid"] {
+                    let pid_file = bundle_path.join(pid_filename);
+                    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+                        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                            if pid > 1 {
+                                pids.push(pid);
+                            }
                         }
                     }
                 }
@@ -91,7 +100,7 @@ impl ContainerKiller {
             }
         }
 
-        let is_fatal = sig == 9 || sig == 15 || sig == 2 || sig == 3;
+        let is_fatal = sig == 9;
         if is_fatal {
             let store = ContainerStore::new();
             let _ = store.update_status(&container.id, ContainerStatus::Exited(128 + sig));

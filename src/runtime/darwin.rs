@@ -442,6 +442,9 @@ pub fn execute_bundle(
                         .as_ref()
                         .map(|opts| opts.iter().any(|o| o == "noexec"))
                         .unwrap_or(false),
+                    chown_u: false,
+                    tmpfs_mount_data: None,
+                    volume_name: None,
                     is_volume: false,
                 });
             }

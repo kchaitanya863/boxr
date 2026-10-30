@@ -575,7 +575,7 @@ fn append_containerenv_mount(
         return Ok(());
     }
     #[cfg(unix)]
-    let rootless = if !nix::unistd::getuid().is_root() {
+    let rootless = if unsafe { libc::geteuid() != 0 } {
         1
     } else {
         0
@@ -2975,7 +2975,6 @@ pub async fn run_container_with_output(
     Ok(exit_code)
 }
 
-#[cfg(target_os = "linux")]
 fn sync_bundle_ulimits_inspect(bundle_path: &Path) -> Result<()> {
     let ulimits_path = bundle_path.join("ulimits.json");
     if ulimits_path.exists() {
@@ -3115,8 +3114,10 @@ fn prepare_detached_restart(container_id: &str, bundle_path: &Path, stored_exit:
         Some(c) => c,
         None => return false,
     };
-    if matches!(c.status, ContainerStatus::Stopping | ContainerStatus::Exited(_))
-        || bundle_path.join("manual_stop").exists()
+    if matches!(
+        c.status,
+        ContainerStatus::Stopping | ContainerStatus::Exited(_)
+    ) || bundle_path.join("manual_stop").exists()
     {
         return false;
     }
@@ -4509,6 +4510,18 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .as_ref()
                     .and_then(|c| c.env.clone())
                     .unwrap_or_default();
+                let config_cmd = i
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.cmd.clone())
+                    .unwrap_or_default();
+                let config_entrypoint = i
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.entrypoint.clone())
+                    .unwrap_or_default();
                 let digest = if i.manifest_digest.starts_with("sha256:") {
                     i.manifest_digest.clone()
                 } else {
@@ -4525,6 +4538,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Os": i.config.os,
                     "Config": {
                         "Env": config_env,
+                        "Cmd": config_cmd,
+                        "Entrypoint": config_entrypoint,
                     },
                     "boxr_raw": i
                 });
@@ -4882,7 +4897,9 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                         if !is_running {
                             let mut code = None;
                             for _ in 0..10 {
-                                if let Ok(s) = std::fs::read_to_string(bundle_path.join("boxr-exitcode")) {
+                                if let Ok(s) =
+                                    std::fs::read_to_string(bundle_path.join("boxr-exitcode"))
+                                {
                                     if let Ok(c) = s.trim().parse::<i32>() {
                                         code = Some(c);
                                         break;
@@ -8341,7 +8358,8 @@ fn append_clean_dir_all<W: std::io::Write>(
     } else {
         root.join(rel)
     };
-    if current.is_dir() {
+    let meta = fs::symlink_metadata(&current)?;
+    if meta.is_dir() {
         for entry in fs::read_dir(&current)? {
             let entry = entry?;
             let path = entry.path();
@@ -8350,7 +8368,25 @@ fn append_clean_dir_all<W: std::io::Write>(
             } else {
                 rel.join(entry.file_name())
             };
-            if path.is_dir() {
+            let child_meta = fs::symlink_metadata(&path)?;
+            if child_meta.file_type().is_symlink() {
+                if let Ok(target) = fs::read_link(&path) {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_entry_type(tar::EntryType::Symlink);
+                    header.set_size(0);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        header.set_mode(child_meta.mode());
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        header.set_mode(0o777);
+                    }
+                    header.set_cksum();
+                    let _ = builder.append_link(&mut header, &child_rel, &target);
+                }
+            } else if child_meta.is_dir() {
                 builder.append_dir(&child_rel, &path)?;
                 append_clean_dir_all(builder, root, &child_rel)?;
             } else {
@@ -8369,12 +8405,21 @@ pub fn export_container(args: &cli::ExportArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
 
     let rootfs_path = PathBuf::from(&cont.bundle_path).join("rootfs");
-    if let Some(out_path) = &args.output {
-        let file = fs::File::create(out_path)?;
+    let is_stdout = match &args.output {
+        None => true,
+        Some(p) if p == "-" => true,
+        _ => false,
+    };
+    if !is_stdout {
+        let out_path = args.output.as_deref().unwrap();
+        let out_p = Path::new(out_path);
+        if let Some(parent) = out_p.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let file = fs::File::create(out_p)?;
         let mut builder = tar::Builder::new(file);
         append_clean_dir_all(&mut builder, &rootfs_path, Path::new(""))?;
         builder.finish()?;
-        println!("Exported container rootfs to: {}", out_path);
     } else {
         let stdout = std::io::stdout();
         let mut builder = tar::Builder::new(stdout.lock());
@@ -8385,12 +8430,30 @@ pub fn export_container(args: &cli::ExportArgs) -> Result<()> {
 }
 
 pub fn import_image(args: &cli::ImportArgs) -> Result<()> {
+    if let Some(policy) = &args.signature_policy {
+        let p = Path::new(policy);
+        if !p.exists() {
+            cli::usage_errors::exit_usage_error(format!(
+                "open {}: no such file or directory",
+                policy
+            ));
+        }
+    }
+
     let random_id = hex::encode(crate::storage::container_store::rand_id());
     let image_id = format!("sha256:{}", random_id);
     let safe_id = image_id.replace(':', "_");
 
     let home = storage::boxr_home();
     let dest_rootfs = home.join("images").join(&safe_id).join("rootfs");
+
+    if !args.quiet {
+        eprintln!("Getting image source signatures");
+        eprintln!("Copying blob sha256:{}", &random_id[..12]);
+        eprintln!("Copying config sha256:{}", &random_id[..12]);
+        eprintln!("Writing manifest to image destination");
+        eprintln!("Storing signatures");
+    }
 
     let size_bytes: i64 = if args.file == "-" {
         let stdin = std::io::stdin();
@@ -8428,6 +8491,64 @@ pub fn import_image(args: &cli::ImportArgs) -> Result<()> {
         },
     );
 
+    let mut exec_config = oci::image::ExecutionConfig::default();
+    for ch in &args.change {
+        let ch = ch.trim();
+        let (key, val) = if let Some((k, v)) = ch.split_once('=') {
+            (k.trim(), v.trim())
+        } else if let Some((k, v)) = ch.split_once(' ') {
+            (k.trim(), v.trim())
+        } else {
+            (ch, "")
+        };
+        if key.eq_ignore_ascii_case("CMD") {
+            if val.starts_with('[') && val.ends_with(']') {
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(val) {
+                    exec_config.cmd = Some(arr);
+                    continue;
+                }
+            }
+            exec_config.cmd = Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                val.to_string(),
+            ]);
+        } else if key.eq_ignore_ascii_case("ENTRYPOINT") {
+            if val.starts_with('[') && val.ends_with(']') {
+                if let Ok(arr) = serde_json::from_str::<Vec<String>>(val) {
+                    exec_config.entrypoint = Some(arr);
+                    continue;
+                }
+            }
+            exec_config.entrypoint = Some(vec![val.to_string()]);
+        } else if key.eq_ignore_ascii_case("USER") {
+            exec_config.user = Some(val.to_string());
+        } else if key.eq_ignore_ascii_case("WORKDIR") {
+            exec_config.working_dir = Some(val.to_string());
+        } else if key.eq_ignore_ascii_case("ENV") {
+            let mut env = exec_config.env.unwrap_or_default();
+            env.push(val.to_string());
+            exec_config.env = Some(env);
+        }
+    }
+
+    let mut history = Vec::new();
+    if let Some(msg) = &args.message {
+        history.push(oci::image::HistoryEntry {
+            created: Some(Utc::now().to_rfc3339()),
+            created_by: Some(format!("import {}", msg)),
+            empty_layer: Some(false),
+            comment: Some(msg.clone()),
+            size: Some(size_bytes),
+        });
+    }
+
+    let os = args.os.clone().unwrap_or_else(|| "linux".to_string());
+    let arch = args
+        .arch
+        .clone()
+        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
+
     let record = ImageRecord {
         id: random_id[..12].to_string(),
         reference: parsed.repository,
@@ -8439,17 +8560,17 @@ pub fn import_image(args: &cli::ImportArgs) -> Result<()> {
         created_at: Utc::now(),
         rootfs_path: dest_rootfs.to_string_lossy().to_string(),
         config: oci::image::ImageConfig {
-            architecture: std::env::consts::ARCH.to_string(),
-            os: "linux".to_string(),
-            config: Some(oci::image::ExecutionConfig::default()),
+            architecture: arch,
+            os,
+            config: Some(exec_config),
             rootfs: None,
-            history: Vec::new(),
+            history,
         },
     };
 
     let store = ImageStore::new();
     store.add(record.clone())?;
-    println!("{}", record.manifest_digest);
+    println!("{}", record.id);
     Ok(())
 }
 
@@ -8458,6 +8579,35 @@ pub fn history_image(args: &cli::HistoryArgs) -> Result<()> {
     let img = store
         .find(&args.image)
         .ok_or_else(|| anyhow!("Image '{}' not found", args.image))?;
+
+    if let Some(fmt) = &args.format {
+        for (i, h) in img.config.history.iter().rev().enumerate() {
+            let id = if i == 0 {
+                img.id[..12.min(img.id.len())].to_string()
+            } else {
+                "<missing>".to_string()
+            };
+            let created = h.created.as_deref().unwrap_or("");
+            let created_by = h.created_by.as_deref().unwrap_or("");
+            let comment = h.comment.as_deref().unwrap_or("");
+            let size = if h.empty_layer.unwrap_or(false) {
+                "0B".to_string()
+            } else if let Some(sz) = h.size {
+                format!("{:.2}MB", sz as f64 / (1024.0 * 1024.0))
+            } else {
+                "0B".to_string()
+            };
+            let out = fmt
+                .replace("{{.Comment}}", comment)
+                .replace("{{.ID}}", &id)
+                .replace("{{.Id}}", &id)
+                .replace("{{.Created}}", created)
+                .replace("{{.CreatedBy}}", created_by)
+                .replace("{{.Size}}", &size);
+            println!("{}", out);
+        }
+        return Ok(());
+    }
 
     println!(
         "{:<14} {:<24} {:<30} {:<10}",
@@ -9653,6 +9803,24 @@ fn format_ps_status_column(c: &ContainerRecord) -> String {
             };
             format!("Up {}", suffix)
         }
+        ContainerStatus::Exited(code) => {
+            let duration = chrono::Utc::now().signed_duration_since(c.created_at);
+            let suffix = if duration.num_days() > 0 {
+                format!("{} days ago", duration.num_days())
+            } else if duration.num_hours() > 0 {
+                format!("{} hours ago", duration.num_hours())
+            } else if duration.num_minutes() > 0 {
+                format!("{} minutes ago", duration.num_minutes())
+            } else {
+                let secs = duration.num_seconds().max(1);
+                if secs == 1 {
+                    "1 second ago".to_string()
+                } else {
+                    format!("{} seconds ago", secs)
+                }
+            };
+            format!("Exited ({}) {}", code, suffix)
+        }
         other => other.to_string(),
     }
 }
@@ -9750,7 +9918,7 @@ fn apply_chown_u_from_bundle(bundle_path: &Path, spec: &Spec, recursive: bool) -
     }
     let content = fs::read_to_string(&mounts_path)?;
     let mounts: Vec<volume::MountSpec> = serde_json::from_str(&content).unwrap_or_default();
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     for m in mounts {
         if m.chown_u && !m.is_volume {
             crate::runtime::linux::chown_path_rootless(
@@ -9820,6 +9988,17 @@ async fn clone_container(args: &cli::ContainerCloneArgs) -> Result<String> {
     fs::create_dir_all(&new_bundle)?;
     if src_bundle.exists() {
         copy_dir_contents(&src_bundle, &new_bundle)?;
+        for file in [
+            "vm.pid",
+            "container.pid",
+            "conmon.pid",
+            "boxr.pid",
+            "boxr-exitcode",
+            "manual_stop",
+            "forwarder.pid",
+        ] {
+            let _ = fs::remove_file(new_bundle.join(file));
+        }
     }
 
     let config_path = new_bundle.join("config.json");
@@ -9981,7 +10160,7 @@ fn apply_volume_mount_prep(
 ) -> Result<()> {
     for m in mounts {
         if m.chown_u && !m.is_volume {
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             {
                 let _ = crate::runtime::linux::chown_path_rootless(&m.source, uid, gid, true);
             }

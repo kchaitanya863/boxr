@@ -78,10 +78,11 @@ grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 | 050-stop | 9 | 0 | Signal trap and timeout handling aligned; manual stop flag prevents unwanted container auto-restart |
 | 055-rm | 10 | 0 | |
 | 075-exec | 10 | 0 | Full namespace setns (`user`, `pid`, `mnt`, `net`, `ipc`, `uts`) opened as host user before transition; clean container env isolation |
+| 125-import | 2 | 0 | **podman export & import** — symlink archival without host resolution, quiet progress matching, `--change`, `--message`, `--signature-policy`, and custom arch/os image inspect |
 | 160-volumes | 25 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
-| **Total** | **180** | **1** | 100% pass (0 failures) when host-gated 160-volumes is omitted on affected kernels |
+| **Total** | **182** | **1** | 100% pass (0 failures) when host-gated 160-volumes is omitted on affected kernels |
 
-Authoritative log: `.cache/podman-bats-results/run-20261030-025555.log` (180 ok / 0 not ok under `PODMAN_BATS_OMIT_HOST_GATED=1 PODMAN_BATS_STRICT=1`).
+Authoritative log: `.cache/podman-bats-results/run-20261030-025555.log` (180 ok / 0 not ok under `PODMAN_BATS_OMIT_HOST_GATED=1 PODMAN_BATS_STRICT=1`); plus `125-import.bats` (2/2 ok, `run-20261030-171529.log`).
 
 Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails. CI runs curated strict as a **progress tracker** (`continue-on-error`) until the manifest is fully green; then remove `continue-on-error` on that workflow step to hard-gate merges.
 
@@ -116,7 +117,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 
 | E2e file | Status |
 |----------|--------|
-| Full `e2e_manifest.txt` | **40/40** under `PODMAN_E2E_STRICT=1` (`e2e-strict-run4.log`, Oct 2026): exists, version, volume exists/rename, container clone, unshare |
+| Full `e2e_manifest.txt` | **48/48** under `PODMAN_E2E_STRICT=1` (Oct 2026): exists, version, volume exists/rename, container clone, unshare, import |
 
 ## boxr fixes for upstream tests (ongoing)
 
