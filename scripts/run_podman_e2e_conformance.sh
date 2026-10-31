@@ -52,17 +52,27 @@ export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
 
 cd "$SRC_DIR"
-if [[ ! -f "$REPO_ROOT/.cache/podman-bats/.install.ginkgo" ]]; then
+if [[ ! -f "$REPO_ROOT/.cache/podman-bats/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; then
   echo "Installing ginkgo (first run)..."
   make -C "$SRC_DIR" .install.ginkgo
+fi
+
+if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]]; then
+  echo "Building test/e2e/e2e.test (first run)..."
+  "$SRC_DIR/bin/ginkgo" build --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" test/e2e/.
 fi
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%%#*}"
   line="$(echo "$line" | xargs)"
   [[ -z "$line" ]] && continue
+  if [[ -n "${PODMAN_E2E_PATTERN:-}" ]] && [[ "$line" != *"$PODMAN_E2E_PATTERN"* ]]; then
+    continue
+  fi
   echo "======== e2e FOCUS_FILE=$line ========"
-  if ! make localintegration FOCUS_FILE="$line" GINKGO_PARALLEL=n; then
+  focus_pattern="$line"
+  [[ "$focus_pattern" == /* ]] || focus_pattern="/$focus_pattern"
+  if ! make localintegration FOCUS_FILE="$focus_pattern" GINKGO_PARALLEL=n GINKGOWHAT=test/e2e/e2e.test; then
     if [[ "${PODMAN_E2E_STRICT:-0}" == "1" ]]; then
       exit 1
     fi

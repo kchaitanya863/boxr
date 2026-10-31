@@ -233,11 +233,11 @@ impl PodStore {
             return None;
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            Ok(self
-                .load_unlocked()
-                .pods
-                .into_iter()
-                .find(|p| p.id == q || p.id.starts_with(q) || p.name == q))
+            let pods = self.load_unlocked().pods;
+            if let Some(exact) = pods.iter().find(|p| p.name == q || p.id == q).cloned() {
+                return Ok(Some(exact));
+            }
+            Ok(pods.into_iter().find(|p| p.id.starts_with(q)))
         })
         .ok()
         .flatten()
@@ -349,12 +349,13 @@ impl PodStore {
     pub fn set_infra_container_id(&self, pod_query: &str, infra_id: &str) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(p) = data
+            let pos = data
                 .pods
-                .iter_mut()
-                .find(|p| p.id.starts_with(pod_query) || p.name == pod_query)
-            {
-                p.infra_container_id = infra_id.to_string();
+                .iter()
+                .position(|p| p.name == pod_query || p.id == pod_query)
+                .or_else(|| data.pods.iter().position(|p| p.id.starts_with(pod_query)));
+            if let Some(idx) = pos {
+                data.pods[idx].infra_container_id = infra_id.to_string();
                 self.save_unlocked(&data)?;
                 Ok(())
             } else {
@@ -372,15 +373,18 @@ impl PodStore {
         if q.is_empty() {
             return Err(anyhow!("Pod '' not found"));
         }
+        let _ = crate::guardrails::ProcessReaper::reap_stale_containers();
         let home = self.home.clone();
         let removed = crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             let c_store = ContainerStore::with_home(home.clone());
 
-            if let Some(pos) = data
+            let pos = data
                 .pods
                 .iter()
-                .position(|p| p.id == q || p.id.starts_with(q) || p.name == q)
+                .position(|p| p.name == q || p.id == q)
+                .or_else(|| data.pods.iter().position(|p| p.id.starts_with(q)));
+            if let Some(pos) = pos
             {
                 let pod = &data.pods[pos];
                 let infra_name = self.infra_name(pod);
@@ -512,12 +516,13 @@ impl PodStore {
     pub fn update_status(&self, pod_query: &str, status: &str) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(p) = data
+            let pos = data
                 .pods
-                .iter_mut()
-                .find(|p| p.id.starts_with(pod_query) || p.name == pod_query)
-            {
-                p.status = status.to_string();
+                .iter()
+                .position(|p| p.name == pod_query || p.id == pod_query)
+                .or_else(|| data.pods.iter().position(|p| p.id.starts_with(pod_query)));
+            if let Some(idx) = pos {
+                data.pods[idx].status = status.to_string();
                 self.save_unlocked(&data)?;
                 Ok(())
             } else {
@@ -529,11 +534,13 @@ impl PodStore {
     pub fn add_container_to_pod(&self, pod_query: &str, container_id: &str) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(p) = data
+            let pos = data
                 .pods
-                .iter_mut()
-                .find(|p| p.id.starts_with(pod_query) || p.name == pod_query)
-            {
+                .iter()
+                .position(|p| p.name == pod_query || p.id == pod_query)
+                .or_else(|| data.pods.iter().position(|p| p.id.starts_with(pod_query)));
+            if let Some(idx) = pos {
+                let p = &mut data.pods[idx];
                 if !p.containers.contains(&container_id.to_string()) {
                     p.containers.push(container_id.to_string());
                     p.status = "Running".to_string();
@@ -549,11 +556,13 @@ impl PodStore {
     pub fn add_created_container_to_pod(&self, pod_query: &str, container_id: &str) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(p) = data
+            let pos = data
                 .pods
-                .iter_mut()
-                .find(|p| p.id.starts_with(pod_query) || p.name == pod_query)
-            {
+                .iter()
+                .position(|p| p.name == pod_query || p.id == pod_query)
+                .or_else(|| data.pods.iter().position(|p| p.id.starts_with(pod_query)));
+            if let Some(idx) = pos {
+                let p = &mut data.pods[idx];
                 if !p.containers.contains(&container_id.to_string()) {
                     p.containers.push(container_id.to_string());
                     self.save_unlocked(&data)?;
@@ -721,6 +730,8 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
     let has_infra = pod.infra && !infra_name.is_empty();
     if pod.network.as_deref() == Some("host") {
         args.network = "host".to_string();
+    } else if pod.network.as_deref() == Some("none") {
+        args.network = "none".to_string();
     } else if pod.share_net {
         if has_infra {
             args.network = format!("container:{}", infra_name);
@@ -730,17 +741,91 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
     } else if let Some(net) = &pod.network {
         args.network = net.clone();
     }
-    if pod.share_ipc && args.ipc.is_none() && has_infra {
-        args.ipc = Some(format!("container:{}", infra_name));
+    if pod.labels.get("boxr.pod.shm_size").is_some() && args.ipc.as_deref() == Some("host") {
+        crate::cli::usage_errors::exit_usage_error("cannot set --shm-size with --ipc=host");
     }
-    if pod.share_uts && args.uts.is_none() && has_infra {
-        args.uts = Some(format!("container:{}", infra_name));
+    if pod.share_ipc && args.ipc.is_none() {
+        if let Some(pod_ipc) = pod.labels.get("boxr.pod.ipc") {
+            args.ipc = Some(pod_ipc.clone());
+        } else if has_infra {
+            args.ipc = Some(format!("container:{}", infra_name));
+        }
     }
-    if pod.share_pid && args.pid.is_none() && has_infra {
-        args.pid = Some(format!("container:{}", infra_name));
+    if pod.share_uts && args.uts.is_none() {
+        if let Some(pod_uts) = pod.labels.get("boxr.pod.uts") {
+            args.uts = Some(pod_uts.clone());
+        } else if has_infra {
+            args.uts = Some(format!("container:{}", infra_name));
+        }
     }
-    if args.hostname.is_none() {
-        args.hostname = pod.hostname.clone().or_else(|| Some(pod.name.clone()));
+    if pod.share_pid && args.pid.is_none() {
+        if let Some(pod_pid) = pod.labels.get("boxr.pod.pid") {
+            args.pid = Some(pod_pid.clone());
+        } else if has_infra {
+            args.pid = Some(format!("container:{}", infra_name));
+        }
+    }
+    if pod.labels.get("boxr.pod.share_cgroup").map(|s| s.as_str()) == Some("true")
+        && args.cgroupns.is_none()
+        && has_infra
+    {
+        args.cgroupns = Some(format!("container:{}", pod.infra_container_id));
+    }
+    if pod.labels.get("boxr.pod.share_parent").map(|s| s.as_str()) == Some("false")
+        && args.cgroup_parent.is_none()
+    {
+        let cgm = crate::cli::podman_globals::podman_global_options()
+            .cgroup_manager
+            .unwrap_or_else(|| "systemd".to_string());
+        if cgm == "systemd" && unsafe { libc::getuid() != 0 } {
+            args.cgroup_parent = Some("user.slice".to_string());
+        }
+    }
+    if pod.labels.get("boxr.pod.no_hosts").map(|s| s.as_str()) == Some("true") {
+        let _ = crate::cli::RUN_NO_HOSTS.set(true);
+    }
+    if pod.labels.get("boxr.pod.no_hostname").map(|s| s.as_str()) == Some("true") {
+        args.no_hostname = true;
+    }
+    if args.shm_size.is_none() {
+        if let Some(shm) = pod.labels.get("boxr.pod.shm_size") {
+            args.shm_size = Some(shm.clone());
+        }
+    }
+    if let Some(sec_json) = pod.labels.get("boxr.pod.security_opt") {
+        if let Ok(sec_opts) = serde_json::from_str::<Vec<String>>(sec_json) {
+            for so in sec_opts {
+                if !args.security_opt.contains(&so) {
+                    args.security_opt.push(so);
+                }
+            }
+        }
+    }
+    if let Some(dev_json) = pod.labels.get("boxr.pod.devices") {
+        if let Ok(devs) = serde_json::from_str::<Vec<String>>(dev_json) {
+            for d in devs {
+                if !args.devices.contains(&d) {
+                    args.devices.push(d);
+                }
+            }
+        }
+    }
+    if args.cpuset_cpus.is_none() {
+        if let Some(cs) = pod.labels.get("boxr.pod.cpuset_cpus") {
+            args.cpuset_cpus = Some(cs.clone());
+        }
+    }
+    if args.hostname.is_none() && !args.no_hostname {
+        if pod.labels.get("boxr.pod.uts").map(|s| s.as_str()) == Some("host") {
+            if let Ok(out) = std::process::Command::new("hostname").output() {
+                let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !h.is_empty() {
+                    args.hostname = Some(h);
+                }
+            }
+        } else {
+            args.hostname = pod.hostname.clone().or_else(|| Some(pod.name.clone()));
+        }
     }
     if args.dns.is_empty() && !pod.dns.is_empty() {
         args.dns = pod.dns.clone();

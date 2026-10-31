@@ -172,11 +172,15 @@ pub struct DiffArgs {
     pub second: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 #[command(trailing_var_arg = true, help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct TopArgs {
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Container to inspect processes on
-    pub container: String,
+    pub container: Option<String>,
 
     /// Optional ps arguments
     #[arg(allow_hyphen_values = true)]
@@ -397,11 +401,19 @@ pub struct UpdateArgs {
     pub container: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PortArgs {
+    /// Display port mappings for all running containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Container to inspect ports on
-    pub container: String,
+    pub container: Option<String>,
 
     /// Optional private port / protocol (e.g. 80/tcp)
     pub port: Option<String>,

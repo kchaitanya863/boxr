@@ -5,3 +5,9 @@ volume_rename_test.go
 container_clone_test.go
 unshare_test.go
 import_test.go
+pod_create_test.go
+pod_rm_test.go
+pod_pause_test.go
+pod_top_test.go
+port_test.go
+

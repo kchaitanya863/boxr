@@ -2187,6 +2187,64 @@ fn ensure_digest_tag_alias(
     Ok(())
 }
 
+fn allocate_ephemeral_host_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or_else(|_| 32768 + (std::process::id() as u16 % 20000))
+}
+
+fn expand_publish_all_ports(
+    parsed_ports: &mut Vec<PortMapping>,
+    image_record: Option<&ImageRecord>,
+    cli_expose: &[String],
+) {
+    let mut specs: Vec<String> = Vec::new();
+    if let Some(img) = image_record {
+        if let Some(cfg) = &img.config.config {
+            if let Some(exp) = &cfg.exposed_ports {
+                let mut keys: Vec<String> = exp.keys().cloned().collect();
+                keys.sort();
+                specs.extend(keys);
+            }
+        }
+    }
+    specs.extend(cli_expose.iter().cloned());
+
+    for raw in specs {
+        let (port_part, proto) = if let Some((p, pr)) = raw.split_once('/') {
+            (p.trim(), pr.trim().to_ascii_lowercase())
+        } else {
+            (raw.trim(), "tcp".to_string())
+        };
+        let ports_to_add: Vec<u16> = if let Some((start_s, end_s)) = port_part.split_once('-') {
+            if let (Ok(s), Ok(e)) = (start_s.parse::<u16>(), end_s.parse::<u16>()) {
+                (s..=e).collect()
+            } else {
+                Vec::new()
+            }
+        } else if let Ok(p) = port_part.parse::<u16>() {
+            vec![p]
+        } else {
+            Vec::new()
+        };
+        for cport in ports_to_add {
+            let already = parsed_ports.iter().any(|pm| {
+                pm.container_port == cport && pm.protocol.eq_ignore_ascii_case(&proto)
+            });
+            if !already {
+                let hport = allocate_ephemeral_host_port();
+                parsed_ports.push(PortMapping {
+                    host_ip: None,
+                    host_port: hport,
+                    container_port: cport,
+                    protocol: proto.clone(),
+                });
+            }
+        }
+    }
+}
+
 fn parse_retry_delay_duration(raw: &str) -> Result<std::time::Duration> {
     let s = raw.trim();
     if s == "0" || s == "0s" || s == "0ms" {
@@ -2944,6 +3002,9 @@ pub async fn run_container_with_output(
     validate_health_on_failure_arg(&args)?;
 
     let mut parsed_ports = parse_ports(&args.ports)?;
+    if args.publish_all {
+        expand_publish_all_ports(&mut parsed_ports, image_record.as_ref(), &args.expose);
+    }
     for p in &parsed_ports {
         if !p.protocol.eq_ignore_ascii_case("tcp") && !p.protocol.eq_ignore_ascii_case("udp") {
             cli::usage_errors::exit_config_error(format!(
@@ -2993,6 +3054,7 @@ pub async fn run_container_with_output(
         .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
 
     let ephemeral_new_pod = prepare_run_pod(&mut args).await?;
+    let restart_policy = health::parse_restart_policy(&args.restart)?;
 
     // Resolve volume mounts (after prepare_run_pod so pod-level volumes are included)
     let vol_store = VolumeStore::new();
@@ -3148,6 +3210,16 @@ pub async fn run_container_with_output(
     if args.no_hostname {
         annotations.insert("boxr.no_hostname".to_string(), "true".to_string());
     }
+    if cli::RUN_NO_HOSTS.get() == Some(&true) {
+        annotations.insert("boxr.no_hosts".to_string(), "true".to_string());
+    }
+    if let Some(pod_name) = &args.pod {
+        if let Some(pod_rec) = pod::PodStore::new().find(pod_name) {
+            if let Some(sys_shm) = pod_rec.labels.get("boxr.pod.shm_size_systemd") {
+                annotations.insert("boxr.shm_size_systemd".to_string(), sys_shm.clone());
+            }
+        }
+    }
     if args.uts.as_deref() == Some("host") && args.hostname.is_none() {
         annotations.insert("boxr.uts_host".to_string(), "true".to_string());
     }
@@ -3279,6 +3351,9 @@ pub async fn run_container_with_output(
     }
     annotations.insert("boxr.network".to_string(), args.network.clone());
     if let Some(pod_name) = &args.pod {
+        if spec.process.args == vec!["/sbin/init".to_string()] {
+            spec.process.args = vec!["sleep".to_string(), "86400".to_string()];
+        }
         let pod_store = pod::PodStore::new();
         let pod_key = pod_store
             .find(pod_name)
@@ -3287,6 +3362,10 @@ pub async fn run_container_with_output(
         annotations.insert("boxr.pod".to_string(), pod_key);
     }
     if let Some(linux) = &mut spec.linux {
+        if let Some(cg_parent) = &args.cgroup_parent {
+            linux.cgroup_parent = Some(cg_parent.clone());
+            annotations.insert("boxr.cgroup-parent".to_string(), cg_parent.clone());
+        }
         apply_namespace_to_linux(linux, &mut annotations, "ipc", &args.ipc)?;
         if annotations.get("boxr.ipc").map(|s| s.as_str()) == Some("shareable") {
             let own_shm = bundle_dir.join("shm");
@@ -5049,8 +5128,8 @@ fn apply_pod_namespaces_to_spec(spec: &mut Spec, pod: &pod::PodRecord) -> Result
 }
 
 fn prepare_spec_for_pod_start(spec: &mut Spec, bundle_path: &Path) -> Result<()> {
-    // Only rewrite pod namespace paths if the bundle belongs to a pod AND an existing
-    // /proc/<pid>/ns/* path in spec.linux.namespaces is stale (e.g. after `pod restart`).
+    // Rewrite pod namespace paths if the bundle belongs to a pod AND an existing
+    // /proc/<pid>/ns/* path in spec.linux.namespaces is stale or missing.
     let pod_id = spec
         .annotations
         .as_ref()
@@ -5069,7 +5148,12 @@ fn prepare_spec_for_pod_start(spec: &mut Spec, bundle_path: &Path) -> Result<()>
                 })
             })
             .unwrap_or(false);
-        if has_stale_ns {
+        let has_unresolved_container_ns = spec.annotations.as_ref().is_some_and(|a| {
+            ["boxr.uts", "boxr.ipc", "boxr.pid"].iter().any(|k| {
+                a.get(*k).is_some_and(|v| v.starts_with("container:"))
+            })
+        });
+        if has_stale_ns || has_unresolved_container_ns {
             if let Some(pod) = pod::PodStore::new().find(&pid) {
                 apply_pod_namespaces_to_spec(spec, &pod)?;
                 spec.save_to_bundle(bundle_path)?;
@@ -5785,8 +5869,13 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .map(|s| s.process.env.clone())
                     .unwrap_or_default();
                 let config_entrypoint: Vec<String> = annotations
-                    .get("boxr.entrypoint")
+                    .get("boxr.infra_entrypoint")
                     .and_then(|v| serde_json::from_str(v).ok())
+                    .or_else(|| {
+                        annotations
+                            .get("boxr.entrypoint")
+                            .and_then(|v| serde_json::from_str(v).ok())
+                    })
                     .or_else(|| {
                         i_store
                             .find(&c.image)
@@ -5936,6 +6025,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     } else {
                         annotations
                             .get("boxr.cgroup_parent")
+                            .or_else(|| annotations.get("boxr.cgroup-parent"))
                             .cloned()
                             .unwrap_or_default()
                     };
@@ -5947,12 +6037,55 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     health::HealthStatus::None => "",
                 };
 
+                let saved_mounts: Vec<volume::MountSpec> =
+                    fs::read_to_string(bundle_path.join("mounts.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                let mounts_inspect: Vec<serde_json::Value> = saved_mounts
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "Type": if m.is_volume { "volume" } else { "bind" },
+                            "Name": m.volume_name.clone().unwrap_or_default(),
+                            "Source": m.source.to_string_lossy(),
+                            "Destination": m.destination,
+                            "Driver": if m.is_volume { "local" } else { "" },
+                            "Mode": "",
+                            "Options": [],
+                            "RW": !m.read_only,
+                            "Propagation": "rprivate",
+                        })
+                    })
+                    .collect();
+
+                let (inspect_path, inspect_args) =
+                    if annotations.contains_key("boxr.infra_entrypoint") {
+                        let p = config_entrypoint.first().cloned().unwrap_or_default();
+                        let a = if config_entrypoint.len() > 1 {
+                            config_entrypoint[1..].to_vec()
+                        } else {
+                            Vec::new()
+                        };
+                        (p, a)
+                    } else {
+                        (
+                            c.command.first().cloned().unwrap_or_default(),
+                            if c.command.len() > 1 {
+                                c.command[1..].to_vec()
+                            } else {
+                                Vec::new()
+                            },
+                        )
+                    };
+
                 let mut docker_compat_inspect = serde_json::json!({
                     "Id": c.id,
                     "OCIRuntime": oci_runtime,
                     "Created": c.created_at.to_rfc3339(),
-                    "Path": c.command.first().cloned().unwrap_or_default(),
-                    "Args": if c.command.len() > 1 { c.command[1..].to_vec() } else { Vec::new() },
+                    "Path": inspect_path,
+                    "Args": inspect_args,
+                    "Mounts": mounts_inspect,
                     "State": {
                         "Status": status_label,
                         "Running": is_running,
@@ -6317,16 +6450,41 @@ pub fn diff_container(args: &DiffArgs) -> Result<()> {
 
 pub fn top_container(args: &TopArgs) -> Result<()> {
     let c_store = ContainerStore::new();
-    let cont = c_store
-        .find(&args.container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+    let (target_query, ps_args) = if args.latest {
+        let mut extra = Vec::new();
+        if let Some(first) = &args.container {
+            extra.push(first.clone());
+        }
+        extra.extend(args.ps_args.iter().cloned());
+        let latest_id = c_store
+            .list()
+            .last()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        if latest_id.is_empty() {
+            cli::usage_errors::exit_usage_error("you must provide the name or id of a running container");
+        }
+        (latest_id, extra)
+    } else {
+        let Some(ref q) = args.container else {
+            cli::usage_errors::exit_usage_error("you must provide the name or id of a running container");
+        };
+        (q.clone(), args.ps_args.clone())
+    };
+    let cont = match c_store.find(&target_query) {
+        Some(c) => c,
+        None => cli::usage_errors::exit_usage_error(format!(
+            "unable to look up requested container: no container with name or ID \"{}\" found: no such container",
+            target_query
+        )),
+    };
 
     if !matches!(cont.status, ContainerStatus::Running) {
-        return Err(anyhow!("Container {} is not running", args.container));
+        return Err(anyhow!("Container {} is not running", target_query));
     }
 
     let bundle_path = PathBuf::from(&cont.bundle_path);
-    runtime::top::ContainerTop::list_processes(&bundle_path, &args.ps_args)?;
+    runtime::top::ContainerTop::list_processes(&bundle_path, &ps_args)?;
     Ok(())
 }
 
@@ -7459,8 +7617,59 @@ fn write_prebuilt_resolv_and_hosts(
     let _ = fs::write(&rootfs_resolv, &resolv_text);
 
     // Build /etc/hosts
+    let pod_rec_opt = args
+        .pod
+        .as_ref()
+        .and_then(|pname| pod::PodStore::new().find(pname));
+    if cli::RUN_NO_HOSTS.get() == Some(&true)
+        || pod_rec_opt
+            .as_ref()
+            .and_then(|p| p.labels.get("boxr.pod.no_hosts"))
+            .is_some_and(|v| v == "true")
+    {
+        return;
+    }
+
     let mut hosts_lines: Vec<String> = Vec::new();
     let mut known_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let pod_hosts_file_opt = pod_rec_opt
+        .as_ref()
+        .and_then(|p| p.labels.get("boxr.pod.hosts_file"))
+        .map(|s| s.as_str());
+    let base_hosts_raw: Option<String> = match pod_hosts_file_opt {
+        Some("none") => Some(String::new()),
+        Some("image") => pod_rec_opt
+            .as_ref()
+            .and_then(|p| p.labels.get("boxr.pod.base_hosts_content"))
+            .cloned()
+            .or_else(|| fs::read_to_string(merged_rootfs.join("etc/hosts")).ok()),
+        Some("") | None => containers_conf_toml_value("base_hosts_file")
+            .and_then(|p| fs::read_to_string(p).ok()),
+        Some(custom_path) => fs::read_to_string(custom_path).ok(),
+    };
+    let sep = if pod_hosts_file_opt.is_some() {
+        " "
+    } else {
+        "\t"
+    };
+    if let Some(base_content) = &base_hosts_raw {
+        for line in base_content.lines() {
+            let clean = line.split('#').next().unwrap_or("").trim();
+            if clean.is_empty() {
+                continue;
+            }
+            let mut parts = clean.split_whitespace();
+            if let Some(ip) = parts.next() {
+                let names: Vec<&str> = parts.collect();
+                if !names.is_empty() {
+                    for n in &names {
+                        known_names.insert((*n).to_string());
+                    }
+                    hosts_lines.push(format!("{}{}{}", ip, sep, names.join(" ")));
+                }
+            }
+        }
+    }
     for entry in &args.add_host {
         let clean = entry.trim().trim_matches('"');
         if let Some((host_part, ip_part)) = clean.split_once(':') {
@@ -7468,36 +7677,18 @@ fn write_prebuilt_resolv_and_hosts(
             for n in names.split_whitespace() {
                 known_names.insert(n.to_string());
             }
-            hosts_lines.push(format!("{}\t{}", ip_part.trim(), names));
+            hosts_lines.push(format!("{}{}{}", ip_part.trim(), sep, names));
         }
     }
-    if let Some(base_file) = containers_conf_toml_value("base_hosts_file") {
-        if let Ok(base_content) = fs::read_to_string(&base_file) {
-            for line in base_content.lines() {
-                let clean = line.split('#').next().unwrap_or("").trim();
-                if clean.is_empty() {
-                    continue;
-                }
-                let mut parts = clean.split_whitespace();
-                if let Some(ip) = parts.next() {
-                    let names: Vec<&str> = parts.collect();
-                    if !names.is_empty() {
-                        for n in &names {
-                            known_names.insert((*n).to_string());
-                        }
-                        hosts_lines.push(format!("{}\t{}", ip, names.join(" ")));
-                    }
-                }
-            }
-        }
+    if base_hosts_raw.is_some() {
         if !known_names.contains("localhost") {
-            hosts_lines.push("127.0.0.1\tlocalhost".to_string());
-            hosts_lines.push("::1\tlocalhost".to_string());
+            hosts_lines.push(format!("127.0.0.1{}localhost", sep));
+            hosts_lines.push(format!("::1{}localhost", sep));
             known_names.insert("localhost".to_string());
         }
     } else {
-        hosts_lines.push("127.0.0.1\tlocalhost".to_string());
-        hosts_lines.push("::1\tlocalhost ip6-localhost ip6-loopback".to_string());
+        hosts_lines.push(format!("127.0.0.1{}localhost", sep));
+        hosts_lines.push(format!("::1{}localhost ip6-localhost ip6-loopback", sep));
         known_names.insert("localhost".to_string());
     }
 
@@ -7512,29 +7703,32 @@ fn write_prebuilt_resolv_and_hosts(
         if let Some(ip) = internal_ip {
             if !known_names.contains("host.containers.internal") {
                 hosts_lines.push(format!(
-                    "{}\thost.containers.internal host.docker.internal",
-                    ip
+                    "{}{}host.containers.internal host.docker.internal",
+                    ip, sep
                 ));
                 known_names.insert("host.containers.internal".to_string());
             }
         }
     }
 
-    if let Some(pod_name) = &args.pod {
+    if let Some(pod_rec) = &pod_rec_opt {
         let pod_store = pod::PodStore::new();
-        if let Some(pod_rec) = pod_store.find(pod_name) {
-            let infra = pod_store.infra_name(&pod_rec);
-            let pod_ip = default_host_ipv4().unwrap_or_else(|| "127.0.0.1".to_string());
-            if known_names.contains(&pod_rec.name) {
-                if !known_names.contains(&infra) {
-                    hosts_lines.push(format!("{}\t{}", pod_ip, infra));
-                    known_names.insert(infra);
-                }
-            } else {
-                hosts_lines.push(format!("{}\t{} {}", pod_ip, pod_rec.name, infra));
-                known_names.insert(pod_rec.name.clone());
+        let infra = pod_store.infra_name(pod_rec);
+        let pod_host = pod_rec
+            .hostname
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&pod_rec.name);
+        let pod_ip = default_host_ipv4().unwrap_or_else(|| "127.0.0.1".to_string());
+        if known_names.contains(pod_host) {
+            if !known_names.contains(&infra) {
+                hosts_lines.push(format!("{}{}{}", pod_ip, sep, infra));
                 known_names.insert(infra);
             }
+        } else {
+            hosts_lines.push(format!("{}{}{} {}", pod_ip, sep, pod_host, infra));
+            known_names.insert(pod_host.to_string());
+            known_names.insert(infra);
         }
     }
 
@@ -7544,8 +7738,8 @@ fn write_prebuilt_resolv_and_hosts(
                 let short_id = &cid[..12.min(cid.len())];
                 if !known_names.contains(&ep.container_name) {
                     hosts_lines.push(format!(
-                        "{}\t{} {}",
-                        ep.ipv4_address, ep.container_name, short_id
+                        "{}{}{} {}",
+                        ep.ipv4_address, sep, ep.container_name, short_id
                     ));
                     known_names.insert(ep.container_name.clone());
                 }
@@ -7570,7 +7764,7 @@ fn write_prebuilt_resolv_and_hosts(
         } else {
             "127.0.0.1".to_string()
         };
-        hosts_lines.push(format!("{}\t{}", self_ip, self_names.join(" ")));
+        hosts_lines.push(format!("{}{}{}", self_ip, sep, self_names.join(" ")));
     }
     let _ = container_id;
 
@@ -8216,6 +8410,21 @@ pub(crate) fn id_maps_from_spec(
 fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs) {
     if args.no_hostname {
         spec.hostname = None;
+        return;
+    }
+    if args.uts.as_deref() == Some("host") {
+        let host_hn = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "localhost".to_string());
+        spec.hostname = Some(host_hn.clone());
+        if !args.unsetenv_all
+            && !args.unsetenv.iter().any(|k| k == "HOSTNAME")
+            && !spec.process.env.iter().any(|e| e.starts_with("HOSTNAME="))
+        {
+            spec.process.env.push(format!("HOSTNAME={}", host_hn));
+        }
         return;
     }
     if let Some(h) = &args.hostname {
@@ -8952,7 +9161,8 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                     }
                 }
                 top_container(&cli::TopArgs {
-                    container: c.name.clone(),
+                    latest: false,
+                    container: Some(c.name.clone()),
                     ps_args: Vec::new(),
                 })?;
             }
@@ -11178,6 +11388,9 @@ async fn create_only_container_after_pod_prep(
     validate_unique_volume_destinations(&args.volumes, &args.tmpfs)?;
 
     let mut parsed_ports = parse_ports(&args.ports)?;
+    if args.publish_all {
+        expand_publish_all_ports(&mut parsed_ports, Some(&image_record), &args.expose);
+    }
     guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
 
@@ -11338,6 +11551,16 @@ async fn create_only_container_after_pod_prep(
     }
     if args.no_hostname {
         annotations.insert("boxr.no_hostname".to_string(), "true".to_string());
+    }
+    if cli::RUN_NO_HOSTS.get() == Some(&true) {
+        annotations.insert("boxr.no_hosts".to_string(), "true".to_string());
+    }
+    if let Some(pod_name) = &args.pod {
+        if let Some(pod_rec) = pod::PodStore::new().find(pod_name) {
+            if let Some(sys_shm) = pod_rec.labels.get("boxr.pod.shm_size_systemd") {
+                annotations.insert("boxr.shm_size_systemd".to_string(), sys_shm.clone());
+            }
+        }
     }
     annotations.insert(
         "org.opencontainers.image.architecture".to_string(),
@@ -11988,12 +12211,49 @@ pub async fn restart_container(args: &cli::RestartArgs) -> Result<()> {
 }
 
 pub fn port_container(args: &cli::PortArgs) -> Result<()> {
-    let store = ContainerStore::new();
-    let cont = store
-        .find(&args.container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+    if args.all && args.latest {
+        cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if args.all && (args.container.is_some() || args.port.is_some()) {
+        cli::usage_errors::exit_usage_error("no arguments are needed with --all");
+    }
 
-    let parsed_query = args.port.as_deref().and_then(|q| {
+    let store = ContainerStore::new();
+    if args.all {
+        for cont in store.list() {
+            if !matches!(cont.status, ContainerStatus::Running) || cont.ports.is_empty() {
+                continue;
+            }
+            for p in &cont.ports {
+                let host_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
+                let entry = format!("{}/{}", p.container_port, p.protocol);
+                println!("{}\t{} -> {}:{}", cont.id, entry, host_ip, p.host_port);
+            }
+        }
+        return Ok(());
+    }
+
+    let (cont, port_query) = if args.latest {
+        if args.port.is_some() {
+            cli::usage_errors::exit_usage_error("--latest and containers cannot be used together");
+        }
+        let c = store
+            .list()
+            .into_iter()
+            .last()
+            .ok_or_else(|| anyhow!("no containers to inspect"))?;
+        (c, args.container.clone())
+    } else {
+        let Some(ref cname) = args.container else {
+            cli::usage_errors::exit_usage_error("you must supply a running container name or id");
+        };
+        let c = store
+            .find(cname)
+            .ok_or_else(|| anyhow!("no container with name or ID \"{}\" found: no such container", cname))?;
+        (c, args.port.clone())
+    };
+
+    let parsed_query = port_query.as_deref().and_then(|q| {
         let (num_str, proto) = if let Some((n, pr)) = q.split_once('/') {
             (n, Some(pr.to_lowercase()))
         } else {
@@ -12013,20 +12273,20 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
                     continue;
                 }
             }
-        } else if args.port.is_some() {
+        } else if port_query.is_some() {
             continue;
         }
 
         matched_any = true;
         let host_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
-        if args.port.is_some() {
+        if port_query.is_some() {
             println!("{}:{}", host_ip, p.host_port);
         } else {
             let entry = format!("{}/{}", p.container_port, p.protocol);
             println!("{} -> {}:{}", entry, host_ip, p.host_port);
         }
     }
-    if let Some(q) = &args.port {
+    if let Some(q) = &port_query {
         if !matched_any {
             cli::usage_errors::exit_usage_error(format!("failed to find published port \"{}\"", q));
         }
@@ -13204,7 +13464,19 @@ fn apply_namespace_to_linux(
             "net" => "boxr.network".to_string(),
             _ => format!("boxr.{}", ns_type),
         };
-        annotations.insert(ann_key, val.clone());
+        let norm_val = if let Some(target) = val
+            .strip_prefix("container:")
+            .or_else(|| val.strip_prefix("container://"))
+        {
+            if let Some(donor) = ContainerStore::new().find(target) {
+                format!("container:{}", donor.id)
+            } else {
+                val.clone()
+            }
+        } else {
+            val.clone()
+        };
+        annotations.insert(ann_key, norm_val);
         if val == "host" {
             l.namespaces.retain(|ns| ns.ns_type != ns_type);
             return Ok(());
@@ -13214,7 +13486,14 @@ fn apply_namespace_to_linux(
         }
         let resolved = match pod::resolve_namespace_spec(val, ns_type) {
             Ok(r) => r,
-            Err(e) => cli::usage_errors::exit_usage_error(e.to_string()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("is not running; cannot join") {
+                    None
+                } else {
+                    cli::usage_errors::exit_usage_error(msg);
+                }
+            }
         };
         if let Some(path) = resolved {
             if path == "host" {
@@ -13356,6 +13635,8 @@ fn build_pod_inspect_json(
         });
 
     let mut containers_arr = Vec::new();
+    let mut num_workload_running = 0usize;
+    let mut num_workload_other = 0usize;
     if let Some(ic) = &infra_cont {
         containers_arr.push(serde_json::json!({
             "Id": ic.id,
@@ -13374,6 +13655,11 @@ fn build_pod_inspect_json(
             if Some(c.id.as_str()) == infra_cont.as_ref().map(|ic| ic.id.as_str()) {
                 continue;
             }
+            if matches!(c.status, ContainerStatus::Running) {
+                num_workload_running += 1;
+            } else {
+                num_workload_other += 1;
+            }
             containers_arr.push(serde_json::json!({
                 "Id": c.id,
                 "ID": c.id,
@@ -13382,6 +13668,14 @@ fn build_pod_inspect_json(
             }));
         }
     }
+
+    let computed_state = if num_workload_running > 0 && num_workload_other > 0 {
+        "Degraded".to_string()
+    } else if num_workload_running > 0 {
+        "Running".to_string()
+    } else {
+        p.status.clone()
+    };
 
     let host_network = p.network.as_deref() == Some("host");
     let mut port_bindings = serde_json::Map::new();
@@ -13400,20 +13694,93 @@ fn build_pod_inspect_json(
             .push(entry);
     }
 
-    let cgroup_path = cgroups::CgroupV2Manager::path_only(&p.id).relative_cgroup_path();
+    let share_parent_false = p
+        .labels
+        .get("boxr.pod.share_parent")
+        .is_some_and(|v| v == "false");
+    let create_cgroup = !share_parent_false;
+    let cgroup_path = if share_parent_false {
+        String::new()
+    } else {
+        cgroups::CgroupV2Manager::path_only(&p.id).relative_cgroup_path()
+    };
+
+    let (cpu_period, cpu_quota) = p
+        .cpus
+        .as_deref()
+        .and_then(|s| cgroups::ResourceLimits::parse_cpus(s).ok())
+        .map(|(quota, period)| (period, quota))
+        .unwrap_or((0, 0));
+    let cpuset_cpus = p
+        .labels
+        .get("boxr.pod.cpuset_cpus")
+        .cloned()
+        .unwrap_or_default();
+    let pid_ns = p.labels.get("boxr.pod.pid").cloned().unwrap_or_default();
+    let uts_ns = p.labels.get("boxr.pod.uts").cloned().unwrap_or_default();
+
+    let v_store = VolumeStore::new();
+    let pod_mounts: Vec<serde_json::Value> = p
+        .volumes
+        .iter()
+        .filter_map(|v_str| {
+            let (src, dst) = v_str.split_once(':')?;
+            let dst_clean = dst.split(':').next().unwrap_or(dst);
+            if let Some(vol) = v_store.find(src) {
+                Some(serde_json::json!({
+                    "Type": "volume",
+                    "Name": vol.name,
+                    "Source": vol.mountpoint,
+                    "Destination": dst_clean,
+                    "Driver": "local",
+                    "Mode": "",
+                    "Options": [],
+                    "RW": true,
+                    "Propagation": "rprivate",
+                }))
+            } else {
+                Some(serde_json::json!({
+                    "Type": "bind",
+                    "Name": src,
+                    "Source": src,
+                    "Destination": dst_clean,
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [],
+                    "RW": true,
+                    "Propagation": "rprivate",
+                }))
+            }
+        })
+        .collect();
+
+    let user_labels: HashMap<String, String> = p
+        .labels
+        .iter()
+        .filter(|(k, _)| !k.starts_with("boxr."))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     serde_json::json!({
         "Id": p.id,
         "ID": p.id,
         "Name": p.name,
-        "Status": p.status,
-        "State": p.status,
+        "Status": computed_state,
+        "State": computed_state,
         "Created": p.created_at.to_rfc3339(),
-        "CreateCgroup": true,
+        "CreateCgroup": create_cgroup,
         "CgroupPath": cgroup_path,
         "CreateInfra": p.infra,
         "InfraContainerID": infra_cid,
         "InfraContainerId": infra_cid,
+        "CPUPeriod": cpu_period,
+        "cpu_period": cpu_period,
+        "CPUQuota": cpu_quota,
+        "cpu_quota": cpu_quota,
+        "CPUSetCPUs": cpuset_cpus,
+        "cpuset_cpus": cpuset_cpus,
+        "Mounts": pod_mounts,
+        "mounts": pod_mounts,
         "InfraConfig": {
             "HostNetwork": host_network,
             "PortBindings": port_bindings,
@@ -13422,11 +13789,15 @@ fn build_pod_inspect_json(
             "DNSOption": p.dns_option,
             "HostAdd": p.add_host,
             "Networks": p.network.clone().map(|n| vec![n]).unwrap_or_default(),
+            "PidNS": pid_ns,
+            "pid_ns": pid_ns,
+            "UtsNS": uts_ns,
+            "uts_ns": uts_ns,
         },
         "SharedNamespaces": shared,
         "NumContainers": containers_arr.len(),
         "Containers": containers_arr,
-        "Labels": p.labels,
+        "Labels": user_labels,
         "ExitPolicy": p.exit_policy,
         "RestartPolicy": p.restart_policy.clone().unwrap_or_default(),
         "ShareIpc": p.share_ipc,
@@ -14802,6 +15173,8 @@ fn apply_ps_container_format_template(
         &c.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
     );
     line = line.replace("{{.RunningFor}}", &format_running_for(c.created_at));
+    line = line.replace("{{.Restarts}}", &c.restart_count.to_string());
+    line = line.replace("{{ .Restarts }}", &c.restart_count.to_string());
     line = line.replace("{{.Size}}", size_str);
     line = line.replace("{{.Namespaces.IPC}}", &ns_ipc);
     line = line.replace("{{ .Namespaces.IPC }}", &ns_ipc);
@@ -15729,9 +16102,9 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
                 }
             }
         }
-    } else if let Some(i) = image_store
-        .find(POD_INFRA_IMAGE)
-        .or_else(|| image_store.find("alpine"))
+    } else if let Some(i) = find_image_with_shortname(&image_store, POD_INFRA_IMAGE, None)
+        .or_else(|| find_image_with_shortname(&image_store, "alpine", None))
+        .or_else(|| find_image_with_shortname(&image_store, "busybox", None))
         .or_else(|| image_store.list().into_iter().next())
     {
         i.qualified_name()
@@ -15740,13 +16113,33 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         POD_INFRA_IMAGE.to_string()
     };
 
-    let (entrypoint_override, infra_cmd) = if let Some(cmd_str) = &pod.infra_command {
-        (Some(cmd_str.clone()), Vec::new())
+    let has_pause_only = find_image_with_shortname(&image_store, &image_ref, None).is_some_and(|img| {
+        let rp = Path::new(&img.rootfs_path);
+        rp.join("pause").exists() && !rp.join("bin/sleep").exists() && !rp.join("usr/bin/sleep").exists()
+    });
+    let (entrypoint_override, infra_cmd) = if has_pause_only {
+        (Some("/pause".to_string()), Vec::new())
     } else {
-        (None, vec!["sleep".to_string(), "infinity".to_string()])
+        (Some("sleep".to_string()), vec!["86400".to_string()])
+    };
+    let logical_infra_entrypoint: Vec<String> = if let Some(cmd_str) = &pod.infra_command {
+        cmd_str
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect()
+    } else if let Some(custom_img) = &custom_infra_image {
+        find_image_with_shortname(&image_store, custom_img, None)
+            .and_then(|img| img.config.config.and_then(|c| c.entrypoint))
+            .filter(|ep| !ep.is_empty())
+            .unwrap_or_else(|| vec!["/catatonit".to_string(), "-P".to_string()])
+    } else {
+        vec!["/catatonit".to_string(), "-P".to_string()]
     };
 
     let mut infra_annotations = Vec::new();
+    if let Ok(ep_json) = serde_json::to_string(&logical_infra_entrypoint) {
+        infra_annotations.push(format!("boxr.infra_entrypoint={}", ep_json));
+    }
     if let Some(u) = &pod.userns {
         infra_annotations.push(format!("io.podman.annotations.userns={}", u));
     }
@@ -15928,6 +16321,8 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 name,
                 ports,
                 hostname,
+                no_hostname,
+                hosts_file,
                 labels,
                 dns,
                 dns_search,
@@ -15947,12 +16342,22 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 memory_swap: _,
                 cpus,
                 cpu_shares: _,
-                cpuset_cpus: _,
+                cpuset_cpus,
                 cpuset_mems: _,
                 device_read_bps: _,
                 device_write_bps: _,
                 blkio_weight: _,
-                volumes,
+                mut volumes,
+                volumes_from,
+                devices,
+                security_opt,
+                sysctl: _,
+                pid,
+                uts,
+                ipc,
+                shm_size,
+                shm_size_systemd,
+                share_parent,
                 network,
                 share,
                 infra,
@@ -15961,6 +16366,9 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 pod,
             } = create_args;
             let pod_name = name.or(pod);
+            if replace && pod_name.is_none() {
+                cli::usage_errors::exit_usage_error("cannot replace pod without --name being set");
+            }
             if replace {
                 if let Some(pname) = &pod_name {
                     if store.find(pname).is_some() {
@@ -15968,6 +16376,120 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     }
                 }
             }
+            let want_infra = if cli::POD_INFRA_EXPLICIT_FALSE.get() == Some(&true) {
+                false
+            } else {
+                infra && !no_infra
+            };
+            let no_hosts = cli::RUN_NO_HOSTS.get() == Some(&true);
+            if !want_infra {
+                if !ports.is_empty() {
+                    cli::usage_errors::exit_usage_error(
+                        "you must have an infra container to publish port bindings to the host",
+                    );
+                }
+                if no_hosts {
+                    cli::usage_errors::exit_usage_error(
+                        "cannot specify --no-hosts without an infra container",
+                    );
+                }
+                if !add_host.is_empty() {
+                    cli::usage_errors::exit_usage_error(
+                        "NoInfra and HostAdd are mutually exclusive pod options: invalid pod spec",
+                    );
+                }
+                if hosts_file.is_some() {
+                    cli::usage_errors::exit_usage_error(
+                        "NoInfra and HostsFile are mutually exclusive pod options: invalid pod spec",
+                    );
+                }
+                if !dns.is_empty() {
+                    cli::usage_errors::exit_usage_error(
+                        "NoInfra and DNSServer are mutually exclusive pod options: invalid pod spec",
+                    );
+                }
+                if !dns_option.is_empty() {
+                    cli::usage_errors::exit_usage_error(
+                        "NoInfra and DNSOption are mutually exclusive pod options: invalid pod spec",
+                    );
+                }
+                if !dns_search.is_empty() {
+                    cli::usage_errors::exit_usage_error(
+                        "NoInfo and DNSSearch are mutually exclusive pod options: invalid pod spec",
+                    );
+                }
+                if ip.is_some() {
+                    cli::usage_errors::exit_usage_error(
+                        "cannot set --ip without infra container: invalid argument",
+                    );
+                }
+                if mac_address.is_some() {
+                    cli::usage_errors::exit_usage_error(
+                        "cannot set --mac without infra container: invalid argument",
+                    );
+                }
+            }
+            if no_hosts && !add_host.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--no-hosts and --add-host cannot be set together",
+                );
+            }
+            if no_hosts && hosts_file.is_some() {
+                cli::usage_errors::exit_usage_error(
+                    "--no-hosts and --hosts-file cannot be set together",
+                );
+            }
+            if unsafe { libc::getuid() != 0 }
+                && (ip.is_some() || mac_address.is_some())
+                && network.is_none()
+            {
+                cli::usage_errors::exit_usage_error(
+                    "invalid config provided: networks and static ip/mac address can only be used with Bridge mode networking",
+                );
+            }
+            if let Some(ref pid_ns) = pid {
+                if pid_ns == "pod" {
+                    cli::usage_errors::exit_usage_error(
+                        "cannot use pod namespace as container is not joining a pod or pod has no infra container: invalid argument",
+                    );
+                }
+                if let Some(cid) = pid_ns.strip_prefix("container:") {
+                    if ContainerStore::new().find(cid).is_none() {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "no container with name or ID {:?} found: no such container",
+                            cid
+                        ));
+                    }
+                }
+            }
+            let has_share_cgroup = share.split(',').any(|s| s.trim() == "cgroup");
+            if has_share_cgroup && share_parent != Some(false) {
+                cli::usage_errors::exit_usage_error(
+                    "cannot share cgroup namespace when --share-parent=true",
+                );
+            }
+            for vf in &volumes_from {
+                let vf_name = vf.split(':').next().unwrap_or(vf);
+                if let Some(src_c) = ContainerStore::new().find(vf_name) {
+                    let m_path = PathBuf::from(&src_c.bundle_path).join("mounts.json");
+                    if let Ok(m_str) = fs::read_to_string(&m_path) {
+                        if let Ok(ms) = serde_json::from_str::<Vec<volume::MountSpec>>(&m_str) {
+                            for m in ms {
+                                let src_part = m
+                                    .volume_name
+                                    .unwrap_or_else(|| m.source.to_string_lossy().to_string());
+                                volumes.push(format!("{}:{}", src_part, m.destination));
+                            }
+                        }
+                    }
+                } else {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no container with name or ID {:?} found: no such container",
+                        vf_name
+                    ));
+                }
+            }
+            let network = network.or_else(|| containers_conf_toml_value("netns"));
             let effective_exit_policy = match exit_policy.as_deref() {
                 None | Some("continue") => "continue".to_string(),
                 Some("stop") => "stop".to_string(),
@@ -15980,6 +16502,11 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             };
             if let Some(net) = &network {
                 let net_trim = net.trim();
+                if net_trim.starts_with("container:") {
+                    cli::usage_errors::exit_usage_error(
+                        "pods presently do not support network mode container",
+                    );
+                }
                 if !net_trim.is_empty()
                     && !matches!(
                         net_trim,
@@ -16020,6 +16547,59 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     label_map.insert("boxr.pod.add_host".to_string(), j);
                 }
             }
+            if no_hosts {
+                label_map.insert("boxr.pod.no_hosts".to_string(), "true".to_string());
+            }
+            if no_hostname {
+                label_map.insert("boxr.pod.no_hostname".to_string(), "true".to_string());
+            }
+            if let Some(ref hf) = hosts_file {
+                label_map.insert("boxr.pod.hosts_file".to_string(), hf.clone());
+                if hf == "image" {
+                    let img_store = ImageStore::new();
+                    let target_img = infra_image.as_deref().unwrap_or("alpine");
+                    if let Some(img_rec) = find_image_with_shortname(&img_store, target_img, None) {
+                        let img_hosts = PathBuf::from(&img_rec.rootfs_path).join("etc/hosts");
+                        if let Ok(content) = fs::read_to_string(&img_hosts) {
+                            label_map.insert("boxr.pod.base_hosts_content".to_string(), content);
+                        }
+                    }
+                }
+            }
+            if let Some(ref cs) = cpuset_cpus {
+                label_map.insert("boxr.pod.cpuset_cpus".to_string(), cs.clone());
+            }
+            if let Some(ref p_ns) = pid {
+                label_map.insert("boxr.pod.pid".to_string(), p_ns.clone());
+            }
+            if let Some(ref u_ns) = uts {
+                label_map.insert("boxr.pod.uts".to_string(), u_ns.clone());
+            }
+            if let Some(ref i_ns) = ipc {
+                label_map.insert("boxr.pod.ipc".to_string(), i_ns.clone());
+            }
+            if let Some(ref shm) = shm_size {
+                label_map.insert("boxr.pod.shm_size".to_string(), shm.clone());
+            }
+            if let Some(ref sys_shm) = shm_size_systemd {
+                label_map.insert("boxr.pod.shm_size_systemd".to_string(), sys_shm.clone());
+            }
+            if !security_opt.is_empty() {
+                if let Ok(j) = serde_json::to_string(&security_opt) {
+                    label_map.insert("boxr.pod.security_opt".to_string(), j);
+                }
+            }
+            if !devices.is_empty() {
+                if let Ok(j) = serde_json::to_string(&devices) {
+                    label_map.insert("boxr.pod.devices".to_string(), j);
+                }
+            }
+            if share_parent == Some(false) {
+                label_map.insert("boxr.pod.share_parent".to_string(), "false".to_string());
+            }
+            if has_share_cgroup {
+                label_map.insert("boxr.pod.share_cgroup".to_string(), "true".to_string());
+            }
             if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
                 let trimmed = unit.trim();
                 if !trimmed.is_empty() {
@@ -16029,11 +16609,6 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 }
             }
             let (share_ipc, share_net, share_uts, share_pid) = parse_pod_share(&share);
-            let want_infra = if cli::POD_INFRA_EXPLICIT_FALSE.get() == Some(&true) {
-                false
-            } else {
-                infra && !no_infra
-            };
             let config = pod::PodConfig {
                 name: pod_name.clone(),
                 ports: parsed_ports,
@@ -16146,13 +16721,29 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
         PodAction::Rm {
             force,
             all,
+            latest,
             ignore,
             pod_id_file,
             pods,
             time: _,
         } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "cannot specify pod names or IDs with --all or --latest",
+                );
+            }
+            let _ = guardrails::ProcessReaper::reap_stale_containers();
             let mut targets: Vec<String> = if all {
                 store.list().into_iter().map(|p| p.id).collect()
+            } else if latest {
+                store
+                    .list()
+                    .last()
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default()
             } else {
                 pods
             };
@@ -16164,9 +16755,11 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     }
                 }
             }
-            if targets.is_empty() && !all && pod_id_file.is_empty() {
+            if targets.is_empty() && !all && !latest && pod_id_file.is_empty() {
                 cli::usage_errors::exit_usage_error("you must provide at least one pod name or ID");
             }
+            let mut exit_125_errors: Vec<String> = Vec::new();
+            let mut exit_1_errors: Vec<String> = Vec::new();
             for pod in targets {
                 let sc_opt = store
                     .find(&pod)
@@ -16204,16 +16797,21 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                         let msg = e.to_string();
                         if msg.contains("not all containers could be removed from pod") {
                             let clean = msg.trim_start_matches("cannot remove running pod: ");
-                            cli::usage_errors::exit_usage_error(clean.to_string());
-                        }
-                        if !ignore && !force {
-                            return Err(e);
+                            exit_125_errors.push(clean.to_string());
+                        } else if !ignore && !force {
+                            exit_1_errors.push(msg);
                         }
                     }
                 }
             }
             for pfile in &pod_id_file {
                 let _ = fs::remove_file(pfile);
+            }
+            if !exit_125_errors.is_empty() {
+                cli::usage_errors::exit_usage_error(exit_125_errors.join("\n"));
+            }
+            if !exit_1_errors.is_empty() {
+                return Err(anyhow!("{}", exit_1_errors.join("\n")));
             }
         }
         PodAction::Inspect {
@@ -16252,12 +16850,19 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
         PodAction::Stop {
             time: _,
             all,
+            latest,
             ignore,
             pod_id_file,
             pods,
         } => {
             let mut targets = if all {
                 store.list().into_iter().map(|p| p.id).collect()
+            } else if latest {
+                store
+                    .list()
+                    .last()
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default()
             } else {
                 pods
             };
@@ -16298,11 +16903,18 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
         }
         PodAction::Start {
             all,
+            latest,
             pod_id_file,
             pods,
         } => {
             let mut targets = if all {
                 store.list().into_iter().map(|p| p.id).collect()
+            } else if latest {
+                store
+                    .list()
+                    .last()
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default()
             } else {
                 pods
             };
@@ -16327,9 +16939,15 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 }
             }
         }
-        PodAction::Restart { all, pods } => {
+        PodAction::Restart { all, latest, pods } => {
             let targets = if all {
                 store.list().into_iter().map(|p| p.id).collect()
+            } else if latest {
+                store
+                    .list()
+                    .last()
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default()
             } else {
                 pods
             };
@@ -16347,12 +16965,28 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 }
             }
         }
-        PodAction::Kill { signal, pods } => {
+        PodAction::Kill {
+            signal,
+            all,
+            latest,
+            pods,
+        } => {
             if let Err(e) = runtime::kill::validate_podman_signal(&signal) {
                 cli::usage_errors::exit_usage_error(e);
             }
+            let targets = if all {
+                store.list().into_iter().map(|p| p.id).collect()
+            } else if latest {
+                store
+                    .list()
+                    .last()
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default()
+            } else {
+                pods
+            };
             let c_store = ContainerStore::new();
-            for pod in pods {
+            for pod in targets {
                 let p = store
                     .find(&pod)
                     .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
@@ -16386,52 +17020,204 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 println!("{}", pod);
             }
         }
-        PodAction::Pause { pods } => {
-            for pod in pods {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                for cid in store.member_container_ids(&p) {
-                    pause_container(
-                        &cli::PauseArgs {
-                            containers: vec![cid],
-                        },
-                        &CliOutputPolicy::default(),
-                    )?;
+        PodAction::Pause { all, latest, pods } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "cannot specify pod names or IDs with --all or --latest",
+                );
+            }
+            if !all && !latest && pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "you must provide at least one pod name or ID, or use --all",
+                );
+            }
+            let targets: Vec<String> = if all {
+                store.list().into_iter().map(|p| p.id).collect()
+            } else if latest {
+                store
+                    .list()
+                    .last()
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default()
+            } else {
+                pods
+            };
+            let c_store = ContainerStore::new();
+            for pod in targets {
+                let p = match store.find(&pod) {
+                    Some(p) => p,
+                    None => cli::usage_errors::exit_usage_error(format!(
+                        "no pod with name or ID {} found: no such pod",
+                        pod
+                    )),
+                };
+                let infra_name = store.infra_name(&p);
+                let mut paused_any = false;
+                for cid in &p.containers {
+                    if cid == &infra_name || cid == &p.infra_container_id {
+                        continue;
+                    }
+                    if let Some(cont) = c_store.find(cid) {
+                        if cont.name == infra_name || cont.id == p.infra_container_id {
+                            continue;
+                        }
+                        if matches!(cont.status, ContainerStatus::Running) {
+                            freeze_container_processes(&cont);
+                            c_store.update_status(&cont.id, ContainerStatus::Paused)?;
+                            let mut attrs = HashMap::new();
+                            attrs.insert("name".to_string(), cont.name.clone());
+                            EventManager::record(ContainerEvent::new(
+                                "container",
+                                "pause",
+                                &cont.id,
+                                &cont.name,
+                                attrs,
+                            ));
+                            paused_any = true;
+                        }
+                    }
                 }
-                store.update_status(&p.name, "Paused")?;
-                println!("{}", pod);
+                if paused_any || p.status == "Running" {
+                    let _ = store.update_status(&p.id, "Paused");
+                }
+                if !output_policy.suppress_stdout() {
+                    println!("{}", p.id);
+                }
             }
         }
-        PodAction::Unpause { pods } => {
-            for pod in pods {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                for cid in store.member_container_ids(&p) {
-                    unpause_container(
-                        &cli::UnpauseArgs {
-                            all: false,
-                            containers: vec![cid],
-                        },
-                        &CliOutputPolicy::default(),
-                    )?;
+        PodAction::Unpause { all, latest, pods } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "cannot specify pod names or IDs with --all or --latest",
+                );
+            }
+            if !all && !latest && pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "you must provide at least one pod name or ID, or use --all",
+                );
+            }
+            let c_store = ContainerStore::new();
+            let targets: Vec<String> = if all {
+                store
+                    .list()
+                    .into_iter()
+                    .filter(|p| {
+                        p.status == "Paused"
+                            || p.containers.iter().any(|cid| {
+                                c_store
+                                    .find(cid)
+                                    .is_some_and(|c| matches!(c.status, ContainerStatus::Paused))
+                            })
+                    })
+                    .map(|p| p.id)
+                    .collect()
+            } else if latest {
+                store
+                    .list()
+                    .last()
+                    .map(|p| vec![p.id.clone()])
+                    .unwrap_or_default()
+            } else {
+                pods
+            };
+            for pod in targets {
+                let p = match store.find(&pod) {
+                    Some(p) => p,
+                    None => cli::usage_errors::exit_usage_error(format!(
+                        "no pod with name or ID {} found: no such pod",
+                        pod
+                    )),
+                };
+                let infra_name = store.infra_name(&p);
+                let mut unpaused_any = false;
+                for cid in &p.containers {
+                    if cid == &infra_name || cid == &p.infra_container_id {
+                        continue;
+                    }
+                    if let Some(cont) = c_store.find(cid) {
+                        if cont.name == infra_name || cont.id == p.infra_container_id {
+                            continue;
+                        }
+                        if matches!(cont.status, ContainerStatus::Paused) {
+                            thaw_container_processes(&cont);
+                            c_store.update_status(&cont.id, ContainerStatus::Running)?;
+                            let mut attrs = HashMap::new();
+                            attrs.insert("name".to_string(), cont.name.clone());
+                            EventManager::record(ContainerEvent::new(
+                                "container",
+                                "unpause",
+                                &cont.id,
+                                &cont.name,
+                                attrs,
+                            ));
+                            unpaused_any = true;
+                        }
+                    }
                 }
-                store.update_status(&p.name, "Running")?;
-                println!("{}", pod);
+                if unpaused_any || p.status == "Paused" {
+                    let _ = store.update_status(&p.id, "Running");
+                }
+                if !output_policy.suppress_stdout() {
+                    println!("{}", p.id);
+                }
             }
         }
         PodAction::Top(args) => {
-            let p = store
-                .find(&args.pod)
-                .ok_or_else(|| anyhow!("Pod '{}' not found", args.pod))?;
-            for cid in store.member_container_ids(&p) {
-                println!("=== {} ===", cid);
-                top_container(&TopArgs {
-                    container: cid,
-                    ps_args: args.descriptors.clone(),
-                })?;
+            let (pod_query, ps_args) = if args.latest {
+                let mut extra = Vec::new();
+                if let Some(first) = &args.pod {
+                    extra.push(first.clone());
+                }
+                extra.extend(args.descriptors.iter().cloned());
+                let latest_id = store
+                    .list()
+                    .last()
+                    .map(|p| p.id.clone())
+                    .unwrap_or_default();
+                if latest_id.is_empty() {
+                    cli::usage_errors::exit_usage_error(
+                        "you must provide the name or id of a running pod",
+                    );
+                }
+                (latest_id, extra)
+            } else {
+                let Some(ref q) = args.pod else {
+                    cli::usage_errors::exit_usage_error(
+                        "you must provide the name or id of a running pod",
+                    );
+                };
+                (q.clone(), args.descriptors.clone())
+            };
+            let p = match store.find(&pod_query) {
+                Some(p) => p,
+                None => cli::usage_errors::exit_usage_error(format!(
+                    "unable to look up requested container: no pod with name or ID {} found: no such pod",
+                    pod_query
+                )),
+            };
+            let c_store = ContainerStore::new();
+            let infra_name = store.infra_name(&p);
+            let mut bundle_paths = Vec::new();
+            for cid in &p.containers {
+                if cid == &infra_name || cid == &p.infra_container_id {
+                    continue;
+                }
+                if let Some(cont) = c_store.find(cid) {
+                    if cont.name == infra_name || cont.id == p.infra_container_id {
+                        continue;
+                    }
+                    if matches!(cont.status, ContainerStatus::Running) {
+                        bundle_paths.push(PathBuf::from(&cont.bundle_path));
+                    }
+                }
             }
+            runtime::top::ContainerTop::list_pod_processes(&bundle_paths, &ps_args)?;
         }
         PodAction::Stats {
             no_stream,
