@@ -83,15 +83,31 @@ apply_boxr_patches() {
   echo "${head}:${overrides_id}" >"$stamp"
 }
 
-write_wrapper() {
+function write_wrapper() {
   cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-$HOME/.boxr-bats}}"
+if [[ -f "$CACHE_DIR/current_boxr_home" ]]; then
+  DEFAULT_BOXR_HOME="\$(cat "$CACHE_DIR/current_boxr_home")"
+else
+  DEFAULT_BOXR_HOME="$HOME/.boxr-bats"
+fi
+export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-\$DEFAULT_BOXR_HOME}}"
 mkdir -p "\$BOXR_HOME"
 if [[ "\${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" ]]; then
   export BOXR_FORCE_EMBEDDED_USERNET=1
 fi
+args=()
+prev=""
+for ((i=1; i<=\$#; i++)); do
+  arg="\${!i}"
+  if [[ -z "\$arg" && ( "\$prev" == "-f" || "\$prev" == "--format" ) ]]; then
+    args+=("__EMPTY_FORMAT__")
+  else
+    args+=("\$arg")
+  fi
+  prev="\$arg"
+done
 # Podman BATS expect '[options]' (lower case) in usage lines.
 podmanize_help() {
   sed -e 's/^Usage: podman /Usage:\\n  podman /' \
@@ -115,10 +131,10 @@ elif [[ "\${2:-}" == "--help" || "\${2:-}" == "-h" ]]; then
   is_help=1
 fi
 if [[ \$is_help -eq 1 ]]; then
-  "$BOXR_BIN" "\$@" | podmanize_help
+  "$BOXR_BIN" "\${args[@]}" | podmanize_help
   exit "\${PIPESTATUS[0]}"
 fi
-exec "$BOXR_BIN" "\$@"
+exec "$BOXR_BIN" "\${args[@]}"
 EOF
   chmod +x "$WRAPPER"
 }
@@ -178,6 +194,7 @@ run_manifest() {
     export BOXR_HOME
     BOXR_HOME="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bats.XXXXXX" | tr '[:upper:]' '[:lower:]')"
     export BOXR_BATS_HOME="$BOXR_HOME"
+    echo "$BOXR_HOME" >"$CACHE_DIR/current_boxr_home"
     echo "======== BATS pattern: $pat (BOXR_HOME=$BOXR_HOME) ========" | tee -a "$log"
     if ! hack/bats --rootless "$pat" 2>&1 | tee -a "$log"; then
       failed=1

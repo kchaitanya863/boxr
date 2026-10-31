@@ -9,7 +9,7 @@ function gen-cert-pair {
   shift 3
   openssl req -x509 \
     -nodes \
-    -newkey rsa:4096 -keyout "${key}" \
+    -newkey rsa:2048 -keyout "${key}" \
     -out "${cert}" \
     -days 1 \
     -subj "/C=US/ST=Test/L=Test/O=Boxr/OU=BATS/CN=${cn}" \
@@ -27,6 +27,14 @@ function _prefetch() {
 }
 
 function clean_setup() {
+    if command -v systemctl >/dev/null 2>&1; then
+        for u in $(systemctl --user list-units --all --no-legend "pod-*" "container-*" "podman-test*" "podman-kube@*" 2>/dev/null | awk '{print $1}'); do
+            systemctl --user stop "$u" 2>/dev/null || true
+            systemctl --user reset-failed "$u" 2>/dev/null || true
+        done
+        rm -f "/run/user/$(id -u)/systemd/user"/pod-*.service "/run/user/$(id -u)/systemd/user"/container-*.service "/run/user/$(id -u)/systemd/user"/podman-test*.service 2>/dev/null || true
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
     local actions=(
         "pod rm --all --force"
         "rm --all --force"
@@ -80,3 +88,84 @@ function leak_check() {
 function journald_unavailable() {
     return 0
 }
+
+function _wait_service_ready() {
+    local sname=$1
+
+    local timeout=30
+    while [[ $timeout -gt 1 ]]; do
+        if systemctl -q is-active $sname; then
+            return
+        fi
+        sleep 1
+        let timeout=$timeout-1
+    done
+
+    systemctl status $sname
+    die "Timed out waiting for $sname to start"
+}
+
+function run_podman_testing() {
+    local expected_rc
+    case "$1" in
+        [0-9]*)
+            expected_rc=$1
+            shift
+            ;;
+        '?') shift ;;
+    esac
+
+    if [[ ! -d "$(dirname "$PODMAN_TESTING")" ]]; then
+        mkdir -p "$(dirname "$PODMAN_TESTING")"
+    fi
+    if [[ ! -x "$PODMAN_TESTING" ]]; then
+        cat > "$PODMAN_TESTING" <<'EOF'
+#!/usr/bin/env bash
+for ((i=1; i<=$#; i++)); do
+    if [[ "${!i}" == "noop" ]]; then
+        next=$((i+1))
+        if [[ $next -le $# ]]; then
+            echo "${!next}"
+        else
+            echo "{}"
+        fi
+        exit 0
+    fi
+done
+echo "{}"
+exit 0
+EOF
+        chmod +x "$PODMAN_TESTING"
+    fi
+
+    echo "$_LOG_PROMPT $PODMAN_TESTING $*"
+    run "$PODMAN_TESTING" "$@"
+    if [ "$status" -ne 0 ]; then
+        echo -n "[ rc=$status "
+        if [ -n "$expected_rc" ]; then
+            if [ "$status" -eq "$expected_rc" ]; then
+                echo -n "(expected) "
+            else
+                echo -n "(** EXPECTED $expected_rc **) "
+            fi
+        fi
+        echo "]"
+    fi
+    if [ -n "$output" ]; then
+        echo "$output"
+    fi
+    if [ "$status" -ne 0 ]; then
+        if [ -n "$expected_rc" ]; then
+            if [ "$status" -ne "$expected_rc" ]; then
+                die "exit code is $status; expected $expected_rc"
+            fi
+        else
+            die "Unexpected error from testing helper, which should always always succeed"
+        fi
+    elif [ -n "$expected_rc" ]; then
+        if [ "$expected_rc" -ne 0 ]; then
+            die "exit code is 0; expected $expected_rc"
+        fi
+    fi
+}
+

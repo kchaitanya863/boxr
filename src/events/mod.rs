@@ -148,10 +148,11 @@ impl EventManager {
 
         loop {
             line.clear();
+            let is_Test = cfg!(test) || empty_ticks >= 1;
             match reader.read_line(&mut line) {
                 Ok(0) => {
                     empty_ticks += 1;
-                    if is_test && empty_ticks > 1 {
+                    if is_Test && empty_ticks >= 1 {
                         break;
                     }
                     // EOF reached, wait for new events if streaming

@@ -288,9 +288,7 @@ impl ImageStore {
             data.images.retain(|img| {
                 !(img.registry == record.registry
                     && img.reference == record.reference
-                    && img.tag == record.tag
-                    && img.config.architecture == record.config.architecture
-                    && img.config.os == record.config.os)
+                    && img.tag == record.tag)
             });
             data.images.push(record);
             self.save_unlocked(&data)?;
@@ -368,6 +366,17 @@ impl ImageStore {
         message: Option<&str>,
         author: Option<&str>,
     ) -> Result<ImageRecord> {
+        self.commit_container_with_changes(container, repo_tag, message, author, &[])
+    }
+
+    pub fn commit_container_with_changes(
+        &self,
+        container: &crate::storage::ContainerRecord,
+        repo_tag: Option<&str>,
+        message: Option<&str>,
+        author: Option<&str>,
+        changes: &[String],
+    ) -> Result<ImageRecord> {
         let home = boxr_home();
         let random_id = hex::encode(crate::storage::container_store::rand_id());
         let image_id = format!("sha256:{}", random_id);
@@ -401,6 +410,21 @@ impl ImageStore {
             tag: ImageReference::DEFAULT_TAG.to_string(),
             digest: None,
         });
+        let name_only = full_tag
+            .split('@')
+            .next()
+            .unwrap_or(full_tag)
+            .split(':')
+            .next()
+            .unwrap_or(full_tag);
+        let parsed_ref = if !name_only.contains('/') {
+            let mut r = parsed_ref;
+            r.registry = "localhost".to_string();
+            r.repository = name_only.to_string();
+            r
+        } else {
+            parsed_ref
+        };
         let (repo, tag, reg) = (
             parsed_ref.repository.clone(),
             parsed_ref.tag.clone(),
@@ -432,6 +456,39 @@ impl ImageStore {
                     exec.entrypoint = Some(run_args);
                     exec.cmd = None;
                 }
+            }
+        }
+
+        for ch in changes {
+            let ch = ch.trim();
+            let (key, val) = if let Some((k, v)) = ch.split_once('=') {
+                (k.trim(), v.trim())
+            } else if let Some((k, v)) = ch.split_once(' ') {
+                (k.trim(), v.trim())
+            } else {
+                (ch, "")
+            };
+            let exec = base_config
+                .config
+                .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+            if key.eq_ignore_ascii_case("CMD") {
+                if val.starts_with('[') && val.ends_with(']') {
+                    if let Ok(arr) = serde_json::from_str::<Vec<String>>(val) {
+                        exec.cmd = Some(arr);
+                        exec.entrypoint = None;
+                        continue;
+                    }
+                }
+                exec.cmd = Some(vec![val.to_string()]);
+                exec.entrypoint = None;
+            } else if key.eq_ignore_ascii_case("ENTRYPOINT") {
+                if val.starts_with('[') && val.ends_with(']') {
+                    if let Ok(arr) = serde_json::from_str::<Vec<String>>(val) {
+                        exec.entrypoint = Some(arr);
+                        continue;
+                    }
+                }
+                exec.entrypoint = Some(vec![val.to_string()]);
             }
         }
 

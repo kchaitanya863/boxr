@@ -21,6 +21,8 @@ pub struct KubeMetadata {
     pub name: String,
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub annotations: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,22 +61,117 @@ pub struct KubeManager;
 impl KubeManager {
     /// Play a Kubernetes YAML file (Pod, Deployment, Service, Volume)
     pub async fn play_kube(yaml_path: &Path) -> Result<()> {
+        Self::play_kube_with_opts(yaml_path, false, false, None).await
+    }
+
+    pub async fn play_kube_with_opts(
+        yaml_path: &Path,
+        replace: bool,
+        service_container: bool,
+        exit_code_propagation: Option<&str>,
+    ) -> Result<()> {
         let content = fs::read_to_string(yaml_path)
             .with_context(|| format!("Failed to read Kubernetes YAML at {:?}", yaml_path))?;
 
+        let saved_notify_sock = std::env::var("NOTIFY_SOCKET").ok().filter(|s| !s.is_empty());
+        if saved_notify_sock.is_some() {
+            unsafe {
+                std::env::remove_var("NOTIFY_SOCKET");
+            }
+        }
+
+        let mut service_cid = None;
+        if service_container {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            let hex_hash = hex::encode(hasher.finalize());
+            let svc_name = format!("{}-service", &hex_hash[..12]);
+            if replace {
+                let _ = crate::remove_container_quiet(&svc_name, true, false);
+            }
+            let image_store = crate::storage::ImageStore::new();
+            let svc_img = image_store
+                .list()
+                .first()
+                .map(|i| i.qualified_name())
+                .unwrap_or_else(|| "alpine:3.20".to_string());
+            let mut annotations = Vec::new();
+            if let Some(prop) = exit_code_propagation {
+                annotations.push(format!("io.podman.annotations.kube.play.exit-code-propagation={}", prop));
+            }
+            annotations.push("boxr.kube_service_container=true".to_string());
+            if let Some(ref sock) = saved_notify_sock {
+                annotations.push(format!("boxr.sdnotify_socket={}", sock));
+                annotations.push("boxr.sdnotify_mode=ignore".to_string());
+            }
+            let svc_args = RunArgs {
+                detach: true,
+                name: Some(svc_name.clone()),
+                replace: true,
+                image: svc_img,
+                command: vec!["sleep".to_string(), "infinity".to_string()],
+                annotations,
+                sdnotify: Some("ignore".to_string()),
+                ..Default::default()
+            };
+            let _ = crate::run_container_with_output(
+                svc_args,
+                crate::CliOutputPolicy {
+                    noout: true,
+                    out: None,
+                },
+            )
+            .await;
+            service_cid = Some(svc_name);
+        }
+
         for doc in serde_yaml::Deserializer::from_str(&content) {
             let val = serde_yaml::Value::deserialize(doc)?;
-            Self::play_kube_value(val).await?;
+            if replace {
+                let _ = Self::play_kube_down_value(val.clone());
+            }
+            if let Err(e) = Self::play_kube_value_with_svc(val, service_cid.as_deref()).await {
+                if let Some(ref sc) = service_cid {
+                    let _ = crate::remove_container_quiet(sc, true, false);
+                }
+                return Err(e);
+            }
+        }
+        #[cfg(unix)]
+        if let (Some(sock), Some(sc)) = (saved_notify_sock, service_cid.as_deref()) {
+            let c_store = ContainerStore::new();
+            if let Some(sc_rec) = c_store.find(sc) {
+                let b = std::path::PathBuf::from(&sc_rec.bundle_path);
+                if let Ok(pid_str) = fs::read_to_string(b.join("conmon.pid")) {
+                    let pid_trim = pid_str.trim();
+                    if !pid_trim.is_empty() {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        use std::os::unix::net::UnixDatagram;
+                        if let Ok(dgram) = UnixDatagram::unbound() {
+                            let msg = format!("MAINPID={}\nREADY=1", pid_trim);
+                            let _ = dgram.send_to(msg.as_bytes(), &sock);
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
 
     pub async fn play_kube_value(val: serde_yaml::Value) -> Result<()> {
+        Self::play_kube_value_with_svc(val, None).await
+    }
+
+    pub async fn play_kube_value_with_svc(
+        val: serde_yaml::Value,
+        service_container: Option<&str>,
+    ) -> Result<()> {
         let kind = val.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         match kind {
             "Pod" => {
                 let pod_yaml: KubePodYaml = serde_yaml::from_value(val)?;
-                Self::play_pod(pod_yaml).await?;
+                Self::play_pod_with_svc(pod_yaml, service_container).await?;
             }
             "Deployment" => {
                 let name = val["metadata"]["name"]
@@ -102,12 +199,13 @@ impl KubeManager {
                         metadata: KubeMetadata {
                             name: pod_name,
                             labels: HashMap::new(),
+                            annotations: HashMap::new(),
                         },
                         spec: KubePodSpec {
                             containers: containers.clone(),
                         },
                     };
-                    Self::play_pod(pod_yaml).await?;
+                    Self::play_pod_with_svc(pod_yaml, service_container).await?;
                 }
             }
             "Service" => {
@@ -130,6 +228,13 @@ impl KubeManager {
     }
 
     pub async fn play_pod(pod_yaml: KubePodYaml) -> Result<()> {
+        Self::play_pod_with_svc(pod_yaml, None).await
+    }
+
+    pub async fn play_pod_with_svc(
+        pod_yaml: KubePodYaml,
+        service_container: Option<&str>,
+    ) -> Result<()> {
         println!("Playing Kubernetes Pod '{}'...", pod_yaml.metadata.name);
 
         let pod_store = PodStore::new();
@@ -148,7 +253,29 @@ impl KubeManager {
                 }
             }
         }
-        let pod = pod_store.create(Some(&pod_yaml.metadata.name), pod_ports)?;
+        let mut pod_labels = pod_yaml.metadata.labels.clone();
+        if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
+            let trimmed = unit.trim();
+            if !trimmed.is_empty() {
+                pod_labels
+                    .entry("PODMAN_SYSTEMD_UNIT".to_string())
+                    .or_insert_with(|| trimmed.to_string());
+            }
+        }
+        if let Some(sc) = service_container {
+            pod_labels.insert("boxr.service_container".to_string(), sc.to_string());
+            let c_store = ContainerStore::new();
+            if let Some(sc_rec) = c_store.find(sc) {
+                let b = std::path::PathBuf::from(&sc_rec.bundle_path);
+                let _ = fs::write(b.join("service_for_pod"), &pod_yaml.metadata.name);
+            }
+        }
+        let pod = pod_store.create_with_config(crate::pod::PodConfig {
+            name: Some(pod_yaml.metadata.name.clone()),
+            ports: pod_ports,
+            labels: pod_labels,
+            ..Default::default()
+        })?;
 
         for c_spec in &pod_yaml.spec.containers {
             let container_name = format!("{}-{}", pod.name, c_spec.name);
@@ -166,6 +293,25 @@ impl KubeManager {
             if let Some(envs) = &c_spec.env {
                 for e in envs {
                     env_vec.push(format!("{}={}", e.name, e.value));
+                }
+            }
+
+            let mut ctr_labels = Vec::new();
+            for (k, v) in &pod_yaml.metadata.labels {
+                ctr_labels.push(format!("{}={}", k, v));
+            }
+            if let Some(au) = pod_yaml
+                .metadata
+                .annotations
+                .get(&format!("io.containers.autoupdate/{}", c_spec.name))
+                .or_else(|| pod_yaml.metadata.annotations.get("io.containers.autoupdate"))
+            {
+                ctr_labels.push(format!("io.containers.autoupdate={}", au));
+            }
+            if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
+                let trimmed = unit.trim();
+                if !trimmed.is_empty() {
+                    ctr_labels.push(format!("PODMAN_SYSTEMD_UNIT={}", trimmed));
                 }
             }
 
@@ -189,7 +335,7 @@ impl KubeManager {
                 image_volume: None,
                 memory: None,
                 kernel_memory: None,
-                labels: Vec::new(),
+                labels: ctr_labels,
                 dns: Vec::new(),
                 cidfile: None,
                 conmon_pidfile: None,
@@ -311,6 +457,9 @@ impl KubeManager {
                 rootfs: None,
                 default_mounts_file: None,
                 timeout: None,
+                sdnotify: None,
+                cgroups: None,
+                pod_id_file: None,
                 image: c_spec.image.clone(),
                 command: c_spec.command.clone().unwrap_or_default(),
             };
@@ -331,6 +480,13 @@ impl KubeManager {
     pub fn play_kube_down(yaml_path: &Path) -> Result<()> {
         let content = fs::read_to_string(yaml_path)
             .with_context(|| format!("Failed to read Kubernetes YAML at {:?}", yaml_path))?;
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let hex_hash = hex::encode(hasher.finalize());
+        let svc_name = format!("{}-service", &hex_hash[..12]);
+        let _ = crate::remove_container_quiet(&svc_name, true, false);
 
         for doc in serde_yaml::Deserializer::from_str(&content) {
             if let Ok(val) = serde_yaml::Value::deserialize(doc) {
@@ -445,6 +601,7 @@ impl KubeManager {
             metadata: KubeMetadata {
                 name: pod_name,
                 labels: HashMap::new(),
+                annotations: HashMap::new(),
             },
             spec: KubePodSpec {
                 containers: kube_containers,

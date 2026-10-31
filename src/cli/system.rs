@@ -50,6 +50,9 @@ pub struct EventsArgs {
 
     #[arg(long = "format")]
     pub format: Option<String>,
+
+    #[arg(long = "stream", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    pub stream: Option<bool>,
 }
 
 #[derive(Args, Debug)]
@@ -176,8 +179,22 @@ pub enum SystemAction {
     /// Run an API service for Podman/Docker clients
     Service {
         /// Timeout in seconds until service stops when idle
-        #[arg(short = 't', long = "time")]
+        #[arg(short = 't', long = "time", alias = "timeout")]
         timeout: Option<u64>,
+        /// Set CORS Headers
+        #[arg(long = "cors")]
+        cors: Option<String>,
+        /// PEM file containing TLS serving certificate
+        #[arg(long = "tls-cert")]
+        tls_cert: Option<String>,
+        /// PEM file containing TLS serving certificate private key
+        #[arg(long = "tls-key")]
+        tls_key: Option<String>,
+        /// Only trust client connections with certificates signed by this CA PEM file
+        #[arg(long = "tls-client-ca")]
+        tls_client_ca: Option<String>,
+        /// Listening URI (e.g. unix:///path/to/sock or tcp://host:port)
+        uri: Option<String>,
     },
     /// Prepare Hyper-V virtualization prerequisites
     #[command(name = "hyperv-prep")]
@@ -209,7 +226,7 @@ pub enum ServiceAction {
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct FormatArgs {
     /// Format output using a custom template: 'json' or Go template
-    #[arg(short = 'f', long = "format")]
+    #[arg(short = 'f', long = "format", num_args = 0..=1, default_missing_value = "")]
     pub format: Option<String>,
 }
 
@@ -292,6 +309,21 @@ pub struct PodCreateArgs {
     /// Do not create an infra container
     #[arg(long = "no-infra", default_value_t = false)]
     pub no_infra: bool,
+    /// Write the pod ID to the file
+    #[arg(long = "pod-id-file")]
+    pub pod_id_file: Option<String>,
+    /// Write the infra container's conmon PID to the file
+    #[arg(long = "infra-conmon-pidfile")]
+    pub infra_conmon_pidfile: Option<String>,
+    /// Replace an existing pod with the same name
+    #[arg(long = "replace")]
+    pub replace: bool,
+    /// Behaviour when the last container exits ("continue" or "stop")
+    #[arg(long = "exit-policy")]
+    pub exit_policy: Option<String>,
+    /// Infra container name
+    #[arg(long = "infra-name")]
+    pub infra_name: Option<String>,
     /// Pod name (positional; same as --name)
     #[arg(value_name = "NAME")]
     pub pod: Option<String>,
@@ -316,6 +348,8 @@ pub enum PodAction {
         all: bool,
         #[arg(long = "ignore")]
         ignore: bool,
+        #[arg(long = "pod-id-file")]
+        pod_id_file: Vec<String>,
         pods: Vec<String>,
     },
     /// Display detailed information on one or more pods
@@ -325,9 +359,21 @@ pub enum PodAction {
         pods: Vec<String>,
     },
     /// Stop one or more pods
-    Stop { pods: Vec<String> },
+    Stop {
+        #[arg(long = "ignore")]
+        ignore: bool,
+        #[arg(short = 't', long = "time")]
+        time: Option<i32>,
+        #[arg(long = "pod-id-file")]
+        pod_id_file: Vec<String>,
+        pods: Vec<String>,
+    },
     /// Start one or more pods
-    Start { pods: Vec<String> },
+    Start {
+        #[arg(long = "pod-id-file")]
+        pod_id_file: Vec<String>,
+        pods: Vec<String>,
+    },
     /// Restart one or more pods
     Restart { pods: Vec<String> },
     /// Kill pods with a signal
@@ -387,6 +433,27 @@ pub enum PlayAction {
         /// Tear down resources from the YAML file
         #[arg(long = "down")]
         down: bool,
+        /// Replace existing pods and containers
+        #[arg(long = "replace", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+        replace: bool,
+        /// Starts a service container before all pods
+        #[arg(long = "service-container", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+        service_container: bool,
+        /// Specify how the service container exit code is determined
+        #[arg(long = "service-exit-code-propagation")]
+        service_exit_code_propagation: Option<String>,
+        /// Logging driver for the container
+        #[arg(long = "log-driver")]
+        log_driver: Option<String>,
+        /// Specify network mode or network names
+        #[arg(long = "network")]
+        network: Vec<String>,
+        /// Build images if Containerfile exists
+        #[arg(long = "build", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+        build: bool,
+        /// Clean up all objects created when a SIGTERM is received or pods exit
+        #[arg(long = "wait", short = 'w', num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+        wait: bool,
     },
 }
 
@@ -404,16 +471,68 @@ pub enum GenerateAction {
         /// Container or pod to generate YAML for
         target: String,
     },
-    /// Generate systemd unit files for a container (Quadlet-compatible)
+    /// [DEPRECATED] Generate systemd units
+    #[command(
+        about = "[DEPRECATED] Generate systemd units.\n\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details.",
+        long_about = "[DEPRECATED] Generate systemd units.\n  The generated units can later be controlled via systemctl(1).\n\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details."
+    )]
     Systemd {
-        /// Container name(s) to generate units for
+        /// Container or pod name(s) to generate units for
         containers: Vec<String>,
         /// Output directory (default: stdout)
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
-        /// Restart policy for generated unit
-        #[arg(long = "restart", default_value = "always")]
-        restart: String,
+        /// Use container/pod names instead of IDs
+        #[arg(short = 'n', long = "name")]
+        name: bool,
+        /// Generate .service files instead of printing to stdout
+        #[arg(short = 'f', long = "files")]
+        files: bool,
+        /// Create a new container or pod instead of starting an existing one
+        #[arg(long = "new", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+        new: Option<bool>,
+        /// Make it a template file and use %i and %I specifiers
+        #[arg(long = "template")]
+        template: bool,
+        /// Systemd restart-policy
+        #[arg(long = "restart-policy", alias = "restart")]
+        restart_policy: Option<String>,
+        /// Systemd restart-sec
+        #[arg(long = "restart-sec")]
+        restart_sec: Option<u64>,
+        /// Start timeout override
+        #[arg(long = "start-timeout")]
+        start_timeout: Option<u64>,
+        /// Stop timeout override
+        #[arg(long = "stop-timeout", short = 't', visible_alias = "time")]
+        stop_timeout: Option<u64>,
+        /// Skip header generation
+        #[arg(long = "no-header")]
+        no_header: bool,
+        /// Systemd unit name prefix for containers
+        #[arg(long = "container-prefix", default_value = "container")]
+        container_prefix: String,
+        /// Systemd unit name prefix for pods
+        #[arg(long = "pod-prefix", default_value = "pod")]
+        pod_prefix: String,
+        /// Systemd unit name separator between name/id and prefix
+        #[arg(long = "separator", default_value = "-")]
+        separator: String,
+        /// Print the created units in specified format (json)
+        #[arg(long = "format")]
+        format: Option<String>,
+        /// Add (weak) requirement dependencies to the generated unit file
+        #[arg(long = "wants")]
+        wants: Vec<String>,
+        /// Add dependencies order to the generated unit file
+        #[arg(long = "after")]
+        after: Vec<String>,
+        /// Similar to wants, but declares stronger requirement dependencies
+        #[arg(long = "requires")]
+        requires: Vec<String>,
+        /// Set environment variables to the systemd unit files
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
     },
     /// Generate Podman Specgen JSON for a container
     Spec(GenerateSpecArgs),
@@ -422,6 +541,9 @@ pub enum GenerateAction {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UnshareArgs {
+    /// Join the rootless network namespace
+    #[arg(long = "rootless-netns")]
+    pub rootless_netns: bool,
     /// Command to run inside new user namespace
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
@@ -439,6 +561,15 @@ pub struct AutoUpdateArgs {
     /// Format output using JSON or Go template
     #[arg(long = "format")]
     pub format: Option<String>,
+    /// Rollback to previous image if update fails
+    #[arg(long = "rollback", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    pub rollback: Option<bool>,
+    /// Filter containers based on conditions given
+    #[arg(short = 'f', long = "filter")]
+    pub filter: Vec<String>,
+    /// Require HTTPS and verify certificates when contacting registries
+    #[arg(long = "tls-verify", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    pub tls_verify: Option<bool>,
 }
 
 #[derive(Args, Debug)]
@@ -461,13 +592,31 @@ pub enum HealthcheckAction {
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PodLogsArgs {
     /// Pod to fetch logs from
-    pub pod: String,
+    pub pod: Option<String>,
     /// Show timestamps
     #[arg(short = 't', long = "timestamps")]
     pub timestamps: bool,
     /// Number of lines to show from the end of the logs
     #[arg(short = 'n', long = "tail")]
     pub tail: Option<usize>,
+    /// Output container names instead of container IDs
+    #[arg(long = "names")]
+    pub names: bool,
+    /// Filter logs by container name or ID
+    #[arg(short = 'c', long = "container")]
+    pub container: Option<String>,
+    /// Follow log output
+    #[arg(short = 'f', long = "follow")]
+    pub follow: bool,
+    /// Show logs since timestamp
+    #[arg(long = "since")]
+    pub since: Option<String>,
+    /// Show logs until timestamp
+    #[arg(long = "until")]
+    pub until: Option<String>,
+    /// Act on the latest pod
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -489,7 +638,12 @@ pub struct SystemConnectionSubcommands {
 pub enum SystemConnectionAction {
     /// List system connections
     #[command(alias = "list")]
-    Ls,
+    Ls {
+        #[arg(short = 'f', long = "format")]
+        format: Option<String>,
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
+    },
     /// Add a new system connection
     Add {
         /// Destination name
@@ -497,17 +651,40 @@ pub enum SystemConnectionAction {
         /// Destination URI
         uri: String,
         /// Default connection
-        #[arg(long = "default")]
+        #[arg(short = 'd', long = "default")]
         default: bool,
+        /// Path to SSH identity file
+        #[arg(long = "identity")]
+        identity: Option<String>,
+        /// Path to podman socket on remote host
+        #[arg(long = "socket-path")]
+        socket_path: Option<String>,
+        /// TLS CA cert
+        #[arg(long = "tls-ca")]
+        tls_ca: Option<String>,
+        /// TLS client cert
+        #[arg(long = "tls-cert")]
+        tls_cert: Option<String>,
+        /// TLS client key
+        #[arg(long = "tls-key")]
+        tls_key: Option<String>,
     },
     /// Remove a system connection
+    #[command(alias = "remove")]
     Rm {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
         /// Destination name
-        name: String,
+        name: Option<String>,
     },
     /// Set the default system connection
     Default {
         /// Destination name
         name: String,
+    },
+    /// Rename a system connection
+    Rename {
+        old: String,
+        new: String,
     },
 }

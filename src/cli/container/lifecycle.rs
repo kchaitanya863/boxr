@@ -181,6 +181,10 @@ pub struct WaitArgs {
     #[arg(long = "ignore")]
     pub ignore: bool,
 
+    /// Wait until container reaches condition ("unknown", "configured", "created", "running", "stopped", "paused", "exited", "removing")
+    #[arg(long = "condition")]
+    pub condition: Option<String>,
+
     /// Containers to wait on
     #[arg(required = true)]
     pub containers: Vec<String>,

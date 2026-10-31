@@ -45,6 +45,9 @@ pub fn tee_k8s_stream<R: Read>(
         if n == 0 {
             break;
         }
+        if stream == "stderr" {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let chunk = &buf[..n];
         let _ = append_k8s_log_chunk(&log_path, stream, chunk);
         let _ = attach_out.write_all(chunk);

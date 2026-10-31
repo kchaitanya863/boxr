@@ -25,11 +25,31 @@ pub fn build_podman_info_document() -> Value {
     let image_count = i_store.list().len();
 
     let globals = crate::cli::podman_globals::podman_global_options();
-    let graph_root = globals
+    let remote_uri = globals
+        .url
+        .clone()
+        .or_else(|| std::env::var("CONTAINER_HOST").ok())
+        .unwrap_or_else(|| {
+            let xdg = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run".to_string());
+            format!("unix://{}/podman/podman.sock", xdg)
+        });
+    let mut graph_root = globals
         .root
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| crate::storage::boxr_home().display().to_string());
+    if let Some(rest) = remote_uri.strip_prefix("tcp://").or_else(|| remote_uri.strip_prefix("tcp:")) {
+        let port_part = rest.rsplit(':').next().unwrap_or("0");
+        if let Ok(meta_str) = std::fs::read_to_string(format!("/tmp/boxr-tcp-{}.meta", port_part)) {
+            if let Ok(meta) = serde_json::from_str::<Value>(&meta_str) {
+                if let Some(gr) = meta.get("graph_root").and_then(|v| v.as_str()) {
+                    if !gr.is_empty() {
+                        graph_root = gr.to_string();
+                    }
+                }
+            }
+        }
+    }
     let run_root = globals
         .runroot
         .as_ref()
@@ -120,6 +140,10 @@ pub fn build_podman_info_document() -> Value {
                 "Package": "passt-0^2024.08.07-1"
             },
             "RootlessNetworkCmd": "pasta",
+            "RemoteSocket": {
+                "Path": remote_uri,
+                "Exists": true
+            },
             "Security": {
                 "Rootless": rootless
             }

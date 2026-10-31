@@ -18,6 +18,10 @@ pub struct RegistryAuthArgs {
     /// Username:password for registry operations
     #[arg(long = "creds")]
     pub creds: Option<String>,
+
+    /// Require HTTPS and verify certificates when contacting registries
+    #[arg(long = "tls-verify", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+    pub tls_verify: Option<bool>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -589,6 +593,10 @@ pub struct RmiArgs {
     /// Remove only the given platform variant
     #[arg(long = "platform")]
     pub platform: Option<String>,
+
+    /// Ignore errors when a specified image is not in the container store
+    #[arg(short = 'i', long = "ignore")]
+    pub ignore: bool,
 
     /// Image references or IDs to remove
     pub images: Vec<String>,

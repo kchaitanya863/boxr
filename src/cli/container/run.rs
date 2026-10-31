@@ -256,6 +256,18 @@ pub struct RunArgs {
     #[arg(long = "stop-signal")]
     pub stop_signal: Option<String>,
 
+    /// Control sd-notify behavior ("container", "conmon", "healthy", "ignore")
+    #[arg(long = "sdnotify")]
+    pub sdnotify: Option<String>,
+
+    /// Control container cgroup configuration ("enabled", "disabled", "no-conmon", "split")
+    #[arg(long = "cgroups")]
+    pub cgroups: Option<String>,
+
+    /// Read the pod ID from the file
+    #[arg(long = "pod-id-file")]
+    pub pod_id_file: Option<String>,
+
     /// Add an annotation to the container (passed through to the OCI runtime)
     #[arg(long = "annotation")]
     pub annotations: Vec<String>,

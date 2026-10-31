@@ -351,11 +351,23 @@ pub struct Cli {
     #[arg(global = true, long = "remote")]
     pub remote: bool,
     /// URL to remote Podman service (accepted for help/CLI parity)
-    #[arg(global = true, long = "url")]
+    #[arg(global = true, long = "url", visible_alias = "host")]
     pub url: Option<String>,
     /// Connection name (accepted for help/CLI parity)
-    #[arg(global = true, long = "connection")]
+    #[arg(global = true, long = "connection", visible_alias = "context")]
     pub connection: Option<String>,
+    /// Path to TLS CA certificate file
+    #[arg(global = true, long = "tls-ca")]
+    pub tls_ca: Option<String>,
+    /// Path to TLS client certificate file
+    #[arg(global = true, long = "tls-cert")]
+    pub tls_cert: Option<String>,
+    /// Path to TLS client key file
+    #[arg(global = true, long = "tls-key")]
+    pub tls_key: Option<String>,
+    /// SSH mode (golang or native)
+    #[arg(global = true, long = "ssh")]
+    pub ssh: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }

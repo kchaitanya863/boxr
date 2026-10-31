@@ -12,6 +12,12 @@ pub struct PodmanGlobalOptions {
     pub volumepath: Option<PathBuf>,
     pub storage_driver: Option<String>,
     pub storage_opts: Vec<String>,
+    pub url: Option<String>,
+    pub connection: Option<String>,
+    pub remote: bool,
+    pub tls_ca: Option<String>,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -46,7 +52,14 @@ const VALUE_FLAGS: &[&str] = &[
     "--log-level",
     "--syslog",
     "--url",
+    "--host",
+    "-H",
     "--connection",
+    "--context",
+    "--tls-ca",
+    "--tls-cert",
+    "--tls-key",
+    "--ssh",
 ];
 
 fn is_global_value_flag(token: &str) -> bool {
@@ -142,6 +155,78 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 continue;
             }
         }
+        if a == "--remote" || a == "-r" {
+            opts.remote = true;
+            i += 1;
+            continue;
+        }
+        if let Some(v) = a
+            .strip_prefix("--url=")
+            .or_else(|| a.strip_prefix("--host="))
+            .or_else(|| a.strip_prefix("-H="))
+        {
+            opts.url = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--url" || a == "--host" || a == "-H" {
+            if i + 1 < argv.len() {
+                opts.url = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a
+            .strip_prefix("--connection=")
+            .or_else(|| a.strip_prefix("--context="))
+        {
+            opts.connection = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--connection" || a == "--context" {
+            if i + 1 < argv.len() {
+                opts.connection = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--tls-ca=") {
+            opts.tls_ca = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-ca" {
+            if i + 1 < argv.len() {
+                opts.tls_ca = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--tls-cert=") {
+            opts.tls_cert = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-cert" {
+            if i + 1 < argv.len() {
+                opts.tls_cert = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--tls-key=") {
+            opts.tls_key = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-key" {
+            if i + 1 < argv.len() {
+                opts.tls_key = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
         i += 1;
     }
     opts
@@ -182,6 +267,18 @@ pub fn should_strip_global_flag_at(argv: &[String], i: usize, subcommand_idx: us
         return false;
     }
     let sub = argv.get(subcommand_idx).map(String::as_str).unwrap_or("");
+    if sub == "system"
+        && argv.get(subcommand_idx + 1).map(String::as_str) == Some("service")
+        && (a.starts_with("--tls-cert") || a.starts_with("--tls-key"))
+    {
+        return false;
+    }
+    if sub == "system"
+        && argv.get(subcommand_idx + 1).map(String::as_str) == Some("connection")
+        && (a.starts_with("--tls-ca") || a.starts_with("--tls-cert") || a.starts_with("--tls-key"))
+    {
+        return false;
+    }
     if !strip_globals_after_subcommand(sub) {
         return false;
     }

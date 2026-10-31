@@ -150,10 +150,12 @@ impl OverlayDriver {
                     }
                 }
             } else {
-                let meta = fs::metadata(&from);
-                let _ = fs::copy(&from, &to);
-                if let Ok(meta) = meta {
-                    Self::preserve_file_timestamps(&from, &to, &meta);
+                if fs::hard_link(&from, &to).is_err() {
+                    let meta = fs::metadata(&from);
+                    let _ = fs::copy(&from, &to);
+                    if let Ok(meta) = meta {
+                        Self::preserve_file_timestamps(&from, &to, &meta);
+                    }
                 }
             }
         }

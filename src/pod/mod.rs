@@ -309,6 +309,9 @@ impl PodStore {
                 {
                     let _ = crate::remove_container(&infra.id, force);
                 }
+                if let Some(sc) = removed.labels.get("boxr.service_container") {
+                    let _ = crate::remove_container_quiet(sc, true, false);
+                }
                 Ok(removed)
             } else {
                 Err(anyhow!("Pod '{}' not found", query))

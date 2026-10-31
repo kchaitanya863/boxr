@@ -539,6 +539,9 @@ fn prepare_conmon_shim(bundle_path: &Path, spec: &Spec, exe: &Path) -> Result<Pa
 
 fn scrub_conmon_parent_env(cmd: &mut std::process::Command) {
     cmd.env_remove("NOTIFY_SOCKET");
+    cmd.env_remove("LISTEN_PID");
+    cmd.env_remove("LISTEN_FDS");
+    cmd.env_remove("LISTEN_FDNAMES");
     if unsafe { libc::getuid() } != 0 {
         cmd.env_remove("DBUS_SESSION_BUS_ADDRESS");
     }
@@ -600,6 +603,9 @@ fn tee_journald_capture_stream<R: std::io::Read>(
     while reader.read_line(&mut line).unwrap_or(0) > 0 {
         let trimmed = line.trim_end_matches(['\n', '\r']);
         if !trimmed.is_empty() {
+            if stream == "stderr" {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
             journal_line(trimmed);
             if let Some(path) = &file {
                 let _ = crate::logging::append_k8s_log_chunk(path, stream, trimmed.as_bytes());
@@ -665,6 +671,25 @@ fn wait_for_detached_conmon_start(bundle_path: &Path, supervisor: &mut Child) ->
     ))
 }
 
+#[cfg(unix)]
+fn send_sd_notify(socket_path: &str, msg: &str) {
+    use std::os::unix::net::UnixDatagram;
+    if socket_path.is_empty() {
+        return;
+    }
+    if let Ok(sock) = UnixDatagram::unbound() {
+        for _ in 0..30 {
+            match sock.send_to(msg.as_bytes(), socket_path) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.raw_os_error() == Some(libc::EAGAIN) => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 /// Podman-compatible conmon parent: executable path ends with `conmon`, writes pidfile + ConmonPid.
 pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
     if args.is_empty() {
@@ -672,7 +697,6 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
     }
     let bundle_path = Path::new(&args[0]);
     let conmon_pid = std::process::id() as i32;
-    fs::write(bundle_path.join("conmon.pid"), conmon_pid.to_string())?;
     if let Ok(path) = fs::read_to_string(bundle_path.join("conmon-pidfile.path")) {
         let path = path.trim();
         if !path.is_empty() {
@@ -682,6 +706,21 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
             fs::write(path, conmon_pid.to_string())?;
         }
     }
+    if let Ok(spec_str) = fs::read_to_string(bundle_path.join("config.json")) {
+        if let Ok(spec) = serde_json::from_str::<Spec>(&spec_str) {
+            if let Some(ann) = &spec.annotations {
+                let mode = ann.get("boxr.sdnotify_mode").map(|s| s.as_str()).unwrap_or("conmon");
+                if let Some(sock) = ann.get("boxr.sdnotify_socket") {
+                    if mode == "conmon" {
+                        send_sd_notify(sock, &format!("MAINPID={}\nREADY=1", conmon_pid));
+                    } else if mode == "container" || mode == "healthy" {
+                        send_sd_notify(sock, &format!("MAINPID={}", conmon_pid));
+                    }
+                }
+            }
+        }
+    }
+    fs::write(bundle_path.join("conmon.pid"), conmon_pid.to_string())?;
 
     let detach = bundle_path.join("conmon-detach.flag").exists();
     let log_driver = fs::read_to_string(bundle_path.join("log-driver.txt"))
@@ -769,11 +808,32 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
             };
             let exit_code = status.code().unwrap_or(1);
             let _ = fs::write(bundle_path.join("boxr-exitcode"), exit_code.to_string());
+            let mut systemd_stop_ok = false;
+            if let Ok(spec_str) = fs::read_to_string(bundle_path.join("config.json")) {
+                if let Ok(spec) = serde_json::from_str::<Spec>(&spec_str) {
+                    if let Some(ann) = &spec.annotations {
+                        if ann.contains_key("boxr.kube_service_container") {
+                            systemd_stop_ok = true;
+                        }
+                        if (exit_code == 143 || exit_code == 137)
+                            && ann.contains_key("boxr.sdnotify_socket")
+                        {
+                            systemd_stop_ok = true;
+                        }
+                        if let Some(sock) = ann.get("boxr.sdnotify_socket") {
+                            let mode = ann.get("boxr.sdnotify_mode").map(|s| s.as_str()).unwrap_or("conmon");
+                            if mode != "ignore" || ann.contains_key("boxr.kube_service_container") {
+                                send_sd_notify(sock, "STOPPING=1");
+                            }
+                        }
+                    }
+                }
+            }
             if container_id.is_empty()
                 || !crate::detached_container_process_exited(&container_id, bundle_path, exit_code)
             {
                 flush_deferred_bundle_rmdir(bundle_path);
-                return Ok(exit_code);
+                return Ok(if systemd_stop_ok { 0 } else { exit_code });
             }
         }
     }
@@ -847,10 +907,67 @@ pub fn execute_bundle(
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
 
     // Podman uses a conmon parent for detached containers (ConmonPid, stop/teardown semantics).
-    if use_conmon_shim(_spec) || detach {
+    let has_sdnotify = _spec
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.contains_key("boxr.sdnotify_socket"));
+    if use_conmon_shim(_spec) || detach || has_sdnotify {
         let conmon = prepare_conmon_shim(bundle_path, _spec, &exe)?;
         if detach {
             let _ = fs::write(bundle_path.join("conmon-detach.flag"), "1");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let container_id = bundle_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if !container_id.is_empty() && std::env::var_os("INVOCATION_ID").is_none() {
+                let stop_timeout_arg = _spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.stop_timeout"))
+                    .map(|t| format!("TimeoutStopSec={}s", t));
+                let kill_signal_arg = _spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.stop_signal"))
+                    .and_then(|s| crate::runtime::kill::ContainerKiller::parse_signal(s).ok())
+                    .map(|sig| format!("KillSignal={}", sig));
+                if stop_timeout_arg.is_some() || kill_signal_arg.is_some() {
+                    let mut scope_cmd = std::process::Command::new("systemd-run");
+                    if unsafe { libc::getuid() != 0 } {
+                        scope_cmd.arg("--user");
+                    }
+                    scope_cmd
+                        .arg("--scope")
+                        .arg(format!("--unit=libpod-{}.scope", container_id));
+                    if let Some(ref st) = stop_timeout_arg {
+                        scope_cmd.arg("-p").arg(st);
+                    }
+                    if let Some(ref ks) = kill_signal_arg {
+                        scope_cmd.arg("-p").arg(ks);
+                    }
+                    scope_cmd.arg("--").arg(&conmon);
+                    scope_cmd.arg("__internal-conmon-supervisor").arg(bundle_path);
+                    scope_cmd.stdin(Stdio::null());
+                    scrub_conmon_parent_env(&mut scope_cmd);
+                    if detach {
+                        scope_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::CommandExt;
+                            scope_cmd.process_group(0);
+                        }
+                        if let Ok(mut supervisor) = scope_cmd.spawn() {
+                            if wait_for_detached_conmon_start(bundle_path, &mut supervisor).is_ok() {
+                                return Ok(0);
+                            }
+                        }
+                    }
+                }
+            }
         }
         let mut cmd = std::process::Command::new(&conmon);
         let syslog_shim = _spec
@@ -1123,6 +1240,13 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
     // Check if we are non-root (unprivileged rootless mode)
     let is_rootless = unsafe { libc::getuid() != 0 };
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        if !xdg.is_empty() {
+            let pause_dir = PathBuf::from(&xdg).join("libpod").join("tmp");
+            let _ = fs::create_dir_all(&pause_dir);
+            let _ = fs::write(pause_dir.join("ns_handles"), "1");
+        }
+    }
 
     if is_rootless {
         use std::io::{Read, Write};
@@ -1605,13 +1729,27 @@ pub fn chown_path_rootless(path: &Path, uid: u32, gid: u32, recursive: bool) -> 
 
 /// Run an unshare command in a new user namespace (boxr unshare)
 pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
-    if let Some(first) = args.first() {
+    let mut rootless_netns = false;
+    let mut filtered_args = Vec::new();
+    for a in args {
+        if a == "--rootless-netns" {
+            rootless_netns = true;
+            continue;
+        }
+        filtered_args.push(a.clone());
+    }
+    if let Some(first) = filtered_args.first() {
         if first.starts_with("--") {
             crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
         }
     }
     let default_cmd = vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())];
-    let cmd = if args.is_empty() { &default_cmd } else { args };
+    let cmd = if filtered_args.is_empty() {
+        &default_cmd
+    } else {
+        &filtered_args
+    };
+    let _ = rootless_netns;
 
     let is_rootless = unsafe { libc::getuid() != 0 };
     if is_rootless {
@@ -2646,9 +2784,12 @@ fn exec_in_bundle_via_setns(
             if let Some(f) = &pid_f {
                 let _ = setns(f, CloneFlags::CLONE_NEWPID);
             }
-            if let Some(f) = &mnt_f {
-                let _ = setns(f, CloneFlags::CLONE_NEWNS);
-            }
+            let rootfs = bundle_path.join("rootfs");
+            let entered_mnt = if let Some(f) = &mnt_f {
+                setns(f, CloneFlags::CLONE_NEWNS).is_ok()
+            } else {
+                false
+            };
             if let Some(f) = &net_f {
                 let _ = setns(f, CloneFlags::CLONE_NEWNET);
             }
@@ -2663,15 +2804,16 @@ fn exec_in_bundle_via_setns(
             let _ = child_sock.read_exact(&mut done);
             drop(child_sock);
 
-            let rootfs = bundle_path.join("rootfs");
+            let _ = nix::unistd::chroot(&rootfs);
+            let _ = chdir(Path::new("/"));
             if let Some(wd) = workdir {
-                let wd_path = rootfs.join(wd.trim_start_matches('/'));
+                let wd_path = PathBuf::from(wd);
                 if wd_path.is_dir() {
                     let _ = chdir(&wd_path);
-                } else {
-                    let _ = chdir(Path::new(wd));
                 }
             }
+            let _ = entered_mnt;
+            let command = command.to_vec();
             if let Some(u) = umask {
                 unsafe {
                     libc::umask(u as libc::mode_t);
@@ -2706,7 +2848,6 @@ fn exec_in_bundle_via_setns(
             }
             // After joining the container PID namespace, init is always PID 1.
             const INIT_PID_IN_CONTAINER: i32 = 1;
-            let command = exec_rootfs_command(&rootfs, command);
             match unsafe { fork() }? {
                 ForkResult::Parent { child: grand } => {
                     let code = match waitpid(grand, None) {
@@ -3354,6 +3495,7 @@ fn run_container_child(
     // Ensure DNS configuration exists in container rootfs
     let resolv_path = rootfs.join("etc/resolv.conf");
     let _ = fs::create_dir_all(rootfs.join("etc"));
+    let _ = fs::remove_file(&resolv_path);
     let mut dns_content = String::new();
     let bundle_dir = rootfs.parent().unwrap_or(rootfs);
     let dns_file = bundle_dir.join("dns.json");
@@ -3366,31 +3508,34 @@ fn run_container_child(
             }
         }
     }
-    let net_mode = spec
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get("boxr.network"))
-        .map(|s| crate::network::pasta::NetworkMode::parse(s))
-        .unwrap_or_default();
-    if net_mode.should_use_native_usernet() {
-        use crate::network::usernet::DEFAULT_DNS_IP;
-        dns_content = format!("nameserver {}\n", DEFAULT_DNS_IP);
-    }
     if dns_content.is_empty() {
+        let net_mode = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.network"))
+            .map(|s| crate::network::pasta::NetworkMode::parse(s))
+            .unwrap_or_default();
+        if net_mode.should_use_native_usernet() {
+            use crate::network::usernet::DEFAULT_DNS_IP;
+            dns_content.push_str(&format!("nameserver {}\n", DEFAULT_DNS_IP));
+        }
         if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {
             for line in host_resolv.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("nameserver") {
+                if trimmed.starts_with("nameserver")
+                    && !trimmed.contains("127.0.0.")
+                    && !trimmed.contains("::1")
+                {
                     dns_content.push_str(trimmed);
                     dns_content.push('\n');
                 }
             }
         }
-        if !dns_content.contains("1.1.1.1") {
-            dns_content.push_str("nameserver 1.1.1.1\n");
-        }
         if !dns_content.contains("8.8.8.8") {
             dns_content.push_str("nameserver 8.8.8.8\n");
+        }
+        if !dns_content.contains("1.1.1.1") {
+            dns_content.push_str("nameserver 1.1.1.1\n");
         }
     }
     let dns_search_file = bundle_dir.join("dns_search.json");
@@ -3416,7 +3561,14 @@ fn run_container_child(
     if let Some(domain) = &spec.domainname {
         dns_content.push_str(&format!("domain {}\n", domain));
     }
-    let _ = fs::write(&resolv_path, dns_content);
+    let _ = fs::write(&resolv_path, &dns_content);
+    let upper_resolv = bundle_dir.join("upper/etc/resolv.conf");
+    if let Some(parent) = upper_resolv.parent() {
+        if parent.exists() {
+            let _ = fs::remove_file(&upper_resolv);
+            let _ = fs::write(&upper_resolv, &dns_content);
+        }
+    }
 
     // Ensure /etc/hosts exists and contains localhost and container hostname
     let hosts_path = rootfs.join("etc/hosts");
@@ -3528,6 +3680,16 @@ fn run_container_child(
             }
             unsafe {
                 std::env::set_var(k, v);
+            }
+        }
+    }
+    if let Some(ann) = &spec.annotations {
+        if ann.get("boxr.systemd").is_some_and(|v| v != "false" && v != "0") {
+            if let Some(cid) = bundle_path.file_name().and_then(|n| n.to_str()) {
+                let uuid = if cid.len() >= 32 { &cid[..32] } else { cid };
+                unsafe {
+                    std::env::set_var("container_uuid", uuid);
+                }
             }
         }
     }
