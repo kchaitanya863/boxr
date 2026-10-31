@@ -10,3 +10,9 @@ untag_test.go
 history_test.go
 farm_test.go
 trust_test.go
+rename_test.go
+export_test.go
+diff_test.go
+pause_test.go
+top_test.go
+

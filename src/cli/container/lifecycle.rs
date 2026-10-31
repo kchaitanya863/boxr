@@ -165,20 +165,47 @@ impl ExecArgs {
     }
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PauseArgs {
+    /// Pause all running containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Read container ID from the given file
+    #[arg(long = "cidfile")]
+    pub cidfile: Vec<String>,
+
+    /// Filter output based on conditions provided
+    #[arg(short = 'f', long = "filter")]
+    pub filter: Vec<String>,
+
     /// Containers to pause
-    #[arg(required = true)]
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UnpauseArgs {
     /// Unpause all paused containers
-    #[arg(long = "all")]
+    #[arg(short = 'a', long = "all")]
     pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Read container ID from the given file
+    #[arg(long = "cidfile")]
+    pub cidfile: Vec<String>,
+
+    /// Filter output based on conditions provided
+    #[arg(short = 'f', long = "filter")]
+    pub filter: Vec<String>,
 
     /// Containers to unpause
     pub containers: Vec<String>,

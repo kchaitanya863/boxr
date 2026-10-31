@@ -47,6 +47,7 @@ impl FilesystemDiff {
         }
         rel_str == "/.containerenv"
             || rel_str == "/run/.containerenv"
+            || rel_str == "/.oldroot"
             || rel_str == "/etc/resolv.conf"
             || rel_str == "/etc/hosts"
             || rel_str == "/etc/hostname"
@@ -127,6 +128,12 @@ impl FilesystemDiff {
             let rel_str = format!("/{}", rel_path.to_string_lossy());
 
             if Self::is_internal_ignored(&rel_str, file_name, is_top) {
+                if rel_str == "/etc/hostname"
+                    && base_dir.exists()
+                    && !base_dir.join(rel_path).exists()
+                {
+                    Self::record_parent_changed(rel_path, changed_dirs);
+                }
                 continue;
             }
 

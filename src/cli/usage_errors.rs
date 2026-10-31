@@ -416,6 +416,18 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
             std::process::exit(125);
         }
         ErrorKind::MissingRequiredArgument => {
+            if argv.iter().any(|a| a == "diff") {
+                if hide_remote_in_help(argv) {
+                    eprintln!("Error: diff requires a name or id");
+                } else {
+                    eprintln!("Error: diff requires a name, id, or the \"--latest\" flag");
+                }
+                std::process::exit(125);
+            }
+            if argv.iter().any(|a| a == "top") {
+                eprintln!("Error: you must provide the name or id of a running container");
+                std::process::exit(125);
+            }
             eprintln!("Error: must provide required argument");
             std::process::exit(125);
         }
