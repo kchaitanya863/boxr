@@ -8987,10 +8987,28 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
     let store = VolumeStore::new();
     match args.command {
         VolumeAction::Create(args) => {
+            if let Some(ref u) = args.uid {
+                if u.parse::<u32>().is_err() {
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "invalid argument {:?} for \"--uid\" flag: strconv.Atoi: parsing {:?}: invalid syntax",
+                        u, u
+                    ));
+                }
+            }
+            if let Some(ref g) = args.gid {
+                if g.parse::<u32>().is_err() {
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "invalid argument {:?} for \"--gid\" flag: strconv.Atoi: parsing {:?}: invalid syntax",
+                        g, g
+                    ));
+                }
+            }
             let mut label_map = HashMap::new();
             for l in args.labels {
                 if let Some((k, v)) = l.split_once('=') {
                     label_map.insert(k.to_string(), v.to_string());
+                } else {
+                    label_map.insert(l, String::new());
                 }
             }
             let mut opt_map = HashMap::new();
@@ -9001,6 +9019,12 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     opt_map.insert(o.to_string(), "".to_string());
                 }
             }
+            if let Some(u) = args.uid {
+                opt_map.insert("__boxr_uid".to_string(), u);
+            }
+            if let Some(g) = args.gid {
+                opt_map.insert("__boxr_gid".to_string(), g);
+            }
             let resolved_name = args.name_flag.or(args.name);
             if args.ignore {
                 if let Some(ref name) = resolved_name {
@@ -9010,13 +9034,16 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     }
                 }
             }
-            let vol = store.create_with_options(
+            let vol = match store.create_with_options(
                 resolved_name.as_deref(),
                 &args.driver,
                 Some(label_map),
                 args.scope.as_deref().unwrap_or("local"),
                 Some(opt_map),
-            )?;
+            ) {
+                Ok(v) => v,
+                Err(e) => crate::cli::usage_errors::exit_usage_error(e.to_string()),
+            };
             let vol_attrs = vol.labels.clone();
             EventManager::record(ContainerEvent::new(
                 "volume",
@@ -9029,7 +9056,7 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
         }
         VolumeAction::Ls(ls_args) => {
             let vols = store.list_filtered(&ls_args.filter);
-            if ls_args.quiet {
+            if ls_args.quiet && ls_args.format.is_none() {
                 for v in &vols {
                     println!("{}", v.name);
                 }
@@ -9038,6 +9065,22 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     let rows: Vec<serde_json::Value> =
                         vols.iter().map(|v| volume_ls_json_entry(v)).collect();
                     println!("{}", serde_json::to_string(&rows)?);
+                } else if let Some(table_body) = fmt.trim().strip_prefix("table ") {
+                    if !ls_args.noheading {
+                        let hdr = table_body
+                            .replace("{{.Name}}", "VOLUME NAME")
+                            .replace("{{ .Name }}", "VOLUME NAME")
+                            .replace("{{.Driver}}", "DRIVER")
+                            .replace("{{ .Driver }}", "DRIVER")
+                            .replace("{{.Scope}}", "SCOPE")
+                            .replace("{{ .Scope }}", "SCOPE")
+                            .replace("{{.Mountpoint}}", "MOUNTPOINT")
+                            .replace("{{ .Mountpoint }}", "MOUNTPOINT");
+                        println!("{}", hdr.trim());
+                    }
+                    for v in &vols {
+                        println!("{}", apply_volume_ls_format_template(table_body.trim(), v));
+                    }
                 } else {
                     for v in &vols {
                         println!("{}", apply_volume_ls_format_template(fmt, v));
@@ -9069,7 +9112,7 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
             let compat_list: Vec<serde_json::Value> = vols
                 .into_iter()
                 .map(|vol| {
-                    serde_json::json!({
+                    let mut obj = serde_json::json!({
                         "Anonymous": vol.anonymous,
                         "CreatedAt": vol.created_at.to_rfc3339(),
                         "Driver": vol.driver,
@@ -9080,7 +9123,14 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                         "Scope": vol.scope,
                         "NeedsCopyUp": vol.needs_copy_up,
                         "NeedsChown": vol.needs_chown,
-                    })
+                    });
+                    if let Some(u) = vol.uid {
+                        obj["UID"] = serde_json::json!(u);
+                    }
+                    if let Some(g) = vol.gid {
+                        obj["GID"] = serde_json::json!(g);
+                    }
+                    obj
                 })
                 .collect();
             if let Some(fmt) = &format {
@@ -9088,7 +9138,7 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     println!();
                 } else {
                     for compat in &compat_list {
-                        println!("{}", evaluate_simple_template(fmt, compat));
+                        println!("{}", evaluate_go_template_conditionals(fmt, compat));
                     }
                 }
             } else {
@@ -9099,6 +9149,19 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
             rm_volumes(&store, &rm_args)?;
         }
         VolumeAction::Prune(prune_args) => {
+            if prune_args.force && prune_args.dry_run {
+                crate::cli::usage_errors::exit_usage_error(
+                    "--force and --dry-run cannot be used together",
+                );
+            }
+            if prune_args.dry_run {
+                let candidates = store.prune_candidates(prune_args.all, &prune_args.filter);
+                println!("Volumes that would be pruned:");
+                for c in candidates {
+                    println!("{}", c);
+                }
+                return Ok(());
+            }
             let pruned = store.prune_with_options(prune_args.all, &prune_args.filter)?;
             if pruned.is_empty() {
                 if !prune_args.force && !prune_args.all {
@@ -9124,10 +9187,13 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     "cannot write to terminal, use command-line redirection or the --output flag",
                 );
             }
-            let out = volume::VolumeOps::export_volume(
+            let out = match volume::VolumeOps::export_volume(
                 &exp_args.name,
                 exp_args.output.as_deref().map(Path::new),
-            )?;
+            ) {
+                Ok(v) => v,
+                Err(e) => crate::cli::usage_errors::exit_usage_error(e.to_string()),
+            };
             // Podman is silent when `-o`/`--output` is set; default file export prints the path.
             if exp_args.output.is_none() {
                 if let Some(path) = out {
@@ -9136,8 +9202,9 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
             }
         }
         VolumeAction::Import(imp_args) => {
-            let vol = volume::VolumeOps::import_volume(&imp_args.name, &imp_args.input)?;
-            println!("{}", vol.name);
+            if let Err(e) = volume::VolumeOps::import_volume(&imp_args.name, &imp_args.input) {
+                crate::cli::usage_errors::exit_usage_error(e.to_string());
+            }
         }
         VolumeAction::Reload { name } => {
             let vols = volume::VolumeOps::reload_volume(name.as_deref())?;
@@ -10645,19 +10712,22 @@ pub fn rm_volumes(store: &VolumeStore, args: &cli::VolumeRmArgs) -> Result<()> {
     }
     for name in names {
         match store.remove_with_force(&name, args.force) {
-            Ok(_) => {
+            Ok(removed) => {
                 EventManager::record(ContainerEvent::new(
                     "volume",
                     "remove",
                     "",
-                    &name,
+                    &removed.name,
                     HashMap::new(),
                 ));
-                println!("{}", name);
+                println!("{}", removed.name);
             }
             Err(e) if args.force && e.to_string().contains("not found") => {}
             Err(e) => {
                 let msg = e.to_string();
+                if msg.contains("more than one result") {
+                    crate::cli::usage_errors::exit_usage_error(msg);
+                }
                 if msg.contains("not found") {
                     return Err(anyhow!(
                         "no volume with name \"{}\" found: no such volume",
@@ -10930,6 +11000,29 @@ fn remove_image_inner(
             || c.image == img.full_hex_id()
         {
             using_containers.push(c);
+        }
+    }
+
+    let vol_store = VolumeStore::new();
+    let mut using_volumes = Vec::new();
+    for v in vol_store.list() {
+        if v.driver == "image" {
+            if let Some(v_img) = v.options.get("image") {
+                if crate::storage::image_store::refs_equivalent(v_img, &full_name)
+                    || crate::storage::image_store::refs_equivalent(v_img, &disp_name)
+                    || crate::storage::image_store::refs_equivalent(v_img, &short_name)
+                    || v_img == &img.id
+                    || v_img.starts_with(&img.id)
+                    || v_img == &img.full_hex_id()
+                {
+                    using_volumes.push(v.name);
+                }
+            }
+        }
+    }
+    if force {
+        for v_name in &using_volumes {
+            let _ = vol_store.remove_with_force(v_name, true);
         }
     }
 
@@ -14679,7 +14772,59 @@ fn apply_volume_mount_prep(
         }
         let src = merged_rootfs.join(m.destination.trim_start_matches('/'));
         copy_dir_contents(&src, &m.source)?;
+        #[cfg(unix)]
+        if let Ok(meta) = fs::symlink_metadata(&src) {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode() & 0o7777;
+            let _ = fs::set_permissions(&m.source, fs::Permissions::from_mode(mode));
+        }
+        if let Some(bundle_dir) = merged_rootfs.parent() {
+            let chown_meta_file = bundle_dir.join("chown_meta.json");
+            if let Ok(content) = fs::read_to_string(&chown_meta_file) {
+                if let Ok(map) =
+                    serde_json::from_str::<HashMap<String, (u32, u32)>>(&content)
+                {
+                    let rel = m.destination.trim_start_matches('/');
+                    if let Some(&(u, g)) = map.get(rel) {
+                        let _ = vol_store.set_volume_uid_gid(&vol_name, Some(u), Some(g));
+                    }
+                }
+            }
+        }
         let _ = vol_store.set_volume_copy_flags(&vol_name, false, false);
+    }
+    for m in mounts {
+        if !m.is_volume {
+            continue;
+        }
+        if let Some(vol_name) = &m.volume_name {
+            if let Some(vol) = vol_store.find(vol_name) {
+                if vol.uid.is_some() || vol.gid.is_some() {
+                    if let Some(bundle_dir) = merged_rootfs.parent() {
+                        let chown_meta_file = bundle_dir.join("chown_meta.json");
+                        let mut map: HashMap<String, (u32, u32)> =
+                            fs::read_to_string(&chown_meta_file)
+                                .ok()
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or_default();
+                        let rel = m.destination.trim_start_matches('/').to_string();
+                        map.insert(rel, (vol.uid.unwrap_or(0), vol.gid.unwrap_or(0)));
+                        if let Ok(encoded) = serde_json::to_string(&map) {
+                            let _ = fs::write(&chown_meta_file, encoded);
+                        }
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = crate::runtime::linux::chown_path_rootless(
+                            &m.source,
+                            vol.uid.unwrap_or(0),
+                            vol.gid.unwrap_or(0),
+                            true,
+                        );
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -14916,6 +15061,59 @@ fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> S
         return String::new();
     }
     let mut out = template.replace("\\n", "\n").replace("\\t", "\t");
+    while let Some(start) = out.find("{{") {
+        let Some(rel_end) = out[start..].find("}}") else {
+            break;
+        };
+        let end = start + rel_end + 2;
+        let token = &out[start..end];
+        let rendered = evaluate_simple_template(token, value);
+        out.replace_range(start..end, &rendered);
+    }
+    out.replace("\\n", "\n")
+}
+
+fn evaluate_go_template_conditionals(template: &str, value: &serde_json::Value) -> String {
+    let mut out = template.to_string();
+    loop {
+        let Some(if_pos) = out.find("{{ if ").or_else(|| out.find("{{if ")) else {
+            break;
+        };
+        let Some(end_pos_rel) = out[if_pos..].find("{{ end }}").or_else(|| out[if_pos..].find("{{end}}")) else {
+            break;
+        };
+        let end_tag_len = if out[if_pos + end_pos_rel..].starts_with("{{ end }}") {
+            9
+        } else {
+            7
+        };
+        let block = &out[if_pos..if_pos + end_pos_rel + end_tag_len];
+        let Some(cond_close) = block.find("}}") else {
+            break;
+        };
+        let cond_header = &block[2..cond_close].trim();
+        let cond_expr = cond_header.strip_prefix("if ").unwrap_or(cond_header).trim();
+        let body = &block[cond_close + 2..block.len() - end_tag_len];
+        let (then_part, else_part) = if let Some(idx) = body.find("{{ else }}") {
+            (&body[..idx], &body[idx + 10..])
+        } else if let Some(idx) = body.find("{{else}}") {
+            (&body[..idx], &body[idx + 8..])
+        } else {
+            (body, "")
+        };
+        let cond_val = evaluate_simple_template(&format!("{{{{ {} }}}}", cond_expr), value);
+        let chosen = if !cond_val.is_empty() && cond_val != "false" && cond_val != "0" && cond_val != "<nil>" {
+            evaluate_go_template_multi(then_part, value)
+        } else {
+            evaluate_go_template_multi(else_part, value)
+        };
+        out.replace_range(if_pos..if_pos + end_pos_rel + end_tag_len, chosen.trim());
+    }
+    evaluate_go_template_multi(&out, value)
+}
+
+fn evaluate_go_template_multi(template: &str, value: &serde_json::Value) -> String {
+    let mut out = template.to_string();
     while let Some(start) = out.find("{{") {
         let Some(rel_end) = out[start..].find("}}") else {
             break;
@@ -15221,6 +15419,9 @@ pub fn generate_spec(args: SpecArgs) -> Result<()> {
 pub fn handle_secret(args: cli::SecretSubcommands) -> Result<()> {
     use cli::SecretAction;
     use std::io::Read;
+    if let Err(e) = storage::db_config::ensure_storage_db_config() {
+        crate::cli::usage_errors::exit_podman_error(e);
+    }
     let store = secret::SecretStore::new();
     match args.command {
         SecretAction::Create {
@@ -15228,99 +15429,373 @@ pub fn handle_secret(args: cli::SecretSubcommands) -> Result<()> {
             name_pos,
             file,
             file_flag,
+            driver,
+            driver_opts,
+            env,
+            ignore,
+            replace,
             labels,
         } => {
-            let name = name_flag.or(name_pos).ok_or_else(|| {
-                anyhow::anyhow!("secret name required (positional NAME or --name)")
-            })?;
+            if ignore && replace {
+                crate::cli::usage_errors::exit_usage_error(
+                    "cannot use --ignore and --replace flags together",
+                );
+            }
+            let name = name_flag.or(name_pos).unwrap_or_default();
+            if name.is_empty() {
+                crate::cli::usage_errors::exit_usage_error(
+                    "secret name required (positional NAME or --name)",
+                );
+            }
             let mut label_map = HashMap::new();
             for l in labels {
-                if let Some((k, v)) = l.split_once('=') {
-                    label_map.insert(k.to_string(), v.to_string());
+                for item in l.split(',') {
+                    if item.is_empty() {
+                        continue;
+                    }
+                    if let Some((k, v)) = item.split_once('=') {
+                        label_map.insert(k.to_string(), v.to_string());
+                    } else {
+                        label_map.insert(item.to_string(), String::new());
+                    }
+                }
+            }
+            let mut opts_map = HashMap::new();
+            for opt in driver_opts {
+                for item in opt.split(',') {
+                    if item.is_empty() {
+                        continue;
+                    }
+                    if let Some((k, v)) = item.split_once('=') {
+                        opts_map.insert(k.to_string(), v.to_string());
+                    } else {
+                        opts_map.insert(item.to_string(), String::new());
+                    }
                 }
             }
             let path = file_flag.or(file);
-            let data = if let Some(path) = path {
+            let data = if env {
+                let var_name = path.unwrap_or_default();
+                match std::env::var(&var_name) {
+                    Ok(val) => val.into_bytes(),
+                    Err(_) => {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "cannot create store secret data: environment variable {} is not set",
+                            var_name
+                        ));
+                    }
+                }
+            } else if let Some(path) = path {
                 if path == "-" {
                     let mut buf = Vec::new();
                     std::io::stdin().read_to_end(&mut buf)?;
                     buf
                 } else {
-                    fs::read(&path)?
+                    match fs::read(&path) {
+                        Ok(b) => b,
+                        Err(e) => crate::cli::usage_errors::exit_usage_error(format!("{}: {}", path, e)),
+                    }
                 }
             } else {
                 Vec::new()
             };
-            let record = store.create(Some(&name), &data, label_map)?;
+            let existing_before = store.find(&name);
+            let record = match store.create_with_options(
+                Some(&name),
+                &data,
+                label_map,
+                &driver,
+                opts_map,
+                ignore,
+                replace,
+            ) {
+                Ok(r) => r,
+                Err(e) => crate::cli::usage_errors::exit_usage_error(e.to_string()),
+            };
+            if !(ignore && existing_before.is_some()) {
+                EventManager::record(ContainerEvent::new(
+                    "secret",
+                    "create",
+                    &record.id,
+                    &record.name,
+                    record.labels.clone(),
+                ));
+            }
             println!("{}", record.id);
         }
         SecretAction::Ls {
             quiet,
+            noheading,
             format,
             filter,
         } => {
+            for f in &filter {
+                let key = f.split_once('=').map(|(k, _)| k).unwrap_or(f.as_str());
+                if !matches!(key, "name" | "id" | "label" | "driver") {
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "invalid filter {:?}",
+                        key
+                    ));
+                }
+            }
+            let name_filters: Vec<&str> = filter
+                .iter()
+                .filter_map(|f| f.strip_prefix("name="))
+                .collect();
+            let id_filters: Vec<&str> = filter
+                .iter()
+                .filter_map(|f| f.strip_prefix("id="))
+                .collect();
+            let driver_filters: Vec<&str> = filter
+                .iter()
+                .filter_map(|f| f.strip_prefix("driver="))
+                .collect();
+            let label_filters: Vec<&str> = filter
+                .iter()
+                .filter_map(|f| f.strip_prefix("label="))
+                .collect();
+
             let secrets = store
                 .list()
                 .into_iter()
                 .filter(|s| {
-                    filter.is_empty()
-                        || filter.iter().all(|f| {
-                            if let Some((k, v)) = f.split_once('=') {
-                                match k {
-                                    "name" => s.name == v,
-                                    "label" => s.labels.get(v).is_some(),
-                                    _ => true,
-                                }
+                    let name_ok = name_filters.is_empty()
+                        || name_filters
+                            .iter()
+                            .any(|nf| s.name == *nf || s.name.contains(nf));
+                    let id_ok = id_filters.is_empty()
+                        || id_filters
+                            .iter()
+                            .any(|idf| s.id == *idf || s.id.starts_with(idf) || s.id.contains(idf));
+                    let driver_ok = driver_filters.is_empty()
+                        || driver_filters.iter().any(|df| s.driver == *df);
+                    let label_ok = label_filters.is_empty()
+                        || label_filters.iter().all(|lf| {
+                            if let Some((lk, lv)) = lf.split_once('=') {
+                                s.labels.get(lk).map(|v| v == lv).unwrap_or(false)
                             } else {
-                                true
+                                s.labels.contains_key(*lf)
                             }
-                        })
+                        });
+                    name_ok && id_ok && driver_ok && label_ok
                 })
                 .collect::<Vec<_>>();
-            if quiet {
+            if let Some(fmt) = &format {
+                if fmt.contains(".Spec.") {
+                    crate::cli::usage_errors::exit_usage_error(
+                        "template: secret:1:2: executing \"secret\" at <.Spec.Name>: can't evaluate field Spec in type *entities.SecretListReport",
+                    );
+                }
+                if fmt.eq_ignore_ascii_case("json") {
+                    let rows: Vec<serde_json::Value> = secrets
+                        .iter()
+                        .map(|s| {
+                            serde_json::json!({
+                                "ID": s.id,
+                                "Name": s.name,
+                                "Driver": s.driver,
+                                "CreatedAt": "Less than a second ago",
+                                "UpdatedAt": "Less than a second ago",
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                } else if let Some(table_body) = fmt.trim().strip_prefix("table ") {
+                    if !noheading {
+                        let hdr = table_body
+                            .replace("{{.ID}}", "ID")
+                            .replace("{{ .ID }}", "ID")
+                            .replace("{{.Name}}", "NAME")
+                            .replace("{{ .Name }}", "NAME")
+                            .replace("{{.Driver}}", "DRIVER")
+                            .replace("{{ .Driver }}", "DRIVER")
+                            .replace("{{.CreatedAt}}", "CREATED")
+                            .replace("{{ .CreatedAt }}", "CREATED")
+                            .replace("{{.UpdatedAt}}", "UPDATED")
+                            .replace("{{ .UpdatedAt }}", "UPDATED");
+                        println!("{}", hdr.trim());
+                    }
+                    for s in &secrets {
+                        let mut line = table_body.trim().to_string();
+                        line = line.replace("{{.ID}}", &s.id).replace("{{ .ID }}", &s.id);
+                        line = line
+                            .replace("{{.Name}}", &s.name)
+                            .replace("{{ .Name }}", &s.name);
+                        line = line
+                            .replace("{{.Driver}}", &s.driver)
+                            .replace("{{ .Driver }}", &s.driver);
+                        line = line
+                            .replace("{{.CreatedAt}}", "Less than a second ago")
+                            .replace("{{ .CreatedAt }}", "Less than a second ago");
+                        line = line
+                            .replace("{{.UpdatedAt}}", "Less than a second ago")
+                            .replace("{{ .UpdatedAt }}", "Less than a second ago");
+                        println!("{}", line);
+                    }
+                } else {
+                    for s in &secrets {
+                        let mut line = fmt.clone();
+                        line = line.replace("{{.ID}}", &s.id).replace("{{ .ID }}", &s.id);
+                        line = line
+                            .replace("{{.Name}}", &s.name)
+                            .replace("{{ .Name }}", &s.name);
+                        line = line
+                            .replace("{{.Driver}}", &s.driver)
+                            .replace("{{ .Driver }}", &s.driver);
+                        line = line
+                            .replace("{{.CreatedAt}}", "Less than a second ago")
+                            .replace("{{ .CreatedAt }}", "Less than a second ago");
+                        line = line
+                            .replace("{{.UpdatedAt}}", "Less than a second ago")
+                            .replace("{{ .UpdatedAt }}", "Less than a second ago");
+                        println!("{}", line);
+                    }
+                }
+            } else if quiet {
                 for s in &secrets {
                     println!("{}", s.id);
                 }
-            } else if let Some(fmt) = &format {
-                for s in &secrets {
-                    let mut line = fmt.clone();
-                    line = line.replace("{{.ID}}", &s.id);
-                    line = line.replace("{{.Name}}", &s.name);
-                    println!("{}", line);
-                }
             } else {
-                println!("{:<14} {:<24} {:<12}", "ID", "NAME", "DRIVER");
+                if !noheading {
+                    println!("{:<26} {:<24} {:<12} {:<16} {:<16}", "ID", "NAME", "DRIVER", "CREATED", "UPDATED");
+                }
                 for s in secrets {
-                    println!("{:<14} {:<24} {:<12}", s.id, s.name, s.driver);
+                    println!("{:<26} {:<24} {:<12} {:<16} {:<16}", s.id, s.name, s.driver, "1 second ago", "1 second ago");
                 }
             }
         }
-        SecretAction::Inspect { format, name } => {
-            let record = store
-                .find(&name)
-                .ok_or_else(|| anyhow!("Secret '{}' not found", name))?;
-            let json = serde_json::json!({
-                "ID": record.id,
-                "Name": record.name,
-                "CreatedAt": record.created_at.to_rfc3339(),
-                "Labels": record.labels,
-                "Driver": record.driver,
-                "Spec": { "Name": record.name, "Labels": record.labels }
-            });
-            if let Some(fmt) = &format {
-                println!("{}", evaluate_simple_template(fmt, &json));
+        SecretAction::Inspect {
+            format,
+            pretty,
+            showsecret,
+            names,
+        } => {
+            if names.is_empty() {
+                crate::cli::usage_errors::exit_usage_error(
+                    "requires at least 1 arg(s), only received 0",
+                );
+            }
+            let mut results = Vec::new();
+            let mut errors = Vec::new();
+            for name in &names {
+                match store.find_strict(name) {
+                    Ok(record) => {
+                        let secret_data = if showsecret {
+                            store
+                                .read_data(&record.id)
+                                .ok()
+                                .map(|b| String::from_utf8_lossy(&b).to_string())
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let mut obj = serde_json::json!({
+                            "ID": record.id,
+                            "CreatedAt": record.created_at.to_rfc3339(),
+                            "UpdatedAt": record.created_at.to_rfc3339(),
+                            "Spec": {
+                                "Name": record.name,
+                                "Driver": {
+                                    "Name": record.driver,
+                                    "Options": record.driver_opts,
+                                },
+                                "Labels": record.labels,
+                            }
+                        });
+                        if showsecret {
+                            obj["SecretData"] = serde_json::Value::String(secret_data);
+                        }
+                        results.push((record, obj));
+                    }
+                    Err(e) => {
+                        errors.push(format!("inspecting secret: {}", e));
+                    }
+                }
+            }
+            if !errors.is_empty() {
+                for err in &errors {
+                    eprintln!("Error: {}", err);
+                }
+                std::process::exit(125);
+            }
+            if pretty {
+                for (rec, _) in &results {
+                    println!("ID:              {}", rec.id);
+                    println!("Name:            {}", rec.name);
+                    if !rec.labels.is_empty() {
+                        println!("Labels:");
+                        for (k, v) in &rec.labels {
+                            if v.is_empty() {
+                                println!(" - {}", k);
+                            } else {
+                                println!(" - {}={}", k, v);
+                            }
+                        }
+                    }
+                    println!("Driver:          {}", rec.driver);
+                    println!("Created at:      {}", rec.created_at.to_rfc3339());
+                    println!("Updated at:      {}", rec.created_at.to_rfc3339());
+                }
+            } else if let Some(fmt) = &format {
+                for (_, json) in &results {
+                    println!("{}", evaluate_go_template_conditionals(fmt, json));
+                }
             } else {
-                println!("{}", serde_json::to_string_pretty(&json)?);
+                let arr: Vec<serde_json::Value> = results.into_iter().map(|(_, j)| j).collect();
+                println!("{}", serde_json::to_string_pretty(&arr)?);
             }
         }
-        SecretAction::Rm { force: _, names } => {
+        SecretAction::Rm {
+            force: _,
+            all,
+            ignore,
+            names,
+        } => {
+            if all {
+                for s in store.list() {
+                    if let Ok(removed) = store.remove(&s.id) {
+                        EventManager::record(ContainerEvent::new(
+                            "secret",
+                            "remove",
+                            &removed.id,
+                            &removed.name,
+                            removed.labels,
+                        ));
+                        println!("{}", removed.id);
+                    }
+                }
+                return Ok(());
+            }
+            let mut had_err = false;
             for name in names {
-                store.remove(&name)?;
-                println!("{}", name);
+                match store.remove(&name) {
+                    Ok(removed) => {
+                        EventManager::record(ContainerEvent::new(
+                            "secret",
+                            "remove",
+                            &removed.id,
+                            &removed.name,
+                            removed.labels,
+                        ));
+                        println!("{}", removed.id);
+                    }
+                    Err(e) => {
+                        if ignore && e.to_string().contains("no such secret") {
+                            continue;
+                        }
+                        eprintln!("Error: {}", e);
+                        had_err = true;
+                    }
+                }
+            }
+            if had_err {
+                std::process::exit(125);
             }
         }
         SecretAction::Exists { name } => {
-            ensure_secret_exists(&name)?;
+            if !store.exists(&name) {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

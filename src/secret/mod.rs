@@ -16,6 +16,8 @@ pub struct SecretRecord {
     pub created_at: DateTime<Utc>,
     pub labels: std::collections::HashMap<String, String>,
     pub driver: String,
+    #[serde(default)]
+    pub driver_opts: std::collections::HashMap<String, String>,
     pub size: u64,
 }
 
@@ -70,19 +72,40 @@ impl SecretStore {
     }
 
     pub fn find(&self, query: &str) -> Option<SecretRecord> {
+        self.find_strict(query).ok()
+    }
+
+    pub fn find_strict(&self, query: &str) -> Result<SecretRecord> {
         let q = query.trim();
         if q.is_empty() {
-            return None;
+            return Err(anyhow!(
+                "no secret with name or id {:?}: no such secret",
+                query
+            ));
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            Ok(self
-                .load_unlocked()
-                .secrets
+            let secrets = self.load_unlocked().secrets;
+            if let Some(exact) = secrets.iter().find(|s| s.name == q || s.id == q) {
+                return Ok(exact.clone());
+            }
+            let prefix_matches: Vec<SecretRecord> = secrets
                 .into_iter()
-                .find(|s| s.id == q || s.id.starts_with(q) || s.name == q))
+                .filter(|s| s.id.starts_with(q))
+                .collect();
+            if prefix_matches.len() == 1 {
+                Ok(prefix_matches.into_iter().next().unwrap())
+            } else if prefix_matches.len() > 1 {
+                Err(anyhow!(
+                    "multiple secrets with prefix {:?}: secret is ambiguous",
+                    q
+                ))
+            } else {
+                Err(anyhow!(
+                    "no secret with name or id {:?}: no such secret",
+                    q
+                ))
+            }
         })
-        .ok()
-        .flatten()
     }
 
     pub fn create(
@@ -90,6 +113,27 @@ impl SecretStore {
         name: Option<&str>,
         data: &[u8],
         labels: std::collections::HashMap<String, String>,
+    ) -> Result<SecretRecord> {
+        self.create_with_options(
+            name,
+            data,
+            labels,
+            "file",
+            std::collections::HashMap::new(),
+            false,
+            false,
+        )
+    }
+
+    pub fn create_with_options(
+        &self,
+        name: Option<&str>,
+        data: &[u8],
+        labels: std::collections::HashMap<String, String>,
+        driver: &str,
+        driver_opts: std::collections::HashMap<String, String>,
+        ignore: bool,
+        replace: bool,
     ) -> Result<SecretRecord> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut store = self.load_unlocked();
@@ -99,9 +143,44 @@ impl SecretStore {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| format!("secret-{}", &random_id[..8]));
 
-            if store.secrets.iter().any(|s| s.name == secret_name) {
-                if let Some(existing) = store.secrets.iter().find(|s| s.name == secret_name) {
-                    return Ok(existing.clone());
+            if secret_name.is_empty()
+                || secret_name.len() > 253
+                || secret_name
+                    .chars()
+                    .any(|c| c == '=' || c == '/' || c == ',' || c == '\0')
+            {
+                return Err(anyhow!(
+                    "secret name {:?} can not include '=', '/', ',', or the '\\0' (NULL) and be between 1 and 253 characters: invalid secret name",
+                    secret_name
+                ));
+            }
+
+            if driver != "file" && driver != "pass" && driver != "shell" {
+                return Err(anyhow!("invalid secret driver {:?}", driver));
+            }
+            if driver == "shell" {
+                let has_all = ["list", "lookup", "store", "delete"]
+                    .iter()
+                    .all(|k| driver_opts.contains_key(*k));
+                if !has_all {
+                    return Err(anyhow!(
+                        "missing config value: shell driver requires list, lookup, store, delete"
+                    ));
+                }
+            }
+
+            if let Some(pos) = store.secrets.iter().position(|s| s.name == secret_name) {
+                if ignore {
+                    return Ok(store.secrets[pos].clone());
+                }
+                if replace {
+                    let old = store.secrets.remove(pos);
+                    let old_dir = self.secrets_dir.join(&old.name);
+                    if old_dir.exists() {
+                        let _ = fs::remove_dir_all(old_dir);
+                    }
+                } else {
+                    return Err(anyhow!("{}: secret name in use", secret_name));
                 }
             }
 
@@ -109,12 +188,20 @@ impl SecretStore {
             fs::create_dir_all(&secret_dir)?;
             fs::write(secret_dir.join("data"), data)?;
 
+            let mut full_id = format!(
+                "{}{}",
+                random_id,
+                hex::encode(crate::storage::container_store::rand_id())
+            );
+            full_id.truncate(25);
+
             let record = SecretRecord {
-                id: random_id[..12].to_string(),
+                id: full_id,
                 name: secret_name,
                 created_at: Utc::now(),
                 labels,
-                driver: "file".to_string(),
+                driver: driver.to_string(),
+                driver_opts,
                 size: data.len() as u64,
             };
 
@@ -125,9 +212,7 @@ impl SecretStore {
     }
 
     pub fn read_data(&self, query: &str) -> Result<Vec<u8>> {
-        let record = self
-            .find(query)
-            .ok_or_else(|| anyhow!("Secret '{}' not found", query))?;
+        let record = self.find_strict(query)?;
         let path = self.secrets_dir.join(&record.name).join("data");
         fs::read(path).map_err(|e| anyhow!("Failed to read secret data: {}", e))
     }
@@ -136,21 +221,37 @@ impl SecretStore {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut store = self.load_unlocked();
             let q = query.trim();
-            if let Some(pos) = store
-                .secrets
-                .iter()
-                .position(|s| s.id == q || s.id.starts_with(q) || s.name == q)
-            {
-                let removed = store.secrets.remove(pos);
-                self.save_unlocked(&store)?;
-                let secret_dir = self.secrets_dir.join(&removed.name);
-                if secret_dir.exists() {
-                    let _ = fs::remove_dir_all(secret_dir);
-                }
-                Ok(removed)
+            let pos = if let Some(p) = store.secrets.iter().position(|s| s.name == q || s.id == q) {
+                p
             } else {
-                Err(anyhow!("Secret '{}' not found", query))
+                let prefix_matches: Vec<usize> = store
+                    .secrets
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.id.starts_with(q))
+                    .map(|(i, _)| i)
+                    .collect();
+                if prefix_matches.len() == 1 {
+                    prefix_matches[0]
+                } else if prefix_matches.len() > 1 {
+                    return Err(anyhow!(
+                        "multiple secrets with prefix {:?}: secret is ambiguous",
+                        q
+                    ));
+                } else {
+                    return Err(anyhow!(
+                        "no secret with name or id {:?}: no such secret",
+                        q
+                    ));
+                }
+            };
+            let removed = store.secrets.remove(pos);
+            self.save_unlocked(&store)?;
+            let secret_dir = self.secrets_dir.join(&removed.name);
+            if secret_dir.exists() {
+                let _ = fs::remove_dir_all(secret_dir);
             }
+            Ok(removed)
         })
     }
 

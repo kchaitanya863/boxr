@@ -22,8 +22,23 @@ pub enum SecretAction {
         /// Read secret from file (use - for stdin)
         #[arg(short = 'f', long = "file")]
         file_flag: Option<String>,
+        /// Specify secret driver (default "file")
+        #[arg(short = 'd', long = "driver", default_value = "file")]
+        driver: String,
+        /// Specify driver specific options
+        #[arg(long = "driver-opts")]
+        driver_opts: Vec<String>,
+        /// Read secret data from environment variable
+        #[arg(long = "env")]
+        env: bool,
+        /// Do not fail if the secret already exists
+        #[arg(long = "ignore")]
+        ignore: bool,
+        /// If a secret with the same name exists, replace it
+        #[arg(long = "replace")]
+        replace: bool,
         /// Set metadata labels (key=value)
-        #[arg(long = "label")]
+        #[arg(long = "label", short = 'l')]
         labels: Vec<String>,
     },
     /// List secrets
@@ -31,6 +46,8 @@ pub enum SecretAction {
     Ls {
         #[arg(short = 'q', long = "quiet")]
         quiet: bool,
+        #[arg(short = 'n', long = "noheading")]
+        noheading: bool,
         #[arg(long = "format")]
         format: Option<String>,
         #[arg(short = 'f', long = "filter")]
@@ -40,12 +57,20 @@ pub enum SecretAction {
     Inspect {
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
-        name: String,
+        #[arg(long = "pretty")]
+        pretty: bool,
+        #[arg(long = "showsecret")]
+        showsecret: bool,
+        names: Vec<String>,
     },
     /// Remove one or more secrets
     Rm {
         #[arg(short = 'f', long = "force")]
         force: bool,
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'i', long = "ignore")]
+        ignore: bool,
         names: Vec<String>,
     },
     /// Return 0 if the secret exists, 1 otherwise

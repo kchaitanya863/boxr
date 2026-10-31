@@ -115,7 +115,7 @@ impl ContainerEvent {
             format!(" ({})", attrs_str.join(", "))
         };
 
-        let id_str = if no_trunc || self.event_type == "network" {
+        let id_str = if no_trunc || self.event_type == "network" || self.event_type == "secret" {
             self.actor_id.as_str()
         } else {
             &self.actor_id[..12.min(self.actor_id.len())]

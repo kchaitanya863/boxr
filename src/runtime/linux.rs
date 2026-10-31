@@ -4729,6 +4729,17 @@ fn run_container_child(
                             let _ = libc::lchown(c_path.as_ptr(), uid, gid);
                         }
                     }
+                    if p.is_dir() {
+                        if let Ok(entries) = fs::read_dir(&p) {
+                            for entry in entries.flatten() {
+                                if let Ok(c_sub) = CString::new(entry.path().as_os_str().as_bytes()) {
+                                    unsafe {
+                                        let _ = libc::lchown(c_sub.as_ptr(), uid, gid);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

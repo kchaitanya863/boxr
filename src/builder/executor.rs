@@ -815,6 +815,10 @@ impl ImageBuilder {
                     }
 
                     record_subuid_chowns(&bundle_rootfs, &bundle_rootfs, &mut chown_map);
+                    #[cfg(target_os = "linux")]
+                    if !chown_map.is_empty() {
+                        let _ = crate::runtime::linux::chown_path_rootless(&bundle_rootfs, 0, 0, true);
+                    }
                     let _ = fs::remove_dir_all(&current_rootfs);
                     if fs::rename(&bundle_rootfs, &current_rootfs).is_err() {
                         fs::create_dir_all(&current_rootfs)?;
@@ -1005,6 +1009,7 @@ impl ImageBuilder {
         };
 
         self.store.add(record.clone())?;
+        crate::storage::container_store::make_tree_writable(temp_dir.path());
         if !opts.quiet {
             let commit_line = if let Some(rt) = &raw_tag_opt {
                 format!("COMMIT {}", rt)
@@ -1161,6 +1166,10 @@ fn record_subuid_chowns(
         .unwrap_or(100_000);
 
     let Ok(entries) = fs::read_dir(cur) else {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = crate::runtime::linux::chown_path_rootless(cur, 0, 0, true);
+        }
         return;
     };
     for entry in entries.flatten() {
@@ -1170,11 +1179,13 @@ fn record_subuid_chowns(
         };
         let u = meta.uid();
         let g = meta.gid();
-        if (u != host_uid || g != host_gid) && u >= subuid_base {
+        if (u != host_uid || g != host_gid) && (u >= subuid_base || g >= subgid_base) {
             let cont_u = if u == host_uid {
                 0
-            } else {
+            } else if u >= subuid_base {
                 u.saturating_sub(subuid_base) + 1
+            } else {
+                0
             };
             let cont_g = if g == host_gid {
                 0
@@ -1195,6 +1206,12 @@ fn record_subuid_chowns(
         }
         if meta.file_type().is_dir() {
             record_subuid_chowns(root, &p, chown_map);
+        }
+        if (u != host_uid || g != host_gid) && (u >= subuid_base || g >= subgid_base) {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = crate::runtime::linux::chown_path_rootless(&p, 0, 0, true);
+            }
         }
     }
 }
@@ -1265,7 +1282,12 @@ fn copy_dir_with_ignore_and_inodes(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o755));
+            if let Ok(meta) = fs::symlink_metadata(src) {
+                let mode = meta.permissions().mode() & 0o7777;
+                let _ = fs::set_permissions(dst, fs::Permissions::from_mode(mode | 0o700));
+            } else {
+                let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o755));
+            }
         }
     }
     for entry in fs::read_dir(src)? {
