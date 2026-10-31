@@ -478,7 +478,12 @@ pub enum PodAction {
     Rm {
         #[arg(short = 'f', long = "force")]
         force: bool,
-        #[arg(short = 't', long = "time", allow_hyphen_values = true, value_name = "SECONDS")]
+        #[arg(
+            short = 't',
+            long = "time",
+            allow_hyphen_values = true,
+            value_name = "SECONDS"
+        )]
         time: Option<i32>,
         #[arg(short = 'a', long = "all")]
         all: bool,
@@ -500,7 +505,12 @@ pub enum PodAction {
     },
     /// Stop one or more pods
     Stop {
-        #[arg(short = 't', long = "time", allow_hyphen_values = true, value_name = "SECONDS")]
+        #[arg(
+            short = 't',
+            long = "time",
+            allow_hyphen_values = true,
+            value_name = "SECONDS"
+        )]
         time: Option<i32>,
         #[arg(short = 'a', long = "all")]
         all: bool,
@@ -840,8 +850,5 @@ pub enum SystemConnectionAction {
         name: String,
     },
     /// Rename a system connection
-    Rename {
-        old: String,
-        new: String,
-    },
+    Rename { old: String, new: String },
 }

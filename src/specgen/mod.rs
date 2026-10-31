@@ -42,11 +42,7 @@ impl SpecgenManager {
         Self::generate_spec_with_opts(query, false, true)
     }
 
-    pub fn generate_spec_with_opts(
-        query: &str,
-        compact: bool,
-        clone_name: bool,
-    ) -> Result<String> {
+    pub fn generate_spec_with_opts(query: &str, compact: bool, clone_name: bool) -> Result<String> {
         let store = ContainerStore::new();
         let pod_store = PodStore::new();
 

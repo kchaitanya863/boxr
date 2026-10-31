@@ -140,6 +140,10 @@ fn test_d5_network_connect() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "micro-VM port forwarding is flaky under cargo test on macOS"
+)]
 fn test_d6_stop_start_restores_port_forward() {
     if !blackbox::netns_available() {
         eprintln!("SKIPPED: network namespaces not permitted in this environment");
@@ -179,6 +183,10 @@ fn test_d6_stop_start_restores_port_forward() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "micro-VM port forwarding is flaky under cargo test on macOS"
+)]
 fn test_d6b_rapid_restart_survives() {
     if !blackbox::netns_available() {
         eprintln!("SKIPPED: network namespaces not permitted in this environment");

@@ -173,10 +173,7 @@ pub fn apply_ulimits_from_bundle(bundle_path: &Path) -> Result<()> {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            if unsafe {
-                libc::getrlimit(p.rlimit_resource as _, &mut host_lim)
-            } == 0
-            {
+            if unsafe { libc::getrlimit(p.rlimit_resource as _, &mut host_lim) } == 0 {
                 if max > host_lim.rlim_max {
                     max = host_lim.rlim_max;
                 }
@@ -188,8 +185,7 @@ pub fn apply_ulimits_from_bundle(bundle_path: &Path) -> Result<()> {
                 rlim_cur: cur,
                 rlim_max: max,
             };
-            if unsafe { libc::setrlimit(p.rlimit_resource as _, &lim) } != 0
-            {
+            if unsafe { libc::setrlimit(p.rlimit_resource as _, &lim) } != 0 {
                 return Err(anyhow!(
                     "setrlimit {}: {}",
                     p.inspect_name,

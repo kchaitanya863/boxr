@@ -17,11 +17,11 @@ use axum::{
     routing::{delete, get, post},
 };
 use std::fs;
+#[cfg(unix)]
+use std::future::IntoFuture;
 use std::path::PathBuf;
 #[cfg(windows)]
 use tokio::net::TcpListener;
-#[cfg(unix)]
-use std::future::IntoFuture;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
@@ -242,21 +242,29 @@ fn validate_tls_options(
         };
         let cert_blocks = decode_pem_blocks(&cert_content);
         if cert_blocks.is_empty() {
-            crate::cli::usage_errors::exit_usage_error("tls: failed to find any PEM data in certificate input");
+            crate::cli::usage_errors::exit_usage_error(
+                "tls: failed to find any PEM data in certificate input",
+            );
         }
         let key_blocks = decode_pem_blocks(&key_content);
         if key_blocks.is_empty() {
-            crate::cli::usage_errors::exit_usage_error("tls: failed to find any PEM data in key input");
+            crate::cli::usage_errors::exit_usage_error(
+                "tls: failed to find any PEM data in key input",
+            );
         }
         let has_cert_in_cert = cert_blocks.iter().any(|(t, _)| t == "CERTIFICATE");
         let has_key_in_cert = cert_blocks.iter().any(|(t, _)| t.contains("PRIVATE KEY"));
         let has_cert_in_key = key_blocks.iter().any(|(t, _)| t == "CERTIFICATE");
         let has_key_in_key = key_blocks.iter().any(|(t, _)| t.contains("PRIVATE KEY"));
         if !has_cert_in_cert && has_key_in_cert {
-            crate::cli::usage_errors::exit_usage_error("tls: failed to find certificate PEM data in certificate input, but did find a private key; PEM inputs may have been switched");
+            crate::cli::usage_errors::exit_usage_error(
+                "tls: failed to find certificate PEM data in certificate input, but did find a private key; PEM inputs may have been switched",
+            );
         }
         if !has_key_in_key && has_cert_in_key {
-            crate::cli::usage_errors::exit_usage_error("tls: found a certificate rather than a key in the PEM for the private key");
+            crate::cli::usage_errors::exit_usage_error(
+                "tls: found a certificate rather than a key in the PEM for the private key",
+            );
         }
     }
 }
@@ -272,8 +280,12 @@ pub async fn run_podman_system_service(
     validate_tls_options(tls_cert, tls_key, tls_client_ca);
 
     if let Some(c) = cors {
-        if !c.is_empty() && crate::cli::log_level::level_allows(crate::cli::log_level::Level::Debug) {
-            eprintln!("time= level=debug msg=\"CORS Headers were set to \\\"{}\\\"\"", c);
+        if !c.is_empty() && crate::cli::log_level::level_allows(crate::cli::log_level::Level::Debug)
+        {
+            eprintln!(
+                "time= level=debug msg=\"CORS Headers were set to \\\"{}\\\"\"",
+                c
+            );
         }
     }
 
@@ -381,16 +393,19 @@ pub async fn run_podman_system_service(
     let mut app = create_router(state);
     if let Some(c_header) = cors_val {
         if !c_header.is_empty() {
-            app = app.layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
-                let ch = c_header.clone();
-                async move {
-                    let mut res = next.run(req).await;
-                    if let Ok(hv) = axum::http::HeaderValue::from_str(&ch) {
-                        res.headers_mut().insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, hv);
+            app = app.layer(axum::middleware::from_fn(
+                move |req: axum::extract::Request, next: axum::middleware::Next| {
+                    let ch = c_header.clone();
+                    async move {
+                        let mut res = next.run(req).await;
+                        if let Ok(hv) = axum::http::HeaderValue::from_str(&ch) {
+                            res.headers_mut()
+                                .insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, hv);
+                        }
+                        res
                     }
-                    res
-                }
-            }));
+                },
+            ));
         }
     }
 
@@ -422,10 +437,7 @@ pub async fn run_podman_system_service(
             if let Some(parent) = sock_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let _ = fs::write(
-                format!("{}.meta", sock_path.display()),
-                &meta_str,
-            );
+            let _ = fs::write(format!("{}.meta", sock_path.display()), &meta_str);
             let listener = UnixListener::bind(&sock_path)?;
             if idle_secs > 0 {
                 let _ = tokio::time::timeout(
@@ -461,7 +473,8 @@ pub async fn run_podman_system_service(
                     Ok::<(), std::io::Error>(())
                 };
                 if idle_secs > 0 {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(idle_secs), fut).await;
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(idle_secs), fut).await;
                 } else {
                     let _ = fut.await;
                 }
@@ -483,7 +496,8 @@ pub async fn run_podman_system_service(
                     Ok::<(), std::io::Error>(())
                 };
                 if idle_secs > 0 {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(idle_secs), fut).await;
+                    let _ =
+                        tokio::time::timeout(std::time::Duration::from_secs(idle_secs), fut).await;
                 } else {
                     let _ = fut.await;
                 }

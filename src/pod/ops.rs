@@ -115,10 +115,14 @@ impl PodOps {
                 let bundle_path = PathBuf::from(&c.bundle_path);
                 let annotations = crate::load_container_labels_from_bundle(&c.bundle_path);
                 let mut content = String::new();
-                if let Some(path) = crate::logging::resolve_container_log_path(&bundle_path, &annotations) {
+                if let Some(path) =
+                    crate::logging::resolve_container_log_path(&bundle_path, &annotations)
+                {
                     if path.to_string_lossy().contains("-ctr.log")
                         || crate::logging::is_k8s_log_path(&path)
-                        || annotations.get("boxr.log_driver").is_some_and(|d| d == "journald")
+                        || annotations
+                            .get("boxr.log_driver")
+                            .is_some_and(|d| d == "journald")
                     {
                         content = crate::logging::decode_k8s_log_file(&path).unwrap_or_default();
                     } else if path.exists() {

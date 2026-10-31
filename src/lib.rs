@@ -361,14 +361,18 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     let is_remote = std::env::var_os("CONTAINER_HOST").is_some()
         || std::env::var_os("CONTAINER_CONNECTION").is_some()
         || cli::podman_globals::podman_global_options().url.is_some()
-        || cli::podman_globals::podman_global_options().connection.is_some()
+        || cli::podman_globals::podman_global_options()
+            .connection
+            .is_some()
         || cli::podman_globals::podman_global_options().remote;
     if !is_remote {
         if let Ok(fds) = std::env::var("LISTEN_FDS") {
             if !fds.is_empty() {
-                spec.process
-                    .env
-                    .retain(|e| !e.starts_with("LISTEN_FDS=") && !e.starts_with("LISTEN_PID=") && !e.starts_with("LISTEN_FDNAMES="));
+                spec.process.env.retain(|e| {
+                    !e.starts_with("LISTEN_FDS=")
+                        && !e.starts_with("LISTEN_PID=")
+                        && !e.starts_with("LISTEN_FDNAMES=")
+                });
                 spec.process.env.push(format!("LISTEN_FDS={fds}"));
                 spec.process.env.push("LISTEN_PID=1".to_string());
                 if let Ok(names) = std::env::var("LISTEN_FDNAMES") {
@@ -842,7 +846,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             if runtime_flags.iter().any(|f| f == "invalidflag") {
                 return Err(anyhow!("unknown runtime flag: invalidflag"));
             }
-            let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.registry_auth.tls_verify);
+            let _reg = registry_auth_scope_ext(
+                &args.registry_auth,
+                global_auth,
+                args.registry_auth.tls_verify,
+            );
             build_image(args).await?;
             Ok(0)
         }
@@ -898,7 +906,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Push(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
-            let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.registry_auth.tls_verify);
+            let _reg = registry_auth_scope_ext(
+                &args.registry_auth,
+                global_auth,
+                args.registry_auth.tls_verify,
+            );
             if let Err(e) =
                 auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await
             {
@@ -952,7 +964,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             };
 
             let target_auth = eff_auth.or(args.compat_auth_file.as_deref());
-            let _reg = registry_auth_scope_ext(&args.registry_auth, target_auth, args.registry_auth.tls_verify);
+            let _reg = registry_auth_scope_ext(
+                &args.registry_auth,
+                target_auth,
+                args.registry_auth.tls_verify,
+            );
             if server.starts_with("localhost:") {
                 let client = RegistryClient::for_registry(server);
                 if let Err(e) = client.verify_login(server, &username, &password).await {
@@ -1095,7 +1111,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ContainerAction::Stats(stats_args) => {
-                if stats_args.format.as_deref().is_some_and(|f| f.contains("\"\\n\"")) {
+                if stats_args
+                    .format
+                    .as_deref()
+                    .is_some_and(|f| f.contains("\"\\n\""))
+                {
                     return Ok(0);
                 }
                 stats::StatsCollector::display_stats(&stats_args.containers, stats_args.no_stream)?;
@@ -1208,11 +1228,9 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     global_auth,
                     push_args.registry_auth.tls_verify,
                 );
-                if let Err(e) = auth::RegistryPusher::push(
-                    &push_args.source,
-                    push_args.destination.as_deref(),
-                )
-                .await
+                if let Err(e) =
+                    auth::RegistryPusher::push(&push_args.source, push_args.destination.as_deref())
+                        .await
                 {
                     cli::usage_errors::exit_usage_error(e.to_string());
                 }
@@ -1411,7 +1429,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             SystemAction::Events(events_args) => {
-                if events_args.format.as_deref().is_some_and(|f| f.contains("\"\\n\"")) {
+                if events_args
+                    .format
+                    .as_deref()
+                    .is_some_and(|f| f.contains("\"\\n\""))
+                {
                     return Ok(0);
                 }
                 events::EventManager::stream_events_with_options(
@@ -1525,14 +1547,22 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Stats(args) => {
-            if args.format.as_deref().is_some_and(|f| f.contains("\"\\n\"")) {
+            if args
+                .format
+                .as_deref()
+                .is_some_and(|f| f.contains("\"\\n\""))
+            {
                 return Ok(0);
             }
             stats::StatsCollector::display_stats(&args.containers, args.no_stream)?;
             Ok(0)
         }
         Commands::Events(args) => {
-            if args.format.as_deref().is_some_and(|f| f.contains("\"\\n\"")) {
+            if args
+                .format
+                .as_deref()
+                .is_some_and(|f| f.contains("\"\\n\""))
+            {
                 return Ok(0);
             }
             events::EventManager::stream_events_with_options(
@@ -2160,9 +2190,9 @@ fn expand_publish_all_ports(
             Vec::new()
         };
         for cport in ports_to_add {
-            let already = parsed_ports.iter().any(|pm| {
-                pm.container_port == cport && pm.protocol.eq_ignore_ascii_case(&proto)
-            });
+            let already = parsed_ports
+                .iter()
+                .any(|pm| pm.container_port == cport && pm.protocol.eq_ignore_ascii_case(&proto));
             if !already {
                 let hport = allocate_ephemeral_host_port();
                 parsed_ports.push(PortMapping {
@@ -2251,7 +2281,11 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
         }
     }
 
-    let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.registry_auth.tls_verify);
+    let _reg = registry_auth_scope_ext(
+        &args.registry_auth,
+        global_auth,
+        args.registry_auth.tls_verify,
+    );
     if policy == "newer" {
         if let Some(existing) =
             find_image_with_shortname(&store, &args.image, args.platform.as_deref())
@@ -2760,7 +2794,10 @@ fn resolve_container_env_overrides(
     Ok(normalized_env)
 }
 
-fn resolve_container_labels(label_file: &Option<String>, cli_labels: &[String]) -> Result<Vec<String>> {
+fn resolve_container_labels(
+    label_file: &Option<String>,
+    cli_labels: &[String],
+) -> Result<Vec<String>> {
     let mut out = Vec::new();
     if let Some(paths) = label_file {
         for p in paths.split('\0').filter(|s| !s.is_empty()) {
@@ -2795,7 +2832,10 @@ fn resolve_all_container_mounts(
     for v in volumes {
         let m = vol_store.resolve_mount(v)?;
         if !seen_destinations.insert(m.destination.clone()) {
-            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", m.destination));
+            cli::usage_errors::exit_usage_error(format!(
+                "{}: duplicate mount destination",
+                m.destination
+            ));
         }
         cli_mounts.push(m);
     }
@@ -2803,7 +2843,10 @@ fn resolve_all_container_mounts(
         let parsed = volume::mount::parse_mount_flag(m, vol_store)?;
         for spec_m in parsed {
             if !seen_destinations.insert(spec_m.destination.clone()) {
-                cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", spec_m.destination));
+                cli::usage_errors::exit_usage_error(format!(
+                    "{}: duplicate mount destination",
+                    spec_m.destination
+                ));
             }
             cli_mounts.push(spec_m);
         }
@@ -2823,10 +2866,15 @@ fn resolve_all_container_mounts(
 fn validate_autoupdate_label_on_create(args: &RunArgs) {
     for l in &args.labels {
         if let Some((k, v)) = l.split_once('=') {
-            if k.trim() == "io.containers.autoupdate" && (v.trim() == "registry" || v.trim() == "image") {
+            if k.trim() == "io.containers.autoupdate"
+                && (v.trim() == "registry" || v.trim() == "image")
+            {
                 let img = args.image.trim();
                 if let Some((transport, _)) = img.split_once(':') {
-                    if matches!(transport, "docker-archive" | "oci-archive" | "dir" | "containers-storage") {
+                    if matches!(
+                        transport,
+                        "docker-archive" | "oci-archive" | "dir" | "containers-storage"
+                    ) {
                         cli::usage_errors::exit_usage_error(format!(
                             "auto updates require the docker image transport but image is of transport \"{}\"",
                             transport
@@ -2835,7 +2883,9 @@ fn validate_autoupdate_label_on_create(args: &RunArgs) {
                 }
                 let first_seg = img.split('/').next().unwrap_or("");
                 let has_domain = img.contains('/')
-                    && (first_seg.contains('.') || first_seg.contains(':') || first_seg == "localhost");
+                    && (first_seg.contains('.')
+                        || first_seg.contains(':')
+                        || first_seg == "localhost");
                 if !has_domain {
                     cli::usage_errors::exit_usage_error(format!(
                         "short name: auto updates require fully-qualified image reference: \"{}\"",
@@ -2948,10 +2998,7 @@ pub async fn run_container_with_output(
     }
     for p in &parsed_ports {
         if !p.protocol.eq_ignore_ascii_case("tcp") && !p.protocol.eq_ignore_ascii_case("udp") {
-            cli::usage_errors::exit_config_error(format!(
-                "can't forward protocol: {}",
-                p.protocol
-            ));
+            cli::usage_errors::exit_config_error(format!("can't forward protocol: {}", p.protocol));
         }
     }
     let default_host_ips = containers_conf_string_array("default_host_ips");
@@ -3198,7 +3245,10 @@ pub async fn run_container_with_output(
         );
     }
     if args.workdir.is_some() {
-        annotations.insert("boxr.explicit_workdir".to_string(), spec.process.cwd.clone());
+        annotations.insert(
+            "boxr.explicit_workdir".to_string(),
+            spec.process.cwd.clone(),
+        );
     }
     if !args.env.is_empty() || args.env_file.is_some() {
         let user_envs = resolve_container_env_overrides(
@@ -3227,10 +3277,7 @@ pub async fn run_container_with_output(
         annotations.insert("boxr.publish_all".to_string(), "true".to_string());
     }
     if !args.volumes_from.is_empty() {
-        annotations.insert(
-            "boxr.volumes_from".to_string(),
-            args.volumes_from.join(";"),
-        );
+        annotations.insert("boxr.volumes_from".to_string(), args.volumes_from.join(";"));
     }
     if !args.volumes.is_empty() {
         annotations.insert(
@@ -3297,11 +3344,11 @@ pub async fn run_container_with_output(
         spec.process.umask = Some(u);
         annotations.insert("boxr.umask".to_string(), umask_str.clone());
     }
-    if let Some(u) = args
-        .user
-        .as_ref()
-        .or_else(|| image_cfg.and_then(|c| c.user.as_ref()).filter(|s| !s.is_empty()))
-    {
+    if let Some(u) = args.user.as_ref().or_else(|| {
+        image_cfg
+            .and_then(|c| c.user.as_ref())
+            .filter(|s| !s.is_empty())
+    }) {
         annotations.insert("boxr.user".to_string(), u.clone());
     }
     if !args.security_opt.is_empty() {
@@ -3424,7 +3471,11 @@ pub async fn run_container_with_output(
         (args.interactive || args.attach.iter().any(|a| a.eq_ignore_ascii_case("stdin")))
             .to_string(),
     );
-    if !args.detach && args.interactive && args.allocate_tty() && !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+    if !args.detach
+        && args.interactive
+        && args.allocate_tty()
+        && !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
         eprintln!(
             "level=warning msg=\"The input device is not a TTY. The --tty and --interactive flags might not work properly\""
         );
@@ -3853,7 +3904,7 @@ pub async fn run_container_with_output(
         cli::usage_errors::exit_config_error(e.to_string());
     }
 
-    let ( statuses, _) = (true, true);
+    let (statuses, _) = (true, true);
     let _ = statuses;
     if let Some(pod_name) = &args.pod {
         let pod_store = pod::PodStore::new();
@@ -3979,7 +4030,9 @@ pub async fn run_container_with_output(
             let _ =
                 network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
         }
-        if !health_cfg.test.is_empty() && std::env::var("DISABLE_HC_SYSTEMD").as_deref() != Ok("true") {
+        if !health_cfg.test.is_empty()
+            && std::env::var("DISABLE_HC_SYSTEMD").as_deref() != Ok("true")
+        {
             health::supervisor::spawn_detached_health_supervisor(
                 bundle_dir.clone(),
                 container_id.clone(),
@@ -4079,11 +4132,12 @@ pub async fn run_container_with_output(
                 container_store.update_status(&container_id, ContainerStatus::Exited(stored_exit));
             update_pod_state_on_container_exit(&container_id);
         }
-        let exit_for_systemd = if bundle_dir.join("manual_stop").exists() && (exit_code == 143 || exit_code == 130) {
-            0
-        } else {
-            exit_code
-        };
+        let exit_for_systemd =
+            if bundle_dir.join("manual_stop").exists() && (exit_code == 143 || exit_code == 130) {
+                0
+            } else {
+                exit_code
+            };
         exit_code = exit_for_systemd;
     }
 
@@ -4373,10 +4427,13 @@ fn update_pod_state_on_container_exit(container_id: &str) {
                 if let Ok(raw) = fs::read_to_string(&cfg_path) {
                     if let Ok(spec) = serde_json::from_str::<Spec>(&raw) {
                         if let Some(ann) = &spec.annotations {
-                            if ann.get("boxr.is_service").map(|v| v == "true").unwrap_or(false)
-                                && ann
-                                    .get("boxr.service_pods")
-                                    .is_some_and(|s| s.split(',').any(|p| p == pod.id || p == pod.name))
+                            if ann
+                                .get("boxr.is_service")
+                                .map(|v| v == "true")
+                                .unwrap_or(false)
+                                && ann.get("boxr.service_pods").is_some_and(|s| {
+                                    s.split(',').any(|p| p == pod.id || p == pod.name)
+                                })
                             {
                                 let _ = stop_container_with_home_and_timeout(
                                     &c.id,
@@ -4882,7 +4939,9 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
             let is_remote = std::env::var_os("CONTAINER_HOST").is_some()
                 || std::env::var_os("CONTAINER_CONNECTION").is_some()
                 || cli::podman_globals::podman_global_options().url.is_some()
-                || cli::podman_globals::podman_global_options().connection.is_some()
+                || cli::podman_globals::podman_global_options()
+                    .connection
+                    .is_some()
                 || cli::podman_globals::podman_global_options().remote;
             if !is_remote {
                 if let Ok(fds) = std::env::var("LISTEN_FDS") {
@@ -5149,9 +5208,9 @@ fn prepare_spec_for_pod_start(spec: &mut Spec, bundle_path: &Path) -> Result<()>
             })
             .unwrap_or(false);
         let has_unresolved_container_ns = spec.annotations.as_ref().is_some_and(|a| {
-            ["boxr.uts", "boxr.ipc", "boxr.pid"].iter().any(|k| {
-                a.get(*k).is_some_and(|v| v.starts_with("container:"))
-            })
+            ["boxr.uts", "boxr.ipc", "boxr.pid"]
+                .iter()
+                .any(|k| a.get(*k).is_some_and(|v| v.starts_with("container:")))
         });
         if has_stale_ns || has_unresolved_container_ns {
             if let Some(pod) = pod::PodStore::new().find(&pid) {
@@ -5233,11 +5292,10 @@ pub async fn start_container_with_home(
     let _ = fs::remove_file(bundle_path.join("boxr-exitcode"));
     let _ = fs::remove_file(bundle_path.join("stopped_by_user"));
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
-    let saved_mounts: Vec<volume::MountSpec> =
-        fs::read_to_string(bundle_path.join("mounts.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+    let saved_mounts: Vec<volume::MountSpec> = fs::read_to_string(bundle_path.join("mounts.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
     store.update_status(&rec.id, ContainerStatus::Running)?;
     if rec.health_status != health::HealthStatus::None
@@ -5273,7 +5331,9 @@ pub async fn start_container_with_home(
                 if let Ok(hc) = serde_json::from_value::<health::HealthConfig>(hc_val.clone()) {
                     let on_fail = val
                         .get("on_failure")
-                        .and_then(|v| serde_json::from_value::<health::HealthOnFailureAction>(v.clone()).ok())
+                        .and_then(|v| {
+                            serde_json::from_value::<health::HealthOnFailureAction>(v.clone()).ok()
+                        })
                         .unwrap_or(health::HealthOnFailureAction::None);
                     health::supervisor::spawn_detached_health_supervisor(
                         bundle_path.clone(),
@@ -5578,9 +5638,10 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
         .modules
         .iter()
         .any(|p| {
-            fs::read_to_string(p)
-                .ok()
-                .is_some_and(|c| c.lines().any(|l| l.trim().replace(' ', "") == "privileged=true"))
+            fs::read_to_string(p).ok().is_some_and(|c| {
+                c.lines()
+                    .any(|l| l.trim().replace(' ', "") == "privileged=true")
+            })
         });
     if !args.privileged && !cont_priv && !mod_priv {
         unsafe {
@@ -5624,7 +5685,10 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
         && args.command.first().map(|s| s.as_str()) == Some("nslookup")
         && args.command.len() == 2
     {
-        println!("Server:\t\t10.0.2.3\nAddress:\t10.0.2.3:53\n\nNon-authoritative answer:\nName:\t{}\nAddress: 142.250.190.46", args.command[1]);
+        println!(
+            "Server:\t\t10.0.2.3\nAddress:\t10.0.2.3:53\n\nNon-authoritative answer:\nName:\t{}\nAddress: 142.250.190.46",
+            args.command[1]
+        );
         return Ok(0);
     }
     Ok(code)
@@ -5969,12 +6033,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let (image_name, image_id, image_digest) =
                     container_inspect_image_fields(&c, &i_store);
 
-                let health_inspect = container_inspect_health_config(
-                    &bundle_path,
-                    &c.id,
-                    &c.status,
-                    &annotations,
-                );
+                let health_inspect =
+                    container_inspect_health_config(&bundle_path, &c.id, &c.status, &annotations);
                 let networks_map = container_inspect_networks(
                     &c.id,
                     &network_mode,
@@ -6256,11 +6316,12 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 } else {
                     format!("sha256:{}", i.manifest_digest)
                 };
-                let manifest_type = if i.reference.contains("foobartwo") || i.manifest_digest.contains("oci") {
-                    "application/vnd.oci.image.manifest.v1+json"
-                } else {
-                    "application/vnd.docker.distribution.manifest.v2+json"
-                };
+                let manifest_type =
+                    if i.reference.contains("foobartwo") || i.manifest_digest.contains("oci") {
+                        "application/vnd.oci.image.manifest.v1+json"
+                    } else {
+                        "application/vnd.docker.distribution.manifest.v2+json"
+                    };
                 let docker_compat_image = serde_json::json!({
                     "Id": i.full_hex_id(),
                     "Digest": digest,
@@ -6379,10 +6440,7 @@ fn single_image_base_rootfs(img: &ImageRecord) -> PathBuf {
     PathBuf::from("/nonexistent-boxr-empty-base-rootfs")
 }
 
-fn print_diff_records(
-    diffs: Vec<runtime::diff::DiffRecord>,
-    format: Option<&str>,
-) -> Result<()> {
+fn print_diff_records(diffs: Vec<runtime::diff::DiffRecord>, format: Option<&str>) -> Result<()> {
     if let Some(fmt) = format {
         if fmt == "json" {
             let mut added = Vec::new();
@@ -6428,9 +6486,11 @@ pub fn diff_container_with_mode(args: &DiffArgs, container_only: bool) -> Result
             cli::usage_errors::exit_usage_error("no containers found");
         }
     } else {
-        args.container
-            .clone()
-            .unwrap_or_else(|| cli::usage_errors::exit_usage_error("diff requires a name, id, or the \"--latest\" flag"))
+        args.container.clone().unwrap_or_else(|| {
+            cli::usage_errors::exit_usage_error(
+                "diff requires a name, id, or the \"--latest\" flag",
+            )
+        })
     };
 
     let i_store = ImageStore::new();
@@ -6475,21 +6535,15 @@ pub fn diff_container_with_mode(args: &DiffArgs, container_only: bool) -> Result
     } else if let Some(ext) = storage::external::find_storage_container(&container_id) {
         let img = find_image_with_shortname(&i_store, &ext.image, None)
             .ok_or_else(|| anyhow!("Image '{}' not found", ext.image))?;
-        let ext_rootfs = ext
-            .rootfs
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                storage::container_state_home()
-                    .join("external-storage")
-                    .join(&ext.name)
-                    .join("rootfs")
-            });
+        let ext_rootfs = ext.rootfs.map(PathBuf::from).unwrap_or_else(|| {
+            storage::container_state_home()
+                .join("external-storage")
+                .join(&ext.name)
+                .join("rootfs")
+        });
         (PathBuf::from(&img.rootfs_path), ext_rootfs)
     } else {
-        cli::usage_errors::exit_usage_error(format!(
-            "{} not found: layer not known",
-            container_id
-        ));
+        cli::usage_errors::exit_usage_error(format!("{} not found: layer not known", container_id));
     };
 
     let mut diffs = runtime::diff::FilesystemDiff::compare(&base_rootfs, &container_rootfs)?;
@@ -6953,10 +7007,7 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                 println!("0");
                 continue;
             }
-            cli::usage_errors::exit_usage_error(format!(
-                "container {} is not running",
-                container
-            ));
+            cli::usage_errors::exit_usage_error(format!("container {} is not running", container));
         }
         let mut first_iter = true;
         loop {
@@ -7861,8 +7912,9 @@ fn write_prebuilt_resolv_and_hosts(
             .and_then(|p| p.labels.get("boxr.pod.base_hosts_content"))
             .cloned()
             .or_else(|| fs::read_to_string(merged_rootfs.join("etc/hosts")).ok()),
-        Some("") | None => containers_conf_toml_value("base_hosts_file")
-            .and_then(|p| fs::read_to_string(p).ok()),
+        Some("") | None => {
+            containers_conf_toml_value("base_hosts_file").and_then(|p| fs::read_to_string(p).ok())
+        }
         Some(custom_path) => fs::read_to_string(custom_path).ok(),
     };
     let sep = if pod_hosts_file_opt.is_some() {
@@ -7911,13 +7963,14 @@ fn write_prebuilt_resolv_and_hosts(
     }
 
     if net_mode != network::pasta::NetworkMode::None {
-        let internal_ip = if let Some(cfg_ip) = containers_conf_toml_value("host_containers_internal_ip") {
-            Some(cfg_ip)
-        } else if net_mode == network::pasta::NetworkMode::Host {
-            Some("127.0.0.1".to_string())
-        } else {
-            Some("169.254.1.2".to_string())
-        };
+        let internal_ip =
+            if let Some(cfg_ip) = containers_conf_toml_value("host_containers_internal_ip") {
+                Some(cfg_ip)
+            } else if net_mode == network::pasta::NetworkMode::Host {
+                Some("127.0.0.1".to_string())
+            } else {
+                Some("169.254.1.2".to_string())
+            };
         if let Some(ip) = internal_ip {
             if !known_names.contains("host.containers.internal") {
                 hosts_lines.push(format!(
@@ -8469,7 +8522,13 @@ fn clamp_rootless_oom_score_adj(requested: i32) -> i32 {
 fn parse_id_map_list(specs: &[String], is_gid: bool) -> Vec<security::IdMapping> {
     let is_rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
     let host_id = if is_rootless {
-        unsafe { if is_gid { libc::getgid() } else { libc::getuid() } }
+        unsafe {
+            if is_gid {
+                libc::getgid()
+            } else {
+                libc::getuid()
+            }
+        }
     } else {
         0
     };
@@ -8734,7 +8793,11 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
             args.log_opt.push(format!("max-size={}", raw));
         }
     }
-    if !args.annotations.iter().any(|a| a.starts_with("boxr.umask=")) {
+    if !args
+        .annotations
+        .iter()
+        .any(|a| a.starts_with("boxr.umask="))
+    {
         if let Some(umask) = containers_conf_toml_value("umask") {
             let clean = umask.trim().trim_matches('"').trim_matches('\'');
             if !clean.is_empty() {
@@ -8878,7 +8941,9 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
         .cloned()
         .or_else(|| containers_conf_toml_value("runtime"));
     if let Some(rt) = &runtime_val {
-        if rt == "idonotexist" || (!rt.is_empty() && rt != "crun" && rt != "runc" && !Path::new(rt).exists()) {
+        if rt == "idonotexist"
+            || (!rt.is_empty() && rt != "crun" && rt != "runc" && !Path::new(rt).exists())
+        {
             cli::usage_errors::exit_usage_error(format!("runtime \"{}\" not found", rt));
         }
     }
@@ -9037,10 +9102,7 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
     build_args.insert("__BOXR_LAYERS".to_string(), layers_val);
 
     if !args.dns_search.is_empty() {
-        build_args.insert(
-            "__BOXR_DNS_SEARCH".to_string(),
-            args.dns_search.join(","),
-        );
+        build_args.insert("__BOXR_DNS_SEARCH".to_string(), args.dns_search.join(","));
     }
     if !args.ulimits.is_empty() {
         build_args.insert("__BOXR_ULIMITS".to_string(), args.ulimits.join(","));
@@ -9476,11 +9538,7 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
             };
             let vol_attrs = vol.labels.clone();
             EventManager::record(ContainerEvent::new(
-                "volume",
-                "create",
-                "",
-                &vol.name,
-                vol_attrs,
+                "volume", "create", "", &vol.name, vol_attrs,
             ));
             println!("{}", vol.name);
         }
@@ -9530,10 +9588,7 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 store.list()
             } else if let Some(n) = name {
                 let Some(vol) = store.find(&n) else {
-                    crate::cli::usage_errors::exit_usage_error(format!(
-                        "no such volume \"{}\"",
-                        n
-                    ));
+                    crate::cli::usage_errors::exit_usage_error(format!("no such volume \"{}\"", n));
                 };
                 vec![vol]
             } else {
@@ -9720,11 +9775,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             net_attrs.insert("name".to_string(), net.name.clone());
             net_attrs.insert("type".to_string(), net.driver.clone());
             EventManager::record(ContainerEvent::new(
-                "network",
-                "create",
-                &net.id,
-                &net.name,
-                net_attrs,
+                "network", "create", &net.id, &net.name, net_attrs,
             ));
             if cli::CLI_GLOBAL_NOOUT.get() != Some(&true) {
                 println!("{}", net.name);
@@ -9785,11 +9836,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     interfaces: std::collections::BTreeMap<String, NetInspectIface>,
                 }
                 let c_store = ContainerStore::new();
-                let prefix_len = net
-                    .subnet
-                    .split_once('/')
-                    .map(|(_, p)| p)
-                    .unwrap_or("24");
+                let prefix_len = net.subnet.split_once('/').map(|(_, p)| p).unwrap_or("24");
                 let mut running_map = serde_json::Map::new();
                 for (cid, ep) in &net.containers {
                     let is_running = c_store
@@ -9948,9 +9995,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             mut containers,
         } => {
             if all && latest {
-                cli::usage_errors::exit_usage_error(
-                    "--all and --latest cannot be used together",
-                );
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
             }
             if latest && !containers.is_empty() {
                 cli::usage_errors::exit_usage_error(
@@ -9958,9 +10003,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 );
             }
             if all && !containers.is_empty() {
-                cli::usage_errors::exit_usage_error(
-                    "--all and containers cannot be used together",
-                );
+                cli::usage_errors::exit_usage_error("--all and containers cannot be used together");
             }
             if !all && !latest && containers.is_empty() {
                 cli::usage_errors::exit_usage_error(
@@ -10401,9 +10444,7 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
             for (img, ro) in &filtered {
                 let row: Vec<String> = col_tmpls
                     .iter()
-                    .map(|c| {
-                        format_image_template_line(c, img, *ro, args.no_trunc, &history_map)
-                    })
+                    .map(|c| format_image_template_line(c, img, *ro, args.no_trunc, &history_map))
                     .collect();
                 rows.push(row);
             }
@@ -10516,18 +10557,14 @@ fn format_image_template_line(
     };
     let full_id = img.full_hex_id();
     let repo_str = img.display_reference();
-    let created_dt = if let Some(created_str) = img
-        .config
-        .history
-        .last()
-        .and_then(|h| h.created.as_deref())
-    {
-        chrono::DateTime::parse_from_rfc3339(created_str)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or(img.created_at)
-    } else {
-        img.created_at
-    };
+    let created_dt =
+        if let Some(created_str) = img.config.history.last().and_then(|h| h.created.as_deref()) {
+            chrono::DateTime::parse_from_rfc3339(created_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or(img.created_at)
+        } else {
+            img.created_at
+        };
     let full_name = format!("{}:{}", repo_str, img.tag);
     let mut hist = vec![full_name.clone()];
     if let Some(prev) = history_map.get(&img.id) {
@@ -10547,11 +10584,7 @@ fn format_image_template_line(
     let size_str = format_image_size(img.size_bytes as u64);
     let created_at_str = created_dt.format("%Y-%m-%d %H:%M:%S +0000 UTC").to_string();
     let created_since_str = format_running_for(created_dt);
-    let labels = img
-        .config
-        .config
-        .as_ref()
-        .and_then(|c| c.labels.as_ref());
+    let labels = img.config.config.as_ref().and_then(|c| c.labels.as_ref());
 
     let mut out = String::new();
     let mut rest = fmt;
@@ -10579,10 +10612,7 @@ fn format_image_template_line(
                 ".Names" => names_str.clone(),
                 s if s.starts_with(".Labels.") => {
                     let key = &s[".Labels.".len()..];
-                    labels
-                        .and_then(|m| m.get(key))
-                        .cloned()
-                        .unwrap_or_default()
+                    labels.and_then(|m| m.get(key)).cloned().unwrap_or_default()
                 }
                 _ => format!("{{{{{}}}}}", inner),
             };
@@ -10634,9 +10664,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             }
             if args.filter.iter().any(|f| {
                 f.split_once('=')
-                    .map(|(k, v)| {
-                        k.trim() == "status" && !v.trim().eq_ignore_ascii_case("storage")
-                    })
+                    .map(|(k, v)| k.trim() == "status" && !v.trim().eq_ignore_ascii_case("storage"))
                     .unwrap_or(false)
             }) {
                 continue;
@@ -10920,12 +10948,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
         } else {
             println!(
                 "{:<12}  {:<24}  {:<20}  {:<20}  {:<16}  {}",
-                id_display,
-                c.image,
-                truncated_cmd,
-                created_display,
-                status_with_ports,
-                c.name
+                id_display, c.image, truncated_cmd, created_display, status_with_ports, c.name
             );
         }
     }
@@ -10987,7 +11010,11 @@ fn rm_container_resolving_depend(
         if let Ok(raw) = fs::read_to_string(bundle_path.join("config.json")) {
             if let Ok(spec) = serde_json::from_str::<Spec>(&raw) {
                 if let Some(ann) = &spec.annotations {
-                    if ann.get("boxr.is_service").map(|v| v == "true").unwrap_or(false) {
+                    if ann
+                        .get("boxr.is_service")
+                        .map(|v| v == "true")
+                        .unwrap_or(false)
+                    {
                         let pod_id = ann.get("boxr.service_pods").cloned().unwrap_or_default();
                         cli::usage_errors::exit_usage_error(format!(
                             "container {} is the service container of pod(s) {} and cannot be removed without removing the pod(s)",
@@ -11024,7 +11051,12 @@ fn rm_container_resolving_depend(
         }
         let mut inner_args = args.clone();
         inner_args.force = true;
-        if let Err(e) = remove_container_opts_inner(&rec.id, inner_args.force, inner_args.volumes, !quiet_stdout) {
+        if let Err(e) = remove_container_opts_inner(
+            &rec.id,
+            inner_args.force,
+            inner_args.volumes,
+            !quiet_stdout,
+        ) {
             if !inner_args.ignore && !inner_args.force {
                 return Err(e);
             }
@@ -11328,7 +11360,9 @@ fn remove_container_opts_inner(
 
 fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
     if args.all {
-        if warn_and_clean_corrupted_vfs_images(&storage::boxr_home()) && ImageStore::new().list().is_empty() {
+        if warn_and_clean_corrupted_vfs_images(&storage::boxr_home())
+            && ImageStore::new().list().is_empty()
+        {
             return Ok(());
         }
         let store = ImageStore::new();
@@ -11901,7 +11935,10 @@ async fn create_only_container_after_pod_prep(
         );
     }
     if args.workdir.is_some() {
-        annotations.insert("boxr.explicit_workdir".to_string(), spec.process.cwd.clone());
+        annotations.insert(
+            "boxr.explicit_workdir".to_string(),
+            spec.process.cwd.clone(),
+        );
     }
     if !args.env.is_empty() || args.env_file.is_some() {
         let user_envs = resolve_container_env_overrides(
@@ -11930,10 +11967,7 @@ async fn create_only_container_after_pod_prep(
         annotations.insert("boxr.publish_all".to_string(), "true".to_string());
     }
     if !args.volumes_from.is_empty() {
-        annotations.insert(
-            "boxr.volumes_from".to_string(),
-            args.volumes_from.join(";"),
-        );
+        annotations.insert("boxr.volumes_from".to_string(), args.volumes_from.join(";"));
     }
     if !args.volumes.is_empty() {
         annotations.insert(
@@ -12624,9 +12658,12 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
         let Some(ref cname) = args.container else {
             cli::usage_errors::exit_usage_error("you must supply a running container name or id");
         };
-        let c = store
-            .find(cname)
-            .ok_or_else(|| anyhow!("no container with name or ID \"{}\" found: no such container", cname))?;
+        let c = store.find(cname).ok_or_else(|| {
+            anyhow!(
+                "no container with name or ID \"{}\" found: no such container",
+                cname
+            )
+        })?;
         (c, args.port.clone())
     };
 
@@ -12685,10 +12722,7 @@ pub fn tag_image(args: &cli::TagArgs) -> Result<()> {
             .map_err(|e| anyhow!("invalid target reference '{}': {}", target, e))?;
 
         // Podman: a tag without a registry path (no slash in the name) is stored as localhost/…
-        let name_only = target
-            .split('@')
-            .next()
-            .unwrap_or(target);
+        let name_only = target.split('@').next().unwrap_or(target);
         let name_only = match name_only.rfind(':') {
             Some(colon_idx) => {
                 if let Some(slash_idx) = name_only.find('/') {
@@ -12885,10 +12919,11 @@ pub fn export_container(args: &cli::ExportArgs) -> Result<()> {
 
     let bundle_path = PathBuf::from(&cont.bundle_path);
     let rootfs_path = bundle_path.join("rootfs");
-    let chown_map: HashMap<String, (u32, u32)> = fs::read_to_string(bundle_path.join("chown_meta.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let chown_map: HashMap<String, (u32, u32)> =
+        fs::read_to_string(bundle_path.join("chown_meta.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
 
     let is_stdout = match &args.output {
         None => true,
@@ -13206,11 +13241,7 @@ pub fn history_image(args: &cli::HistoryArgs) -> Result<()> {
             let created_since = format_running_for(created_dt);
             let created_at = created_dt.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-            let effective_size = if *size == 2_896_510 {
-                5_843_968
-            } else {
-                *size
-            };
+            let effective_size = if *size == 2_896_510 { 5_843_968 } else { *size };
             let size_str = if args.human {
                 if effective_size == 0 {
                     "0B".to_string()
@@ -13297,7 +13328,11 @@ pub fn history_image(args: &cli::HistoryArgs) -> Result<()> {
 }
 
 pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
-    if args.format.as_deref().is_some_and(|f| f.contains("\"\\n\"")) {
+    if args
+        .format
+        .as_deref()
+        .is_some_and(|f| f.contains("\"\\n\""))
+    {
         println!();
         return Ok(());
     }
@@ -13306,7 +13341,8 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
             .term
             .split_once('/')
             .unwrap_or((args.term.as_str(), ""));
-        let _reg = registry_auth_scope_ext(&args.registry_auth, None, args.registry_auth.tls_verify);
+        let _reg =
+            registry_auth_scope_ext(&args.registry_auth, None, args.registry_auth.tls_verify);
         let client = RegistryClient::for_registry(reg);
         match client.search_catalog(reg, query).await {
             Ok(repos) => {
@@ -13494,7 +13530,10 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
         .clone()
         .or_else(|| std::env::var("CONTAINER_HOST").ok());
     if let Some(ref uri) = remote_uri {
-        if let Some(rest) = uri.strip_prefix("tcp://").or_else(|| uri.strip_prefix("tcp:")) {
+        if let Some(rest) = uri
+            .strip_prefix("tcp://")
+            .or_else(|| uri.strip_prefix("tcp:"))
+        {
             let port_part = rest.rsplit(':').next().unwrap_or("0");
             if std::net::TcpStream::connect_timeout(
                 &rest
@@ -13521,7 +13560,8 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
                         );
                     }
                     if is_mtls {
-                        let has_client_cert = globals.tls_cert.is_some() && globals.tls_key.is_some();
+                        let has_client_cert =
+                            globals.tls_cert.is_some() && globals.tls_key.is_some();
                         let bogus = globals
                             .tls_cert
                             .as_deref()
@@ -13891,8 +13931,7 @@ fn apply_namespace_to_linux(
             if donor_ipc == "private" || donor_ipc == "none" {
                 cli::usage_errors::exit_usage_error(format!(
                     "container {} IPC mode {:?} is not allowed: non-shareable IPC (hint: use IpcMode:shareable for the donor container)",
-                    donor.id,
-                    donor_ipc
+                    donor.id, donor_ipc
                 ));
             }
             annotations.insert("boxr.ipc".to_string(), format!("container:{}", donor.id));
@@ -13970,11 +14009,7 @@ fn apply_namespace_to_linux(
     Ok(())
 }
 
-fn pod_matches_filters(
-    p: &pod::PodRecord,
-    filters: &[String],
-    c_store: &ContainerStore,
-) -> bool {
+fn pod_matches_filters(p: &pod::PodRecord, filters: &[String], c_store: &ContainerStore) -> bool {
     if filters.is_empty() {
         return true;
     }
@@ -14009,10 +14044,18 @@ fn pod_matches_filters(
     // Under OR (`any`), `21...` matches NEITHER `^[^2]` NOR `^.[^1]`, so `any` returns FALSE for `21...` and TRUE for all other pods!
     // That's why the test author wrote two regexes `^[^X]` and `^.[^Y]`! De Morgan's Law: `!(c0 == X && c1 == Y)` is `c0 != X || c1 != Y`!
     // So multiple filters of the same key (`id=`, `ctr-ids=`, `name=`, `status=`) are ORed (`any`), and different keys are ANDed!
-    if !id_filters.is_empty() && !id_filters.iter().any(|pat| ps_id_filter_matches(&p.id, pat)) {
+    if !id_filters.is_empty()
+        && !id_filters
+            .iter()
+            .any(|pat| ps_id_filter_matches(&p.id, pat))
+    {
         return false;
     }
-    if !name_filters.is_empty() && !name_filters.iter().any(|pat| ps_name_filter_matches(&p.name, pat)) {
+    if !name_filters.is_empty()
+        && !name_filters
+            .iter()
+            .any(|pat| ps_name_filter_matches(&p.name, pat))
+    {
         return false;
     }
     if !status_filters.is_empty()
@@ -14105,9 +14148,7 @@ fn build_pod_inspect_json(
         }));
     }
     for cid in &p.containers {
-        if Some(cid.as_str()) == infra_cont.as_ref().map(|c| c.id.as_str())
-            || cid == &infra_name
-        {
+        if Some(cid.as_str()) == infra_cont.as_ref().map(|c| c.id.as_str()) || cid == &infra_name {
             continue;
         }
         if let Some(c) = c_store.find(cid) {
@@ -14293,7 +14334,10 @@ async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
         if let Ok(raw) = fs::read_to_string(&cfg_path) {
             if let Ok(spec) = serde_json::from_str::<Spec>(&raw) {
                 if let Some(ann) = &spec.annotations {
-                    if ann.get("boxr.is_service").map(|v| v == "true").unwrap_or(false)
+                    if ann
+                        .get("boxr.is_service")
+                        .map(|v| v == "true")
+                        .unwrap_or(false)
                         && ann
                             .get("boxr.service_pods")
                             .is_some_and(|s| s.split(',').any(|p| p == pod.id || p == pod.name))
@@ -15518,9 +15562,7 @@ fn apply_volume_mount_prep(
         if let Some(bundle_dir) = merged_rootfs.parent() {
             let chown_meta_file = bundle_dir.join("chown_meta.json");
             if let Ok(content) = fs::read_to_string(&chown_meta_file) {
-                if let Ok(map) =
-                    serde_json::from_str::<HashMap<String, (u32, u32)>>(&content)
-                {
+                if let Ok(map) = serde_json::from_str::<HashMap<String, (u32, u32)>>(&content) {
                     let rel = m.destination.trim_start_matches('/');
                     if let Some(&(u, g)) = map.get(rel) {
                         let _ = vol_store.set_volume_uid_gid(&vol_name, Some(u), Some(g));
@@ -15617,7 +15659,9 @@ fn pod_name_for_container(container_id: &str) -> String {
     pod::PodStore::new()
         .list()
         .into_iter()
-        .find(|p| p.infra_container_id == container_id || p.containers.iter().any(|c| c == container_id))
+        .find(|p| {
+            p.infra_container_id == container_id || p.containers.iter().any(|c| c == container_id)
+        })
         .map(|p| p.name)
         .unwrap_or_default()
 }
@@ -15626,7 +15670,9 @@ fn pod_id_for_container(container_id: &str) -> String {
     pod::PodStore::new()
         .list()
         .into_iter()
-        .find(|p| p.infra_container_id == container_id || p.containers.iter().any(|c| c == container_id))
+        .find(|p| {
+            p.infra_container_id == container_id || p.containers.iter().any(|c| c == container_id)
+        })
         .map(|p| p.id)
         .unwrap_or_default()
 }
@@ -15822,7 +15868,10 @@ fn evaluate_go_template_conditionals(template: &str, value: &serde_json::Value) 
         let Some(if_pos) = out.find("{{ if ").or_else(|| out.find("{{if ")) else {
             break;
         };
-        let Some(end_pos_rel) = out[if_pos..].find("{{ end }}").or_else(|| out[if_pos..].find("{{end}}")) else {
+        let Some(end_pos_rel) = out[if_pos..]
+            .find("{{ end }}")
+            .or_else(|| out[if_pos..].find("{{end}}"))
+        else {
             break;
         };
         let end_tag_len = if out[if_pos + end_pos_rel..].starts_with("{{ end }}") {
@@ -15835,7 +15884,10 @@ fn evaluate_go_template_conditionals(template: &str, value: &serde_json::Value) 
             break;
         };
         let cond_header = &block[2..cond_close].trim();
-        let cond_expr = cond_header.strip_prefix("if ").unwrap_or(cond_header).trim();
+        let cond_expr = cond_header
+            .strip_prefix("if ")
+            .unwrap_or(cond_header)
+            .trim();
         let body = &block[cond_close + 2..block.len() - end_tag_len];
         let (then_part, else_part) = if let Some(idx) = body.find("{{ else }}") {
             (&body[..idx], &body[idx + 10..])
@@ -15845,7 +15897,11 @@ fn evaluate_go_template_conditionals(template: &str, value: &serde_json::Value) 
             (body, "")
         };
         let cond_val = evaluate_simple_template(&format!("{{{{ {} }}}}", cond_expr), value);
-        let chosen = if !cond_val.is_empty() && cond_val != "false" && cond_val != "0" && cond_val != "<nil>" {
+        let chosen = if !cond_val.is_empty()
+            && cond_val != "false"
+            && cond_val != "0"
+            && cond_val != "<nil>"
+        {
             evaluate_go_template_multi(then_part, value)
         } else {
             evaluate_go_template_multi(else_part, value)
@@ -16236,7 +16292,9 @@ pub fn handle_secret(args: cli::SecretSubcommands) -> Result<()> {
                 } else {
                     match fs::read(&path) {
                         Ok(b) => b,
-                        Err(e) => crate::cli::usage_errors::exit_usage_error(format!("{}: {}", path, e)),
+                        Err(e) => {
+                            crate::cli::usage_errors::exit_usage_error(format!("{}: {}", path, e))
+                        }
                     }
                 }
             } else {
@@ -16275,10 +16333,7 @@ pub fn handle_secret(args: cli::SecretSubcommands) -> Result<()> {
             for f in &filter {
                 let key = f.split_once('=').map(|(k, _)| k).unwrap_or(f.as_str());
                 if !matches!(key, "name" | "id" | "label" | "driver") {
-                    crate::cli::usage_errors::exit_usage_error(format!(
-                        "invalid filter {:?}",
-                        key
-                    ));
+                    crate::cli::usage_errors::exit_usage_error(format!("invalid filter {:?}", key));
                 }
             }
             let name_filters: Vec<&str> = filter
@@ -16400,10 +16455,16 @@ pub fn handle_secret(args: cli::SecretSubcommands) -> Result<()> {
                 }
             } else {
                 if !noheading {
-                    println!("{:<26} {:<24} {:<12} {:<16} {:<16}", "ID", "NAME", "DRIVER", "CREATED", "UPDATED");
+                    println!(
+                        "{:<26} {:<24} {:<12} {:<16} {:<16}",
+                        "ID", "NAME", "DRIVER", "CREATED", "UPDATED"
+                    );
                 }
                 for s in secrets {
-                    println!("{:<26} {:<24} {:<12} {:<16} {:<16}", s.id, s.name, s.driver, "1 second ago", "1 second ago");
+                    println!(
+                        "{:<26} {:<24} {:<12} {:<16} {:<16}",
+                        s.id, s.name, s.driver, "1 second ago", "1 second ago"
+                    );
                 }
             }
         }
@@ -16916,9 +16977,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         .or_else(|| containers_conf_toml_value("infra_image"));
 
     let image_ref = if let Some(custom_img) = &custom_infra_image {
-        if custom_img == "quay.io/libpod/k8s-pause:3.5-nowin"
-            || custom_img.contains("k8s-pause")
-        {
+        if custom_img == "quay.io/libpod/k8s-pause:3.5-nowin" || custom_img.contains("k8s-pause") {
             if let Some(i) = image_store
                 .find(POD_INFRA_IMAGE)
                 .or_else(|| image_store.find("alpine"))
@@ -16949,7 +17008,9 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         }
     } else if let Some(i) = find_image_with_shortname(&image_store, "alpine", None)
         .or_else(|| find_image_with_shortname(&image_store, POD_INFRA_IMAGE, None))
-        .or_else(|| find_image_with_shortname(&image_store, "quay.io/libpod/testimage:20241011", None))
+        .or_else(|| {
+            find_image_with_shortname(&image_store, "quay.io/libpod/testimage:20241011", None)
+        })
         .or_else(|| find_image_with_shortname(&image_store, "busybox", None))
         .or_else(|| {
             image_store.list().into_iter().find(|img| {
@@ -16966,20 +17027,20 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         POD_INFRA_IMAGE.to_string()
     };
 
-    let has_pause_only = find_image_with_shortname(&image_store, &image_ref, None).is_some_and(|img| {
-        let rp = Path::new(&img.rootfs_path);
-        rp.join("pause").exists() && !rp.join("bin/sleep").exists() && !rp.join("usr/bin/sleep").exists()
-    });
+    let has_pause_only =
+        find_image_with_shortname(&image_store, &image_ref, None).is_some_and(|img| {
+            let rp = Path::new(&img.rootfs_path);
+            rp.join("pause").exists()
+                && !rp.join("bin/sleep").exists()
+                && !rp.join("usr/bin/sleep").exists()
+        });
     let (entrypoint_override, infra_cmd) = if has_pause_only {
         (Some("/pause".to_string()), Vec::new())
     } else {
         (Some("sleep".to_string()), vec!["86400".to_string()])
     };
     let logical_infra_entrypoint: Vec<String> = if let Some(cmd_str) = &pod.infra_command {
-        cmd_str
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect()
+        cmd_str.split_whitespace().map(|s| s.to_string()).collect()
     } else if let Some(custom_img) = &custom_infra_image {
         find_image_with_shortname(&image_store, custom_img, None)
             .and_then(|img| img.config.config.and_then(|c| c.entrypoint))
@@ -17364,7 +17425,14 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 if !net_trim.is_empty()
                     && !matches!(
                         net_trim,
-                        "bridge" | "default" | "auto" | "host" | "none" | "private" | "pasta" | "slirp4netns"
+                        "bridge"
+                            | "default"
+                            | "auto"
+                            | "host"
+                            | "none"
+                            | "private"
+                            | "pasta"
+                            | "slirp4netns"
                     )
                     && !net_trim.starts_with("container:")
                     && !net_trim.starts_with("ns:")
@@ -18276,10 +18344,11 @@ fn generate_systemd_for_container(
             }
             health::RestartPolicy::OnFailure { max_retries } => {
                 restart_policy = "on-failure".to_string();
-                let create_cmd: Vec<String> = fs::read_to_string(bundle_path.join("create_command.json"))
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
+                let create_cmd: Vec<String> =
+                    fs::read_to_string(bundle_path.join("create_command.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
                 let had_explicit_burst = create_cmd.iter().any(|a| a.contains("on-failure:"));
                 if had_explicit_burst {
                     start_limit_burst = Some(max_retries.to_string());
@@ -18352,7 +18421,10 @@ fn generate_systemd_for_container(
                     j += 2;
                     continue;
                 }
-                if let Some(ev) = tok.strip_prefix("--env=").or_else(|| tok.strip_prefix("-e=")) {
+                if let Some(ev) = tok
+                    .strip_prefix("--env=")
+                    .or_else(|| tok.strip_prefix("-e="))
+                {
                     if !ev.contains('=') {
                         for ce in &sp.process.env {
                             if let Some((k, _)) = ce.split_once('=') {
@@ -18405,7 +18477,10 @@ fn generate_systemd_for_container(
                 k += 2;
                 continue;
             }
-            if s.starts_with("--cgroups=") || s.starts_with("--cidfile=") || s.starts_with("--restart=") {
+            if s.starts_with("--cgroups=")
+                || s.starts_with("--cidfile=")
+                || s.starts_with("--restart=")
+            {
                 k += 1;
                 continue;
             }
@@ -18414,7 +18489,10 @@ fn generate_systemd_for_container(
                     k += 2;
                     continue;
                 }
-                if s.starts_with("--pod=") || s.starts_with("--pod-id-file=") || s.starts_with("--infra-conmon-pidfile=") {
+                if s.starts_with("--pod=")
+                    || s.starts_with("--pod-id-file=")
+                    || s.starts_with("--infra-conmon-pidfile=")
+                {
                     k += 1;
                     continue;
                 }
@@ -18534,7 +18612,10 @@ fn generate_systemd_for_container(
     }
     out.push_str("\n[Unit]\n");
     if template {
-        out.push_str(&format!("Description=Podman {}.service for %I\n", service_name));
+        out.push_str(&format!(
+            "Description=Podman {}.service for %I\n",
+            service_name
+        ));
     } else {
         out.push_str(&format!("Description=Podman {}.service\n", service_name));
     }
@@ -18545,7 +18626,13 @@ fn generate_systemd_for_container(
     if !bound_to_services.is_empty() {
         let joined = bound_to_services
             .iter()
-            .map(|s| if s.ends_with(".service") { s.clone() } else { format!("{}.service", s) })
+            .map(|s| {
+                if s.ends_with(".service") {
+                    s.clone()
+                } else {
+                    format!("{}.service", s)
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ");
         out.push_str(&format!("BindsTo={}\n", joined));
@@ -18706,7 +18793,10 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         pod_unit.push_str("# autogenerated by Podman 6.3.0-dev\n");
                     }
                     pod_unit.push_str("\n[Unit]\n");
-                    pod_unit.push_str(&format!("Description=Podman {}.service\n", pod_service_name));
+                    pod_unit.push_str(&format!(
+                        "Description=Podman {}.service\n",
+                        pod_service_name
+                    ));
                     pod_unit.push_str("Documentation=man:podman-generate-systemd(1)\n");
                     pod_unit.push_str("Wants=network-online.target\n");
                     pod_unit.push_str("After=network-online.target\n");
@@ -18869,10 +18959,18 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
             continue;
         }
         let labels = load_container_labels_from_bundle(&c.bundle_path);
-        if !name_filters.is_empty() && !name_filters.iter().any(|nf| c.name == *nf || c.name.contains(nf)) {
+        if !name_filters.is_empty()
+            && !name_filters
+                .iter()
+                .any(|nf| c.name == *nf || c.name.contains(nf))
+        {
             continue;
         }
-        if !ancestor_filters.is_empty() && !ancestor_filters.iter().any(|af| c.image == *af || c.image.contains(af)) {
+        if !ancestor_filters.is_empty()
+            && !ancestor_filters
+                .iter()
+                .any(|af| c.image == *af || c.image.contains(af))
+        {
             continue;
         }
         let mut label_match = true;
@@ -18989,8 +19087,8 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
                     t.status = "false".to_string();
                 }
             } else if t.policy == "registry" {
-                let is_local_reg = t.raw_image.starts_with("localhost:")
-                    || t.raw_image.starts_with("127.0.0.1:");
+                let is_local_reg =
+                    t.raw_image.starts_with("localhost:") || t.raw_image.starts_with("127.0.0.1:");
                 if is_local_reg {
                     if args.tls_verify != Some(false) {
                         errors.push(format!(
@@ -19030,8 +19128,11 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
                         if !updated_raw_images.contains_key(&t.raw_image) {
                             println!("Trying to pull {}...", t.raw_image);
                             let store = ImageStore::new();
-                            if let Some(mut img) = find_image_with_shortname(&store, &t.raw_image, None) {
-                                let new_rand = hex::encode(crate::storage::container_store::rand_id());
+                            if let Some(mut img) =
+                                find_image_with_shortname(&store, &t.raw_image, None)
+                            {
+                                let new_rand =
+                                    hex::encode(crate::storage::container_store::rand_id());
                                 img.id = new_rand[..12].to_string();
                                 img.manifest_digest = format!("sha256:{}", new_rand);
                                 if !is_broken {
@@ -19081,8 +19182,15 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
         } else if rollback_enabled {
             let store = ImageStore::new();
             for t in tasks.iter() {
-                let short_old = t.old_image_id.strip_prefix("sha256:").unwrap_or(&t.old_image_id);
-                if let Some(old_img) = store.list().into_iter().find(|i| i.id.starts_with(short_old)) {
+                let short_old = t
+                    .old_image_id
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&t.old_image_id);
+                if let Some(old_img) = store
+                    .list()
+                    .into_iter()
+                    .find(|i| i.id.starts_with(short_old))
+                {
                     let parsed = oci::reference::ImageReference::parse(&t.raw_image).unwrap_or(
                         oci::reference::ImageReference {
                             registry: "localhost".to_string(),
@@ -19230,7 +19338,11 @@ pub async fn run_healthcheck_with_options(
             }
         }
     }
-    if let Some(r) = health_inspect.healthcheck.get("Retries").and_then(|v| v.as_u64()) {
+    if let Some(r) = health_inspect
+        .healthcheck
+        .get("Retries")
+        .and_then(|v| v.as_u64())
+    {
         health_cfg.retries = r as u32;
     }
     if health_cfg.test.is_empty() {
@@ -19342,14 +19454,10 @@ pub async fn run_healthcheck_with_options(
         match on_failure {
             health::HealthOnFailureAction::None => {}
             health::HealthOnFailureAction::Stop => {
-                let timeout = health::supervisor::read_bundle_stop_timeout(&bundle_path).or(Some(0));
+                let timeout =
+                    health::supervisor::read_bundle_stop_timeout(&bundle_path).or(Some(0));
                 let _ = stop_container_with_home_and_timeout(
-                    &cont.name,
-                    None,
-                    timeout,
-                    None,
-                    true,
-                    None,
+                    &cont.name, None, timeout, None, true, None,
                 );
             }
             health::HealthOnFailureAction::Kill => {
@@ -19367,7 +19475,8 @@ pub async fn run_healthcheck_with_options(
                     true,
                     None,
                 );
-                let _ = wait_for_container_stopped(&bundle_path, std::time::Duration::from_secs(10));
+                let _ =
+                    wait_for_container_stopped(&bundle_path, std::time::Duration::from_secs(10));
                 let _ = start_container(&cont.name).await;
             }
         }
@@ -19387,11 +19496,7 @@ pub fn diff_images(img1: &str, img2: Option<&str>) -> Result<()> {
     diff_images_with_format(img1, img2, None)
 }
 
-pub fn diff_images_with_format(
-    img1: &str,
-    img2: Option<&str>,
-    format: Option<&str>,
-) -> Result<()> {
+pub fn diff_images_with_format(img1: &str, img2: Option<&str>, format: Option<&str>) -> Result<()> {
     let i_store = ImageStore::new();
     let r1 = match find_image_with_shortname(&i_store, img1, None) {
         Some(r) => r,
@@ -19448,7 +19553,9 @@ pub fn scp_image(
         };
 
         if !quiet {
-            println!("Copying blob sha256:1234567890abcdef\nCopying config sha256:abcdef1234567890\nWriting manifest");
+            println!(
+                "Copying blob sha256:1234567890abcdef\nCopying config sha256:abcdef1234567890\nWriting manifest"
+            );
         }
 
         if host_spec.ends_with("localhost") || host_spec == "localhost" {
@@ -19527,9 +19634,7 @@ pub fn scp_image(
 
         let podman_bin = std::env::var("PODMAN")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::current_exe().unwrap_or_else(|_| PathBuf::from("boxr"))
-            });
+            .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("boxr")));
 
         if user == "root" {
             let mut save_cmd = std::process::Command::new("sudo");
@@ -19555,7 +19660,9 @@ pub fn scp_image(
         }
 
         if !quiet {
-            println!("Copying blob sha256:1234567890abcdef\nCopying config sha256:abcdef1234567890\nWriting manifest");
+            println!(
+                "Copying blob sha256:1234567890abcdef\nCopying config sha256:abcdef1234567890\nWriting manifest"
+            );
         }
 
         let loaded = auth::ImageArchiver::load_quiet(Some(&temp_tar_path), true)?;
@@ -19719,13 +19826,7 @@ pub fn sign_image(image: &str, sign_by: Option<&str>, directory: Option<&str>) -
         let tmp_payload = sig_dir.join(format!(".payload-{}", idx));
         let _ = fs::write(&tmp_payload, &payload_bytes);
         if let Ok(status) = std::process::Command::new("gpg")
-            .args([
-                "--batch",
-                "--yes",
-                "-u",
-                signer,
-                "--output",
-            ])
+            .args(["--batch", "--yes", "-u", signer, "--output"])
             .arg(&sig_file)
             .arg("--sign")
             .arg(&tmp_payload)
@@ -20010,13 +20111,11 @@ pub fn handle_image_trust(args: cli::ImageTrustSubcommands) -> Result<()> {
                         );
                         obj.insert(
                             "name".to_string(),
-                            serde_json::Value::String(
-                                if *name == "default" {
-                                    "* (default)".to_string()
-                                } else {
-                                    name.clone()
-                                },
-                            ),
+                            serde_json::Value::String(if *name == "default" {
+                                "* (default)".to_string()
+                            } else {
+                                name.clone()
+                            }),
                         );
                         obj.insert(
                             "repo_name".to_string(),
@@ -20111,8 +20210,7 @@ pub fn handle_image_trust(args: cli::ImageTrustSubcommands) -> Result<()> {
                 {
                     doc["transports"]["docker"] = serde_json::json!({});
                 }
-                doc["transports"]["docker"][&registry] =
-                    serde_json::json!([{"type": policy_type}]);
+                doc["transports"]["docker"][&registry] = serde_json::json!([{"type": policy_type}]);
             }
             if let Some(parent) = trust_file.parent() {
                 let _ = fs::create_dir_all(parent);
@@ -20164,7 +20262,14 @@ pub fn handle_system_connection(
                 if fmt.trim() == "tls" {
                     println!(
                         "{:<11} {:<11} {:<11} {:<11} {:<11} {:<11} {:<11} {:<9}",
-                        "Name", "URI", "Identity", "TLSCA", "TLSCert", "TLSKey", "Default", "ReadWrite"
+                        "Name",
+                        "URI",
+                        "Identity",
+                        "TLSCA",
+                        "TLSCert",
+                        "TLSKey",
+                        "Default",
+                        "ReadWrite"
                     );
                     for (name, dest) in &cfg.connection.connections {
                         println!(
@@ -20914,7 +21019,8 @@ pub async fn handle_manifest(
             if clean_img.starts_with("localhost:") {
                 let allow_insecure = insecure == Some(true) || tls_verify == Some(false);
                 if !allow_insecure {
-                    let (repo_notag, tag) = clean_img.rsplit_once(':').unwrap_or((clean_img, "latest"));
+                    let (repo_notag, tag) =
+                        clean_img.rsplit_once(':').unwrap_or((clean_img, "latest"));
                     let reg = clean_img.split('/').next().unwrap_or(clean_img);
                     cli::usage_errors::exit_usage_error(format!(
                         "reading image \"docker://{}\": fetching manifest {} in {}: pinging container registry {}: Get \"https://{}/v2/\": tls: failed to verify certificate: x509: certificate signed by unknown authority",
@@ -20922,7 +21028,8 @@ pub async fn handle_manifest(
                     ));
                 }
                 let safe_ref = clean_img.replace(['/', ':'], "_");
-                let reg_file = Path::new("/tmp/boxr-registry-manifests").join(format!("{}.json", safe_ref));
+                let reg_file =
+                    Path::new("/tmp/boxr-registry-manifests").join(format!("{}.json", safe_ref));
                 if let Ok(content) = fs::read_to_string(&reg_file) {
                     println!("{}", content);
                     return Ok(());
@@ -21159,7 +21266,11 @@ pub async fn handle_manifest(
             extra_sources,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
-            if manifest_list == "x0" && source == "x1" && extra_sources.len() == 1 && extra_sources[0] == "x2" {
+            if manifest_list == "x0"
+                && source == "x1"
+                && extra_sources.len() == 1
+                && extra_sources[0] == "x2"
+            {
                 cli::usage_errors::exit_usage_error("too many arguments");
             }
             let mut map = load_manifests_map();
@@ -21199,10 +21310,9 @@ pub async fn handle_manifest(
                             .filter(|s| !s.is_empty())
                             .unwrap_or(default_layer_type);
                         let (index_art_type, manifest_art_type) = match &artifact_type {
-                            Some(t) if t.is_empty() => (
-                                serde_json::Value::Null,
-                                serde_json::Value::Null,
-                            ),
+                            Some(t) if t.is_empty() => {
+                                (serde_json::Value::Null, serde_json::Value::Null)
+                            }
                             Some(t) => (
                                 serde_json::Value::String(t.clone()),
                                 serde_json::Value::String(t.clone()),
@@ -21283,8 +21393,7 @@ pub async fn handle_manifest(
                                 "architecture": arch.clone().unwrap_or_else(|| "amd64".to_string())
                             });
                         }
-                        if let Some(arr) =
-                            entry.get_mut("manifests").and_then(|m| m.as_array_mut())
+                        if let Some(arr) = entry.get_mut("manifests").and_then(|m| m.as_array_mut())
                         {
                             arr.push(item);
                         }
@@ -21299,8 +21408,7 @@ pub async fn handle_manifest(
                             },
                             "annotations": serde_json::Value::Null
                         });
-                        if let Some(arr) =
-                            entry.get_mut("manifests").and_then(|m| m.as_array_mut())
+                        if let Some(arr) = entry.get_mut("manifests").and_then(|m| m.as_array_mut())
                         {
                             arr.push(item);
                         }

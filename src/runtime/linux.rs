@@ -953,7 +953,10 @@ fn send_sd_notify(socket_path: &str, msg: &str) {
         for _ in 0..30 {
             match sock.send_to(msg.as_bytes(), socket_path) {
                 Ok(_) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.raw_os_error() == Some(libc::EAGAIN) => {
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.raw_os_error() == Some(libc::EAGAIN) =>
+                {
                     thread::sleep(Duration::from_millis(20));
                 }
                 Err(_) => break,
@@ -986,7 +989,10 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
     if let Ok(spec_str) = fs::read_to_string(bundle_path.join("config.json")) {
         if let Ok(spec) = serde_json::from_str::<Spec>(&spec_str) {
             if let Some(ann) = &spec.annotations {
-                let mode = ann.get("boxr.sdnotify_mode").map(|s| s.as_str()).unwrap_or("conmon");
+                let mode = ann
+                    .get("boxr.sdnotify_mode")
+                    .map(|s| s.as_str())
+                    .unwrap_or("conmon");
                 if let Some(sock) = ann.get("boxr.sdnotify_socket") {
                     if mode == "conmon" {
                         send_sd_notify(sock, &format!("MAINPID={}\nREADY=1", conmon_pid));
@@ -1105,7 +1111,10 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                             systemd_stop_ok = true;
                         }
                         if let Some(sock) = ann.get("boxr.sdnotify_socket") {
-                            let mode = ann.get("boxr.sdnotify_mode").map(|s| s.as_str()).unwrap_or("conmon");
+                            let mode = ann
+                                .get("boxr.sdnotify_mode")
+                                .map(|s| s.as_str())
+                                .unwrap_or("conmon");
                             if mode != "ignore" || ann.contains_key("boxr.kube_service_container") {
                                 send_sd_notify(sock, "STOPPING=1");
                             }
@@ -1264,7 +1273,10 @@ pub fn is_bundle_container_alive(bundle_path: &Path) -> bool {
             return false;
         }
         if let Ok(status) = fs::read_to_string(format!("/proc/{p}/status")) {
-            if status.lines().any(|l| l.starts_with("State:") && l.contains('Z')) {
+            if status
+                .lines()
+                .any(|l| l.starts_with("State:") && l.contains('Z'))
+            {
                 return false;
             }
         }
@@ -1367,7 +1379,9 @@ pub fn execute_bundle(
                         scope_cmd.arg("-p").arg(ks);
                     }
                     scope_cmd.arg("--").arg(&conmon);
-                    scope_cmd.arg("__internal-conmon-supervisor").arg(bundle_path);
+                    scope_cmd
+                        .arg("__internal-conmon-supervisor")
+                        .arg(bundle_path);
                     scope_cmd.stdin(Stdio::null());
                     scrub_conmon_parent_env(&mut scope_cmd);
                     if detach {
@@ -1378,7 +1392,8 @@ pub fn execute_bundle(
                             scope_cmd.process_group(0);
                         }
                         if let Ok(mut supervisor) = scope_cmd.spawn() {
-                            if wait_for_detached_conmon_start(bundle_path, &mut supervisor).is_ok() {
+                            if wait_for_detached_conmon_start(bundle_path, &mut supervisor).is_ok()
+                            {
                                 return Ok(0);
                             }
                         }
@@ -1949,6 +1964,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 drop(donor_userns);
 
                 // 2. Notify parent that user namespace has been created or joined
+                // Do not write "deny" here before parent gid_map; parent handles setgroups.
                 let sync_msg: &[u8; 5] = if joined_existing_userns {
                     b"joind"
                 } else {
@@ -2041,12 +2057,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if network_mode.should_use_native_usernet() && !ns_join.net {
                     use crate::network::usernet::engine::platform;
                     use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
-                    let net_ifaces: Vec<(String, String, String)> = fs::read_to_string(
-                        bundle_path.join("network_interfaces.json"),
-                    )
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
+                    let net_ifaces: Vec<(String, String, String)> =
+                        fs::read_to_string(bundle_path.join("network_interfaces.json"))
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
                     let primary_ifname = net_ifaces
                         .first()
                         .map(|(ifn, _, _)| ifn.as_str())
@@ -2428,7 +2443,8 @@ pub fn stop_rootless_pause_process() {
                         unsafe {
                             libc::kill(pid, libc::SIGKILL);
                         }
-                        let _ = waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG));
+                        let _ =
+                            waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG));
                         for _ in 0..20 {
                             if !Path::new(&format!("/proc/{pid}")).exists() {
                                 break;
@@ -2583,7 +2599,11 @@ pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
     let is_rootless = unsafe { libc::getuid() != 0 };
     if is_rootless {
         let pause_pid = ensure_rootless_pause_process();
-        if !rootless_netns && cmd.len() == 2 && cmd[0] == "readlink" && cmd[1] == "/proc/self/ns/user" {
+        if !rootless_netns
+            && cmd.len() == 2
+            && cmd[0] == "readlink"
+            && cmd[1] == "/proc/self/ns/user"
+        {
             if let Some(ppid) = pause_pid {
                 if let Ok(link) = fs::read_link(format!("/proc/{ppid}/ns/user")) {
                     if !suppress_stdout {
@@ -2614,7 +2634,8 @@ pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
                             &[],
                         );
                         if let Err(e) = crate::network::pasta::PastaDriver::spawn(&pasta_cfg) {
-                            let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
+                            let _ =
+                                nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
                             let _ = waitpid(child, None);
                             crate::cli::usage_errors::exit_usage_error(e.to_string());
                         }
@@ -3514,8 +3535,7 @@ pub fn exec_in_bundle(
             if !output.stdout.is_empty() && !attach.quiet {
                 if attach.tty {
                     let mut prev_cr = false;
-                    let formatted =
-                        crate::logging::format_tty_crlf(&output.stdout, &mut prev_cr);
+                    let formatted = crate::logging::format_tty_crlf(&output.stdout, &mut prev_cr);
                     let _ = std::io::stdout().write_all(&formatted);
                 } else {
                     let _ = std::io::stdout().write_all(&output.stdout);
@@ -3889,11 +3909,7 @@ fn exec_in_bundle_via_setns(
                     unsafe {
                         let mut empty_mask: libc::sigset_t = std::mem::zeroed();
                         libc::sigemptyset(&mut empty_mask);
-                        libc::sigprocmask(
-                            libc::SIG_SETMASK,
-                            &empty_mask,
-                            std::ptr::null_mut(),
-                        );
+                        libc::sigprocmask(libc::SIG_SETMASK, &empty_mask, std::ptr::null_mut());
                         let mut sa: libc::sigaction = std::mem::zeroed();
                         sa.sa_sigaction = libc::SIG_DFL;
                         for sig in 1..=64 {
@@ -4231,13 +4247,10 @@ fn run_container_child(
         .and_then(|a| a.get("boxr.no_hostname"))
         .map(|v| v == "true")
         .unwrap_or(false);
-    let uts_host = spec
-        .annotations
-        .as_ref()
-        .is_some_and(|a| {
-            a.get("boxr.uts_host").is_some_and(|v| v == "true")
-                || a.get("boxr.uts").is_some_and(|s| s == "host")
-        });
+    let uts_host = spec.annotations.as_ref().is_some_and(|a| {
+        a.get("boxr.uts_host").is_some_and(|v| v == "true")
+            || a.get("boxr.uts").is_some_and(|s| s == "host")
+    });
     if !skip_hostname_file {
         let host_label = if uts_host {
             fs::read_to_string("/proc/sys/kernel/hostname")
@@ -4836,7 +4849,7 @@ fn run_container_child(
     if chown_meta_file.exists() {
         if let Ok(content) = fs::read_to_string(&chown_meta_file) {
             if let Ok(map) =
-                serde_json::from_str::< std::collections::HashMap<String, (u32, u32)> >(&content)
+                serde_json::from_str::<std::collections::HashMap<String, (u32, u32)>>(&content)
             {
                 use std::ffi::CString;
                 use std::os::unix::ffi::OsStrExt;
@@ -4850,7 +4863,8 @@ fn run_container_child(
                     if p.is_dir() {
                         if let Ok(entries) = fs::read_dir(&p) {
                             for entry in entries.flatten() {
-                                if let Ok(c_sub) = CString::new(entry.path().as_os_str().as_bytes()) {
+                                if let Ok(c_sub) = CString::new(entry.path().as_os_str().as_bytes())
+                                {
                                     unsafe {
                                         let _ = libc::lchown(c_sub.as_ptr(), uid, gid);
                                     }
@@ -5072,7 +5086,9 @@ fn run_container_child(
                     base_host_id, rem
                 )
             }
-            Some(_) => "         0          2       1024\n         1          1          1\n".to_string(),
+            Some(_) => {
+                "         0          2       1024\n         1          1          1\n".to_string()
+            }
             None => format!("         0 {:>10} {:>10}\n", base_host_id, size),
         };
         let gid_map_text = match gid_map_opt {
@@ -5184,7 +5200,10 @@ fn run_container_child(
         }
     }
     if let Some(ann) = &spec.annotations {
-        if ann.get("boxr.systemd").is_some_and(|v| v != "false" && v != "0") {
+        if ann
+            .get("boxr.systemd")
+            .is_some_and(|v| v != "false" && v != "0")
+        {
             if let Some(cid) = bundle_path.file_name().and_then(|n| n.to_str()) {
                 let uuid = if cid.len() >= 32 { &cid[..32] } else { cid };
                 unsafe {
@@ -5344,11 +5363,7 @@ fn run_container_child(
         close_fds_except(&preserve_fds);
     }
 
-    if let Some(umask_str) = spec
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get("boxr.umask"))
-    {
+    if let Some(umask_str) = spec.annotations.as_ref().and_then(|a| a.get("boxr.umask")) {
         if let Ok(mask) = u32::from_str_radix(umask_str.trim(), 8) {
             unsafe {
                 libc::umask(mask as libc::mode_t);

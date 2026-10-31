@@ -255,12 +255,7 @@ impl ContainerCopy {
         Self::copy_with_options(src, dest, true, false)
     }
 
-    pub fn copy_with_options(
-        src: &str,
-        dest: &str,
-        archive: bool,
-        overwrite: bool,
-    ) -> Result<()> {
+    pub fn copy_with_options(src: &str, dest: &str, archive: bool, overwrite: bool) -> Result<()> {
         if src == "/dev/stdin" {
             return Ok(());
         }
@@ -291,7 +286,10 @@ impl ContainerCopy {
         if is_src_cont {
             let (container_query, container_path) = src.split_once(':').unwrap();
             let cont = store.find(container_query).ok_or_else(|| {
-                anyhow!("no container with name or ID {:?} found: no such container", container_query)
+                anyhow!(
+                    "no container with name or ID {:?} found: no such container",
+                    container_query
+                )
             })?;
 
             let target = Self::resolve_in_container(&cont, container_path, false)?;
@@ -316,7 +314,10 @@ impl ContainerCopy {
         } else if is_dest_cont {
             let (container_query, container_path) = dest.split_once(':').unwrap();
             let cont = store.find(container_query).ok_or_else(|| {
-                anyhow!("no container with name or ID {:?} found: no such container", container_query)
+                anyhow!(
+                    "no container with name or ID {:?} found: no such container",
+                    container_query
+                )
             })?;
 
             let host_src = PathBuf::from(src);
@@ -414,7 +415,11 @@ impl ContainerCopy {
                         } else {
                             target.abs_container_path.clone()
                         };
-                        Self::write_file_in_running_container_mnt(&bundle_path, &dest_in_ctr, &bytes);
+                        Self::write_file_in_running_container_mnt(
+                            &bundle_path,
+                            &dest_in_ctr,
+                            &bytes,
+                        );
                     }
                 }
             }
@@ -475,7 +480,10 @@ impl ContainerCopy {
     fn copy_stdin_to_container(store: &ContainerStore, dest: &str, archive: bool) -> Result<()> {
         let (container_query, container_path) = dest.split_once(':').unwrap();
         let cont = store.find(container_query).ok_or_else(|| {
-            anyhow!("no container with name or ID {:?} found: no such container", container_query)
+            anyhow!(
+                "no container with name or ID {:?} found: no such container",
+                container_query
+            )
         })?;
         let target = Self::resolve_in_container(&cont, container_path, true)?;
         match fs::metadata(&target.host_path) {
@@ -537,7 +545,9 @@ impl ContainerCopy {
         }
 
         let mut tar_arch = tar::Archive::new(&decompressed[..]);
-        let res = tar_arch.unpack(&target.host_path).map_err(|e| anyhow!("{}", e));
+        let res = tar_arch
+            .unpack(&target.host_path)
+            .map_err(|e| anyhow!("{}", e));
         restore_writable_guard(guard);
         res
     }
@@ -595,7 +605,10 @@ impl ContainerCopy {
     fn copy_container_to_stdout(store: &ContainerStore, src: &str) -> Result<()> {
         let (container_query, container_path) = src.split_once(':').unwrap();
         let cont = store.find(container_query).ok_or_else(|| {
-            anyhow!("no container with name or ID {:?} found: no such container", container_query)
+            anyhow!(
+                "no container with name or ID {:?} found: no such container",
+                container_query
+            )
         })?;
         let target = Self::resolve_in_container(&cont, container_path, false)?;
         if !target.host_path.exists() {
@@ -682,9 +695,7 @@ impl ContainerCopy {
     ) -> Result<()> {
         let src_meta = fs::metadata(src)?;
         let src_trimmed = src_arg.trim_end_matches('/');
-        let src_contents_only = src_arg == "."
-            || src_arg.ends_with("/.")
-            || src_trimmed.is_empty();
+        let src_contents_only = src_arg == "." || src_arg.ends_with("/.") || src_trimmed.is_empty();
 
         if src_meta.is_dir() {
             if let Ok(dst_meta) = fs::symlink_metadata(dst) {
@@ -775,12 +786,7 @@ impl ContainerCopy {
         Ok(())
     }
 
-    fn copy_dir_contents(
-        src: &Path,
-        dst: &Path,
-        err_prefix: &str,
-        overwrite: bool,
-    ) -> Result<()> {
+    fn copy_dir_contents(src: &Path, dst: &Path, err_prefix: &str, overwrite: bool) -> Result<()> {
         if let Some(parent) = dst.parent() {
             let g = TempWritableGuard(parent);
             let _ = fs::create_dir_all(dst);

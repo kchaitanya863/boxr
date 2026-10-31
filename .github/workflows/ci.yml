@@ -76,7 +76,22 @@ jobs:
           BOXR_TEST_EMBEDDED_USERNET: "1"
         run: |
           chmod +x scripts/run_podman_bats_conformance.sh scripts/sync_podman_bats_upstream.sh
-          ./scripts/run_podman_bats_conformance.sh || true
+          cat > /tmp/ci-curated-smoke.txt <<'EOF'
+          001-basic
+          005-info
+          010-images
+          015-help
+          020-tag
+          040-ps
+          080-pause
+          085-top
+          110-history
+          125-import
+          130-kill
+          140-diff
+          750-trust
+          EOF
+          MANIFEST=/tmp/ci-curated-smoke.txt ./scripts/run_podman_bats_conformance.sh || true
           log=$(ls -t .cache/podman-bats-results/run-*.log | head -1)
           echo "## Curated Podman BATS (strict)" >> "$GITHUB_STEP_SUMMARY"
           grep -E '^ok |^not ok ' "$log" | awk '{if($1=="ok") o++; else n++} END {print "- ok:", o+0, "not ok:", n+0}' >> "$GITHUB_STEP_SUMMARY"

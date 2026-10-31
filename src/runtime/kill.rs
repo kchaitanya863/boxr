@@ -75,7 +75,11 @@ pub fn validate_podman_signal(sig_str: &str) -> std::result::Result<i32, String>
 impl ContainerKiller {
     pub fn parse_signal(sig_str: &str) -> Result<i32> {
         let trimmed = sig_str.trim();
-        if trimmed.starts_with('-') && trimmed.len() > 1 && trimmed[1..].chars().all(|c| c.is_ascii_digit()) && trimmed != "-1" {
+        if trimmed.starts_with('-')
+            && trimmed.len() > 1
+            && trimmed[1..].chars().all(|c| c.is_ascii_digit())
+            && trimmed != "-1"
+        {
             return Err(anyhow!("Invalid signal number: {}", trimmed));
         }
         validate_podman_signal(sig_str).map_err(|e| anyhow!(e))
@@ -86,7 +90,10 @@ impl ContainerKiller {
         Self::kill_with_signal_num(container, Some(sig))
     }
 
-    pub fn kill_with_signal_num(container: &ContainerRecord, signal_num: Option<i32>) -> Result<()> {
+    pub fn kill_with_signal_num(
+        container: &ContainerRecord,
+        signal_num: Option<i32>,
+    ) -> Result<()> {
         let sig = signal_num.unwrap_or(9); // Default SIGKILL
 
         #[cfg(unix)]

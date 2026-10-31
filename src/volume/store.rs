@@ -178,14 +178,28 @@ impl VolumeStore {
             }
 
             let mut opts = options.clone().unwrap_or_default();
-            let mut explicit_uid = opts.remove("__boxr_uid").and_then(|s| s.parse::<u32>().ok());
-            let mut explicit_gid = opts.remove("__boxr_gid").and_then(|s| s.parse::<u32>().ok());
+            let mut explicit_uid = opts
+                .remove("__boxr_uid")
+                .and_then(|s| s.parse::<u32>().ok());
+            let mut explicit_gid = opts
+                .remove("__boxr_gid")
+                .and_then(|s| s.parse::<u32>().ok());
 
             if driver == "local" {
                 for k in opts.keys() {
                     if !matches!(
                         k.as_str(),
-                        "type" | "device" | "o" | "copy" | "nocopy" | "uid" | "gid" | "size" | "inodes" | "noquota" | "timeout"
+                        "type"
+                            | "device"
+                            | "o"
+                            | "copy"
+                            | "nocopy"
+                            | "uid"
+                            | "gid"
+                            | "size"
+                            | "inodes"
+                            | "noquota"
+                            | "timeout"
                     ) {
                         return Err(anyhow!(
                             "invalid mount option {} for driver 'local': invalid argument",
@@ -307,18 +321,18 @@ impl VolumeStore {
             let removed = data.volumes.remove(pos);
             self.save_unlocked(&data)?;
 
-                let vol_dir = self.volumes_dir.join(&removed.name);
-                if removed.driver != "image" && vol_dir.exists() {
-                    if fs::remove_dir_all(&vol_dir).is_err() {
-                        #[cfg(target_os = "linux")]
-                        {
-                            let _ = crate::runtime::linux::chown_path_rootless(&vol_dir, 0, 0, true);
-                        }
-                        crate::storage::container_store::make_tree_writable(&vol_dir);
-                        let _ = fs::remove_dir_all(&vol_dir);
+            let vol_dir = self.volumes_dir.join(&removed.name);
+            if removed.driver != "image" && vol_dir.exists() {
+                if fs::remove_dir_all(&vol_dir).is_err() {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let _ = crate::runtime::linux::chown_path_rootless(&vol_dir, 0, 0, true);
                     }
+                    crate::storage::container_store::make_tree_writable(&vol_dir);
+                    let _ = fs::remove_dir_all(&vol_dir);
                 }
-                Ok(removed)
+            }
+            Ok(removed)
         })
     }
 
@@ -471,12 +485,7 @@ impl VolumeStore {
     }
 
     pub fn matches_filter(vol: &VolumeRecord, filter: &str) -> bool {
-        Self::matches_filter_with_context(
-            vol,
-            filter,
-            &[],
-            &std::collections::HashSet::new(),
-        )
+        Self::matches_filter_with_context(vol, filter, &[], &std::collections::HashSet::new())
     }
 
     fn label_filter_matches(labels: &HashMap<String, String>, expr: &str) -> bool {
@@ -616,9 +625,7 @@ impl VolumeStore {
         let used_volume_names = self.collect_used_volume_names();
         let all_vols = self.list();
         let filter_all = filters.iter().any(|f| f == "all=true" || f == "all=1");
-        let has_non_all_filter = filters
-            .iter()
-            .any(|f| !f.starts_with("all="));
+        let has_non_all_filter = filters.iter().any(|f| !f.starts_with("all="));
         let include_named = all || filter_all || has_non_all_filter;
 
         all_vols
@@ -640,9 +647,7 @@ impl VolumeStore {
     pub fn prune_with_options(&self, all: bool, filters: &[String]) -> Result<Vec<String>> {
         let used_volume_names = self.collect_used_volume_names();
         let filter_all = filters.iter().any(|f| f == "all=true" || f == "all=1");
-        let has_non_all_filter = filters
-            .iter()
-            .any(|f| !f.starts_with("all="));
+        let has_non_all_filter = filters.iter().any(|f| !f.starts_with("all="));
         let include_named = all || filter_all || has_non_all_filter;
 
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
@@ -659,13 +664,17 @@ impl VolumeStore {
                     unused && matches && v.anonymous
                 };
                 if eligible {
-                    if v.driver != "image" && v.options.get("type").map(|t| t.as_str()) != Some("bind") {
+                    if v.driver != "image"
+                        && v.options.get("type").map(|t| t.as_str()) != Some("bind")
+                    {
                         let vol_dir = self.volumes_dir.join(&v.name);
                         if vol_dir.exists() {
                             if fs::remove_dir_all(&vol_dir).is_err() {
                                 #[cfg(target_os = "linux")]
                                 {
-                                    let _ = crate::runtime::linux::chown_path_rootless(&vol_dir, 0, 0, true);
+                                    let _ = crate::runtime::linux::chown_path_rootless(
+                                        &vol_dir, 0, 0, true,
+                                    );
                                 }
                                 crate::storage::container_store::make_tree_writable(&vol_dir);
                                 let _ = fs::remove_dir_all(&vol_dir);
@@ -824,12 +833,7 @@ impl VolumeStore {
         })
     }
 
-    pub fn set_volume_uid_gid(
-        &self,
-        name: &str,
-        uid: Option<u32>,
-        gid: Option<u32>,
-    ) -> Result<()> {
+    pub fn set_volume_uid_gid(&self, name: &str, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             if let Some(v) = data.volumes.iter_mut().find(|v| v.name == name) {

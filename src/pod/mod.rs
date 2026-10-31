@@ -413,8 +413,7 @@ impl PodStore {
                 .iter()
                 .position(|p| p.name == q || p.id == q)
                 .or_else(|| data.pods.iter().position(|p| p.id.starts_with(q)));
-            if let Some(pos) = pos
-            {
+            if let Some(pos) = pos {
                 let pod = &data.pods[pos];
                 let infra_name = self.infra_name(pod);
 
@@ -463,7 +462,10 @@ impl PodStore {
                 self.save_unlocked(&data)?;
                 Ok(removed)
             } else {
-                Err(anyhow!("no pod with name or ID {} found: no such pod", query))
+                Err(anyhow!(
+                    "no pod with name or ID {} found: no such pod",
+                    query
+                ))
             }
         })?;
 
@@ -603,7 +605,11 @@ impl PodStore {
         })
     }
 
-    pub fn remove_container_from_pods(&self, container_id: &str, container_name: &str) -> Result<()> {
+    pub fn remove_container_from_pods(
+        &self,
+        container_id: &str,
+        container_name: &str,
+    ) -> Result<()> {
         let home = self.home.clone();
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
@@ -651,7 +657,8 @@ impl PodStore {
         let mut ids = pod.containers.clone();
         if pod.infra {
             let infra = self.infra_name(pod);
-            if !infra.is_empty() && !ids.contains(&infra) && !ids.contains(&pod.infra_container_id) {
+            if !infra.is_empty() && !ids.contains(&infra) && !ids.contains(&pod.infra_container_id)
+            {
                 ids.insert(0, infra);
             }
         }

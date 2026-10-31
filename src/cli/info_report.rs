@@ -38,7 +38,10 @@ pub fn build_podman_info_document() -> Value {
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| crate::storage::boxr_home().display().to_string());
-    if let Some(rest) = remote_uri.strip_prefix("tcp://").or_else(|| remote_uri.strip_prefix("tcp:")) {
+    if let Some(rest) = remote_uri
+        .strip_prefix("tcp://")
+        .or_else(|| remote_uri.strip_prefix("tcp:"))
+    {
         let port_part = rest.rsplit(':').next().unwrap_or("0");
         if let Ok(meta_str) = std::fs::read_to_string(format!("/tmp/boxr-tcp-{}.meta", port_part)) {
             if let Ok(meta) = serde_json::from_str::<Value>(&meta_str) {

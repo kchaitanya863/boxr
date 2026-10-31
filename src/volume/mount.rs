@@ -374,10 +374,12 @@ pub fn parse_containers_conf_mounts(
                                         match parse_mount_flag(item, vol_store) {
                                             Ok(parsed) => mounts.extend(parsed),
                                             Err(e) => {
-                                                crate::cli::usage_errors::exit_usage_error(format!(
-                                                    "parsing containers.conf mounts: {}",
-                                                    e
-                                                ));
+                                                crate::cli::usage_errors::exit_usage_error(
+                                                    format!(
+                                                        "parsing containers.conf mounts: {}",
+                                                        e
+                                                    ),
+                                                );
                                             }
                                         }
                                     }

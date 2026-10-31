@@ -127,7 +127,10 @@ pub fn refresh_bridge_hosts_for_network(network_name: &str, home: Option<&Path>)
     Ok(())
 }
 
-pub fn refresh_disconnected_container_hosts(container_query: &str, home: Option<&Path>) -> Result<()> {
+pub fn refresh_disconnected_container_hosts(
+    container_query: &str,
+    home: Option<&Path>,
+) -> Result<()> {
     let net_store = match home {
         Some(h) => NetworkStore::with_home(h.to_path_buf()),
         None => NetworkStore::new(),
@@ -148,7 +151,9 @@ pub fn refresh_disconnected_container_hosts(container_query: &str, home: Option<
         .into_iter()
         .filter(|n| {
             n.containers.contains_key(&record.id)
-                || n.containers.values().any(|ep| ep.container_name == record.name)
+                || n.containers
+                    .values()
+                    .any(|ep| ep.container_name == record.name)
         })
         .map(|n| n.name)
         .collect();

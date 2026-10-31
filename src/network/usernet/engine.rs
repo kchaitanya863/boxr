@@ -146,7 +146,7 @@ impl UserNetEngine {
         // If target IP is gateway, DNS, or any virtual subnet gateway, respond with our virtual gateway MAC
         if arp.target_ip == self.gateway_ip
             || arp.target_ip == self.dns_ip
-            || arp.target_ip != arp.sender_ip
+            || (self.bundle_path.is_some() && arp.target_ip != arp.sender_ip)
         {
             let mut reply = Vec::with_capacity(42);
             let reply_eth = EthernetHeader {
