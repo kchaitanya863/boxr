@@ -3,6 +3,8 @@
 //! Generates rich tab completions for **Zsh**, **Bash**, and **Fish**, with dynamic
 //! container and image name completions, and installs drop-in Docker wrappers.
 
+pub mod cobra;
+
 use crate::storage::boxr_home;
 use anyhow::{Result, anyhow};
 use std::fs;

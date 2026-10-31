@@ -221,7 +221,39 @@ impl CgroupV2Manager {
         if !self.cgroup_path.exists() {
             return Ok(());
         }
-        let _ = fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string());
+        if fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string()).is_err() {
+            #[cfg(target_os = "linux")]
+            {
+                let scope_name = format!("boxr-cg-{}-{}.scope", pid, std::process::id());
+                let pid_str = pid.to_string();
+                let _ = std::process::Command::new("busctl")
+                    .args([
+                        "--user",
+                        "call",
+                        "org.freedesktop.systemd1",
+                        "/org/freedesktop/systemd1",
+                        "org.freedesktop.systemd1.Manager",
+                        "StartTransientUnit",
+                        "ssa(sv)a(sa(sv))",
+                        &scope_name,
+                        "fail",
+                        "2",
+                        "PIDs",
+                        "au",
+                        "1",
+                        &pid_str,
+                        "Delegate",
+                        "b",
+                        "1",
+                        "0",
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                let _ = fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string());
+            }
+        }
         let _ = fs::write(self.cgroup_path.join("tasks"), pid.to_string());
         Ok(())
     }

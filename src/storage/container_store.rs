@@ -286,6 +286,22 @@ impl ContainerStore {
         })
     }
 
+    pub fn set_image(&self, query: &str, new_image: &str) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            let q = Self::normalize_container_name(query);
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
+                c.image = new_image.to_string();
+                self.save_unlocked(&data)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn remove(&self, query: &str) -> Result<ContainerRecord> {
         let q = Self::normalize_container_name(query);
         if q.is_empty() {

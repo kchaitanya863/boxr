@@ -7,13 +7,151 @@ if ! command -v "$BOXR_BIN" >/dev/null 2>&1; then
   BOXR_BIN="${BOXR:-boxr}"
 fi
 
-if [[ "${1:-}" != "copy" ]] || [[ $# -lt 3 ]]; then
-  echo "skopeo-stub: only 'skopeo copy <src> <dst>' is supported" >&2
+subcmd="${1:-}"
+shift || true
+
+authfile=""
+raw_flag=0
+pos_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --authfile=*)
+      authfile="${1#--authfile=}"
+      shift
+      ;;
+    --authfile)
+      authfile="${2:-}"
+      shift 2
+      ;;
+    --raw)
+      raw_flag=1
+      shift
+      ;;
+    --format=*|--dest-tls-verify=*|--src-tls-verify=*|--tls-verify=*)
+      shift
+      ;;
+    --format|--dest-tls-verify|--src-tls-verify|--tls-verify)
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      pos_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+resolve_authfile() {
+  if [[ -n "$authfile" ]]; then
+    echo "$authfile"
+  elif [[ -n "${REGISTRY_AUTH_FILE:-}" ]]; then
+    echo "$REGISTRY_AUTH_FILE"
+  else
+    echo "${BOXR_HOME:-$HOME/.boxr}/config.json"
+  fi
+}
+
+check_registry_auth() {
+  local reg="$1"
+  local af
+  af="$(resolve_authfile)"
+  if [[ ! -f "$af" ]]; then
+    return 1
+  fi
+  jq -e ".auths[\"$reg\"].auth != null and .auths[\"$reg\"].auth != \"\"" "$af" >/dev/null 2>&1
+}
+
+if [[ "$subcmd" == "inspect" ]]; then
+  target="${pos_args[0]:-}"
+  if [[ "$target" == containers-storage:* ]]; then
+    ref="${target#containers-storage:}"
+    cat <<EOF
+{
+  "Name": "${ref%:*}",
+  "Digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "LayersData": [
+    {
+      "MIMEType": "application/vnd.oci.image.layer.v1.tar+zstd"
+    }
+  ]
+}
+EOF
+    exit 0
+  fi
+  if [[ "$target" == docker://* ]]; then
+    clean="${target#docker://}"
+    reg="${clean%%/*}"
+    if [[ "$clean" == localhost:* ]]; then
+      if ! check_registry_auth "$reg"; then
+        echo "time=\"2026-01-01T00:00:00Z\" level=fatal msg=\"reading manifest latest in $clean: authentication required\"" >&2
+        exit 1
+      fi
+    fi
+    if [[ $raw_flag -eq 1 ]]; then
+      if [[ "$clean" == *@sha256:* ]]; then
+        dig="${clean#*@}"
+        by_dig="/tmp/boxr-registry-manifests/by-digest/${dig/:/_}.json"
+        if [[ -f "$by_dig" ]]; then
+          cat "$by_dig"
+          exit 0
+        fi
+      fi
+      safe_ref="${clean//[\/:]/_}"
+      last_part="${clean##*/}"
+      if [[ "$last_part" != *:* && "$last_part" != *@* ]]; then
+        safe_ref="${safe_ref}_latest"
+      fi
+      if [[ -f "/tmp/boxr-registry-manifests/${safe_ref}.json" ]]; then
+        cat "/tmp/boxr-registry-manifests/${safe_ref}.json"
+        exit 0
+      fi
+    fi
+    name_no_tag="$clean"
+    last_part="${clean##*/}"
+    if [[ "$last_part" == *:* ]]; then
+      name_no_tag="${clean%:*}"
+    fi
+    cat <<EOF
+{
+  "Name": "$name_no_tag",
+  "Digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "LayersData": [
+    {
+      "MIMEType": "application/vnd.oci.image.layer.v1.tar+zstd"
+    }
+  ]
+}
+EOF
+    exit 0
+  fi
   exit 1
 fi
 
-src=$2
-dst=$3
+if [[ "$subcmd" != "copy" ]] || [[ ${#pos_args[@]} -lt 2 ]]; then
+  echo "skopeo-stub: unsupported command $subcmd" >&2
+  exit 1
+fi
+
+src="${pos_args[0]}"
+dst="${pos_args[1]}"
+
+if [[ "$src" == containers-storage:* && "$dst" == docker://* ]]; then
+  clean_dst="${dst#docker://}"
+  reg="${clean_dst%%/*}"
+  if [[ "$clean_dst" == localhost:* ]]; then
+    if ! check_registry_auth "$reg"; then
+      echo "Error: authentication required" >&2
+      exit 1
+    fi
+  fi
+  echo "Getting image source signatures"
+  echo "Copying blob sha256:000000000000"
+  echo "Copying config sha256:000000000000"
+  echo "Writing manifest to image destination"
+  exit 0
+fi
 
 docker_dir_to_save_tar() {
   local dir=$1
@@ -132,6 +270,65 @@ fi
 
 if [[ "$src" == dir:* && "$dst" == containers-storage:* ]]; then
   copy_dir_to_storage "$src" "$dst"
+  exit 0
+fi
+
+if [[ "$src" == containers-storage:* && "$dst" == containers-storage:* ]]; then
+  src_ref="${src#containers-storage:}"
+  dst_spec="${dst#containers-storage:}"
+  dst_root="${BOXR_HOME:?BOXR_HOME required}"
+  dst_ref="$dst_spec"
+  if [[ "$dst_spec" == \[*\]* ]]; then
+    bracket="${dst_spec#\[}"
+    bracket="${bracket%%\]*}"
+    dst_ref="${dst_spec#*\]}"
+    if [[ "$bracket" == *@* ]]; then
+      paths="${bracket#*@}"
+      dst_root="${paths%%+*}"
+    fi
+  fi
+  python3 - "${BOXR_HOME:?}" "$src_ref" "$dst_root" "$dst_ref" <<'PY'
+import json, os, shutil, subprocess, sys
+src_home, src_ref, dst_root, dst_ref = sys.argv[1:5]
+src_idx = os.path.join(src_home, "images.json")
+with open(src_idx, "r", encoding="utf-8") as f:
+    src_data = json.load(f)
+matched = []
+for rec in src_data.get("images", []):
+    q = f"{rec.get('registry','')}/{rec.get('reference','')}:{rec.get('tag','')}"
+    s = f"{rec.get('reference','')}:{rec.get('tag','')}"
+    if src_ref in (q, s, rec.get("reference", ""), rec.get("id", "")):
+        matched.append(dict(rec))
+if not matched:
+    raise SystemExit(f"skopeo-stub: source image {src_ref} not found")
+os.makedirs(os.path.join(dst_root, "images"), exist_ok=True)
+os.makedirs(os.path.join(dst_root, "layers"), exist_ok=True)
+dst_idx = os.path.join(dst_root, "images.json")
+dst_data = {"images": []}
+if os.path.isfile(dst_idx):
+    try:
+        with open(dst_idx, "r", encoding="utf-8") as f:
+            dst_data = json.load(f)
+    except Exception:
+        dst_data = {"images": []}
+for rec in matched:
+    old_rootfs = rec.get("rootfs_path", "")
+    img_dir_name = os.path.basename(os.path.dirname(old_rootfs))
+    src_img_dir = os.path.join(src_home, "images", img_dir_name)
+    dst_img_dir = os.path.join(dst_root, "images", img_dir_name)
+    if os.path.isdir(src_img_dir) and not os.path.exists(dst_img_dir):
+        if subprocess.call(["cp", "-al", src_img_dir, dst_img_dir]) != 0:
+            shutil.copytree(src_img_dir, dst_img_dir, symlinks=True)
+        try:
+            os.chmod(dst_img_dir, 0o755)
+            os.chmod(os.path.join(dst_img_dir, "rootfs"), 0o755)
+        except OSError:
+            pass
+    rec["rootfs_path"] = os.path.join(dst_img_dir, "rootfs")
+    dst_data["images"].append(rec)
+with open(dst_idx, "w", encoding="utf-8") as f:
+    json.dump(dst_data, f, indent=2)
+PY
   exit 0
 fi
 

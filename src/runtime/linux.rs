@@ -1076,6 +1076,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         return Err(anyhow!("No bundle path specified for trampoline"));
     }
     let bundle_path = Path::new(&args[0]);
+    if let Some(cont_id) = bundle_path.file_name().and_then(|s| s.to_str()) {
+        if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(cont_id) {
+            let _ = cgroup_mgr.add_process(std::process::id() as i32);
+        }
+    }
     let _ = fs::write(
         bundle_path.join("host_netns.pid"),
         std::process::id().to_string(),
@@ -3348,6 +3353,70 @@ fn run_container_child(
                 MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
                 None::<&str>,
             );
+        }
+    }
+
+    // Mount image config VOLUMEs from a shared tmpfs when not overridden
+    let bundle_dir = rootfs.parent().unwrap_or(rootfs);
+    let img_vols_file = bundle_dir.join("image_volumes.json");
+    if img_vols_file.exists() {
+        if let Ok(vols_json) = fs::read_to_string(&img_vols_file) {
+            if let Ok(vol_paths) = serde_json::from_str::<Vec<String>>(&vols_json) {
+                if !vol_paths.is_empty() {
+                    let img_vols_tmpfs = bundle_dir.join("image-vols-tmpfs");
+                    let _ = fs::create_dir_all(&img_vols_tmpfs);
+                    let _ = mount(
+                        Some("tmpfs"),
+                        &img_vols_tmpfs,
+                        Some("tmpfs"),
+                        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+                        None::<&str>,
+                    );
+                    for (idx, vol_dest) in vol_paths.iter().enumerate() {
+                        let clean_dest = vol_dest.trim_start_matches('/');
+                        if clean_dest.is_empty() || clean_dest == "var/lib/registry" {
+                            continue;
+                        }
+                        let target = rootfs.join(clean_dest);
+                        let _ = fs::create_dir_all(&target);
+                        let is_empty = fs::read_dir(&target)
+                            .map(|mut d| d.next().is_none())
+                            .unwrap_or(false);
+                        if !is_empty {
+                            continue;
+                        }
+                        let backing = img_vols_tmpfs.join(format!("v{}", idx));
+                        let _ = fs::create_dir_all(&backing);
+                        let _ = mount(
+                            Some(&backing),
+                            &target,
+                            None::<&str>,
+                            MsFlags::MS_BIND,
+                            None::<&str>,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let chown_meta_file = bundle_dir.join("chown_meta.json");
+    if chown_meta_file.exists() {
+        if let Ok(content) = fs::read_to_string(&chown_meta_file) {
+            if let Ok(map) =
+                serde_json::from_str::< std::collections::HashMap<String, (u32, u32)> >(&content)
+            {
+                use std::ffi::CString;
+                use std::os::unix::ffi::OsStrExt;
+                for (rel, (uid, gid)) in map {
+                    let p = rootfs.join(rel.trim_start_matches('/'));
+                    if let Ok(c_path) = CString::new(p.as_os_str().as_bytes()) {
+                        unsafe {
+                            let _ = libc::lchown(c_path.as_ptr(), uid, gid);
+                        }
+                    }
+                }
+            }
         }
     }
 

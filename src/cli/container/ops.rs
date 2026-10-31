@@ -157,6 +157,9 @@ pub struct DiffArgs {
     /// Container to inspect changes on
     #[arg(required_unless_present = "latest")]
     pub container: Option<String>,
+
+    #[arg(hide = true)]
+    pub second: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -181,8 +184,24 @@ pub struct CommitArgs {
     #[arg(short = 'a', long = "author")]
     pub author: Option<String>,
 
+    /// Format of the committed image manifest (oci or docker)
+    #[arg(short = 'f', long = "format")]
+    pub format: Option<String>,
+
+    /// Suppress output
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
     /// Pause container during commit
-    #[arg(short = 'p', long = "pause", default_value_t = true)]
+    #[arg(
+        short = 'p',
+        long = "pause",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub pause: bool,
 
     /// Container to commit
@@ -191,7 +210,7 @@ pub struct CommitArgs {
     /// Repository and optional tag (e.g., "my-image:v1")
     pub repo_tag: Option<String>,
 
-    #[arg(long = "change")]
+    #[arg(short = 'c', long = "change")]
     pub change: Vec<String>,
 }
 
@@ -209,9 +228,11 @@ pub struct RenameArgs {
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct CpArgs {
     /// Source path (e.g. "my-container:/app/file" or "./local-file")
+    #[arg(value_name = "CONTAINER:SRC_PATH")]
     pub src: String,
 
     /// Destination path (e.g. "./dest" or "my-container:/app/dest")
+    #[arg(value_name = "CONTAINER:DEST_PATH")]
     pub dest: String,
 
     #[arg(long = "archive")]
@@ -352,9 +373,17 @@ pub struct ContainerCleanupArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
 
+    /// Clean up the given exec session instead of the container
+    #[arg(long = "exec")]
+    pub exec: Option<String>,
+
     /// Remove the container after cleanup
     #[arg(long = "rm")]
     pub rm: bool,
+
+    /// Remove the container image after cleanup
+    #[arg(long = "rmi")]
+    pub rmi: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -406,6 +435,35 @@ pub struct ContainerCloneArgs {
 pub struct ContainerRunlabelArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
+
+    /// Display the command that would be executed without running it
+    #[arg(long = "display")]
+    pub display: bool,
+
+    /// Assign a name to the container
+    #[arg(short = 'n', long = "name")]
+    pub name: Option<String>,
+
+    /// Optional parameter 1 for runlabel
+    #[arg(long = "opt1")]
+    pub opt1: Option<String>,
+
+    /// Optional parameter 2 for runlabel
+    #[arg(long = "opt2")]
+    pub opt2: Option<String>,
+
+    /// Optional parameter 3 for runlabel
+    #[arg(long = "opt3")]
+    pub opt3: Option<String>,
+
+    /// Suppress output
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    /// Replace existing container
+    #[arg(long = "replace")]
+    pub replace: bool,
+
     /// Label key to execute
     pub label: String,
 

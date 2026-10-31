@@ -91,7 +91,12 @@ fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
             }
         }
     }
-    if let Some(dir) = &opts.cert_dir {
+    if opts.tls_verify == Some(false) {
+        builder = builder
+            .tls_built_in_root_certs(false)
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
+    } else if let Some(dir) = &opts.cert_dir {
         // BATS/Podman `--cert-dir` often contains the registry's self-signed *server*
         // certificate (not a CA). rustls rejects those as root anchors
         // (`CaUsedAsEndEntity`); trust the configured directory via verifier skip
@@ -135,6 +140,84 @@ impl RegistryClient {
             return Some(c);
         }
         crate::auth::CredentialStore::new().get_credentials(&reference.registry)
+    }
+
+    pub async fn verify_login(&self, server: &str, username: &str, password: &str) -> Result<()> {
+        let clean = server
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let ping_url = format!("https://{}/v2/", registry_connect_host(clean));
+        let encoded = crate::auth::custom_base64_encode(&format!("{}:{}", username, password));
+        let mut req = self.client.get(&ping_url);
+        if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
+            req = req.header(AUTHORIZATION, val);
+        }
+        let resp = req.send().await.map_err(|e| {
+            anyhow!(
+                "logging into \"{}\": pinging container registry {}: {}",
+                server,
+                clean,
+                e
+            )
+        })?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!(
+                "logging into \"{}\": invalid username/password",
+                server
+            ));
+        }
+        Err(anyhow!(
+            "logging into \"{}\": unexpected status {}",
+            server,
+            resp.status()
+        ))
+    }
+
+    pub async fn search_catalog(&self, registry: &str, query: &str) -> Result<Vec<String>> {
+        let clean = registry
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/');
+        let creds = self
+            .inline_credentials()
+            .or_else(|| crate::auth::CredentialStore::new().get_credentials(clean));
+        let url = format!("https://{}/v2/_catalog", registry_connect_host(clean));
+        let mut req = self.client.get(&url);
+        if let Some((u, p)) = &creds {
+            let encoded = crate::auth::custom_base64_encode(&format!("{}:{}", u, p));
+            if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
+                req = req.header(AUTHORIZATION, val);
+            }
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow!("searching registry {}: {}", clean, e))?;
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "searching registry {}: status {}",
+                clean,
+                resp.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct CatalogResponse {
+            #[serde(default)]
+            repositories: Vec<String>,
+        }
+        let cat: CatalogResponse = resp.json().await?;
+        Ok(cat
+            .repositories
+            .into_iter()
+            .filter(|r| query.is_empty() || r.contains(query))
+            .map(|r| format!("{}/{}", clean, r))
+            .collect())
     }
 
     /// Authenticate against registry if needed (e.g. Docker Hub auth token or private registry).
@@ -356,6 +439,14 @@ impl RegistryClient {
         if head.status().is_success() {
             return Ok(());
         }
+        if head.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!(
+                "checking whether a blob {} exists in {}/{}: authentication required",
+                digest,
+                reference.registry,
+                reference.repository
+            ));
+        }
 
         let upload_url = format!(
             "https://{}/v2/{}/blobs/uploads/",
@@ -432,15 +523,80 @@ impl RegistryClient {
             .ok_or_else(|| anyhow!("Invalid image rootfs path"))?;
         let manifest_path = image_dir.join("manifest.json");
         let config_path = image_dir.join("config.json");
+        let layers_dir = crate::storage::boxr_home().join("layers");
+        let _ = fs::create_dir_all(&layers_dir);
 
-        let manifest_bytes_on_disk = if manifest_path.exists() {
-            fs::read(&manifest_path)?
+        let need_synth = if !manifest_path.exists() {
+            true
+        } else if let Ok(bytes) = fs::read(&manifest_path) {
+            if let Ok(m) = serde_json::from_slice::<ImageManifest>(&bytes) {
+                m.layers.iter().any(|l| {
+                    let safe_name = l.digest.replace(':', "_");
+                    !layers_dir.join(format!("{}.tar", safe_name)).exists()
+                })
+            } else {
+                true
+            }
         } else {
-            return Err(anyhow!(
-                "Cannot push image '{}': manifest metadata missing (re-pull or rebuild image)",
-                image.reference
-            ));
+            true
         };
+
+        if need_synth {
+            let mut raw_tar = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut raw_tar);
+                crate::append_clean_dir_all_for_test(&mut builder, &rootfs_path, Path::new(""))?;
+                builder.finish()?;
+            }
+            let mut gz_tar = Vec::new();
+            {
+                let mut enc =
+                    flate2::write::GzEncoder::new(&mut gz_tar, flate2::Compression::none());
+                enc.write_all(&raw_tar)?;
+                enc.finish()?;
+            }
+            let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(&gz_tar)));
+            let diff_id = format!("sha256:{}", hex::encode(Sha256::digest(&raw_tar)));
+            let safe_layer = layer_digest.replace(':', "_");
+            fs::write(layers_dir.join(format!("{}.tar", safe_layer)), &gz_tar)?;
+
+            let mut synth_cfg = image.config.clone();
+            synth_cfg.rootfs = Some(crate::oci::image::RootFsConfig {
+                fs_type: "layers".to_string(),
+                diff_ids: vec![diff_id],
+            });
+            let exec = synth_cfg
+                .config
+                .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+            let labels = exec.labels.get_or_insert_with(Default::default);
+            labels.insert("io.boxr.image.id".to_string(), image.full_hex_id());
+
+            let cfg_bytes = serde_json::to_vec(&synth_cfg)?;
+            let cfg_digest = format!("sha256:{}", hex::encode(Sha256::digest(&cfg_bytes)));
+            fs::write(&config_path, &cfg_bytes)?;
+
+            let synth_manifest = ImageManifest {
+                schema_version: 2,
+                media_type: Some(media_types::DOCKER_MANIFEST_V2.to_string()),
+                config: Descriptor {
+                    media_type: media_types::DOCKER_CONTAINER_IMAGE_V1.to_string(),
+                    size: cfg_bytes.len() as i64,
+                    digest: cfg_digest,
+                    platform: None,
+                    annotations: None,
+                },
+                layers: vec![Descriptor {
+                    media_type: media_types::DOCKER_LAYER_TAR_GZIP.to_string(),
+                    size: gz_tar.len() as i64,
+                    digest: layer_digest,
+                    platform: None,
+                    annotations: None,
+                }],
+            };
+            fs::write(&manifest_path, serde_json::to_vec_pretty(&synth_manifest)?)?;
+        }
+
+        let manifest_bytes_on_disk = fs::read(&manifest_path)?;
         let manifest: ImageManifest = serde_json::from_slice(&manifest_bytes_on_disk)?;
 
         let config_bytes = if config_path.exists() {

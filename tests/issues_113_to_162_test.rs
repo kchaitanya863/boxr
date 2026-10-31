@@ -805,6 +805,7 @@ async fn test_issue_141_search_respects_limit() {
         filter: Vec::new(),
         format: None,
         no_trunc: false,
+        tls_verify: None,
     };
     let res = boxr::search_hub(&args).await;
     assert!(res.is_ok());

@@ -11,6 +11,12 @@ pub struct ImageTrustSubcommands {
 pub enum ImageTrustAction {
     /// Show trust policy
     Show {
+        /// Path to signature policy file
+        #[arg(long = "signature-policy")]
+        signature_policy: Option<String>,
+        /// Output as JSON
+        #[arg(short = 'j', long = "json")]
+        json: bool,
         /// Registry or scope
         registry: Option<String>,
         /// Display raw policy JSON
@@ -19,13 +25,16 @@ pub enum ImageTrustAction {
     },
     /// Set trust policy
     Set {
+        /// Path to signature policy file
+        #[arg(long = "signature-policy")]
+        signature_policy: Option<String>,
         /// Trust type (accept, reject, signedBy)
         #[arg(short = 't', long = "type", default_value = "accept")]
         trust_type: String,
         /// Registry or scope
         registry: String,
         /// Public keys for signedBy
-        #[arg(long = "pubkeys")]
+        #[arg(short = 'f', long = "pubkeysfile", alias = "pubkeys")]
         pubkeys: Vec<String>,
     },
 }

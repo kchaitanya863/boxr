@@ -96,15 +96,17 @@ fn main() -> Result<()> {
         }
     }
 
+    boxr::cli::log_level::init_from_process_args();
+    boxr::completions::cobra::try_handle_cobra_complete(&args);
+    if boxr::cli::usage_errors::try_print_argv_help(&args) {
+        unreachable!();
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
-        boxr::cli::log_level::init_from_process_args();
         let raw_argv: Vec<String> = std::env::args().collect();
-        if boxr::cli::usage_errors::try_print_argv_help(&raw_argv) {
-            unreachable!();
-        }
         let argv: Vec<String> = boxr::cli::preprocess_argv(raw_argv);
         let cli = match boxr::cli::Cli::try_parse_from(&argv) {
             Ok(c) => c,

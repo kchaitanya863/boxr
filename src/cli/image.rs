@@ -27,6 +27,40 @@ pub struct PullArgs {
     #[arg(long = "platform")]
     pub platform: Option<String>,
 
+    /// Set architecture
+    #[arg(long = "arch")]
+    pub arch: Option<String>,
+
+    /// Set OS
+    #[arg(long = "os")]
+    pub os: Option<String>,
+
+    /// Pull image policy ("always", "missing", "never", "newer")
+    #[arg(long = "policy")]
+    pub policy: Option<String>,
+
+    /// Number of times to retry in case of failure when performing pull (default 3)
+    #[arg(long = "retry", default_value_t = 3)]
+    pub retry: u32,
+
+    /// Delay between retries in case of pull failures (default "2s")
+    #[arg(long = "retry-delay", default_value = "2s")]
+    pub retry_delay: String,
+
+    /// Require HTTPS and verify certificates when contacting registries
+    #[arg(
+        long = "tls-verify",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub tls_verify: Option<bool>,
+
+    /// Suppress output information when pulling images
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
 
@@ -67,6 +101,27 @@ pub struct LoadArgs {
 pub struct PushArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
+    /// Number of times to retry in case of failure when performing push (default 3)
+    #[arg(long = "retry", default_value_t = 3)]
+    pub retry: u32,
+    /// Delay between retries in case of push failures (default "2s")
+    #[arg(long = "retry-delay", default_value = "2s")]
+    pub retry_delay: String,
+    #[arg(
+        long = "tls-verify",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub tls_verify: Option<bool>,
+    #[arg(short = 'f', long = "format", hide = true)]
+    pub format: Option<String>,
+    #[arg(long = "compression-format", hide = true)]
+    pub compression_format: Option<String>,
+    #[arg(short = 'q', long = "quiet", hide = true)]
+    pub quiet: bool,
     /// Source image
     pub source: String,
     /// Destination name on the registry (optional)
@@ -84,6 +139,19 @@ pub struct LoginArgs {
     pub password: Option<String>,
     #[arg(long = "password-stdin")]
     pub password_stdin: bool,
+    #[arg(long = "compat-auth-file")]
+    pub compat_auth_file: Option<String>,
+    #[arg(long = "secret")]
+    pub secret: Option<String>,
+    #[arg(
+        long = "tls-verify",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub tls_verify: Option<bool>,
+    #[arg(value_name = "REGISTRY")]
     pub server: Option<String>,
 }
 
@@ -92,6 +160,11 @@ pub struct LoginArgs {
 pub struct LogoutArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
+    #[arg(long = "compat-auth-file")]
+    pub compat_auth_file: Option<String>,
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+    #[arg(value_name = "REGISTRY")]
     pub server: Option<String>,
 }
 
@@ -177,8 +250,17 @@ pub struct BuildArgs {
     #[arg(long = "squash")]
     pub squash: bool,
 
+    /// Squash all layers into a single layer
+    #[arg(long = "squash-all")]
+    pub squash_all: bool,
+
     /// Accepted for Podman BATS compatibility (boxr does not layer-cache builds)
-    #[arg(long = "layers")]
+    #[arg(
+        long = "layers",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub layers: Option<String>,
 
     /// Add Linux capabilities during build (accepted; applied at run time in boxr)
@@ -199,6 +281,54 @@ pub struct BuildArgs {
 
     #[arg(long = "ssh")]
     pub ssh: Vec<String>,
+
+    /// Pull image policy ("missing", "always", "never", "newer") (default "missing")
+    #[arg(
+        long = "pull",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
+    pub pull: Option<String>,
+
+    #[arg(long = "pull-never", hide = true)]
+    pub pull_never: bool,
+
+    #[arg(long = "pull-always", hide = true)]
+    pub pull_always: bool,
+
+    #[arg(long = "format", hide = true)]
+    pub format: Option<String>,
+
+    #[arg(long = "logfile", hide = true)]
+    pub logfile: Option<String>,
+
+    #[arg(long = "ignorefile", hide = true)]
+    pub ignorefile: Option<String>,
+
+    #[arg(long = "dns-search", hide = true)]
+    pub dns_search: Vec<String>,
+
+    #[arg(long = "ulimit", hide = true)]
+    pub ulimits: Vec<String>,
+
+    #[arg(long = "security-opt", hide = true)]
+    pub security_opt: Vec<String>,
+
+    #[arg(long = "jobs", hide = true)]
+    pub jobs: Option<u32>,
+
+    #[arg(
+        long = "tls-verify",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub tls_verify: Option<bool>,
 
     #[arg(default_value = ".")]
     pub path: String,
@@ -484,6 +614,7 @@ pub enum ImageAction {
     Rm(RmiArgs),
     Inspect(super::container::InspectArgs),
     History(HistoryArgs),
+    Search(SearchArgs),
     Save(SaveArgs),
     Load(LoadArgs),
     Import(ImportArgs),
@@ -554,12 +685,16 @@ pub struct ImagesArgs {
     #[arg(long = "tree")]
     pub tree: bool,
 
+    /// Do not print column headings
+    #[arg(short = 'n', long = "noheading", alias = "no-heading")]
+    pub noheading: bool,
+
     /// Format output using a custom template (e.g. json, table)
-    #[arg(short = 'f', long = "format", allow_hyphen_values = true)]
+    #[arg(long = "format", allow_hyphen_values = true)]
     pub format: Option<String>,
 
     /// Filter output based on conditions provided
-    #[arg(long = "filter")]
+    #[arg(short = 'f', long = "filter")]
     pub filter: Vec<String>,
 
     /// Sort by repository, tag, id, or created (Podman-compatible)
@@ -581,6 +716,10 @@ pub struct RmiArgs {
     /// Force removal of the image
     #[arg(short = 'f', long = "force")]
     pub force: bool,
+
+    /// Ignore errors if a specified image does not exist
+    #[arg(short = 'i', long = "ignore")]
+    pub ignore: bool,
 
     /// Do not delete untagged parents
     #[arg(long = "no-prune")]
@@ -683,6 +822,16 @@ pub struct SearchArgs {
 
     #[arg(long = "no-trunc")]
     pub no_trunc: bool,
+
+    #[arg(
+        long = "tls-verify",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub tls_verify: Option<bool>,
 
     /// Search term
     pub term: String,

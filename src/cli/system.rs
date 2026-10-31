@@ -50,6 +50,18 @@ pub struct EventsArgs {
 
     #[arg(long = "format")]
     pub format: Option<String>,
+
+    #[arg(
+        long = "stream",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub stream: Option<bool>,
+
+    #[arg(long = "events-backend")]
+    pub events_backend: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -292,6 +304,15 @@ pub struct PodCreateArgs {
     /// Do not create an infra container
     #[arg(long = "no-infra", default_value_t = false)]
     pub no_infra: bool,
+    /// Custom image for infra container
+    #[arg(long = "infra-image")]
+    pub infra_image: Option<String>,
+    /// Custom command for infra container
+    #[arg(long = "infra-command")]
+    pub infra_command: Option<String>,
+    /// Custom name for infra container
+    #[arg(long = "infra-name")]
+    pub infra_name: Option<String>,
     /// Pod name (positional; same as --name)
     #[arg(value_name = "NAME")]
     pub pod: Option<String>,
@@ -351,6 +372,8 @@ pub enum PodAction {
     Stats {
         #[arg(long = "no-stream")]
         no_stream: bool,
+        #[arg(long = "format")]
+        format: Option<String>,
         pods: Vec<String>,
     },
     /// Remove all stopped pods

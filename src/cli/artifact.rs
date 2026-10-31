@@ -32,6 +32,8 @@ pub enum ArtifactAction {
     },
     /// Display detailed information on an artifact
     Inspect {
+        #[arg(short = 'f', long = "format")]
+        format: Option<String>,
         /// Name or digest of the artifact
         name: String,
     },

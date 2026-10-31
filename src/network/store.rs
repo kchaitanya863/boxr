@@ -154,11 +154,20 @@ impl NetworkStore {
             return None;
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            Ok(self
-                .load_unlocked()
-                .networks
-                .into_iter()
-                .find(|n| n.id == q || n.id.starts_with(q) || n.name == q))
+            let nets = self.load_unlocked().networks;
+            if let Some(found) = nets
+                .iter()
+                .find(|n| n.id == q || n.id.starts_with(q) || n.name == q)
+                .cloned()
+            {
+                return Ok(Some(found));
+            }
+            if q == "podman" {
+                return Ok(nets
+                    .into_iter()
+                    .find(|n| n.name == Self::DEFAULT_NETWORK));
+            }
+            Ok(None)
         })
         .ok()
         .flatten()

@@ -313,6 +313,7 @@ fn test_issue_164_images_accepts_invalid_filter_keys_without_returning_an_error(
         all: false,
         digests: false,
         no_trunc: false,
+        noheading: false,
         tree: false,
         format: None,
         sort: None,
@@ -371,8 +372,9 @@ fn test_issue_167_volume_inspect_fails_with_error_when_format_template_flag_is_s
     store.create(Some("vol167"), None).unwrap();
     let sub = VolumeSubcommands {
         command: VolumeAction::Inspect {
+            all: false,
             format: Some("{{.Name}}".to_string()),
-            name: "vol167".to_string(),
+            name: Some("vol167".to_string()),
         },
     };
     assert!(boxr::handle_volume(sub).is_ok());

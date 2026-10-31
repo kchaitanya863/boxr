@@ -41,7 +41,7 @@ fi
 clone_or_update() {
   if [[ ! -d "$SRC_DIR/.git" ]]; then
     git clone --depth 1 --branch "$PODMAN_TESTS_REF" "$PODMAN_TESTS_REPO" "$SRC_DIR"
-  else
+  elif [[ "${PODMAN_BATS_UPDATE:-0}" == "1" ]]; then
     git -C "$SRC_DIR" fetch --depth 1 origin "$PODMAN_TESTS_REF" 2>/dev/null || true
     git -C "$SRC_DIR" checkout -q FETCH_HEAD 2>/dev/null || git -C "$SRC_DIR" pull -q --ff-only 2>/dev/null || true
   fi
@@ -62,16 +62,18 @@ apply_vendored_upstream() {
 }
 
 apply_boxr_patches() {
+  for hf in "$SRC_DIR/test/system/helpers.network.bash" "$SRC_DIR/test/system/helpers.registry.bash"; do
+    if [[ -f "$hf" ]] && grep -q 'rsa:4096' "$hf" 2>/dev/null; then
+      sed -i 's/rsa:4096/rsa:2048/g' "$hf"
+    fi
+  done
   local stamp="$CACHE_DIR/.boxr-patches-applied"
   local helpers="$SRC_DIR/test/system/helpers.bash"
   local head
   head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo none)"
   local overrides_id
   overrides_id="$(sha256sum "$OVERRIDES" | awk '{print $1}')"
-  if grep -q 'BOXR_BATS_OVERRIDES' "$helpers" 2>/dev/null && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "${head}:${overrides_id}" ]]; then
-    return 0
-  fi
-  # Re-apply overrides on each upstream bump (strip previous block first).
+  # Re-apply overrides after apply_vendored_upstream (strip previous block first).
   if grep -q 'BOXR_BATS_OVERRIDES' "$helpers" 2>/dev/null; then
     sed -i '/^# BOXR_BATS_OVERRIDES$/,$d' "$helpers"
   fi
@@ -107,11 +109,11 @@ podmanize_help() {
 is_help=0
 if [[ "\${1:-}" == "help" ]]; then
   is_help=1
-elif [[ "\${1:-}" != "run" && "\${1:-}" != "exec" ]]; then
+elif [[ "\${1:-}" != "run" && "\${1:-}" != "create" && "\${1:-}" != "exec" ]]; then
   if [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
     is_help=1
   fi
-elif [[ "\${2:-}" == "--help" || "\${2:-}" == "-h" ]]; then
+elif [[ "\${2:-}" == "--help" ]]; then
   is_help=1
 fi
 if [[ \$is_help -eq 1 ]]; then
@@ -182,6 +184,10 @@ run_manifest() {
     if ! hack/bats --rootless "$pat" 2>&1 | tee -a "$log"; then
       failed=1
     fi
+    "$BOXR_BIN" pod rm -a -f >/dev/null 2>&1 || true
+    "$BOXR_BIN" rm -a -f >/dev/null 2>&1 || true
+    chmod -R u+w "$BOXR_HOME" 2>/dev/null || true
+    rm -rf "$BOXR_HOME" 2>/dev/null || true
   done
 
   echo "Log: $log"

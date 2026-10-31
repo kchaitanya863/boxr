@@ -15,7 +15,10 @@ pub enum VolumeAction {
     Inspect {
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
-        name: String,
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(required_unless_present = "all")]
+        name: Option<String>,
     },
     Rm(VolumeRmArgs),
     Prune(VolumePruneArgs),
@@ -196,6 +199,9 @@ pub enum NetworkAction {
         /// Set driver specific options
         #[arg(short = 'o', long = "opt")]
         opts: Vec<String>,
+        /// Network interface name on the bridge
+        #[arg(long = "interface-name")]
+        interface_name: Option<String>,
         /// Control the network's scope
         #[arg(long = "scope")]
         scope: Option<String>,

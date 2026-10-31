@@ -56,6 +56,12 @@ impl OverlayDriver {
 
         // Fallback: safe CoW copy tree isolating container writes from base image layers
         Self::create_hardlink_tree(base_rootfs, &merged_dir)?;
+        if let Some(img_dir) = base_rootfs.parent() {
+            let src_chown = img_dir.join("chown_meta.json");
+            if src_chown.exists() {
+                let _ = fs::copy(&src_chown, bundle_dir.join("chown_meta.json"));
+            }
+        }
 
         Ok(OverlayBundle {
             lower_dir: base_rootfs.to_path_buf(),
@@ -123,6 +129,15 @@ impl OverlayDriver {
     /// CoW fallback: copies files and reproduces directory structure, ensuring container
     /// writes never modify the base image layer inodes.
     pub fn create_hardlink_tree(src: &Path, dst: &Path) -> Result<()> {
+        let mut seen_inodes = std::collections::HashMap::new();
+        Self::create_hardlink_tree_inner(src, dst, &mut seen_inodes)
+    }
+
+    fn create_hardlink_tree_inner(
+        src: &Path,
+        dst: &Path,
+        seen_inodes: &mut std::collections::HashMap<(u64, u64), PathBuf>,
+    ) -> Result<()> {
         let _ = fs::create_dir_all(dst);
         let entries = match fs::read_dir(src) {
             Ok(e) => e,
@@ -141,7 +156,7 @@ impl OverlayDriver {
             let to = dst.join(entry.file_name());
 
             if ty.is_dir() {
-                let _ = Self::create_hardlink_tree(&from, &to);
+                let _ = Self::create_hardlink_tree_inner(&from, &to, seen_inodes);
             } else if ty.is_symlink() {
                 #[cfg(unix)]
                 {
@@ -151,7 +166,32 @@ impl OverlayDriver {
                 }
             } else {
                 let meta = fs::metadata(&from);
-                let _ = fs::copy(&from, &to);
+                #[cfg(unix)]
+                let mut linked = false;
+                #[cfg(unix)]
+                if let Ok(m) = &meta {
+                    use std::os::unix::fs::MetadataExt;
+                    if m.nlink() > 1 {
+                        let key = (m.dev(), m.ino());
+                        if let Some(first_to) = seen_inodes.get(&key) {
+                            let _ = fs::remove_file(&to);
+                            if fs::hard_link(first_to, &to).is_ok() {
+                                linked = true;
+                            }
+                        } else if fs::copy(&from, &to).is_ok() {
+                            seen_inodes.insert(key, to.clone());
+                            linked = true;
+                        }
+                    }
+                }
+                #[cfg(unix)]
+                if !linked {
+                    let _ = fs::copy(&from, &to);
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = fs::copy(&from, &to);
+                }
                 if let Ok(meta) = meta {
                     Self::preserve_file_timestamps(&from, &to, &meta);
                 }

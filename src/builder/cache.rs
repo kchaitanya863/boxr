@@ -11,14 +11,31 @@ impl BuildCache {
     }
 
     pub fn get(key: &str) -> Option<PathBuf> {
-        let dir = Self::cache_dir().join(key).join("rootfs");
-        if dir.exists() { Some(dir) } else { None }
+        let key_dir = Self::cache_dir().join(key);
+        let dir = key_dir.join("rootfs");
+        if key_dir.join(".complete").exists() && dir.exists() {
+            Some(dir)
+        } else {
+            None
+        }
     }
 
     pub fn put(key: &str, rootfs: &Path) -> Result<()> {
-        let dir = Self::cache_dir().join(key).join("rootfs");
-        fs::create_dir_all(&dir)?;
-        copy_dir_all(rootfs, &dir)?;
+        let cache = Self::cache_dir();
+        fs::create_dir_all(&cache)?;
+        let final_key_dir = cache.join(key);
+        if final_key_dir.join(".complete").exists() {
+            return Ok(());
+        }
+        let tmp_key_dir = cache.join(format!(".tmp-{}-{}", key, std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_key_dir);
+        let tmp_rootfs = tmp_key_dir.join("rootfs");
+        fs::create_dir_all(&tmp_rootfs)?;
+        copy_dir_all(rootfs, &tmp_rootfs)?;
+        let _ = fs::write(tmp_key_dir.join(".complete"), b"1");
+        if fs::rename(&tmp_key_dir, &final_key_dir).is_err() {
+            let _ = fs::remove_dir_all(&tmp_key_dir);
+        }
         Ok(())
     }
 

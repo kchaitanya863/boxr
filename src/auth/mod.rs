@@ -81,10 +81,29 @@ pub struct CredentialStore {
 
 impl CredentialStore {
     pub fn new() -> Self {
+        if let Some(af) = crate::oci::registry_options::registry_options_snapshot().authfile {
+            return Self { config_file: af };
+        }
+        if let Some(cfg_dir) = crate::cli::DOCKER_CONFIG_DIR.get() {
+            return Self {
+                config_file: PathBuf::from(cfg_dir).join("config.json"),
+            };
+        }
+        if let Ok(env_af) = std::env::var("REGISTRY_AUTH_FILE") {
+            if !env_af.trim().is_empty() {
+                return Self {
+                    config_file: PathBuf::from(env_af.trim()),
+                };
+            }
+        }
         let home = boxr_home();
         Self {
             config_file: home.join("config.json"),
         }
+    }
+
+    pub fn with_file(config_file: PathBuf) -> Self {
+        Self { config_file }
     }
 
     fn load(&self) -> AuthConfig {
@@ -96,6 +115,11 @@ impl CredentialStore {
     }
 
     fn save(&self, config: &AuthConfig) -> Result<()> {
+        if let Some(parent) = self.config_file.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
         let content = serde_json::to_string_pretty(config)?;
         let rand_suffix = hex::encode(crate::storage::container_store::rand_id());
         let temp_file = self
@@ -277,15 +301,41 @@ pub struct RegistryPusher;
 impl RegistryPusher {
     /// Push an image to an OCI / Docker registry
     pub async fn push(image_query: &str, destination: Option<&str>) -> Result<()> {
-        let store = ImageStore::new();
-        let image = store
-            .find(image_query)
+        let mut store = ImageStore::new();
+        let mut image = crate::find_image_with_shortname(&store, image_query, None)
             .ok_or_else(|| anyhow!("Image '{}' not found locally", image_query))?;
 
-        let reference = if let Some(dest) = destination {
-            ImageReference::parse(dest)?
+        if let Some(dir_dest) = destination.and_then(|d| d.strip_prefix("dir:")) {
+            use sha2::{Digest, Sha256};
+            let dest_path = Path::new(dir_dest);
+            fs::create_dir_all(dest_path)?;
+            let mut tar_bytes = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut tar_bytes);
+                crate::append_clean_dir_all_for_test(
+                    &mut builder,
+                    Path::new(&image.rootfs_path),
+                    Path::new(""),
+                )?;
+                builder.finish()?;
+            }
+            let layer_hex = hex::encode(Sha256::digest(&tar_bytes));
+            fs::write(dest_path.join(&layer_hex), &tar_bytes)?;
+            image.config.rootfs = Some(crate::oci::image::RootFsConfig {
+                fs_type: "layers".to_string(),
+                diff_ids: vec![format!("sha256:{}", layer_hex)],
+            });
+            let _ = store.add(image);
+            return Ok(());
+        }
+
+        let dest_str = destination
+            .map(|d| d.strip_prefix("docker://").unwrap_or(d))
+            .unwrap_or_else(|| image_query.strip_prefix("docker://").unwrap_or(image_query));
+        let reference = if destination.is_some() || dest_str.contains('/') {
+            ImageReference::parse(dest_str)?
         } else {
-            ImageReference::parse(&format!("{}:{}", image.reference, image.tag))?
+            ImageReference::parse(&image.qualified_name())?
         };
         let creds = crate::oci::registry_options::registry_options_snapshot()
             .inline_creds

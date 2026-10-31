@@ -284,15 +284,17 @@ impl PodStore {
                             }
                         }
                     }
-                    if let Some(infra) = c_store
-                        .find(&infra_name)
-                        .or_else(|| c_store.find(&pod.infra_container_id))
-                    {
-                        if matches!(infra.status, ContainerStatus::Running) {
-                            return Err(anyhow!(
-                                "conflict: cannot remove running pod {}. Stop the pod or use force",
-                                pod.name
-                            ));
+                    if pod.status == "Running" {
+                        if let Some(infra) = c_store
+                            .find(&infra_name)
+                            .or_else(|| c_store.find(&pod.infra_container_id))
+                        {
+                            if matches!(infra.status, ContainerStatus::Running) {
+                                return Err(anyhow!(
+                                    "conflict: cannot remove running pod {}. Stop the pod or use force",
+                                    pod.name
+                                ));
+                            }
                         }
                     }
                 }
@@ -301,13 +303,13 @@ impl PodStore {
                 self.save_unlocked(&data)?;
 
                 for cid in &removed.containers {
-                    let _ = crate::remove_container(cid, force);
+                    let _ = crate::remove_container_quiet(cid, force, false);
                 }
                 if let Some(infra) = c_store
                     .find(&infra_name)
                     .or_else(|| c_store.find(&removed.infra_container_id))
                 {
-                    let _ = crate::remove_container(&infra.id, force);
+                    let _ = crate::remove_container_quiet(&infra.id, true, false);
                 }
                 Ok(removed)
             } else {
@@ -379,6 +381,25 @@ impl PodStore {
                 if !p.containers.contains(&container_id.to_string()) {
                     p.containers.push(container_id.to_string());
                     p.status = "Running".to_string();
+                    self.save_unlocked(&data)?;
+                }
+                Ok(())
+            } else {
+                Err(anyhow!("Pod '{}' not found", pod_query))
+            }
+        })
+    }
+
+    pub fn add_created_container_to_pod(&self, pod_query: &str, container_id: &str) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            if let Some(p) = data
+                .pods
+                .iter_mut()
+                .find(|p| p.id.starts_with(pod_query) || p.name == pod_query)
+            {
+                if !p.containers.contains(&container_id.to_string()) {
+                    p.containers.push(container_id.to_string());
                     self.save_unlocked(&data)?;
                 }
                 Ok(())

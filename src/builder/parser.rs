@@ -240,7 +240,24 @@ impl DockerfileParser {
             }
             "USER" => Ok(vec![Instruction::User(rest.to_string())]),
             "VOLUME" => {
-                let vols = parse_array_or_words(rest);
+                let vols = if rest.starts_with('[') && rest.ends_with(']') {
+                    if let Ok(vec) = serde_json::from_str::<Vec<String>>(rest) {
+                        vec
+                    } else {
+                        rest.split_whitespace()
+                            .map(|w| {
+                                let clean = w.trim_matches('"').replace('\'', "");
+                                if clean.starts_with('/') {
+                                    clean
+                                } else {
+                                    format!("/{}", clean)
+                                }
+                            })
+                            .collect()
+                    }
+                } else {
+                    parse_array_or_words(rest)
+                };
                 Ok(vec![Instruction::Volume(vols)])
             }
             "STOPSIGNAL" => Ok(vec![Instruction::StopSignal(rest.to_string())]),
@@ -276,10 +293,15 @@ pub fn parse_array_or_words(s: &str) -> Vec<String> {
 }
 
 pub fn parse_key_value_pairs(rest: &str) -> Vec<(String, String)> {
-    if !rest.contains('=') {
+    let first_token = rest.split_whitespace().next().unwrap_or("");
+    if !first_token.contains('=') {
         if let Some((k, v)) = rest.split_once(char::is_whitespace) {
             let key = k.trim().to_string();
-            let val = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            let val = v
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .replace("\\$", "$");
             return vec![(key, val)];
         }
         return Vec::new();
