@@ -45,6 +45,34 @@ fn vendored_upstream_manifest_all_matches_bats_files() {
 }
 
 #[test]
+fn curated_manifest_matches_all_upstream_bats_files() {
+    let manifest_all = repo_root().join("tests/podman_bats/manifest-all.txt");
+    let raw_all = fs::read_to_string(&manifest_all).expect("manifest-all.txt");
+    let mut all_stems: Vec<String> = raw_all
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(l).trim())
+        .filter(|l| !l.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    all_stems.sort();
+
+    let manifest = repo_root().join("tests/podman_bats/manifest.txt");
+    let raw = fs::read_to_string(&manifest).expect("manifest.txt");
+    let mut curated_stems: Vec<String> = raw
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(l).trim())
+        .filter(|l| !l.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    curated_stems.sort();
+
+    assert_eq!(
+        curated_stems, all_stems,
+        "manifest.txt must include all 77 upstream BATS patterns"
+    );
+}
+
+#[test]
 fn vendored_upstream_includes_helpers_bash() {
     let helpers = repo_root().join("tests/podman_bats/upstream/helpers.bash");
     assert!(

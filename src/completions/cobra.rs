@@ -43,6 +43,10 @@ pub fn try_handle_cobra_complete(raw_argv: &[String]) {
             continue;
         }
         let a = raw_argv[i].as_str();
+        if a.is_empty() && i < comp_pos {
+            i += 1;
+            continue;
+        }
         if matches!(
             a,
             "--root"

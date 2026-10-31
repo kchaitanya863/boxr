@@ -363,6 +363,42 @@ impl CgroupV2Manager {
         Ok(())
     }
 
+    pub fn freeze_pid(pid: i32) {
+        if let Ok(cg) = fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+            for line in cg.lines() {
+                if let Some((_, rel)) = line.rsplit_once("::") {
+                    let rel = rel.trim().trim_start_matches('/');
+                    if !rel.is_empty() {
+                        let p = PathBuf::from("/sys/fs/cgroup")
+                            .join(rel)
+                            .join("cgroup.freeze");
+                        if p.exists() {
+                            let _ = fs::write(p, "1");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn unfreeze_pid(pid: i32) {
+        if let Ok(cg) = fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+            for line in cg.lines() {
+                if let Some((_, rel)) = line.rsplit_once("::") {
+                    let rel = rel.trim().trim_start_matches('/');
+                    if !rel.is_empty() {
+                        let p = PathBuf::from("/sys/fs/cgroup")
+                            .join(rel)
+                            .join("cgroup.freeze");
+                        if p.exists() {
+                            let _ = fs::write(p, "0");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Clean up the container cgroup hierarchy
     pub fn cleanup(&self) -> Result<()> {
         if self.cgroup_path.exists() {

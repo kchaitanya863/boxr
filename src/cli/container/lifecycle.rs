@@ -232,7 +232,7 @@ pub struct AttachArgs {
     pub latest: bool,
 
     /// Container to attach to
-    pub container: String,
+    pub container: Option<String>,
 }
 
 #[derive(Args, Debug)]

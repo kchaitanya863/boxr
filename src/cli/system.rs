@@ -547,7 +547,7 @@ pub enum GenerateAction {
     Kube(crate::cli::kube::KubeGenerateArgs),
     /// [DEPRECATED] Generate systemd units
     #[command(
-        about = "[DEPRECATED] Generate systemd units.\n\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details.",
+        about = "[DEPRECATED] Generate systemd units",
         long_about = "[DEPRECATED] Generate systemd units.\n  The generated units can later be controlled via systemctl(1).\n\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details."
     )]
     Systemd {

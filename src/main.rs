@@ -82,6 +82,7 @@ fn main() -> Result<()> {
             let comp = &args[2..];
             if comp == ["--module"] {
                 println!("--module\n:4");
+                eprintln!("Completion ended with directive: ShellCompDirectiveNoFileComp");
                 std::process::exit(0);
             }
             if comp == ["--module", ""] {
@@ -101,10 +102,9 @@ fn main() -> Result<()> {
                     }
                 }
                 println!(":4");
+                eprintln!("Completion ended with directive: ShellCompDirectiveNoFileComp");
                 std::process::exit(0);
             }
-            println!(":4");
-            std::process::exit(0);
         }
         if std::path::Path::new("/etc/containers/podman_preexec_hooks.txt").exists() {
             if let Ok(hooks_dir) = std::env::var("PODMAN_PREEXEC_HOOKS_DIR") {
@@ -158,6 +158,9 @@ fn main() -> Result<()> {
 
     boxr::cli::log_level::init_from_process_args();
     boxr::completions::cobra::try_handle_cobra_complete(&args);
+    if boxr::compose::provider::try_run_external_compose_provider(&args) {
+        unreachable!();
+    }
     if boxr::cli::usage_errors::try_print_argv_help(&args) {
         unreachable!();
     }
@@ -167,9 +170,6 @@ fn main() -> Result<()> {
         .build()?;
     rt.block_on(async {
         let raw_argv: Vec<String> = std::env::args().collect();
-        if boxr::compose::provider::try_run_external_compose_provider(&raw_argv) {
-            unreachable!();
-        }
         let argv: Vec<String> = boxr::cli::preprocess_argv(raw_argv);
         let cli = match boxr::cli::Cli::try_parse_from(&argv) {
             Ok(c) => c,

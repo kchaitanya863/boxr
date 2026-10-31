@@ -389,7 +389,7 @@ impl ImageStore {
                     }
                     if let Some(parent) = rootfs.parent() {
                         let root_dir = self.index_file.parent().unwrap_or(Path::new("."));
-                        if parent.exists() && parent != root_dir {
+                        if parent.exists() && parent != root_dir && parent != Path::new("/") {
                             #[cfg(unix)]
                             {
                                 use std::os::unix::fs::PermissionsExt;

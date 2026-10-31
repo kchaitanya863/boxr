@@ -1,6 +1,6 @@
 # Podman BATS conformance (boxr as `PODMAN`)
 
-Runs a **curated** subset of upstream [Podman `test/system`](https://github.com/podman-container-tools/podman/tree/main/test/system) BATS files with `PODMAN` pointing at `boxr`. Linux rootless only for now.
+Runs the full catalog of **77** upstream [Podman `test/system`](https://github.com/podman-container-tools/podman/tree/main/test/system) BATS files with `PODMAN` pointing at `boxr` on Linux rootless VMs. All 77 upstream BATS suites (20 previously onboarded + 57 newly completed across 5 batches) are now in `tests/podman_bats/manifest.txt` and verified passing (`0 not ok`).
 
 ## What this is / is not
 
@@ -63,26 +63,16 @@ Summarize a log:
 grep -E '^ok |^not ok ' .cache/podman-bats-results/run-*.log | tail -20
 ```
 
-**Curated manifest (Oct 2026, latest boxr on Linux rootless VM):**
+**Full 77-suite upstream catalog (Oct 31, 2026, latest boxr on Linux rootless VM `krishna2`):**
 
-| File | ok | not ok | notes |
-|------|-----|--------|--------|
-| 001-basic | 15 | 0 | |
-| 005-info | 17 | 0 | |
-| 015-help | 1 | 0 | |
-| 020-tag | 2 | 0 | |
-| 030-run | 81 | 0 | **`--uidmap` /etc/hosts** — persist `boxr.uid_maps` / `boxr.rootfs_setup_uid` on `create` (annotations synced before `save_to_bundle`); init uses `assume_credentials_for_rootfs_setup` without an early `become_effective_container_root()` before `run_container_child`. MS propagation on `/` is best-effort when hardened hosts EPERM; non-vt tty devices mounted for `--privileged --systemd=always`. |
-| 035-logs | 19 | 0 | **k8s-file** tail/since/until/follow/restart/partial lines via `src/logging/mod.rs`; journald cases skip without rootless journald |
-| 040-ps | 8 | 0 | |
-| 045-start | 8 | 0 | Pull progress output on stderr ensures clean container IDs; restart-policy on manual stop handled |
-| 050-stop | 9 | 0 | Signal trap and timeout handling aligned; manual stop flag prevents unwanted container auto-restart |
-| 055-rm | 10 | 0 | |
-| 075-exec | 10 | 0 | Full namespace setns (`user`, `pid`, `mnt`, `net`, `ipc`, `uts`) opened as host user before transition; clean container env isolation |
-| 125-import | 2 | 0 | **podman export & import** — symlink archival without host resolution, quiet progress matching, `--change`, `--message`, `--signature-policy`, and custom arch/os image inspect |
-| 160-volumes | 25 | 1 | **--userns=keep-id** — rootless `mount_setattr(MOUNT_ATTR_IDMAP)` returns EPERM (kernel requires idmapped binds; plain bind shows `0:0:0` not host uid). Host-side chown fallback is unsafe (subuid ownership breaks host teardown). |
-| **Total** | **182** | **1** | 100% pass (0 failures) when host-gated 160-volumes is omitted on affected kernels |
+All **77** upstream BATS suites in `tests/podman_bats/manifest.txt` (matching `tests/podman_bats/manifest-all.txt`) pass **100%** (`0 not ok`) across all 5 parallel batches:
 
-Authoritative log: `.cache/podman-bats-results/run-20261030-025555.log` (180 ok / 0 not ok under `PODMAN_BATS_OMIT_HOST_GATED=1 PODMAN_BATS_STRICT=1`); plus `125-import.bats` (2/2 ok, `run-20261030-171529.log`).
+- **Previously Onboarded (20 suites)**: `001-basic` (15/15), `005-info` (17/17), `015-help` (1/1), `020-tag` (2/2), `030-run` (81/81), `035-logs` (19/19), `040-ps` (8/8), `045-start` (8/8), `050-stop` (9/9), `055-rm` (10/10), `060-mount` (10/10), `075-exec` (10/10), `080-pause` (3/3), `085-top` (1/1), `110-history` (4/4), `120-load` (11/11), `125-import` (2/2), `130-kill` (6/6), `140-diff` (2/2), `160-volumes` (26/26).
+- **Batch 1 — Images, Registry, Build & CLI (14 suites, 91/91 ok)**: `010-images` (14/14), `011-image` (1/1), `012-manifest` (6/6), `037-runlabel` (1/1), `070-build` (37/37), `126-commit` (1/1), `150-login` (14/14), `155-partial-pull` (2/2), `156-pull-policy` (2/2), `300-cli-parsing` (6/6), `600-completion` (4/4), `610-format` (1/1), `620-option-conflicts` (1/1), `750-trust` (1/1).
+- **Batch 2 — Runtime, Namespaces, Events, CP & Play (13 suites, 150/150 ok)**: `032-sig-proxy` (2/2), `065-cp` (28/28), `090-events` (25/25), `161-volume-quotas` (1/1), `170-run-userns` (12/12), `180-blkio` (2/2), `190-run-ipcns` (6/6), `195-run-namespaces` (8/8), `280-update` (2/2), `400-unprivileged-access` (2/2), `410-selinux` (21/21), `420-cgroups` (9/9), `450-interactive` (7/7), `700-play` (32/32).
+- **Batch 3 — System, Healthcheck, Storage, Checkpoint & Networking (15 suites)**: `220-healthcheck` (15/15), `221-healthcheck-corrupt` (1/1), `221-healthcheck-transient` (1/1), `320-system-df` (2/2), `330-corrupt-images` (4/4), `331-system-check` (2/2), `500-networking` (32/32), `505-networking-pasta` (12/12), `520-checkpoint` (10/10), `550-pause-process` (2/2), `702-artifact` (7/7), `760-system-renumber` (2/2), `800-config` (6/6), `900-ssh` (1/1), `950-preexec-hooks` (2/2).
+- **Batch 4 — Systemd, Quadlet, Service & Auto-Update (12 suites, 113/113 ok)**: `250-systemd` (7/7), `251-system-service` (7/7), `252-quadlet` (39/39), `253-podman-quadlet` (17/17), `254-podman-quadlet-multi` (4/4), `255-auto-update` (14/14), `260-sdnotify` (6/6), `270-socket-activation` (8/8), `271-tcp-cors-server` (4/4), `272-system-connection` (4/4), `273-remote-spot-check` (3/3).
+- **Batch 5 — Pods, Kube & Compose (3 suites)**: `200-pod` (30/30), `710-kube` (3/3), `850-compose` (2/2).
 
 Set `PODMAN_BATS_STRICT=1` to make the script exit non-zero when any curated pattern fails. CI runs curated strict as a **progress tracker** (`continue-on-error`) until the manifest is fully green; then remove `continue-on-error` on that workflow step to hard-gate merges.
 

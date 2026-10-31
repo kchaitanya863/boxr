@@ -23,10 +23,10 @@ pub struct RegistryAuthArgs {
     #[arg(
         long = "tls-verify",
         num_args = 0..=1,
-        require_equals = true,
         default_missing_value = "true",
         action = clap::ArgAction::Set,
-        value_parser = clap::builder::BoolishValueParser::new()
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
     )]
     pub tls_verify: Option<bool>,
 }
@@ -57,16 +57,6 @@ pub struct PullArgs {
     /// Delay between retries in case of pull failures (default "2s")
     #[arg(long = "retry-delay", default_value = "2s")]
     pub retry_delay: String,
-
-    /// Require HTTPS and verify certificates when contacting registries
-    #[arg(
-        long = "tls-verify",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        action = clap::ArgAction::Set,
-        value_parser = clap::builder::BoolishValueParser::new()
-    )]
-    pub tls_verify: Option<bool>,
 
     /// Suppress output information when pulling images
     #[arg(short = 'q', long = "quiet")]
@@ -118,15 +108,6 @@ pub struct PushArgs {
     /// Delay between retries in case of push failures (default "2s")
     #[arg(long = "retry-delay", default_value = "2s")]
     pub retry_delay: String,
-    #[arg(
-        long = "tls-verify",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        action = clap::ArgAction::Set,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        hide = true
-    )]
-    pub tls_verify: Option<bool>,
     #[arg(short = 'f', long = "format", hide = true)]
     pub format: Option<String>,
     #[arg(long = "compression-format", hide = true)]
@@ -154,14 +135,6 @@ pub struct LoginArgs {
     pub compat_auth_file: Option<String>,
     #[arg(long = "secret")]
     pub secret: Option<String>,
-    #[arg(
-        long = "tls-verify",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        action = clap::ArgAction::Set,
-        value_parser = clap::builder::BoolishValueParser::new()
-    )]
-    pub tls_verify: Option<bool>,
     #[arg(value_name = "REGISTRY")]
     pub server: Option<String>,
 }
@@ -329,17 +302,6 @@ pub struct BuildArgs {
 
     #[arg(long = "jobs", hide = true)]
     pub jobs: Option<u32>,
-
-    #[arg(
-        long = "tls-verify",
-        num_args = 0..=1,
-        require_equals = true,
-        default_missing_value = "true",
-        action = clap::ArgAction::Set,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        hide = true
-    )]
-    pub tls_verify: Option<bool>,
 
     #[arg(long = "unsetenv")]
     pub unsetenv: Vec<String>,
@@ -836,16 +798,6 @@ pub struct SearchArgs {
 
     #[arg(long = "no-trunc")]
     pub no_trunc: bool,
-
-    #[arg(
-        long = "tls-verify",
-        num_args = 0..=1,
-        default_missing_value = "true",
-        action = clap::ArgAction::Set,
-        value_parser = clap::builder::BoolishValueParser::new(),
-        hide = true
-    )]
-    pub tls_verify: Option<bool>,
 
     /// Search term
     pub term: String,

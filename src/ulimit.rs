@@ -12,32 +12,32 @@ pub struct ParsedUlimit {
 }
 
 #[cfg(target_os = "linux")]
-const RLIMIT_LOCKS: u32 = libc::RLIMIT_LOCKS;
+const RLIMIT_LOCKS: u32 = libc::RLIMIT_LOCKS as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_LOCKS: u32 = 10;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_MSGQUEUE: u32 = libc::RLIMIT_MSGQUEUE;
+const RLIMIT_MSGQUEUE: u32 = libc::RLIMIT_MSGQUEUE as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_MSGQUEUE: u32 = 12;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_NICE: u32 = libc::RLIMIT_NICE;
+const RLIMIT_NICE: u32 = libc::RLIMIT_NICE as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_NICE: u32 = 13;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_RTPRIO: u32 = libc::RLIMIT_RTPRIO;
+const RLIMIT_RTPRIO: u32 = libc::RLIMIT_RTPRIO as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_RTPRIO: u32 = 14;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_RTTIME: u32 = libc::RLIMIT_RTTIME;
+const RLIMIT_RTTIME: u32 = libc::RLIMIT_RTTIME as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_RTTIME: u32 = 15;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_SIGPENDING: u32 = libc::RLIMIT_SIGPENDING;
+const RLIMIT_SIGPENDING: u32 = libc::RLIMIT_SIGPENDING as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_SIGPENDING: u32 = 11;
 
@@ -174,7 +174,7 @@ pub fn apply_ulimits_from_bundle(bundle_path: &Path) -> Result<()> {
                 rlim_max: 0,
             };
             if unsafe {
-                libc::getrlimit(p.rlimit_resource as libc::__rlimit_resource_t, &mut host_lim)
+                libc::getrlimit(p.rlimit_resource as _, &mut host_lim)
             } == 0
             {
                 if max > host_lim.rlim_max {
@@ -188,7 +188,7 @@ pub fn apply_ulimits_from_bundle(bundle_path: &Path) -> Result<()> {
                 rlim_cur: cur,
                 rlim_max: max,
             };
-            if unsafe { libc::setrlimit(p.rlimit_resource as libc::__rlimit_resource_t, &lim) } != 0
+            if unsafe { libc::setrlimit(p.rlimit_resource as _, &lim) } != 0
             {
                 return Err(anyhow!(
                     "setrlimit {}: {}",

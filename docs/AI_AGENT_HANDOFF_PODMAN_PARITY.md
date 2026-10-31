@@ -6,31 +6,20 @@ Living notes for cloud and local agents continuing **Podman-compatible** work on
 
 Bring **`035-logs.bats`** (k8s-file / CRI logging) to green under `PODMAN=boxr`, and keep `boxr logs` behavior aligned with Podman for tail, since/until, follow, partial lines, and restart scenarios.
 
-## Status: **Curated BATS manifest 100% green under STRICT=1** (Oct 30, 2026 PT)
+## Status: **All 77 Upstream Podman BATS suites onboarded & 100% green** (Oct 31, 2026 PT)
 
-| Check | Result |
-|-------|--------|
-| `001-basic.bats` | **15/15 ok** |
-| `005-info.bats` | **17/17 ok** |
-| `015-help.bats` | **1/1 ok** |
-| `020-tag.bats` | **2/2 ok** |
-| `030-run.bats` | **81/81 ok** |
-| `035-logs.bats` | **19/19 ok** (journald cases skipped on rootless without journald) |
-| `040-ps.bats` | **8/8 ok** |
-| `045-start.bats` | **8/8 ok** |
-| `050-stop.bats` | **9/9 ok** |
-| `055-rm.bats` | **10/10 ok** |
-| `060-mount.bats` | **10/10 ok** (volume/glob/ramfs/tmpfs mounts, containers.conf overrides) |
-| `075-exec.bats` | **10/10 ok** |
-| `080-pause.bats` | **3/3 ok** (systemd healthcheck timer interception) |
-| `085-top.bats` | **1/1 ok** (trailing var args, container proc namespace scanning) |
-| `110-history.bats` | **4/4 ok** (--human, JSON format, ISO/relative timestamps, layer alignment) |
-| `120-load.bats` | **11/11 ok** (Docker/OCI archives, HTTP URL, scp transfer, id/name roundtrip) |
-| `125-import.bats` | **2/2 ok** (symlink rootfs, quiet flags, --change, --signature-policy) |
-| `130-kill.bats` | **6/6 ok** (signal dispatch, -a/--all, allow-hyphen, setsid isolation) |
-| `140-diff.bats` | **2/2 ok** (buildah external container diffing, symlink diff, workdir creation) |
-| `run_podman_bats_offline_gate.sh` | **OK** |
-| Full curated suite (`STRICT=1`) | **221+ ok, 0 failed** (exit code 0) |
+All **77** upstream BATS files (20 initial curated suites + all 57 previously pending suites across Batches 1–5) are now listed in `tests/podman_bats/manifest.txt` (matching `tests/podman_bats/manifest-all.txt`) and verified passing with `0 not ok` on rootless Linux (`ssh krishna2`):
+
+| Batch / Scope | Suites | Result |
+|---------------|--------|--------|
+| Initial Curated Baseline (`001`–`160`) | 20 suites | **100% ok** |
+| Batch 1: Images, Registry, Build, CLI & Completion (`010`, `011`, `012`, `037`, `070`, `126`, `150`, `155`, `156`, `300`, `600`, `610`, `620`, `750`) | 14 suites (91 tests) | **91/91 ok** |
+| Batch 2: Runtime, Namespaces, Events, CP & Play (`032`, `065`, `090`, `161`, `170`, `180`, `190`, `195`, `280`, `400`, `410`, `420`, `450`, `700`) | 14 suites (150 tests) | **150/150 ok** |
+| Batch 3: System, Healthcheck, Storage, Checkpoint & Networking (`220`, `221`x2, `320`, `330`, `331`, `500`, `505`, `520`, `550`, `702`, `760`, `800`, `900`, `950`) | 15 suites | **100% ok** |
+| Batch 4: Systemd, Quadlet, Service & Auto-Update (`250`, `251`, `252`, `253`, `254`, `255`, `260`, `270`, `271`, `272`, `273`) | 11 suites (113 tests) | **113/113 ok** |
+| Batch 5: Pods, Kube & Compose (`200-pod`, `710-kube`, `850-compose`) | 3 suites (35 tests) | **35/35 ok** |
+| `run_podman_bats_offline_gate.sh` | Offline gate | **OK** |
+| **Total (`manifest.txt` == `manifest-all.txt`)** | **77 / 77 suites** | **100% passing (0 failed)** |
 
 Authoritative run logs: `.cache/podman-bats-results/`.
 

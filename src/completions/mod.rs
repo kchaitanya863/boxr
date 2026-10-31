@@ -471,6 +471,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_cli_debug_assert() {
+        use clap::CommandFactory;
+        crate::cli::Cli::command().debug_assert();
+    }
+
+    #[test]
     fn test_completion_generation() {
         let bash = CompletionGenerator::generate(ShellType::Bash);
         assert!(bash.contains("complete -F _boxr boxr"));

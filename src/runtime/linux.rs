@@ -118,7 +118,6 @@ fn proc_ns_name(ns: &str) -> &str {
         "cgroupns" => "cgroup",
         other => other,
     }
-    false
 }
 
 fn is_same_as_self_ns(path: &str, ns: &str) -> bool {
@@ -280,7 +279,7 @@ fn find_donor_userns_fd(spec: &Spec) -> Option<std::fs::File> {
 
     for p in candidate_paths {
         if let Ok(f) = fs::File::open(&p) {
-            let userns_fd = unsafe { libc::ioctl(f.as_raw_fd(), NS_GET_USERNS) };
+            let userns_fd = unsafe { libc::ioctl(f.as_raw_fd(), NS_GET_USERNS as _) };
             if userns_fd >= 0 {
                 let userns_file = unsafe { fs::File::from_raw_fd(userns_fd) };
                 if let Ok(m) = userns_file.metadata() {

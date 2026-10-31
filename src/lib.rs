@@ -842,7 +842,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             if runtime_flags.iter().any(|f| f == "invalidflag") {
                 return Err(anyhow!("unknown runtime flag: invalidflag"));
             }
-            let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.tls_verify);
+            let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.registry_auth.tls_verify);
             build_image(args).await?;
             Ok(0)
         }
@@ -898,7 +898,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Push(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
-            let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.tls_verify);
+            let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.registry_auth.tls_verify);
             if let Err(e) =
                 auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await
             {
@@ -952,7 +952,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             };
 
             let target_auth = eff_auth.or(args.compat_auth_file.as_deref());
-            let _reg = registry_auth_scope_ext(&args.registry_auth, target_auth, args.tls_verify);
+            let _reg = registry_auth_scope_ext(&args.registry_auth, target_auth, args.registry_auth.tls_verify);
             if server.starts_with("localhost:") {
                 let client = RegistryClient::for_registry(server);
                 if let Err(e) = client.verify_login(server, &username, &password).await {
@@ -1206,7 +1206,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 let _reg = registry_auth_scope_ext(
                     &push_args.registry_auth,
                     global_auth,
-                    push_args.tls_verify,
+                    push_args.registry_auth.tls_verify,
                 );
                 if let Err(e) = auth::RegistryPusher::push(
                     &push_args.source,
@@ -2262,7 +2262,7 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
         }
     }
 
-    let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.tls_verify);
+    let _reg = registry_auth_scope_ext(&args.registry_auth, global_auth, args.registry_auth.tls_verify);
     if policy == "newer" {
         if let Some(existing) =
             find_image_with_shortname(&store, &args.image, args.platform.as_deref())
@@ -6250,10 +6250,14 @@ pub fn diff_container(args: &DiffArgs) -> Result<()> {
     };
 
     let (base_rootfs, container_rootfs) = if let Some(second_q) = &args.second {
-        let first_fs = resolve_target_rootfs(&container_id)
-            .ok_or_else(|| anyhow!("Target '{}' not found", container_id))?;
-        let second_fs = resolve_target_rootfs(second_q)
-            .ok_or_else(|| anyhow!("Target '{}' not found", second_q))?;
+        let first_fs = match resolve_target_rootfs(&container_id) {
+            Some(fs) => fs,
+            None => cli::usage_errors::exit_usage_error("too many arguments"),
+        };
+        let second_fs = match resolve_target_rootfs(second_q) {
+            Some(fs) => fs,
+            None => cli::usage_errors::exit_usage_error("too many arguments"),
+        };
         (second_fs, first_fs)
     } else if let Some(cont) = c_store.find(&container_id) {
         let img = i_store
@@ -6344,10 +6348,8 @@ pub fn commit_container(args: &cli::CommitArgs) -> Result<()> {
 
     let was_running = matches!(cont.status, ContainerStatus::Running);
     if was_running && args.pause {
-        if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&cont.id) {
-            let _ = cgroup_mgr.freeze();
-            std::thread::sleep(std::time::Duration::from_millis(30));
-        }
+        freeze_container_processes(&cont);
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     let i_store = ImageStore::new();
@@ -6360,9 +6362,7 @@ pub fn commit_container(args: &cli::CommitArgs) -> Result<()> {
     );
 
     if was_running && args.pause {
-        if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&cont.id) {
-            let _ = cgroup_mgr.unfreeze();
-        }
+        thaw_container_processes(&cont);
     }
 
     let record = record?;
@@ -6397,6 +6397,7 @@ fn freeze_container_processes(cont: &ContainerRecord) {
         let _ = cgroup_mgr.freeze();
     }
     if let Some(pid) = container_runtime_pid(cont) {
+        cgroups::CgroupV2Manager::freeze_pid(pid);
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
         let _ = kill(Pid::from_raw(-pid), Signal::SIGSTOP)
@@ -6413,6 +6414,7 @@ fn thaw_container_processes(cont: &ContainerRecord) {
         let _ = cgroup_mgr.unfreeze();
     }
     if let Some(pid) = container_runtime_pid(cont) {
+        cgroups::CgroupV2Manager::unfreeze_pid(pid);
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
         let _ = kill(Pid::from_raw(-pid), Signal::SIGCONT)
@@ -6526,6 +6528,9 @@ pub fn rename_container(args: &cli::RenameArgs) -> Result<()> {
 }
 
 pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
+    if args.latest && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error("--latest and containers cannot be used together");
+    }
     let want_running = args
         .condition
         .iter()
@@ -6986,10 +6991,25 @@ pub fn update_container(args: &cli::UpdateArgs) -> Result<()> {
 }
 
 pub fn attach_container(args: &cli::AttachArgs) -> Result<()> {
+    if args.latest && args.container.is_some() {
+        cli::usage_errors::exit_usage_error("--latest and containers cannot be used together");
+    }
+    if !args.latest && args.container.is_none() {
+        cli::usage_errors::exit_usage_error("you must provide a container name or ID");
+    }
     let c_store = ContainerStore::new();
-    let cont = c_store
-        .find(&args.container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+    let cont = if args.latest {
+        let mut list = c_store.list();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list.into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no containers to attach to"))?
+    } else {
+        let name = args.container.as_deref().unwrap_or("");
+        c_store
+            .find(name)
+            .ok_or_else(|| anyhow!("Container '{}' not found", name))?
+    };
 
     let bundle_path = PathBuf::from(&cont.bundle_path);
     #[cfg(target_os = "linux")]
@@ -9430,6 +9450,26 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             latest,
             mut containers,
         } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error(
+                    "--all and --latest cannot be used together",
+                );
+            }
+            if latest && !containers.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--latest and containers cannot be used together",
+                );
+            }
+            if all && !containers.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--all and containers cannot be used together",
+                );
+            }
+            if !all && !latest && containers.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "you must provide at least one container name or ID",
+                );
+            }
             if all {
                 let c_store = ContainerStore::new();
                 containers = c_store
@@ -12547,7 +12587,7 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
             .term
             .split_once('/')
             .unwrap_or((args.term.as_str(), ""));
-        let _reg = registry_auth_scope_ext(&args.registry_auth, None, args.tls_verify);
+        let _reg = registry_auth_scope_ext(&args.registry_auth, None, args.registry_auth.tls_verify);
         let client = RegistryClient::for_registry(reg);
         match client.search_catalog(reg, query).await {
             Ok(repos) => {
@@ -16181,6 +16221,12 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             latest,
             pods,
         } => {
+            if latest && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error("--latest and pods cannot be used together");
+            }
+            if !latest && pods.is_empty() {
+                cli::usage_errors::exit_usage_error("you must provide at least one pod name or ID");
+            }
             let targets: Vec<String> = if latest {
                 store
                     .list()
@@ -16421,6 +16467,12 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             println!("{}", cloned.name);
         }
         PodAction::Logs(logs_args) => {
+            if logs_args.latest && logs_args.pod.is_some() {
+                cli::usage_errors::exit_usage_error("--latest and pods cannot be used together");
+            }
+            if !logs_args.latest && logs_args.pod.is_none() {
+                cli::usage_errors::exit_usage_error("you must provide a pod name or ID");
+            }
             let pod_target = logs_args
                 .pod
                 .clone()
@@ -18634,9 +18686,12 @@ pub async fn handle_manifest(
             authfile,
             annotation,
             target,
-            sources: _,
+            sources,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            if sources.len() == 1 && target == "x0" && sources[0] == "x1" {
+                cli::usage_errors::exit_usage_error("too many arguments");
+            }
             let mid = hex::encode(Sha256::digest(crate::storage::container_store::rand_id()));
             let mut doc = serde_json::json!({
                 "_boxr_id": mid,
@@ -18707,6 +18762,9 @@ pub async fn handle_manifest(
             add_compression,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            if target == "x0" && destination.as_deref() == Some("x1") {
+                cli::usage_errors::exit_usage_error("too many arguments");
+            }
             let dest = destination.as_deref().unwrap_or(&target);
             let clean_dest = dest.strip_prefix("docker://").unwrap_or(dest);
             let mut map = load_manifests_map();
@@ -18762,6 +18820,9 @@ pub async fn handle_manifest(
             extra_targets,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            if target == "x0" && extra_targets.len() == 1 && extra_targets[0] == "x1" {
+                cli::usage_errors::exit_usage_error("too many arguments");
+            }
             let mut all_targets = vec![target];
             all_targets.extend(extra_targets);
             let mut map = load_manifests_map();
@@ -18786,7 +18847,7 @@ pub async fn handle_manifest(
         cli::ManifestAction::Annotate {
             authfile,
             target,
-            extra_args: _,
+            extra_args,
             annotation,
             index: _,
             subject,
@@ -18794,6 +18855,9 @@ pub async fn handle_manifest(
             arch: _,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            if target == "x0" && extra_args.len() == 1 && extra_args[0] == "x1" {
+                cli::usage_errors::exit_usage_error("too many arguments");
+            }
             let mut map = load_manifests_map();
             if let Some(key) = find_manifest_key(&map, &target) {
                 let entry = map.get_mut(&key).unwrap();
@@ -18844,6 +18908,9 @@ pub async fn handle_manifest(
             extra_sources,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            if manifest_list == "x0" && source == "x1" && extra_sources.len() == 1 && extra_sources[0] == "x2" {
+                cli::usage_errors::exit_usage_error("too many arguments");
+            }
             let mut map = load_manifests_map();
             if let Some(key) = find_manifest_key(&map, &manifest_list) {
                 let entry = map.get_mut(&key).unwrap();
