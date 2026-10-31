@@ -18,10 +18,10 @@ load_json() {
 }
 
 save_container() {
-  local id="$1" image="$2" name="$3"
-  python3 - "$id" "$image" "$name" "$containers_file" <<'PY'
+  local id="$1" image="$2" name="$3" rootfs="${4:-}"
+  python3 - "$id" "$image" "$name" "$rootfs" "$containers_file" <<'PY'
 import json, sys, time, os
-cid, image, name, path = sys.argv[1:5]
+cid, image, name, rootfs, path = sys.argv[1:6]
 rows = []
 if os.path.isfile(path):
     with open(path) as f:
@@ -30,6 +30,7 @@ rows.append({
     "id": cid,
     "image": image,
     "name": name,
+    "rootfs": rootfs if rootfs else None,
     "mounted": False,
     "created_unix": int(time.time()),
 })
@@ -61,10 +62,132 @@ fi
 
 if [[ "${1:-}" == "from" && "${2:-}" == "--name" && -n "${3:-}" ]]; then
   name="${3}"
-  if [[ ! -f "$names_file" ]] || ! grep -qxF "$name" "$names_file"; then
-    echo "$name" >>"$names_file"
+  img="${4:-scratch}"
+  cid="$(new_id)"
+  rootfs_dir="$state_dir/containers/$name/rootfs"
+  mkdir -p "$rootfs_dir"
+
+  img_rootfs="$(python3 - "$img" "$home" <<'PY'
+import json, sys, os
+img, home = sys.argv[1:3]
+ipath = os.path.join(home, "images.json")
+if os.path.isfile(ipath):
+    with open(ipath) as f:
+        data = json.load(f)
+    for rec in data.get("images", []):
+        ref = rec.get("reference", "")
+        tag = rec.get("tag", "")
+        reg = rec.get("registry", "")
+        full = f"{ref}:{tag}" if tag else ref
+        reg_full = f"{reg}/{full}" if reg else full
+        candidates = {
+            rec.get("id", ""),
+            ref,
+            full,
+            reg_full,
+            rec.get("manifest_digest", ""),
+            rec.get("config_digest", ""),
+        }
+        if img in candidates or any(c.endswith(f"/{img}") or img.endswith(f"/{c}") for c in candidates if c):
+            rpath = rec.get("rootfs_path", "")
+            if os.path.isdir(rpath):
+                print(rpath)
+                break
+PY
+)"
+  if [[ -z "$img_rootfs" && -n "${BOXR_BIN:-}" && -x "$BOXR_BIN" && "$img" != "scratch" ]]; then
+    "$BOXR_BIN" pull "$img" >/dev/null 2>&1 || true
+    img_rootfs="$(python3 - "$img" "$home" <<'PY'
+import json, sys, os
+img, home = sys.argv[1:3]
+ipath = os.path.join(home, "images.json")
+if os.path.isfile(ipath):
+    with open(ipath) as f:
+        data = json.load(f)
+    for rec in data.get("images", []):
+        ref = rec.get("reference", "")
+        tag = rec.get("tag", "")
+        reg = rec.get("registry", "")
+        full = f"{ref}:{tag}" if tag else ref
+        reg_full = f"{reg}/{full}" if reg else full
+        candidates = {
+            rec.get("id", ""),
+            ref,
+            full,
+            reg_full,
+            rec.get("manifest_digest", ""),
+            rec.get("config_digest", ""),
+        }
+        if img in candidates or any(c.endswith(f"/{img}") or img.endswith(f"/{c}") for c in candidates if c):
+            rpath = rec.get("rootfs_path", "")
+            if os.path.isdir(rpath):
+                print(rpath)
+                break
+PY
+)"
   fi
-  echo "external-${name}"
+  if [[ -n "$img_rootfs" && -d "$img_rootfs" ]]; then
+    cp -a "$img_rootfs/." "$rootfs_dir/"
+  fi
+
+  save_container "$cid" "$img" "$name" "$rootfs_dir"
+  echo "$name"
+  exit 0
+fi
+
+if [[ "${1:-}" == "run" && -n "${2:-}" ]]; then
+  cname="$2"
+  shift 2
+  rootfs="$(python3 - "$cname" "$containers_file" <<'PY'
+import json, sys, os
+name, path = sys.argv[1:3]
+if os.path.isfile(path):
+    with open(path) as f:
+        rows = json.load(f)
+    for c in rows:
+        if c.get("name") == name or c.get("id") == name:
+            r = c.get("rootfs")
+            if r and os.path.isdir(r):
+                print(r)
+                break
+PY
+)"
+  if [[ -n "$rootfs" && -d "$rootfs" ]]; then
+    if [[ -n "${BOXR_BIN:-}" && -x "$BOXR_BIN" ]]; then
+      "$BOXR_BIN" unshare chroot "$rootfs" "$@"
+    else
+      chroot "$rootfs" "$@"
+    fi
+    exit 0
+  fi
+  exit 0
+fi
+
+if [[ "${1:-}" == "rm" && -n "${2:-}" ]]; then
+  target="$2"
+  python3 - "$target" "$containers_file" "$names_file" <<'PY'
+import json, sys, os, shutil
+target, cpath, npath = sys.argv[1:4]
+if os.path.isfile(cpath):
+    with open(cpath) as f:
+        rows = json.load(f)
+    rem = [c for c in rows if c.get("name") == target or c.get("id") == target]
+    rows = [c for c in rows if c.get("name") != target and c.get("id") != target]
+    with open(cpath, "w") as f:
+        json.dump(rows, f, indent=2)
+    for c in rem:
+        r = c.get("rootfs")
+        if r:
+            p = os.path.dirname(r)
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+if os.path.isfile(npath):
+    with open(npath) as f:
+        lines = f.read().splitlines()
+    lines = [l for l in lines if l.strip() != target]
+    with open(npath, "w") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+PY
   exit 0
 fi
 

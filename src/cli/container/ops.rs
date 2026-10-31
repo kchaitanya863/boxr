@@ -99,7 +99,7 @@ pub struct PsArgs {
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RmArgs {
     /// Force the removal of a running container
@@ -111,8 +111,12 @@ pub struct RmArgs {
     pub volumes: bool,
 
     /// Remove the specified link
-    #[arg(short = 'l', long = "link")]
+    #[arg(long = "link")]
     pub link: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Remove all containers
     #[arg(short = 'a', long = "all")]
@@ -142,18 +146,27 @@ pub struct RmArgs {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct DiffArgs {
+    /// Format output using a custom template or 'json'
+    #[arg(short = 'f', long = "format")]
+    pub format: Option<String>,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Container to inspect changes on
-    pub container: String,
+    #[arg(required_unless_present = "latest")]
+    pub container: Option<String>,
 }
 
 #[derive(Args, Debug)]
-#[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
+#[command(trailing_var_arg = true, help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct TopArgs {
     /// Container to inspect processes on
     pub container: String,
 
     /// Optional ps arguments
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(allow_hyphen_values = true)]
     pub ps_args: Vec<String>,
 }
 

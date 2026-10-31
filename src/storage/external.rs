@@ -21,6 +21,8 @@ pub struct ExternalContainer {
     pub id: String,
     pub image: String,
     pub name: String,
+    #[serde(default)]
+    pub rootfs: Option<String>,
     pub mounted: bool,
     pub created_unix: u64,
 }
@@ -108,6 +110,15 @@ pub fn list_storage_containers() -> Result<Vec<ExternalContainer>> {
 }
 
 pub fn add_storage_container(id: &str, image: &str, name: &str) -> Result<()> {
+    add_storage_container_with_rootfs(id, image, name, None)
+}
+
+pub fn add_storage_container_with_rootfs(
+    id: &str,
+    image: &str,
+    name: &str,
+    rootfs: Option<String>,
+) -> Result<()> {
     let mut containers = load_containers()?;
     let created_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -117,6 +128,7 @@ pub fn add_storage_container(id: &str, image: &str, name: &str) -> Result<()> {
         id: id.to_string(),
         image: image.to_string(),
         name: name.to_string(),
+        rootfs,
         mounted: false,
         created_unix,
     });

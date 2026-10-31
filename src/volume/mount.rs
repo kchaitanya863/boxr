@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -95,4 +96,259 @@ pub struct MountSpec {
     #[serde(default)]
     pub volume_name: Option<String>,
     pub is_volume: bool,
+}
+
+fn expand_path_glob(pattern: &str) -> Vec<PathBuf> {
+    let parts: Vec<&str> = pattern.split('/').collect();
+    let mut current = vec![PathBuf::from("/")];
+    for part in parts {
+        if part.is_empty() {
+            continue;
+        }
+        if !part.contains('*') && !part.contains('?') {
+            for p in &mut current {
+                p.push(part);
+            }
+            current.retain(|p| p.exists());
+        } else {
+            let re_str = format!(
+                "^{}$",
+                regex::escape(part).replace(r"\*", ".*").replace(r"\?", ".")
+            );
+            if let Ok(re) = regex::Regex::new(&re_str) {
+                let mut next = Vec::new();
+                for dir in current {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let file_name = entry.file_name();
+                            let name_str = file_name.to_string_lossy();
+                            if re.is_match(&name_str) {
+                                next.push(entry.path());
+                            }
+                        }
+                    }
+                }
+                current = next;
+            } else {
+                return Vec::new();
+            }
+        }
+    }
+    current.sort();
+    current
+}
+
+pub fn parse_mount_flag(
+    m: &str,
+    vol_store: &crate::volume::store::VolumeStore,
+) -> Result<Vec<MountSpec>> {
+    let m_trim = m.trim();
+    if m_trim.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut mount_type = "bind".to_string();
+    let mut source = String::new();
+    let mut target = String::new();
+    let mut ro = false;
+    let mut noexec = false;
+    let mut noswap = false;
+
+    for kv in m_trim.split(',') {
+        if let Some((k, v)) = kv.split_once('=') {
+            match k.trim() {
+                "type" => mount_type = v.trim().to_string(),
+                "source" | "src" => source = v.trim().to_string(),
+                "target" | "destination" | "dst" => target = v.trim().to_string(),
+                "readonly" | "ro" => ro = v.trim() != "false",
+                "rw" => ro = v.trim() == "false",
+                _ => {}
+            }
+        } else {
+            match kv.trim() {
+                "readonly" | "ro" => ro = true,
+                "rw" => ro = false,
+                "noexec" => noexec = true,
+                "noswap" => noswap = true,
+                _ => {}
+            }
+        }
+    }
+
+    if mount_type != "bind"
+        && mount_type != "volume"
+        && mount_type != "tmpfs"
+        && mount_type != "ramfs"
+        && mount_type != "glob"
+        && mount_type != "image"
+        && mount_type != "devpts"
+    {
+        return Err(anyhow!("invalid filesystem type \"{}\"", mount_type));
+    }
+
+    if noswap && mount_type == "tmpfs" {
+        #[cfg(target_os = "linux")]
+        {
+            if nix::unistd::geteuid().as_raw() != 0 {
+                crate::cli::usage_errors::exit_usage_error(
+                    "the 'noswap' option is only allowed with rootful tmpfs mounts: must provide an argument for option",
+                );
+            }
+        }
+    }
+
+    match mount_type.as_str() {
+        "glob" => {
+            let mut res = Vec::new();
+            let matched_paths = expand_path_glob(&source);
+            for path in matched_paths {
+                let file_name = path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let dest = if target.is_empty() {
+                    path.to_string_lossy().to_string()
+                } else {
+                    PathBuf::from(&target)
+                        .join(&file_name)
+                        .to_string_lossy()
+                        .to_string()
+                };
+                res.push(MountSpec {
+                    source: path,
+                    destination: dest,
+                    read_only: ro,
+                    noexec,
+                    chown_u: false,
+                    tmpfs_mount_data: None,
+                    volume_name: None,
+                    is_volume: false,
+                });
+            }
+            if res.is_empty() {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "no file paths matching glob \"{}\"",
+                    source
+                ));
+            }
+            Ok(res)
+        }
+        "volume" => {
+            if target.is_empty() {
+                crate::cli::usage_errors::exit_usage_error("must set volume destination");
+            }
+            let (src_path, vol_name) = if source.is_empty() {
+                let vol = vol_store.create(None, None)?;
+                (vol.mountpoint, Some(vol.name))
+            } else if let Some(vol) = vol_store.find(&source) {
+                (vol.mountpoint, Some(vol.name))
+            } else {
+                let vol = vol_store.create(Some(&source), None)?;
+                (vol.mountpoint, Some(vol.name))
+            };
+            Ok(vec![MountSpec {
+                source: PathBuf::from(src_path),
+                destination: target,
+                read_only: ro,
+                noexec,
+                chown_u: false,
+                tmpfs_mount_data: None,
+                volume_name: vol_name,
+                is_volume: true,
+            }])
+        }
+        "ramfs" => {
+            if target.is_empty() {
+                crate::cli::usage_errors::exit_usage_error("must set volume destination");
+            }
+            Ok(vec![MountSpec {
+                source: PathBuf::from("ramfs"),
+                destination: target,
+                read_only: ro,
+                noexec,
+                chown_u: false,
+                tmpfs_mount_data: Some("mode=755".to_string()),
+                volume_name: None,
+                is_volume: false,
+            }])
+        }
+        "tmpfs" => {
+            if target.is_empty() {
+                crate::cli::usage_errors::exit_usage_error("must set volume destination");
+            }
+            Ok(vec![MountSpec {
+                source: PathBuf::from("tmpfs"),
+                destination: target,
+                read_only: ro,
+                noexec,
+                chown_u: false,
+                tmpfs_mount_data: Some("mode=755".to_string()),
+                volume_name: None,
+                is_volume: false,
+            }])
+        }
+        _ => {
+            if target.is_empty() {
+                crate::cli::usage_errors::exit_usage_error("must set volume destination");
+            }
+            let src_p = PathBuf::from(&source);
+            if mount_type == "bind" && !src_p.exists() {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "statfs {}: no such file or directory",
+                    source
+                ));
+            }
+            Ok(vec![MountSpec {
+                source: src_p,
+                destination: target,
+                read_only: ro,
+                noexec,
+                chown_u: false,
+                tmpfs_mount_data: None,
+                volume_name: None,
+                is_volume: false,
+            }])
+        }
+    }
+}
+
+pub fn parse_containers_conf_mounts(
+    vol_store: &crate::volume::store::VolumeStore,
+) -> Result<Vec<MountSpec>> {
+    let mut mounts = Vec::new();
+    for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
+        if let Ok(path) = std::env::var(var) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let mut in_containers = false;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('[') {
+                        in_containers = trimmed.eq_ignore_ascii_case("[containers]");
+                        continue;
+                    }
+                    if in_containers && trimmed.starts_with("mounts") {
+                        if let Some((_, rest)) = trimmed.split_once('=') {
+                            if let Ok(re) = regex::Regex::new(r#"["']([^"']+)["']"#) {
+                                for cap in re.captures_iter(rest) {
+                                    let item = &cap[1];
+                                    if !item.is_empty() {
+                                        match parse_mount_flag(item, vol_store) {
+                                            Ok(parsed) => mounts.extend(parsed),
+                                            Err(e) => {
+                                                crate::cli::usage_errors::exit_usage_error(format!(
+                                                    "parsing containers.conf mounts: {}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(mounts)
 }

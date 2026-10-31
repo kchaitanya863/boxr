@@ -16,37 +16,78 @@ impl ProcessKiller for ContainerKiller {
     }
 }
 
+pub fn validate_podman_signal(sig_str: &str) -> std::result::Result<i32, String> {
+    let raw = sig_str.trim();
+    let stripped = raw.strip_prefix('-').unwrap_or(raw);
+
+    if stripped.is_empty() {
+        return Err("invalid signal: ".to_string());
+    }
+
+    if let Ok(num) = stripped.parse::<i64>() {
+        if num == 0 {
+            return Err("invalid signal: 0".to_string());
+        }
+        if (1..=64).contains(&num) {
+            return Ok(num as i32);
+        }
+        return Err("valid signals are 1 through 64".to_string());
+    }
+
+    let upper = stripped.to_uppercase();
+    let sig_name = upper.strip_prefix("SIG").unwrap_or(&upper);
+    match sig_name {
+        "HUP" => Ok(1),
+        "INT" => Ok(2),
+        "QUIT" => Ok(3),
+        "ILL" => Ok(4),
+        "TRAP" => Ok(5),
+        "ABRT" | "IOT" => Ok(6),
+        "BUS" => Ok(7),
+        "FPE" => Ok(8),
+        "KILL" => Ok(9),
+        "USR1" => Ok(10),
+        "SEGV" => Ok(11),
+        "USR2" => Ok(12),
+        "PIPE" => Ok(13),
+        "ALRM" => Ok(14),
+        "TERM" => Ok(15),
+        "STKFLT" => Ok(16),
+        "CHLD" => Ok(17),
+        "CONT" => Ok(18),
+        "STOP" => Ok(19),
+        "TSTP" => Ok(20),
+        "TTIN" => Ok(21),
+        "TTOU" => Ok(22),
+        "URG" => Ok(23),
+        "XCPU" => Ok(24),
+        "XFSZ" => Ok(25),
+        "VTALRM" => Ok(26),
+        "PROF" => Ok(27),
+        "WINCH" => Ok(28),
+        "POLL" | "IO" => Ok(29),
+        "PWR" => Ok(30),
+        "SYS" => Ok(31),
+        _ => Err(format!("invalid signal: {}", stripped)),
+    }
+}
+
 impl ContainerKiller {
     pub fn parse_signal(sig_str: &str) -> Result<i32> {
-        let upper = sig_str.trim().to_uppercase();
-        let stripped = upper.strip_prefix("SIG").unwrap_or(&upper);
-
-        match stripped {
-            "HUP" | "1" => Ok(1),
-            "INT" | "2" => Ok(2),
-            "QUIT" | "3" => Ok(3),
-            "KILL" | "9" => Ok(9),
-            "USR1" | "10" => Ok(10),
-            "USR2" | "12" => Ok(12),
-            "TERM" | "15" => Ok(15),
-            "CONT" | "18" => Ok(18),
-            "STOP" | "19" => Ok(19),
-            other => {
-                if let Ok(num) = other.parse::<i32>() {
-                    if num >= 1 && num <= 64 {
-                        Ok(num)
-                    } else {
-                        Err(anyhow!("Invalid signal number: {}", num))
-                    }
-                } else {
-                    Err(anyhow!("Unknown signal '{}'", sig_str))
-                }
-            }
+        let trimmed = sig_str.trim();
+        if trimmed.starts_with('-') && trimmed.len() > 1 && trimmed[1..].chars().all(|c| c.is_ascii_digit()) && trimmed != "-1" {
+            return Err(anyhow!("Invalid signal number: {}", trimmed));
         }
+        validate_podman_signal(sig_str).map_err(|e| anyhow!(e))
     }
 
     pub fn kill(container: &ContainerRecord, signal_str: Option<&str>) -> Result<()> {
-        let sig = signal_str.map(Self::parse_signal).transpose()?.unwrap_or(9); // Default SIGKILL
+        let sig = signal_str.map(Self::parse_signal).transpose()?.unwrap_or(9);
+        Self::kill_with_signal_num(container, Some(sig))
+    }
+
+    pub fn kill_with_signal_num(container: &ContainerRecord, signal_num: Option<i32>) -> Result<()> {
+        let sig = signal_num.unwrap_or(9); // Default SIGKILL
 
         #[cfg(unix)]
         {
@@ -72,18 +113,24 @@ impl ContainerKiller {
                 }
             }
             #[cfg(target_os = "linux")]
-            let pids = crate::get_process_tree_pids(&pids);
+            let pids = if sig == 9 {
+                crate::get_process_tree_pids(&pids)
+            } else {
+                pids
+            };
 
             for pid in pids {
                 unsafe {
                     libc::kill(pid, sig);
-                    let _ = libc::kill(-pid, sig);
+                    if sig == 9 {
+                        let _ = libc::kill(-pid, sig);
+                    }
                 }
             }
         }
 
         #[cfg(target_os = "linux")]
-        {
+        if sig == 9 {
             let cgroup_dir = std::path::PathBuf::from("/sys/fs/cgroup/boxr").join(&container.id);
             let procs_file = cgroup_dir.join("cgroup.procs");
             if procs_file.exists() {
@@ -117,7 +164,6 @@ impl ContainerKiller {
             attrs,
         ));
 
-        println!("{}", container.id);
         Ok(())
     }
 }

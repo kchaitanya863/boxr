@@ -33,14 +33,24 @@ pub struct PullArgs {
     pub image: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct SaveArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<String>,
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
-    pub image: String,
+    #[arg(long = "format")]
+    pub format: Option<String>,
+    #[arg(short = 'm', long = "multi-image-archive")]
+    pub multi_image_archive: bool,
+    #[arg(long = "uncompressed")]
+    pub uncompressed: bool,
+    #[arg(long = "oci-accept-uncompressed-layers")]
+    pub oci_accept_uncompressed_layers: bool,
+    /// Image(s) to save
+    #[arg(value_name = "IMAGE")]
+    pub images: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -545,16 +555,20 @@ pub struct ImagesArgs {
     pub tree: bool,
 
     /// Format output using a custom template (e.g. json, table)
-    #[arg(long = "format")]
+    #[arg(short = 'f', long = "format", allow_hyphen_values = true)]
     pub format: Option<String>,
 
     /// Filter output based on conditions provided
-    #[arg(short = 'f', long = "filter")]
+    #[arg(long = "filter")]
     pub filter: Vec<String>,
 
     /// Sort by repository, tag, id, or created (Podman-compatible)
     #[arg(long = "sort")]
     pub sort: Option<String>,
+
+    /// Filter by image name or ID
+    #[arg(value_name = "IMAGE")]
+    pub image: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -631,10 +645,18 @@ pub struct HistoryArgs {
     /// Image to show history for
     pub image: String,
 
-    #[arg(short = 'f', long = "format")]
+    #[arg(short = 'f', long = "format", allow_hyphen_values = true)]
     pub format: Option<String>,
 
-    #[arg(long = "human", default_value_t = true)]
+    #[arg(
+        short = 'H',
+        long = "human",
+        default_value = "true",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub human: bool,
 
     #[arg(short = 'q', long = "quiet")]

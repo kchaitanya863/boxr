@@ -179,6 +179,7 @@ impl KubeManager {
                 rm: false,
                 rmi: false,
                 name: Some(container_name.clone()),
+                replace: false,
                 env: env_vec,
                 unsetenv: Vec::new(),
                 unsetenv_all: false,

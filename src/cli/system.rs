@@ -244,7 +244,7 @@ pub struct PodLsArgs {
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
 
-    #[arg(long = "noheading")]
+    #[arg(short = 'n', long = "noheading")]
     pub noheading: bool,
 
     #[arg(value_name = "POD")]
@@ -332,7 +332,12 @@ pub enum PodAction {
     Restart { pods: Vec<String> },
     /// Kill pods with a signal
     Kill {
-        #[arg(short = 's', long = "signal", default_value = "SIGKILL")]
+        #[arg(
+            short = 's',
+            long = "signal",
+            default_value = "SIGKILL",
+            allow_hyphen_values = true
+        )]
         signal: String,
         pods: Vec<String>,
     },

@@ -17,11 +17,19 @@ pub struct ImageDiffArgs {
 #[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImageScpArgs {
+    /// Format of the image transfer (e.g. oci-archive, docker-archive)
+    #[arg(long = "format")]
+    pub format: Option<String>,
+
     /// Source image spec (e.g. [user@]host::image)
     pub source: String,
 
     /// Destination image spec
-    pub destination: String,
+    pub destination: Option<String>,
+
+    /// Tag for destination image
+    #[arg(value_name = "TAG")]
+    pub tag: Option<String>,
 
     /// Suppress status output
     #[arg(short = 'q', long = "quiet")]

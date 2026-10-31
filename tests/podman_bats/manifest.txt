@@ -11,6 +11,13 @@
 045-start
 050-stop
 055-rm
+060-mount
 075-exec
+080-pause
+085-top
+110-history
+120-load
 125-import
+130-kill
+140-diff
 160-volumes

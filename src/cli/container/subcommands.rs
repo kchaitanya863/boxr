@@ -31,6 +31,7 @@ pub enum ContainerAction {
     #[command(alias = "ps")]
     Ls(PsArgs),
     Inspect(InspectArgs),
+    #[command(trailing_var_arg = true)]
     Top(TopArgs),
     Port(PortArgs),
     Cp(CpArgs),

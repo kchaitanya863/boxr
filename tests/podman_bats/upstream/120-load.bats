@@ -249,7 +249,7 @@ verify_iid_and_name() {
     run_podman images -a --format '{{.ID}} {{.Repository}}:{{.Tag}}' $img1
     assert "$output" == "$images_output"
 
-    run_podman rm -f -t0 $cname
+    run_podman rm -f -t0 myweb $cname
 }
 
 @test "podman load - redirect corrupt payload" {

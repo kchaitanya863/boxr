@@ -31,6 +31,10 @@ pub struct RunArgs {
     #[arg(long = "name")]
     pub name: Option<String>,
 
+    /// If a container with the same name exists, replace it
+    #[arg(long = "replace")]
+    pub replace: bool,
+
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
 

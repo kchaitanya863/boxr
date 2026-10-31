@@ -157,6 +157,13 @@ impl OverlayDriver {
                 }
             }
         }
+        #[cfg(unix)]
+        if let Ok(meta) = fs::metadata(src) {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = meta.permissions().mode();
+            mode |= 0o700;
+            let _ = fs::set_permissions(dst, fs::Permissions::from_mode(mode));
+        }
         Ok(())
     }
 
