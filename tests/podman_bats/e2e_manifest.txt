@@ -5,3 +5,8 @@ volume_rename_test.go
 container_clone_test.go
 unshare_test.go
 import_test.go
+tag_test.go
+untag_test.go
+history_test.go
+farm_test.go
+trust_test.go

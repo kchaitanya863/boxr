@@ -3,8 +3,102 @@
 use crate::storage::boxr_home;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConnectionsFile {
+    #[serde(default)]
+    pub connection: ConnectionSection,
+    #[serde(default)]
+    pub farm: FarmSection,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConnectionSection {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default: String,
+    #[serde(default)]
+    pub connections: BTreeMap<String, DestinationEntry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DestinationEntry {
+    #[serde(default, rename = "uri", alias = "URI")]
+    pub uri: String,
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        rename = "identity",
+        alias = "Identity"
+    )]
+    pub identity: String,
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        rename = "tls_cert",
+        alias = "TLSCert"
+    )]
+    pub tls_cert: String,
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        rename = "tls_key",
+        alias = "TLSKey"
+    )]
+    pub tls_key: String,
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        rename = "tls_ca",
+        alias = "TLSCA"
+    )]
+    pub tls_ca: String,
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        rename = "is_machine",
+        alias = "IsMachine"
+    )]
+    pub is_machine: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FarmSection {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default: String,
+    #[serde(default)]
+    pub list: BTreeMap<String, Vec<String>>,
+}
+
+pub fn connections_conf_path() -> PathBuf {
+    if let Ok(p) = std::env::var("PODMAN_CONNECTIONS_CONF") {
+        if !p.trim().is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    boxr_home().join("connections.json")
+}
+
+pub fn load_connections_file() -> ConnectionsFile {
+    let path = connections_conf_path();
+    if let Ok(content) = fs::read_to_string(&path) {
+        serde_json::from_str(&content).unwrap_or_default()
+    } else {
+        ConnectionsFile::default()
+    }
+}
+
+pub fn save_connections_file(cfg: &ConnectionsFile) -> Result<()> {
+    let path = connections_conf_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let content = serde_json::to_string_pretty(cfg)?;
+    fs::write(&path, content)?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FarmRecord {

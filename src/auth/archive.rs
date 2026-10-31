@@ -515,13 +515,18 @@ impl ArchiveManager {
                 );
             }
 
+            let mut unpacked_layers_size: i64 = 0;
             for layer in &item.layers {
                 let layer_path = temp_dir.path().join(layer);
                 if layer_path.exists() {
+                    if let Ok(meta) = fs::metadata(&layer_path) {
+                        unpacked_layers_size += meta.len() as i64;
+                    }
                     let mut layer_archive = Archive::new(File::open(layer_path)?);
                     crate::oci::image::unpack_archive_safely(&mut layer_archive, &dest_rootfs)?;
                 }
             }
+            let size_bytes = size_bytes.max(unpacked_layers_size);
 
             let tags = if item.repo_tags.is_empty() {
                 vec!["<none>:<none>".to_string()]
