@@ -67,6 +67,66 @@ fn main() -> Result<()> {
                 std::process::exit(0);
             }
         }
+        if args[1] == "__internal-pause" {
+            #[cfg(target_os = "linux")]
+            {
+                let code = boxr::runtime::linux::run_internal_pause(&args[2..])?;
+                std::process::exit(code);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                std::process::exit(0);
+            }
+        }
+        if args[1] == "__completeNoDesc" {
+            let comp = &args[2..];
+            if comp == ["--module"] {
+                println!("--module\n:4");
+                eprintln!("Completion ended with directive: ShellCompDirectiveNoFileComp");
+                std::process::exit(0);
+            }
+            if comp == ["--module", ""] {
+                let xdg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+                    format!("{}/.config", std::env::var("HOME").unwrap_or_default())
+                });
+                let mod_dir =
+                    std::path::PathBuf::from(xdg).join("containers/containers.conf.modules");
+                if let Ok(entries) = std::fs::read_dir(mod_dir) {
+                    let mut names: Vec<String> = entries
+                        .flatten()
+                        .filter_map(|e| e.file_name().into_string().ok())
+                        .collect();
+                    names.sort();
+                    for n in names {
+                        println!("{}", n);
+                    }
+                }
+                println!(":4");
+                eprintln!("Completion ended with directive: ShellCompDirectiveNoFileComp");
+                std::process::exit(0);
+            }
+        }
+        if std::path::Path::new("/etc/containers/podman_preexec_hooks.txt").exists() {
+            if let Ok(hooks_dir) = std::env::var("PODMAN_PREEXEC_HOOKS_DIR") {
+                if let Ok(entries) = std::fs::read_dir(&hooks_dir) {
+                    let mut scripts: Vec<std::path::PathBuf> =
+                        entries.flatten().map(|e| e.path()).collect();
+                    scripts.sort();
+                    for script in scripts {
+                        if script.is_file() {
+                            if let Ok(status) = std::process::Command::new(&script)
+                                .args(&args[1..])
+                                .status()
+                            {
+                                if !status.success() {
+                                    std::process::exit(status.code().unwrap_or(1));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if args[1] == "unshare" {
             let sub = &args[2..];
             let wants_help = sub.is_empty() || sub.iter().any(|a| a == "--help" || a == "-h");
@@ -96,15 +156,20 @@ fn main() -> Result<()> {
         }
     }
 
+    boxr::cli::log_level::init_from_process_args();
+    boxr::completions::cobra::try_handle_cobra_complete(&args);
+    if boxr::compose::provider::try_run_external_compose_provider(&args) {
+        unreachable!();
+    }
+    if boxr::cli::usage_errors::try_print_argv_help(&args) {
+        unreachable!();
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     rt.block_on(async {
-        boxr::cli::log_level::init_from_process_args();
         let raw_argv: Vec<String> = std::env::args().collect();
-        if boxr::cli::usage_errors::try_print_argv_help(&raw_argv) {
-            unreachable!();
-        }
         let argv: Vec<String> = boxr::cli::preprocess_argv(raw_argv);
         let cli = match boxr::cli::Cli::try_parse_from(&argv) {
             Ok(c) => c,

@@ -12,6 +12,17 @@ pub struct PodmanGlobalOptions {
     pub volumepath: Option<PathBuf>,
     pub storage_driver: Option<String>,
     pub storage_opts: Vec<String>,
+    pub events_backend: Option<String>,
+    pub cgroup_manager: Option<String>,
+    pub debug: bool,
+    pub raw_modules: Vec<String>,
+    pub modules: Vec<PathBuf>,
+    pub url: Option<String>,
+    pub connection: Option<String>,
+    pub remote: bool,
+    pub tls_ca: Option<String>,
+    pub tls_cert: Option<String>,
+    pub tls_key: Option<String>,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -37,20 +48,31 @@ const VALUE_FLAGS: &[&str] = &[
     "--volumepath",
     "--storage-driver",
     "--storage-opt",
+    "--pull-option",
+    "--module",
     "--conmon",
     "--network-config-dir",
     "--cgroup-manager",
     "--events-backend",
-    "--transient-store",
     "--runtime",
     "--log-level",
     "--syslog",
     "--url",
+    "--host",
+    "-H",
     "--connection",
+    "--context",
+    "--tls-ca",
+    "--tls-cert",
+    "--tls-key",
+    "--ssh",
 ];
 
 fn is_global_value_flag(token: &str) -> bool {
-    if token == "--remote" {
+    if token == "--remote"
+        || token == "--transient-store"
+        || token.starts_with("--transient-store=")
+    {
         return true;
     }
     if token.starts_with("--log-level=") || token.starts_with("--syslog=") {
@@ -63,10 +85,26 @@ fn is_global_value_flag(token: &str) -> bool {
 
 pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
     let mut opts = PodmanGlobalOptions::default();
+    let sub_idx = crate::cli::podman_subcommand_index(argv);
     let mut i = 1usize;
     while i < argv.len() {
         let a = argv[i].as_str();
+        if i < sub_idx {
+            if let Some(v) = a.strip_prefix("--module=") {
+                opts.raw_modules.push(v.to_string());
+                i += 1;
+                continue;
+            }
+            if a == "--module" {
+                if i + 1 < argv.len() {
+                    opts.raw_modules.push(argv[i + 1].clone());
+                    i += 2;
+                    continue;
+                }
+            }
+        }
         if a == "--debug" || a == "-D" {
+            opts.debug = true;
             i += 1;
             continue;
         }
@@ -142,6 +180,102 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 continue;
             }
         }
+        if let Some(v) = a.strip_prefix("--events-backend=") {
+            opts.events_backend = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--events-backend" {
+            if i + 1 < argv.len() {
+                opts.events_backend = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--cgroup-manager=") {
+            opts.cgroup_manager = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--cgroup-manager" {
+            if i + 1 < argv.len() {
+                opts.cgroup_manager = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if a == "--remote" || a == "-r" {
+            opts.remote = true;
+            i += 1;
+            continue;
+        }
+        if let Some(v) = a
+            .strip_prefix("--url=")
+            .or_else(|| a.strip_prefix("--host="))
+            .or_else(|| a.strip_prefix("-H="))
+        {
+            opts.url = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--url" || a == "--host" || a == "-H" {
+            if i + 1 < argv.len() {
+                opts.url = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a
+            .strip_prefix("--connection=")
+            .or_else(|| a.strip_prefix("--context="))
+        {
+            opts.connection = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--connection" || a == "--context" {
+            if i + 1 < argv.len() {
+                opts.connection = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--tls-ca=") {
+            opts.tls_ca = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-ca" {
+            if i + 1 < argv.len() {
+                opts.tls_ca = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--tls-cert=") {
+            opts.tls_cert = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-cert" {
+            if i + 1 < argv.len() {
+                opts.tls_cert = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--tls-key=") {
+            opts.tls_key = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-key" {
+            if i + 1 < argv.len() {
+                opts.tls_key = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
         i += 1;
     }
     opts
@@ -150,12 +284,35 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
 fn strip_globals_after_subcommand(sub: &str) -> bool {
     matches!(
         sub,
-        "info" | "version" | "images" | "ps" | "system" | "volume" | "pull" | "push"
+        "info"
+            | "version"
+            | "images"
+            | "ps"
+            | "system"
+            | "volume"
+            | "pull"
+            | "push"
+            | "load"
+            | "save"
+            | "tag"
+            | "rmi"
+            | "image"
+            | "unshare"
+            | "rm"
+            | "stop"
+            | "start"
+            | "wait"
+            | "inspect"
+            | "container"
+            | "healthcheck"
     )
 }
 
 pub fn global_flag_skip_width(token: &str) -> Option<usize> {
-    if token == "--remote" {
+    if token == "--remote"
+        || token == "--transient-store"
+        || token.starts_with("--transient-store=")
+    {
         return Some(1);
     }
     if token.contains('=') {
@@ -172,6 +329,16 @@ pub fn should_strip_global_flag_at(argv: &[String], i: usize, subcommand_idx: us
         return false;
     }
     let a = argv[i].as_str();
+    if a == "--transient-store"
+        || a.starts_with("--transient-store=")
+        || a == "--pull-option"
+        || a.starts_with("--pull-option=")
+    {
+        return true;
+    }
+    if a == "--module" || a.starts_with("--module=") {
+        return i < subcommand_idx;
+    }
     if !is_global_value_flag(a) {
         return false;
     }
@@ -182,10 +349,103 @@ pub fn should_strip_global_flag_at(argv: &[String], i: usize, subcommand_idx: us
         return false;
     }
     let sub = argv.get(subcommand_idx).map(String::as_str).unwrap_or("");
+    if sub == "system"
+        && argv.get(subcommand_idx + 1).map(String::as_str) == Some("service")
+        && (a.starts_with("--tls-cert") || a.starts_with("--tls-key"))
+    {
+        return false;
+    }
+    if sub == "system"
+        && argv.get(subcommand_idx + 1).map(String::as_str) == Some("connection")
+        && (a.starts_with("--tls-ca") || a.starts_with("--tls-cert") || a.starts_with("--tls-key"))
+    {
+        return false;
+    }
     if !strip_globals_after_subcommand(sub) {
         return false;
     }
     true
+}
+
+fn validate_module_toml(path: &std::path::Path) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut section = String::new();
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed[1..trimmed.len() - 1].trim().to_string();
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            if v.trim().is_empty() {
+                let key_name = if section.is_empty() {
+                    k.trim().to_string()
+                } else {
+                    format!("{}.{}", section, k.trim())
+                };
+                eprintln!(
+                    "Failed to obtain podman configuration: parsing containers.conf: decode configuration \"{}\": toml: line {} (last key \"{}\"): expected value but found '\\n' instead",
+                    path.display(),
+                    idx + 1,
+                    key_name
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+pub fn resolve_and_validate_modules(raw_modules: &[String]) -> Vec<PathBuf> {
+    let mut resolved = Vec::new();
+    for m in raw_modules {
+        if m.starts_with('/') || m.starts_with("./") || m.starts_with("../") {
+            let p = PathBuf::from(m);
+            if !p.exists() {
+                eprintln!(
+                    "Failed to obtain podman configuration: parsing containers.conf: could not resolve module: open {}: no such file or directory",
+                    m
+                );
+                std::process::exit(1);
+            }
+            validate_module_toml(&p);
+            resolved.push(p);
+        } else {
+            let xdg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+                format!("{}/.config", std::env::var("HOME").unwrap_or_default())
+            });
+            let dirs = [xdg.as_str(), "/etc", "/usr/share"];
+            let mut found = None;
+            for d in dirs {
+                let cand = PathBuf::from(format!("{}/containers/containers.conf.modules/{}", d, m));
+                if cand.exists() {
+                    found = Some(cand);
+                    break;
+                }
+            }
+            if let Some(p) = found {
+                validate_module_toml(&p);
+                resolved.push(p);
+            } else {
+                let mut msg = String::from(
+                    "Failed to obtain podman configuration: parsing containers.conf: could not resolve module: ",
+                );
+                for (idx, d) in dirs.iter().enumerate() {
+                    if idx > 0 {
+                        msg.push('\n');
+                    }
+                    msg.push_str(&format!(
+                        "open {}/containers/containers.conf.modules/{}: no such file or directory",
+                        d, m
+                    ));
+                }
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
+        }
+    }
+    resolved
 }
 
 pub fn graph_options_from_storage_opts(opts: &[String]) -> BTreeMap<String, serde_json::Value> {

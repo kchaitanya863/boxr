@@ -12,32 +12,32 @@ pub struct ParsedUlimit {
 }
 
 #[cfg(target_os = "linux")]
-const RLIMIT_LOCKS: u32 = libc::RLIMIT_LOCKS;
+const RLIMIT_LOCKS: u32 = libc::RLIMIT_LOCKS as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_LOCKS: u32 = 10;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_MSGQUEUE: u32 = libc::RLIMIT_MSGQUEUE;
+const RLIMIT_MSGQUEUE: u32 = libc::RLIMIT_MSGQUEUE as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_MSGQUEUE: u32 = 12;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_NICE: u32 = libc::RLIMIT_NICE;
+const RLIMIT_NICE: u32 = libc::RLIMIT_NICE as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_NICE: u32 = 13;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_RTPRIO: u32 = libc::RLIMIT_RTPRIO;
+const RLIMIT_RTPRIO: u32 = libc::RLIMIT_RTPRIO as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_RTPRIO: u32 = 14;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_RTTIME: u32 = libc::RLIMIT_RTTIME;
+const RLIMIT_RTTIME: u32 = libc::RLIMIT_RTTIME as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_RTTIME: u32 = 15;
 
 #[cfg(target_os = "linux")]
-const RLIMIT_SIGPENDING: u32 = libc::RLIMIT_SIGPENDING;
+const RLIMIT_SIGPENDING: u32 = libc::RLIMIT_SIGPENDING as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_SIGPENDING: u32 = 11;
 
@@ -72,12 +72,20 @@ fn parse_limit_token(tok: &str) -> Result<i64> {
 
 /// Validate a `--ulimit` value (`name=soft:hard`). Exits via caller on Podman-shaped errors.
 pub fn parse_ulimit_option(spec: &str) -> Result<ParsedUlimit> {
-    let (name, limits) = spec
-        .split_once('=')
-        .ok_or_else(|| anyhow!("ulimit option \"{}\" requires name=SOFT:HARD", spec))?;
-    let (soft_s, hard_s) = limits
-        .split_once(':')
-        .ok_or_else(|| anyhow!("ulimit option \"{}\" requires name=SOFT:HARD", spec))?;
+    let (name, limits) = spec.split_once('=').ok_or_else(|| {
+        anyhow!(
+            "ulimit option \"{}\" requires name=SOFT:HARD, failed to be parsed: invalid ulimit argument {}",
+            spec,
+            spec
+        )
+    })?;
+    let (soft_s, hard_s) = limits.split_once(':').ok_or_else(|| {
+        anyhow!(
+            "ulimit option \"{}\" requires name=SOFT:HARD, failed to be parsed: invalid ulimit argument {}",
+            spec,
+            spec
+        )
+    })?;
     let (inspect_name, rlimit_resource) = rlimit_name_parts(name).ok_or_else(|| {
         anyhow!(
             "ulimit option \"{}\" requires name=SOFT:HARD, failed to be parsed: invalid ulimit name: {}",
@@ -112,6 +120,9 @@ pub fn parse_ulimit_option(spec: &str) -> Result<ParsedUlimit> {
 
 pub fn validate_ulimit_cli_options(ulimits: &[String]) -> Result<()> {
     for u in ulimits {
+        if u.eq_ignore_ascii_case("host") {
+            continue;
+        }
         parse_ulimit_option(u)?;
     }
     Ok(())
@@ -120,6 +131,9 @@ pub fn validate_ulimit_cli_options(ulimits: &[String]) -> Result<()> {
 pub fn ulimits_inspect_json(ulimits: &[String]) -> Result<serde_json::Value> {
     let mut entries = Vec::new();
     for u in ulimits {
+        if u.eq_ignore_ascii_case("host") {
+            continue;
+        }
         let p = parse_ulimit_option(u)?;
         entries.push(serde_json::json!({
             "Name": p.inspect_name,
@@ -147,14 +161,34 @@ pub fn apply_ulimits_from_bundle(bundle_path: &Path) -> Result<()> {
     let content = std::fs::read_to_string(&path)?;
     let specs: Vec<String> = serde_json::from_str(&content)?;
     for spec in &specs {
+        if spec.eq_ignore_ascii_case("host") {
+            continue;
+        }
         let p = parse_ulimit_option(spec)?;
         #[cfg(target_os = "linux")]
         {
-            let lim = libc::rlimit {
-                rlim_cur: rlim_from_i64(p.soft),
-                rlim_max: rlim_from_i64(p.hard),
+            let mut cur = rlim_from_i64(p.soft);
+            let mut max = rlim_from_i64(p.hard);
+            let mut host_lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
             };
-            if unsafe { libc::setrlimit(p.rlimit_resource as libc::__rlimit_resource_t, &lim) } != 0
+            if unsafe {
+                libc::getrlimit(p.rlimit_resource as _, &mut host_lim)
+            } == 0
+            {
+                if max > host_lim.rlim_max {
+                    max = host_lim.rlim_max;
+                }
+                if cur > max {
+                    cur = max;
+                }
+            }
+            let lim = libc::rlimit {
+                rlim_cur: cur,
+                rlim_max: max,
+            };
+            if unsafe { libc::setrlimit(p.rlimit_resource as _, &lim) } != 0
             {
                 return Err(anyhow!(
                     "setrlimit {}: {}",

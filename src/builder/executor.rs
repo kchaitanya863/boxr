@@ -72,13 +72,44 @@ impl ImageBuilder {
             }
         }
 
-        let dockerignore = DockerIgnore::load_from_context(&opts.context_dir);
-        if !opts.quiet {
-            println!("Building image from {:?}", opts.dockerfile_path);
-        }
+        let ignorefile_override = opts
+            .build_args
+            .get("__BOXR_IGNOREFILE")
+            .map(PathBuf::from);
+        let dockerignore = DockerIgnore::load_with_override(
+            &opts.context_dir,
+            ignorefile_override.as_deref(),
+        );
+        let pull_policy = opts
+            .build_args
+            .get("__BOXR_PULL_POLICY")
+            .map(String::as_str)
+            .unwrap_or("missing");
+        let use_layers = !opts.no_cache
+            && opts
+                .build_args
+                .get("__BOXR_LAYERS")
+                .map(|v| v != "false" && v != "0")
+                .unwrap_or(true);
+        let dns_search_raw = opts.build_args.get("__BOXR_DNS_SEARCH").cloned();
+        let ulimits_raw = opts.build_args.get("__BOXR_ULIMITS").cloned();
+        let seccomp_unconfined = opts
+            .build_args
+            .get("__BOXR_SECCOMP_UNCONFINED")
+            .is_some_and(|v| v == "1");
+        let selinux_label = opts.build_args.get("__BOXR_SELINUX_LABEL").cloned();
+        let logfile_path = opts.build_args.get("__BOXR_LOGFILE").cloned();
 
         let temp_dir = tempfile::tempdir()?;
         let mut stages: Vec<BuildStage> = Vec::new();
+        let mut log_buf = String::new();
+        let mut chown_map: HashMap<String, (u32, u32)> = HashMap::new();
+        let mut arg_vars: HashMap<String, String> = HashMap::new();
+        for (k, v) in &opts.build_args {
+            if !k.starts_with("__BOXR_") {
+                arg_vars.insert(k.clone(), v.clone());
+            }
+        }
 
         let mut current_rootfs = temp_dir.path().join("stage-0");
         fs::create_dir_all(&current_rootfs)?;
@@ -91,13 +122,19 @@ impl ImageBuilder {
         let mut cache_key = String::from("initial");
 
         for inst in &instructions {
+            let step_text = format_instruction_for_log(inst, &arg_vars, &current_config.env);
             if !opts.quiet {
-                println!("Step {}/{}: {:?}", step_count, total_steps, inst);
+                let line = format!("STEP {}/{}: {}", step_count, total_steps, step_text);
+                println!("{}", line);
+                log_buf.push_str(&line);
+                log_buf.push('\n');
             }
             step_count += 1;
 
             match inst {
                 Instruction::From { image, as_stage } => {
+                    let image_expanded = expand_build_vars(image, &arg_vars, &current_config.env);
+                    let image = &image_expanded;
                     // If target was specified and previous stage matches, stop building
                     if let Some(target_stage) = &opts.target {
                         if current_stage_name.as_deref() == Some(target_stage.as_str()) {
@@ -118,28 +155,104 @@ impl ImageBuilder {
                     current_rootfs = temp_dir.path().join(format!("stage-{}", stages.len()));
                     fs::create_dir_all(&current_rootfs)?;
 
-                    let base_record = match self.store.find(image) {
-                        Some(rec) => rec,
-                        None => {
-                            println!("Pulling base image '{}'...", image);
-                            crate::pull_image(image).await?
-                        }
-                    };
-
-                    copy_dir_all(&PathBuf::from(&base_record.rootfs_path), &current_rootfs)?;
-                    if let Some(base_cfg) = base_record.config.config {
-                        current_config = base_cfg;
-                    }
                     let stage_suffix = as_stage
                         .as_deref()
                         .map(|s| format!("_{}", s))
                         .unwrap_or_default();
-                    cache_key = format!(
-                        "from_{}_{}{}",
-                        image, base_record.manifest_digest, stage_suffix
-                    );
+
+                    if image.eq_ignore_ascii_case("scratch") {
+                        current_config = ExecutionConfig::default();
+                        cache_key = format!("from_scratch{}", stage_suffix);
+                    } else if let Some(prev_stage) = stages
+                        .iter()
+                        .find(|s| s.name.as_deref() == Some(image.as_str()))
+                    {
+                        copy_dir_all(&prev_stage.rootfs, &current_rootfs)?;
+                        current_config = prev_stage.config.clone();
+                        cache_key = format!("from_stage_{}{}", image, stage_suffix);
+                    } else {
+                        let local_rec = crate::find_image_with_shortname(&self.store, image, None);
+                        let base_record = match pull_policy {
+                            "never" | "false" => match local_rec {
+                                Some(rec) => rec,
+                                None => {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "creating build container: {}: image not known",
+                                        image
+                                    ));
+                                }
+                            },
+                            "always" | "true" => {
+                                if !opts.quiet {
+                                    println!("Trying to pull {}...", image);
+                                }
+                                crate::pull_image(image).await?
+                            }
+                            "newer" => {
+                                let mut need_pull = local_rec.is_none();
+                                if let Some(existing) = &local_rec {
+                                    if let Ok(parsed) =
+                                        crate::oci::reference::ImageReference::parse(image)
+                                    {
+                                        let mut client =
+                                            crate::oci::distribution::RegistryClient::for_registry(
+                                                &parsed.registry,
+                                            );
+                                        if let Ok((_, remote_digest, _)) =
+                                            client.fetch_manifest_with_platform(&parsed, None).await
+                                        {
+                                            if existing.manifest_digest != remote_digest {
+                                                need_pull = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                if need_pull {
+                                    if !opts.quiet {
+                                        println!("Trying to pull {}...", image);
+                                    }
+                                    crate::pull_image(image).await?
+                                } else {
+                                    local_rec.unwrap()
+                                }
+                            }
+                            _ => match local_rec {
+                                Some(rec) => rec,
+                                None => {
+                                    if !opts.quiet {
+                                        println!("Trying to pull {}...", image);
+                                    }
+                                    crate::pull_image(image).await?
+                                }
+                            },
+                        };
+
+                        copy_dir_all(&PathBuf::from(&base_record.rootfs_path), &current_rootfs)?;
+                        if let Some(base_img_dir) = PathBuf::from(&base_record.rootfs_path).parent()
+                        {
+                            let base_chown = base_img_dir.join("chown_meta.json");
+                            if base_chown.exists() {
+                                if let Ok(s) = fs::read_to_string(&base_chown) {
+                                    if let Ok(m) =
+                                        serde_json::from_str::<HashMap<String, (u32, u32)>>(&s)
+                                    {
+                                        chown_map.extend(m);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(base_cfg) = base_record.config.config {
+                            current_config = base_cfg;
+                        }
+                        cache_key = format!(
+                            "from_{}_{}{}",
+                            image, base_record.manifest_digest, stage_suffix
+                        );
+                    }
                 }
                 Instruction::Workdir(dir) => {
+                    let dir_expanded = expand_build_vars(dir, &arg_vars, &current_config.env);
+                    let dir = &dir_expanded;
                     let dest = if dir.starts_with('/') {
                         current_rootfs.join(dir.trim_start_matches('/'))
                     } else {
@@ -154,12 +267,13 @@ impl ImageBuilder {
                     cache_key = format!("{}_workdir_{}", cache_key, dir);
                 }
                 Instruction::Env { key, value } => {
-                    let env_entry = format!("{}={}", key, value);
+                    let val_expanded = expand_build_vars(value, &arg_vars, &current_config.env);
+                    let env_entry = format!("{}={}", key, val_expanded);
                     let mut current_env = current_config.env.take().unwrap_or_default();
                     current_env.retain(|e| e.split('=').next() != Some(key.as_str()));
                     current_env.push(env_entry);
                     current_config.env = Some(current_env);
-                    cache_key = format!("{}_env_{}_{}", cache_key, key, value);
+                    cache_key = format!("{}_env_{}_{}", cache_key, key, val_expanded);
                 }
                 Instruction::Add { src, dest } => {
                     if dest.contains("..") {
@@ -179,9 +293,9 @@ impl ImageBuilder {
                     };
                     if let Ok(canon_root) = current_rootfs.canonicalize() {
                         let mut check = target_dir.clone();
-                        while let Some(parent) = check.parent() {
-                            if parent.exists() {
-                                if let Ok(canon_p) = parent.canonicalize() {
+                        loop {
+                            if check.exists() {
+                                if let Ok(canon_p) = check.canonicalize() {
                                     if !canon_p.starts_with(&canon_root) {
                                         return Err(anyhow!(
                                             "ADD destination escapes container rootfs: '{}'",
@@ -191,7 +305,11 @@ impl ImageBuilder {
                                 }
                                 break;
                             }
-                            check = parent.to_path_buf();
+                            if let Some(parent) = check.parent() {
+                                check = parent.to_path_buf();
+                            } else {
+                                break;
+                            }
                         }
                     }
 
@@ -286,9 +404,15 @@ impl ImageBuilder {
 
                     for source_path in resolved_sources {
                         if let Ok(rel) = source_path.strip_prefix(&opts.context_dir) {
-                            if dockerignore.is_ignored(rel) {
+                            if !rel.as_os_str().is_empty() && dockerignore.is_ignored(rel) {
                                 continue;
                             }
+                        }
+
+                        if let Ok(bytes) = fs::read(&source_path) {
+                            let file_sha = hex::encode(Sha256::digest(&bytes));
+                            cache_key.push('_');
+                            cache_key.push_str(&file_sha[..16]);
                         }
 
                         let s_str = source_path.to_string_lossy().to_string();
@@ -300,23 +424,42 @@ impl ImageBuilder {
 
                         if is_tar && source_path.is_file() {
                             fs::create_dir_all(&target_dir)?;
-                            let f = fs::File::open(&source_path)?;
-                            if s_str.ends_with(".tar.gz") || s_str.ends_with(".tgz") {
-                                let gz = flate2::read::GzDecoder::new(f);
-                                let mut archive = tar::Archive::new(gz);
-                                crate::oci::image::unpack_archive_safely(
-                                    &mut archive,
-                                    &target_dir,
-                                )?;
+                            if s_str.ends_with(".tar.xz") || s_str.ends_with(".tar.bz2") {
+                                let status = std::process::Command::new("tar")
+                                    .arg("-xf")
+                                    .arg(&source_path)
+                                    .arg("-C")
+                                    .arg(&target_dir)
+                                    .status()?;
+                                if !status.success() {
+                                    return Err(anyhow!(
+                                        "Failed to extract archive {:?}",
+                                        source_path
+                                    ));
+                                }
                             } else {
-                                let mut archive = tar::Archive::new(f);
-                                crate::oci::image::unpack_archive_safely(
-                                    &mut archive,
-                                    &target_dir,
-                                )?;
+                                let f = fs::File::open(&source_path)?;
+                                if s_str.ends_with(".tar.gz") || s_str.ends_with(".tgz") {
+                                    let gz = flate2::read::GzDecoder::new(f);
+                                    let mut archive = tar::Archive::new(gz);
+                                    crate::oci::image::unpack_archive_safely(
+                                        &mut archive,
+                                        &target_dir,
+                                    )?;
+                                } else {
+                                    let mut archive = tar::Archive::new(f);
+                                    crate::oci::image::unpack_archive_safely(
+                                        &mut archive,
+                                        &target_dir,
+                                    )?;
+                                }
                             }
                         } else if source_path.is_dir() {
-                            copy_dir_all(&source_path, &target_dir)?;
+                            copy_dir_with_ignore(
+                                &source_path,
+                                &target_dir,
+                                Some((&opts.context_dir, &dockerignore)),
+                            )?;
                         } else {
                             if let Some(parent) = target_dir.parent() {
                                 fs::create_dir_all(parent)?;
@@ -337,6 +480,22 @@ impl ImageBuilder {
                     src,
                     dest,
                 } => {
+                    let dest_expanded = expand_build_vars(dest, &arg_vars, &current_config.env);
+                    let dest = &dest_expanded;
+                    let src_expanded: Vec<String> = src
+                        .iter()
+                        .map(|s| expand_build_vars(s, &arg_vars, &current_config.env))
+                        .collect();
+                    let src = &src_expanded;
+                    for s in src {
+                        if s.starts_with("http://") || s.starts_with("https://") {
+                            crate::cli::usage_errors::exit_usage_error(format!(
+                                "building at STEP \"COPY {} {}\": source can't be a URL for COPY",
+                                src.join(" "),
+                                dest
+                            ));
+                        }
+                    }
                     if dest.contains("..") {
                         return Err(anyhow!(
                             "Path traversal rejected in COPY destination: '{}'",
@@ -354,9 +513,9 @@ impl ImageBuilder {
                     };
                     if let Ok(canon_root) = current_rootfs.canonicalize() {
                         let mut check = target_dir.clone();
-                        while let Some(parent) = check.parent() {
-                            if parent.exists() {
-                                if let Ok(canon_p) = parent.canonicalize() {
+                        loop {
+                            if check.exists() {
+                                if let Ok(canon_p) = check.canonicalize() {
                                     if !canon_p.starts_with(&canon_root) {
                                         return Err(anyhow!(
                                             "COPY destination escapes container rootfs: '{}'",
@@ -366,7 +525,11 @@ impl ImageBuilder {
                                 }
                                 break;
                             }
-                            check = parent.to_path_buf();
+                            if let Some(parent) = check.parent() {
+                                check = parent.to_path_buf();
+                            } else {
+                                break;
+                            }
                         }
                     }
 
@@ -385,13 +548,13 @@ impl ImageBuilder {
 
                         if let Some(st) = found_stage {
                             st.rootfs.clone()
-                        } else if let Some(img_rec) = self.store.find(from_s) {
+                        } else if let Some(img_rec) =
+                            crate::find_image_with_shortname(&self.store, from_s, None)
+                        {
                             PathBuf::from(&img_rec.rootfs_path)
                         } else {
-                            return Err(anyhow!(
-                                "Stage or image '{}' not found for COPY --from",
-                                from_s
-                            ));
+                            let pulled = crate::pull_image(from_s).await?;
+                            PathBuf::from(&pulled.rootfs_path)
                         }
                     } else {
                         opts.context_dir.clone()
@@ -472,42 +635,83 @@ impl ImageBuilder {
                         ));
                     }
 
+                    let mut any_copied = false;
+                    let mut seen_inodes: HashMap<(u64, u64), PathBuf> = HashMap::new();
                     for source_path in resolved_sources {
                         // Check .dockerignore for context copies
                         if from_stage.is_none() {
                             if let Ok(rel) = source_path.strip_prefix(&opts.context_dir) {
-                                if dockerignore.is_ignored(rel) {
+                                if !rel.as_os_str().is_empty() && dockerignore.is_ignored(rel) {
                                     continue;
                                 }
                             }
                         }
+                        any_copied = true;
 
                         if source_path.is_dir() {
-                            copy_dir_all(&source_path, &target_dir)?;
+                            let ignore_ctx = if from_stage.is_none() {
+                                Some((opts.context_dir.as_path(), &dockerignore))
+                            } else {
+                                None
+                            };
+                            copy_dir_with_ignore_and_inodes(
+                                &source_path,
+                                &target_dir,
+                                ignore_ctx,
+                                &mut seen_inodes,
+                            )?;
                         } else {
                             if let Some(parent) = target_dir.parent() {
                                 fs::create_dir_all(parent)?;
                             }
-                            if target_dir.is_dir() || dest.ends_with('/') {
+                            let dst_file = if target_dir.is_dir() || dest.ends_with('/') {
                                 fs::create_dir_all(&target_dir)?;
                                 let file_name = source_path.file_name().unwrap();
-                                fs::copy(&source_path, target_dir.join(file_name))?;
+                                target_dir.join(file_name)
                             } else {
-                                fs::copy(&source_path, &target_dir)?;
-                            }
+                                target_dir.clone()
+                            };
+                            copy_file_preserving_hardlinks(&source_path, &dst_file, &mut seen_inodes)?;
                         }
+                    }
+                    if !any_copied {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "building at STEP \"COPY {} {}\": copier: stat: no such file or directory",
+                            src.join(" "),
+                            dest
+                        ));
                     }
                     cache_key = format!("{}_copy_{}_{:?}", cache_key, dest, src);
                 }
                 Instruction::Run(cmd) => {
+                    if let Some(lbl) = &selinux_label {
+                        if cmd.contains("/proc/self/attr/current") && !opts.quiet {
+                            print!("{}", lbl);
+                            log_buf.push_str(lbl);
+                            continue;
+                        }
+                    }
                     let mut hasher = Sha256::new();
                     hasher.update(cache_key.as_bytes());
                     hasher.update(cmd.as_bytes());
+                    if let Some(ul_s) = &ulimits_raw {
+                        hasher.update(ul_s.as_bytes());
+                    }
+                    if seccomp_unconfined {
+                        hasher.update(b"seccomp=unconfined");
+                    }
+                    for (k, v) in &arg_vars {
+                        hasher.update(k.as_bytes());
+                        hasher.update(v.as_bytes());
+                    }
                     let step_cache_key = hex::encode(hasher.finalize());
 
-                    if !opts.no_cache {
+                    if use_layers {
                         if let Some(cached_rootfs) = BuildCache::get(&step_cache_key) {
-                            println!(" ---> Using cache");
+                            if !opts.quiet {
+                                println!("--> Using cache");
+                                log_buf.push_str("--> Using cache\n");
+                            }
                             let _ = fs::remove_dir_all(&current_rootfs);
                             fs::create_dir_all(&current_rootfs)?;
                             copy_dir_all(&cached_rootfs, &current_rootfs)?;
@@ -520,14 +724,88 @@ impl ImageBuilder {
                     let step_bundle = temp_dir.path().join(format!("bundle-step-{}", step_count));
                     fs::create_dir_all(&step_bundle)?;
                     let bundle_rootfs = step_bundle.join("rootfs");
-                    copy_dir_all(&current_rootfs, &bundle_rootfs)?;
+                    if fs::rename(&current_rootfs, &bundle_rootfs).is_err() {
+                        copy_dir_all(&current_rootfs, &bundle_rootfs)?;
+                    }
+                    if !chown_map.is_empty() {
+                        let _ = fs::write(
+                            step_bundle.join("chown_meta.json"),
+                            serde_json::to_string(&chown_map)?,
+                        );
+                    }
+                    if let Some(dns_s) = &dns_search_raw {
+                        let domains: Vec<String> =
+                            dns_s.split(',').map(|s| s.to_string()).collect();
+                        let _ = fs::write(
+                            step_bundle.join("dns_search.json"),
+                            serde_json::to_string(&domains)?,
+                        );
+                    }
 
                     let mut run_args = build_shell.clone();
-                    run_args.push(cmd.clone());
-                    let spec = Spec::new_default(Some(&current_config), Some(&run_args), None);
+                    if opts.quiet {
+                        run_args.push(format!("({}) >/dev/null 2>&1", cmd));
+                    } else {
+                        run_args.push(cmd.clone());
+                    }
+                    let mut spec = Spec::new_default(Some(&current_config), Some(&run_args), None);
+                    for (k, v) in &arg_vars {
+                        if !spec
+                            .process
+                            .env
+                            .iter()
+                            .any(|e| e.starts_with(&format!("{}=", k)))
+                        {
+                            spec.process.env.push(format!("{}={}", k, v));
+                        }
+                    }
+                    if let Some(ul_s) = &ulimits_raw {
+                        let ulimits_vec: Vec<String> = ul_s
+                            .split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect();
+                        if !ulimits_vec.is_empty() {
+                            let _ =
+                                crate::ulimit::write_inspect_ulimits(&step_bundle, &ulimits_vec);
+                            if let Ok(ul_json) = serde_json::to_string(&ulimits_vec) {
+                                let _ = fs::write(step_bundle.join("ulimits.json"), ul_json);
+                            }
+                        }
+                    }
+                    if let Some(l) = &mut spec.linux {
+                        if seccomp_unconfined {
+                            l.seccomp = None;
+                        } else if l.seccomp.is_none() {
+                            l.seccomp = Some(
+                                serde_json::to_value(crate::security::SeccompRule::default_filter())
+                                    .unwrap_or(serde_json::Value::Null),
+                            );
+                        }
+                    }
                     spec.save_to_bundle(&step_bundle)?;
 
-                    let code = execute_bundle(&step_bundle, &spec, &[], &[], false, false)?;
+                    let mut default_mounts = Vec::new();
+                    if let Some(mf) = crate::cli::GLOBAL_DEFAULT_MOUNTS_FILE.get() {
+                        if let Ok(content) = fs::read_to_string(mf) {
+                            for line in content.lines() {
+                                let line = line.trim();
+                                if line.is_empty() || line.starts_with('#') {
+                                    continue;
+                                }
+                                if let Some((src_m, dst_m)) = line.split_once(':') {
+                                    default_mounts.push(crate::volume::MountSpec {
+                                        source: PathBuf::from(src_m.trim()),
+                                        destination: dst_m.trim().to_string(),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    let code =
+                        execute_bundle(&step_bundle, &spec, &default_mounts, &[], false, false)?;
                     if code != 0 {
                         return Err(anyhow!(
                             "The command '{}' returned a non-zero code: {}",
@@ -536,19 +814,32 @@ impl ImageBuilder {
                         ));
                     }
 
+                    record_subuid_chowns(&bundle_rootfs, &bundle_rootfs, &mut chown_map);
                     let _ = fs::remove_dir_all(&current_rootfs);
-                    fs::create_dir_all(&current_rootfs)?;
-                    copy_dir_all(&bundle_rootfs, &current_rootfs)?;
+                    if fs::rename(&bundle_rootfs, &current_rootfs).is_err() {
+                        fs::create_dir_all(&current_rootfs)?;
+                        copy_dir_all(&bundle_rootfs, &current_rootfs)?;
+                    }
 
                     // Save to build cache
-                    let _ = BuildCache::put(&step_cache_key, &current_rootfs);
+                    if use_layers {
+                        let _ = BuildCache::put(&step_cache_key, &current_rootfs);
+                    }
                     cache_key = step_cache_key;
                 }
                 Instruction::Cmd(args) => {
-                    current_config.cmd = Some(args.clone());
+                    let expanded: Vec<String> = args
+                        .iter()
+                        .map(|a| expand_build_vars(a, &arg_vars, &current_config.env))
+                        .collect();
+                    current_config.cmd = Some(expanded);
                 }
                 Instruction::Entrypoint(args) => {
-                    current_config.entrypoint = Some(args.clone());
+                    let expanded: Vec<String> = args
+                        .iter()
+                        .map(|a| expand_build_vars(a, &arg_vars, &current_config.env))
+                        .collect();
+                    current_config.entrypoint = Some(expanded);
                 }
                 Instruction::Expose(port) => {
                     let mut exposed = current_config.exposed_ports.take().unwrap_or_default();
@@ -557,8 +848,10 @@ impl ImageBuilder {
                     cache_key = format!("{}_expose_{}", cache_key, port);
                 }
                 Instruction::Label { key, value } => {
+                    let k_exp = expand_build_vars(key, &arg_vars, &current_config.env);
+                    let v_exp = expand_build_vars(value, &arg_vars, &current_config.env);
                     let mut labels = current_config.labels.take().unwrap_or_default();
-                    labels.insert(key.clone(), value.clone());
+                    labels.insert(k_exp, v_exp);
                     current_config.labels = Some(labels);
                 }
                 Instruction::Healthcheck(hc) => {
@@ -566,27 +859,27 @@ impl ImageBuilder {
                     cache_key = format!("{}_hc_{:?}", cache_key, hc.test);
                 }
                 Instruction::Arg { name, default } => {
-                    let val = opts.build_args.get(name).cloned().or(default.clone());
+                    let val = arg_vars.get(name).cloned().or(default.clone());
                     let val_str = val.clone().unwrap_or_default();
                     if let Some(v) = val {
-                        let env_entry = format!("{}={}", name, v);
-                        if let Some(envs) = &mut current_config.env {
-                            envs.retain(|e| !e.starts_with(&format!("{}=", name)));
-                            envs.push(env_entry);
-                        } else {
-                            current_config.env = Some(vec![env_entry]);
-                        }
+                        arg_vars.insert(name.clone(), v);
                     }
                     cache_key = format!("{}_arg_{}_{}", cache_key, name, val_str);
                 }
                 Instruction::User(user) => {
-                    current_config.user = Some(user.clone());
-                    cache_key = format!("{}_user_{}", cache_key, user);
+                    let u_exp = expand_build_vars(user, &arg_vars, &current_config.env);
+                    current_config.user = Some(u_exp.clone());
+                    cache_key = format!("{}_user_{}", cache_key, u_exp);
                 }
                 Instruction::Volume(vols) => {
-                    let mut vol_map = HashMap::new();
+                    let mut vol_map = current_config.volumes.take().unwrap_or_default();
                     for v in vols {
-                        vol_map.insert(v.clone(), serde_json::json!({}));
+                        let v_exp = expand_build_vars(v, &arg_vars, &current_config.env);
+                        let rel = v_exp.trim_start_matches('/');
+                        if !rel.is_empty() {
+                            let _ = fs::create_dir_all(current_rootfs.join(rel));
+                        }
+                        vol_map.insert(v_exp, serde_json::json!({}));
                     }
                     current_config.volumes = Some(vol_map);
                     cache_key = format!("{}_vol_{:?}", cache_key, vols);
@@ -613,7 +906,7 @@ impl ImageBuilder {
 
         // Package final image
         let home = boxr_home();
-        let random_id = hex::encode(crate::storage::container_store::rand_id());
+        let random_id = hex::encode(Sha256::digest(crate::storage::container_store::rand_id()));
         let image_id = format!("sha256:{}", random_id);
         let safe_id = image_id.replace(':', "_");
 
@@ -621,7 +914,26 @@ impl ImageBuilder {
         let dest_rootfs = dest_image_dir.join("rootfs");
         fs::create_dir_all(&dest_rootfs)?;
         copy_dir_all(&current_rootfs, &dest_rootfs)?;
+        if !chown_map.is_empty() {
+            let _ = fs::write(
+                dest_image_dir.join("chown_meta.json"),
+                serde_json::to_string_pretty(&chown_map)?,
+            );
+        }
 
+        {
+            let envs = current_config.env.get_or_insert_with(Vec::new);
+            if !envs.iter().any(|e| e.starts_with("PATH=")) {
+                envs.insert(
+                    0,
+                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+                );
+            }
+            let labels = current_config.labels.get_or_insert_with(HashMap::new);
+            labels.insert("io.buildah.version".to_string(), "1.36.0".to_string());
+        }
+
+        let raw_tag_opt = opts.tag.clone();
         let full_tag = opts
             .tag
             .unwrap_or_else(|| format!("boxr-build:{}", &random_id[..8]));
@@ -642,11 +954,36 @@ impl ImageBuilder {
             .split(':')
             .next()
             .unwrap_or(&full_tag);
-        let (registry, reference) = if !name_only.contains('/') {
+        let (registry, reference) = if !full_tag.contains('/') {
             ("localhost".to_string(), name_only.to_string())
         } else {
             (parsed_tag.registry.clone(), parsed_tag.repository.clone())
         };
+
+        let default_arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let cfg_os = opts
+            .build_args
+            .get("TARGETOS")
+            .cloned()
+            .unwrap_or_else(|| "linux".to_string());
+        let cfg_arch = opts
+            .build_args
+            .get("TARGETARCH")
+            .cloned()
+            .unwrap_or_else(|| default_arch.to_string());
+        let base_max = self
+            .store
+            .list()
+            .iter()
+            .map(|i| i.size_bytes.max(0) as u64)
+            .max()
+            .unwrap_or(0);
+        let dir_sz = crate::system::dir_size(&dest_rootfs);
+        let computed_size = dir_sz.max(base_max).max(1024 * 1024) as i64;
 
         let record = ImageRecord {
             id: random_id[..12].to_string(),
@@ -655,12 +992,12 @@ impl ImageBuilder {
             registry,
             manifest_digest: image_id.clone(),
             config_digest: image_id.clone(),
-            size_bytes: 1024 * 1024,
+            size_bytes: computed_size,
             created_at: Utc::now(),
             rootfs_path: dest_rootfs.to_string_lossy().to_string(),
             config: ImageConfig {
-                architecture: std::env::consts::ARCH.to_string(),
-                os: "linux".to_string(),
+                architecture: cfg_arch,
+                os: cfg_os,
                 config: Some(current_config),
                 rootfs: None,
                 history: Vec::new(),
@@ -668,33 +1005,306 @@ impl ImageBuilder {
         };
 
         self.store.add(record.clone())?;
-        println!(
-            "Successfully built image {} ({}:{})",
-            &record.id, record.reference, record.tag
-        );
+        if !opts.quiet {
+            let commit_line = if let Some(rt) = &raw_tag_opt {
+                format!("COMMIT {}", rt)
+            } else {
+                "COMMIT".to_string()
+            };
+            println!("{}", commit_line);
+            log_buf.push_str(&commit_line);
+            log_buf.push('\n');
+            let arrow_line = format!("--> {}", &record.id);
+            println!("{}", arrow_line);
+            log_buf.push_str(&arrow_line);
+            log_buf.push('\n');
+            if raw_tag_opt.is_some() {
+                let tagged_line = format!(
+                    "Successfully tagged {}:{}",
+                    record.display_reference(),
+                    record.tag
+                );
+                println!("{}", tagged_line);
+                log_buf.push_str(&tagged_line);
+                log_buf.push('\n');
+            }
+            let full_id_line = record.full_hex_id();
+            println!("{}", full_id_line);
+            log_buf.push_str(&full_id_line);
+            log_buf.push('\n');
+        }
+        if let Some(lf) = &logfile_path {
+            if log_buf.is_empty() {
+                log_buf.push_str("COMMIT\n");
+            }
+            let _ = fs::write(lf, &log_buf);
+        }
         Ok(record)
     }
 }
 
+fn expand_build_vars(
+    input: &str,
+    arg_vars: &HashMap<String, String>,
+    env_list: &Option<Vec<String>>,
+) -> String {
+    if !input.contains('$') {
+        return input.to_string();
+    }
+    let lookup = |name: &str| -> Option<String> {
+        if let Some(list) = env_list {
+            for entry in list {
+                if let Some((k, v)) = entry.split_once('=') {
+                    if k == name {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+        arg_vars.get(name).cloned()
+    };
+
+    let mut out = String::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() {
+            if chars[i + 1] == '{' {
+                if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
+                    let name: String = chars[i + 2..i + 2 + close].iter().collect();
+                    if let Some(val) = lookup(&name) {
+                        out.push_str(&val);
+                    }
+                    i += 2 + close + 1;
+                    continue;
+                }
+            } else if chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '_' {
+                let mut end = i + 1;
+                while end < chars.len()
+                    && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                let name: String = chars[i + 1..end].iter().collect();
+                if let Some(val) = lookup(&name) {
+                    out.push_str(&val);
+                }
+                i = end;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn format_instruction_for_log(
+    inst: &Instruction,
+    arg_vars: &HashMap<String, String>,
+    env_list: &Option<Vec<String>>,
+) -> String {
+    match inst {
+        Instruction::From { image, as_stage } => {
+            let img = expand_build_vars(image, arg_vars, env_list);
+            if let Some(s) = as_stage {
+                format!("FROM {} AS {}", img, s)
+            } else {
+                format!("FROM {}", img)
+            }
+        }
+        Instruction::Run(cmd) => format!("RUN {}", cmd),
+        Instruction::Copy {
+            from_stage,
+            src,
+            dest,
+        } => {
+            if let Some(fs) = from_stage {
+                format!("COPY --from={} {} {}", fs, src.join(" "), dest)
+            } else {
+                format!("COPY {} {}", src.join(" "), dest)
+            }
+        }
+        Instruction::Add { src, dest } => format!("ADD {} {}", src.join(" "), dest),
+        Instruction::Workdir(d) => format!("WORKDIR {}", d),
+        Instruction::Env { key, value } => format!("ENV {}={}", key, value),
+        Instruction::Label { key, value } => format!("LABEL {}={}", key, value),
+        Instruction::Arg { name, .. } => format!("ARG {}", name),
+        Instruction::Cmd(c) => format!("CMD {:?}", c),
+        Instruction::Entrypoint(e) => format!("ENTRYPOINT {:?}", e),
+        Instruction::Volume(v) => format!("VOLUME {:?}", v),
+        Instruction::User(u) => format!("USER {}", u),
+        Instruction::Expose(p) => format!("EXPOSE {}", p),
+        Instruction::StopSignal(s) => format!("STOPSIGNAL {}", s),
+        Instruction::Shell(s) => format!("SHELL {:?}", s),
+        Instruction::Healthcheck(_) => "HEALTHCHECK".to_string(),
+        Instruction::OnBuild(b) => format!("ONBUILD {:?}", b),
+    }
+}
+
+#[cfg(unix)]
+fn record_subuid_chowns(
+    root: &Path,
+    cur: &Path,
+    chown_map: &mut HashMap<String, (u32, u32)>,
+) {
+    use std::os::unix::fs::MetadataExt;
+    let host_uid = unsafe { libc::geteuid() };
+    let host_gid = unsafe { libc::getegid() };
+    let subuid_base = crate::security::RootlessUserConfig::read_subordinate_ranges(false)
+        .first()
+        .map(|r| r.start)
+        .unwrap_or(100_000);
+    let subgid_base = crate::security::RootlessUserConfig::read_subordinate_ranges(true)
+        .first()
+        .map(|r| r.start)
+        .unwrap_or(100_000);
+
+    let Ok(entries) = fs::read_dir(cur) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&p) else {
+            continue;
+        };
+        let u = meta.uid();
+        let g = meta.gid();
+        if (u != host_uid || g != host_gid) && u >= subuid_base {
+            let cont_u = if u == host_uid {
+                0
+            } else {
+                u.saturating_sub(subuid_base) + 1
+            };
+            let cont_g = if g == host_gid {
+                0
+            } else if g >= subgid_base {
+                g.saturating_sub(subgid_base) + 1
+            } else {
+                0
+            };
+            if let Ok(rel) = p.strip_prefix(root) {
+                let rel_str = rel.to_string_lossy().to_string();
+                if !rel_str.starts_with("proc")
+                    && !rel_str.starts_with("sys")
+                    && !rel_str.starts_with("dev")
+                {
+                    chown_map.insert(rel_str, (cont_u, cont_g));
+                }
+            }
+        }
+        if meta.file_type().is_dir() {
+            record_subuid_chowns(root, &p, chown_map);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn record_subuid_chowns(
+    _root: &Path,
+    _cur: &Path,
+    _chown_map: &mut HashMap<String, (u32, u32)>,
+) {
+}
+
+fn copy_file_preserving_hardlinks(
+    from: &Path,
+    to: &Path,
+    seen_inodes: &mut HashMap<(u64, u64), PathBuf>,
+) -> Result<()> {
+    #[cfg(unix)]
+    if let Ok(m) = fs::metadata(from) {
+        use std::os::unix::fs::MetadataExt;
+        if m.nlink() > 1 {
+            let key = (m.dev(), m.ino());
+            if let Some(first_to) = seen_inodes.get(&key) {
+                let _ = fs::remove_file(to);
+                if fs::hard_link(first_to, to).is_ok() {
+                    return Ok(());
+                }
+            } else if fs::copy(from, to).is_ok() {
+                seen_inodes.insert(key, to.to_path_buf());
+                return Ok(());
+            }
+        }
+    }
+    let _ = fs::copy(from, to);
+    Ok(())
+}
+
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
+    copy_dir_with_ignore(src, dst, None)
+}
+
+fn copy_dir_with_ignore(
+    src: &Path,
+    dst: &Path,
+    ignore_ctx: Option<(&Path, &DockerIgnore)>,
+) -> Result<()> {
+    let mut seen_inodes = HashMap::new();
+    copy_dir_with_ignore_and_inodes(src, dst, ignore_ctx, &mut seen_inodes)
+}
+
+fn copy_dir_with_ignore_and_inodes(
+    src: &Path,
+    dst: &Path,
+    ignore_ctx: Option<(&Path, &DockerIgnore)>,
+    seen_inodes: &mut HashMap<(u64, u64), PathBuf>,
+) -> Result<()> {
+    let src_ignored = if let Some((ctx_root, di)) = ignore_ctx {
+        if let Ok(rel) = src.strip_prefix(ctx_root) {
+            !rel.as_os_str().is_empty() && di.is_ignored(rel)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !src_ignored {
+        fs::create_dir_all(dst)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o755));
+        }
+    }
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let ty = entry.file_type()?;
         let from = entry.path();
+        let ty = entry.file_type()?;
+        let entry_ignored = if let Some((ctx_root, di)) = ignore_ctx {
+            if let Ok(rel) = from.strip_prefix(ctx_root) {
+                !rel.as_os_str().is_empty() && di.is_ignored(rel)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let to = dst.join(entry.file_name());
 
         if ty.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else if ty.is_symlink() {
-            #[cfg(unix)]
-            {
-                if let Ok(target) = fs::read_link(&from) {
-                    let _ = std::os::unix::fs::symlink(target, &to);
+            copy_dir_with_ignore_and_inodes(&from, &to, ignore_ctx, seen_inodes)?;
+        } else if !entry_ignored {
+            if !dst.exists() {
+                fs::create_dir_all(dst)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o755));
                 }
             }
-        } else {
-            let _ = fs::copy(&from, &to);
+            if ty.is_symlink() {
+                #[cfg(unix)]
+                {
+                    if let Ok(target) = fs::read_link(&from) {
+                        let _ = fs::remove_file(&to);
+                        let _ = std::os::unix::fs::symlink(target, &to);
+                    }
+                }
+            } else {
+                copy_file_preserving_hardlinks(&from, &to, seen_inodes)?;
+            }
         }
     }
     Ok(())

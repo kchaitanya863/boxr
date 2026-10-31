@@ -2,9 +2,7 @@
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
-use std::path::Path;
-#[cfg(all(unix, not(target_os = "macos")))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -15,12 +13,71 @@ use tokio::sync::Notify;
 /// On macOS micro-VMs and Windows, it dials the guest/container TCP address directly.
 pub struct RootlessPortForwarder {
     host_addr: SocketAddr,
+    v6_only: Option<bool>,
     #[cfg(all(unix, not(target_os = "macos")))]
     target_sock: PathBuf,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    bundle_dir: Option<PathBuf>,
     #[cfg(any(windows, target_os = "macos"))]
     target_addr: SocketAddr,
     stop_notify: Arc<Notify>,
     is_stopped: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+fn bind_linux_tcp_listener(addr: SocketAddr, v6_only: Option<bool>) -> Result<TcpListener> {
+    use std::os::unix::io::FromRawFd;
+    if let (SocketAddr::V6(v6), Some(only)) = (addr, v6_only) {
+        unsafe {
+            let fd = libc::socket(libc::AF_INET6, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let reuse: libc::c_int = 1;
+            let _ = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &reuse as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            let flag: libc::c_int = if only { 1 } else { 0 };
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_V6ONLY,
+                &flag as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            let mut sa: libc::sockaddr_in6 = std::mem::zeroed();
+            sa.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sa.sin6_port = v6.port().to_be();
+            sa.sin6_flowinfo = v6.flowinfo();
+            sa.sin6_addr.s6_addr = v6.ip().octets();
+            sa.sin6_scope_id = v6.scope_id();
+            if libc::bind(
+                fd,
+                &sa as *const _ as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            ) < 0
+            {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err.into());
+            }
+            if libc::listen(fd, 128) < 0 {
+                let err = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(err.into());
+            }
+            let std_listener = std::net::TcpListener::from_raw_fd(fd);
+            std_listener.set_nonblocking(true)?;
+            return Ok(TcpListener::from_std(std_listener)?);
+        }
+    }
+    let std_listener = std::net::TcpListener::bind(addr)?;
+    std_listener.set_nonblocking(true)?;
+    Ok(TcpListener::from_std(std_listener)?)
 }
 
 impl RootlessPortForwarder {
@@ -28,6 +85,25 @@ impl RootlessPortForwarder {
     pub fn new(host_addr: SocketAddr, target_sock: PathBuf) -> Self {
         Self {
             host_addr,
+            v6_only: None,
+            bundle_dir: target_sock.parent().map(|p| p.to_path_buf()),
+            target_sock,
+            stop_notify: Arc::new(Notify::new()),
+            is_stopped: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub fn new_with_v6_only(
+        host_addr: SocketAddr,
+        v6_only: Option<bool>,
+        target_sock: PathBuf,
+        bundle_dir: PathBuf,
+    ) -> Self {
+        Self {
+            host_addr,
+            v6_only,
+            bundle_dir: Some(bundle_dir),
             target_sock,
             stop_notify: Arc::new(Notify::new()),
             is_stopped: Arc::new(AtomicBool::new(false)),
@@ -38,6 +114,7 @@ impl RootlessPortForwarder {
     pub fn new_tcp(host_addr: SocketAddr, target_addr: SocketAddr) -> Self {
         Self {
             host_addr,
+            v6_only: None,
             target_addr,
             stop_notify: Arc::new(Notify::new()),
             is_stopped: Arc::new(AtomicBool::new(false)),
@@ -58,6 +135,21 @@ impl RootlessPortForwarder {
 
     /// Start the user-space TCP proxy forwarding traffic between host and container target
     pub async fn start(&self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        let listener = bind_linux_tcp_listener(self.host_addr, self.v6_only).or_else(|e| {
+            if self.v6_only == Some(false) {
+                let fallback = SocketAddr::from(([0, 0, 0, 0], self.host_addr.port()));
+                bind_linux_tcp_listener(fallback, None)
+            } else {
+                Err(e)
+            }
+        }).with_context(|| {
+            format!(
+                "Failed to bind rootless port forwarder on {}",
+                self.host_addr
+            )
+        })?;
+        #[cfg(not(target_os = "linux"))]
         let listener = TcpListener::bind(self.host_addr).await.with_context(|| {
             format!(
                 "Failed to bind rootless port forwarder on {}",
@@ -69,6 +161,8 @@ impl RootlessPortForwarder {
         let is_stopped = self.is_stopped.clone();
         #[cfg(all(unix, not(target_os = "macos")))]
         let target_sock = self.target_sock.clone();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let bundle_dir = self.bundle_dir.clone();
         #[cfg(any(windows, target_os = "macos"))]
         let target_addr = self.target_addr;
 
@@ -86,6 +180,13 @@ impl RootlessPortForwarder {
                             Ok((mut inbound, _)) => {
                                 #[cfg(all(unix, not(target_os = "macos")))]
                                 {
+                                    if bundle_dir
+                                        .as_ref()
+                                        .is_some_and(|b| b.join("network_disconnected").exists())
+                                    {
+                                        drop(inbound);
+                                        continue;
+                                    }
                                     let sock_path = target_sock.clone();
                                     tokio::spawn(async move {
                                         if let Ok(mut outbound) =
@@ -292,24 +393,62 @@ impl PortForwardManager {
         let _ = bundle_path;
         let mut forwarders = Vec::new();
         for p in ports {
-            let host_ip_str = p.host_ip.as_deref().unwrap_or("0.0.0.0");
-            let host_addr: SocketAddr = format!("{}:{}", host_ip_str, p.host_port)
-                .parse()
-                .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], p.host_port)));
+            let raw_ip = p.host_ip.as_deref().map(|s| s.trim().trim_matches(|c| c == '[' || c == ']'));
+            #[cfg(target_os = "linux")]
+            let (host_addr, v6_only): (SocketAddr, Option<bool>) = match raw_ip {
+                None | Some("") => (
+                    SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 0], p.host_port)),
+                    Some(false),
+                ),
+                Some("::") => (
+                    SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 0], p.host_port)),
+                    Some(true),
+                ),
+                Some(ip) if ip.contains(':') => (
+                    format!("[{}]:{}", ip, p.host_port)
+                        .parse()
+                        .unwrap_or_else(|_| SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 0], p.host_port))),
+                    Some(true),
+                ),
+                Some(ip) => (
+                    format!("{}:{}", ip, p.host_port)
+                        .parse()
+                        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], p.host_port))),
+                    None,
+                ),
+            };
+            #[cfg(not(target_os = "linux"))]
+            let host_addr: SocketAddr = {
+                let host_ip_str = raw_ip.filter(|s| !s.is_empty()).unwrap_or("0.0.0.0");
+                if host_ip_str.contains(':') {
+                    format!("[{}]:{}", host_ip_str, p.host_port)
+                        .parse()
+                        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], p.host_port)))
+                } else {
+                    format!("{}:{}", host_ip_str, p.host_port)
+                        .parse()
+                        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], p.host_port)))
+                }
+            };
 
             #[cfg(all(unix, not(target_os = "macos")))]
             {
                 let sock_path = if p.protocol.eq_ignore_ascii_case("udp") {
-                    bundle_path.join(forward_udp_sock_name(p.container_port))
+                    bundle_forward_sock_path(bundle_path, &forward_udp_sock_name(p.container_port))
                 } else {
-                    bundle_path.join(forward_sock_name(p.container_port))
+                    bundle_forward_sock_path(bundle_path, &forward_sock_name(p.container_port))
                 };
                 if p.protocol.eq_ignore_ascii_case("udp") {
                     let forwarder = Arc::new(RootlessUdpPortForwarder::new(host_addr, sock_path));
                     let _ = forwarder.start().await;
                     forwarders.push(ActiveForwarder::Udp(forwarder));
                 } else {
-                    let forwarder = Arc::new(RootlessPortForwarder::new(host_addr, sock_path));
+                    let forwarder = Arc::new(RootlessPortForwarder::new_with_v6_only(
+                        host_addr,
+                        v6_only,
+                        sock_path,
+                        bundle_path.to_path_buf(),
+                    ));
                     let _ = forwarder.start().await;
                     forwarders.push(ActiveForwarder::Tcp(forwarder));
                 }
@@ -360,6 +499,30 @@ pub fn forward_udp_sock_name(container_port: u16) -> String {
     format!("forward-udp-{}.sock", container_port)
 }
 
+#[cfg(unix)]
+pub fn bundle_forward_sock_path(bundle_path: &Path, sock_name: &str) -> PathBuf {
+    let candidate = bundle_path.join(sock_name);
+    if candidate.to_string_lossy().len() < 100 {
+        return candidate;
+    }
+    let cid = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ctr");
+    let short = &cid[..12.min(cid.len())];
+    PathBuf::from(format!("/tmp/bx-{}-{}", short, sock_name))
+}
+
+#[cfg(unix)]
+pub fn forward_sock_path(bundle_path: &Path, container_port: u16) -> PathBuf {
+    bundle_forward_sock_path(bundle_path, &forward_sock_name(container_port))
+}
+
+#[cfg(unix)]
+pub fn forward_udp_sock_path(bundle_path: &Path, container_port: u16) -> PathBuf {
+    bundle_forward_sock_path(bundle_path, &forward_udp_sock_name(container_port))
+}
+
 /// Runs INSIDE the container's network namespace (call after unsharing
 /// CLONE_NEWNET). For each published port, listens on a Unix socket in the
 /// bundle dir and bridges connections to the container's localhost.
@@ -373,9 +536,15 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
 
     let mut tcp_listeners = Vec::new();
     let mut udp_listeners = Vec::new();
+    let mut seen_tcp = std::collections::HashSet::new();
+    let mut seen_udp = std::collections::HashSet::new();
     for p in ports {
         if p.protocol.eq_ignore_ascii_case("udp") {
-            let sock_path = bundle_path.join(forward_udp_sock_name(p.container_port));
+            if !seen_udp.insert(p.container_port) {
+                continue;
+            }
+            let sock_path =
+                bundle_forward_sock_path(bundle_path, &forward_udp_sock_name(p.container_port));
             let _ = std::fs::remove_file(&sock_path);
             match UnixListener::bind(&sock_path) {
                 Ok(l) => udp_listeners.push((p.container_port, l)),
@@ -386,7 +555,11 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                 ),
             }
         } else {
-            let sock_path = bundle_path.join(forward_sock_name(p.container_port));
+            if !seen_tcp.insert(p.container_port) {
+                continue;
+            }
+            let sock_path =
+                bundle_forward_sock_path(bundle_path, &forward_sock_name(p.container_port));
             let _ = std::fs::remove_file(&sock_path);
             match UnixListener::bind(&sock_path) {
                 Ok(l) => tcp_listeners.push((p.container_port, l)),
@@ -402,19 +575,28 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
         return Ok(());
     }
 
+    let primary_ip = std::fs::read_to_string(bundle_path.join("primary_ip.txt"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let mut handles = Vec::new();
     for (container_port, listener) in tcp_listeners {
+        let primary_ip = primary_ip.clone();
         handles.push(std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let unix_stream = match conn {
                     Ok(s) => s,
                     Err(_) => break,
                 };
+                let primary_ip = primary_ip.clone();
                 std::thread::spawn(move || {
-                    let target = format!("127.0.0.1:{}", container_port);
-                    let tcp = match std::net::TcpStream::connect(&target) {
-                        Ok(s) => s,
-                        Err(_) => return,
+                    let tcp = primary_ip
+                        .as_deref()
+                        .and_then(|ip| std::net::TcpStream::connect(format!("{}:{}", ip, container_port)).ok())
+                        .or_else(|| std::net::TcpStream::connect(format!("127.0.0.1:{}", container_port)).ok());
+                    let Some(tcp) = tcp else {
+                        return;
                     };
                     let _ = tcp.set_nodelay(true);
                     let mut unix_stream = unix_stream;
@@ -423,8 +605,10 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                         (Ok(mut u2), Ok(mut t2)) => {
                             let h = std::thread::spawn(move || {
                                 let _ = std::io::copy(&mut u2, &mut t2);
+                                let _ = t2.shutdown(std::net::Shutdown::Write);
                             });
                             let _ = std::io::copy(&mut tcp, &mut unix_stream);
+                            let _ = unix_stream.shutdown(std::net::Shutdown::Write);
                             let _ = h.join();
                         }
                         _ => {}

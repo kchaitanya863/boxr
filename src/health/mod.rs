@@ -82,7 +82,13 @@ impl std::fmt::Display for RestartPolicy {
         match self {
             RestartPolicy::No => write!(f, "no"),
             RestartPolicy::Always => write!(f, "always"),
-            RestartPolicy::OnFailure { max_retries } => write!(f, "on-failure:{}", max_retries),
+            RestartPolicy::OnFailure { max_retries } => {
+                if *max_retries == 0 {
+                    write!(f, "on-failure")
+                } else {
+                    write!(f, "on-failure:{}", max_retries)
+                }
+            }
             RestartPolicy::UnlessStopped => write!(f, "unless-stopped"),
         }
     }
@@ -112,14 +118,14 @@ pub fn parse_health_on_failure(input: &str) -> Result<HealthOnFailureAction> {
 
 pub fn parse_restart_policy(input: &str) -> Result<RestartPolicy> {
     let input = input.trim().to_lowercase();
-    if input == "no" || input == "none" || input.is_empty() {
+    if input == "no" || input == "none" || input == "never" || input.is_empty() {
         Ok(RestartPolicy::No)
     } else if input == "always" {
         Ok(RestartPolicy::Always)
     } else if input == "unless-stopped" {
         Ok(RestartPolicy::UnlessStopped)
     } else if input == "on-failure" {
-        Ok(RestartPolicy::OnFailure { max_retries: 3 })
+        Ok(RestartPolicy::OnFailure { max_retries: 0 })
     } else if let Some(retries_str) = input.strip_prefix("on-failure:") {
         let retries: u32 = retries_str
             .parse()
@@ -159,6 +165,106 @@ impl HealthProbe for DefaultHealthProbe {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HealthCheckLogEntry {
+    #[serde(rename = "Start")]
+    pub start: String,
+    #[serde(rename = "End")]
+    pub end: String,
+    #[serde(rename = "ExitCode")]
+    pub exit_code: i32,
+    #[serde(rename = "Output")]
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthCheckResults {
+    #[serde(rename = "Status")]
+    pub status: String,
+    #[serde(rename = "FailingStreak")]
+    pub failing_streak: u32,
+    #[serde(rename = "Log")]
+    pub log: Vec<HealthCheckLogEntry>,
+}
+
+impl Default for HealthCheckResults {
+    fn default() -> Self {
+        Self {
+            status: "starting".to_string(),
+            failing_streak: 0,
+            log: Vec::new(),
+        }
+    }
+}
+
+pub fn healthcheck_log_path(
+    bundle_path: &Path,
+    container_id: &str,
+    log_destination: Option<&str>,
+) -> std::path::PathBuf {
+    if let Some(dest) =
+        log_destination.filter(|d| !d.is_empty() && *d != "local" && *d != "events_logger")
+    {
+        std::path::PathBuf::from(dest).join(format!("{container_id}-healthcheck.log"))
+    } else {
+        bundle_path.join(format!("{container_id}-healthcheck.log"))
+    }
+}
+
+pub fn read_healthcheck_results(
+    bundle_path: &Path,
+    container_id: &str,
+    log_destination: Option<&str>,
+    warn_on_corrupt: bool,
+) -> (HealthCheckResults, bool) {
+    let path = healthcheck_log_path(bundle_path, container_id, log_destination);
+    if !path.exists() {
+        return (HealthCheckResults::default(), false);
+    }
+    match std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<HealthCheckResults>(&raw).ok())
+    {
+        Some(res) => (res, false),
+        None => {
+            if warn_on_corrupt {
+                eprintln!(
+                    "time=\"{}\" level=warning msg=\"Failed to get healthcheck log for {}: healthcheck log corrupted\"",
+                    Utc::now().to_rfc3339(),
+                    container_id
+                );
+            }
+            (
+                HealthCheckResults {
+                    status: "unhealthy".to_string(),
+                    failing_streak: 0,
+                    log: Vec::new(),
+                },
+                true,
+            )
+        }
+    }
+}
+
+pub fn write_healthcheck_results(
+    bundle_path: &Path,
+    container_id: &str,
+    log_destination: Option<&str>,
+    results: &HealthCheckResults,
+) -> Result<()> {
+    let path = healthcheck_log_path(bundle_path, container_id, log_destination);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = serde_json::to_string(results)?;
+    std::fs::write(&path, &json)?;
+    let local_path = bundle_path.join(format!("{container_id}-healthcheck.log"));
+    if local_path != path {
+        let _ = std::fs::write(&local_path, &json);
+    }
+    Ok(())
+}
+
 /// Run a health check probe inside a container bundle
 pub fn check_container_health(
     bundle_path: &Path,
@@ -166,20 +272,67 @@ pub fn check_container_health(
     current: &mut HealthCheckResult,
     start_period_active: bool,
 ) -> Result<HealthStatus> {
+    let (status, _, _, _, _) =
+        check_container_health_with_output(bundle_path, config, current, start_period_active)?;
+    Ok(status)
+}
+
+pub fn check_container_health_with_output(
+    bundle_path: &Path,
+    config: &HealthConfig,
+    current: &mut HealthCheckResult,
+    start_period_active: bool,
+) -> Result<(HealthStatus, i32, String, DateTime<Utc>, DateTime<Utc>)> {
+    let start_dt = Utc::now();
     if config.test.is_empty() {
         current.status = HealthStatus::None;
-        return Ok(HealthStatus::None);
+        return Ok((
+            HealthStatus::None,
+            0,
+            String::new(),
+            start_dt,
+            Utc::now(),
+        ));
     }
 
+    let exec_cmd: Vec<String> = if config.test.first().map(|s| s.as_str()) == Some("CMD-SHELL") {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            config.test[1..].join(" "),
+        ]
+    } else if config.test.first().map(|s| s.as_str()) == Some("CMD") {
+        config.test[1..].to_vec()
+    } else if config.test.len() == 1 {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            config.test[0].clone(),
+        ]
+    } else {
+        config.test.clone()
+    };
+
+    let mut env = std::fs::read_to_string(bundle_path.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<crate::oci::runtime::Spec>(&s).ok())
+        .map(|spec| spec.process.env)
+        .unwrap_or_default();
+    if !env.iter().any(|e| e.starts_with("PATH=")) {
+        env.push("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string());
+    }
+
+    let cap_path = bundle_path.join(format!("hc-out-{}.tmp", std::process::id()));
     let code = match exec_in_bundle(
         bundle_path,
-        &config.test,
-        &[],
+        &exec_cmd,
+        &env,
         None,
         None,
         false,
         crate::runtime::ExecAttach {
             quiet: true,
+            capture_output: Some(cap_path.clone()),
             ..Default::default()
         },
         None,
@@ -188,23 +341,26 @@ pub fn check_container_health(
         Ok(c) => c,
         Err(_) => 1,
     };
-    current.last_checked = Utc::now();
+    let end_dt = Utc::now();
+    let output = std::fs::read_to_string(&cap_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&cap_path);
+    current.last_checked = end_dt;
+    current.last_output = output.clone();
 
     if code == 0 {
         current.failing_streak = 0;
         current.status = HealthStatus::Healthy;
-        current.last_output = "OK".to_string();
     } else {
         current.failing_streak += 1;
-        current.last_output = format!("Probe exited with code {}", code);
-        if current.failing_streak >= config.retries && !start_period_active {
+        if (current.failing_streak >= config.retries || config.retries == 0) && !start_period_active
+        {
             current.status = HealthStatus::Unhealthy;
-        } else {
+        } else if current.status != HealthStatus::Healthy {
             current.status = HealthStatus::Starting;
         }
     }
 
-    Ok(current.status.clone())
+    Ok((current.status.clone(), code, output, start_dt, end_dt))
 }
 
 pub mod supervisor;
@@ -226,7 +382,7 @@ mod tests {
         );
         assert_eq!(
             parse_restart_policy("on-failure").unwrap(),
-            RestartPolicy::OnFailure { max_retries: 3 }
+            RestartPolicy::OnFailure { max_retries: 0 }
         );
         assert_eq!(
             parse_restart_policy("on-failure:5").unwrap(),

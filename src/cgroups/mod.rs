@@ -13,8 +13,10 @@ pub struct ResourceLimits {
     pub cpu_period_us: Option<u64>,
     pub cpu_shares: Option<u64>,
     pub cpuset_cpus: Option<String>,
+    pub cpuset_mems: Option<String>,
     pub memory_swappiness: Option<u64>,
     pub pids_max: Option<i64>,
+    pub cgroup_conf: Vec<String>,
 }
 
 impl ResourceLimits {
@@ -101,18 +103,73 @@ impl ResourceManager for CgroupV2Manager {
 }
 
 impl CgroupV2Manager {
-    /// Locate or initialize the rootless / system cgroups v2 hierarchy for a container
+    /// locate or initialize the rootless / system cgroups v2 hierarchy for a container or pod
     pub fn new(container_id: &str) -> Result<Self> {
         let base_cgroup = Self::detect_cgroup_root();
-        let container_cgroup = base_cgroup.join("boxr").join(container_id);
+        let boxr_cgroup = base_cgroup.join("boxr");
+        let container_cgroup = boxr_cgroup.join(container_id);
 
         if base_cgroup.exists() {
+            let _ = fs::create_dir_all(&boxr_cgroup);
+            for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                let _ = fs::write(base_cgroup.join("cgroup.subtree_control"), ctl);
+                let _ = fs::write(boxr_cgroup.join("cgroup.subtree_control"), ctl);
+            }
             let _ = fs::create_dir_all(&container_cgroup);
         }
 
         Ok(Self {
             cgroup_path: container_cgroup,
         })
+    }
+
+    pub fn was_oom_killed(container_id: &str) -> bool {
+        let base_cgroup = Self::detect_cgroup_root();
+        let events_file = base_cgroup
+            .join("boxr")
+            .join(container_id)
+            .join("memory.events");
+        if let Ok(content) = fs::read_to_string(events_file) {
+            for line in content.lines() {
+                if let Some(rest) = line
+                    .strip_prefix("oom_kill ")
+                    .or_else(|| line.strip_prefix("oom "))
+                {
+                    if let Ok(n) = rest.trim().parse::<u64>() {
+                        if n > 0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Return the cgroup path for an ID without creating the directory.
+    pub fn path_only(container_id: &str) -> Self {
+        let base_cgroup = Self::detect_cgroup_root();
+        let container_cgroup = base_cgroup.join("boxr").join(container_id);
+        Self {
+            cgroup_path: container_cgroup,
+        }
+    }
+
+    pub fn cgroup_path(&self) -> &std::path::Path {
+        &self.cgroup_path
+    }
+
+    pub fn relative_cgroup_path(&self) -> String {
+        let s = self.cgroup_path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix("/sys/fs/cgroup") {
+            if rest.is_empty() {
+                "/".to_string()
+            } else {
+                rest.to_string()
+            }
+        } else {
+            s.to_string()
+        }
     }
 
     fn detect_cgroup_root() -> PathBuf {
@@ -156,14 +213,24 @@ impl CgroupV2Manager {
 
         // Apply memory limits (cgroups v2 and v1)
         if let Some(mem) = limits.memory_max_bytes {
-            if mem == 0 {
-                return Ok(());
+            if mem > 0 {
+                let _ = fs::write(self.cgroup_path.join("memory.max"), mem.to_string());
+                let _ = fs::write(
+                    self.cgroup_path.join("memory.limit_in_bytes"),
+                    mem.to_string(),
+                );
             }
-            let _ = fs::write(self.cgroup_path.join("memory.max"), mem.to_string());
-            let _ = fs::write(
-                self.cgroup_path.join("memory.limit_in_bytes"),
-                mem.to_string(),
-            );
+        }
+
+        if let Some(swap) = limits.memory_swap_max_bytes {
+            let swap_v2 = if swap < 0 {
+                "max".to_string()
+            } else if let Some(mem) = limits.memory_max_bytes {
+                swap.saturating_sub(mem).to_string()
+            } else {
+                swap.to_string()
+            };
+            let _ = fs::write(self.cgroup_path.join("memory.swap.max"), swap_v2);
         }
 
         // Apply memory reservation (cgroups v2 memory.low)
@@ -173,6 +240,11 @@ impl CgroupV2Manager {
                 self.cgroup_path.join("memory.soft_limit_in_bytes"),
                 res.to_string(),
             );
+        }
+
+        if let Some(shares) = limits.cpu_shares {
+            let weight = (1 + ((shares.saturating_sub(2)) * 9999) / 262142).clamp(1, 10000);
+            let _ = fs::write(self.cgroup_path.join("cpu.weight"), weight.to_string());
         }
 
         // Apply CPU quota (cgroups v2 and v1)
@@ -189,6 +261,17 @@ impl CgroupV2Manager {
         // Apply cpuset cpus
         if let Some(cpus) = &limits.cpuset_cpus {
             let _ = fs::write(self.cgroup_path.join("cpuset.cpus"), cpus);
+        }
+        if let Some(mems) = &limits.cpuset_mems {
+            let _ = fs::write(self.cgroup_path.join("cpuset.mems"), mems);
+        }
+        for kv in &limits.cgroup_conf {
+            if let Some((k, v)) = kv.split_once('=') {
+                let k = k.trim();
+                if !k.is_empty() && !k.contains('/') && !k.contains("..") {
+                    let _ = fs::write(self.cgroup_path.join(k), v.trim());
+                }
+            }
         }
 
         // Apply memory swappiness
@@ -221,7 +304,39 @@ impl CgroupV2Manager {
         if !self.cgroup_path.exists() {
             return Ok(());
         }
-        let _ = fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string());
+        if fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string()).is_err() {
+            #[cfg(target_os = "linux")]
+            {
+                let scope_name = format!("boxr-cg-{}-{}.scope", pid, std::process::id());
+                let pid_str = pid.to_string();
+                let _ = std::process::Command::new("busctl")
+                    .args([
+                        "--user",
+                        "call",
+                        "org.freedesktop.systemd1",
+                        "/org/freedesktop/systemd1",
+                        "org.freedesktop.systemd1.Manager",
+                        "StartTransientUnit",
+                        "ssa(sv)a(sa(sv))",
+                        &scope_name,
+                        "fail",
+                        "2",
+                        "PIDs",
+                        "au",
+                        "1",
+                        &pid_str,
+                        "Delegate",
+                        "b",
+                        "1",
+                        "0",
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                let _ = fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string());
+            }
+        }
         let _ = fs::write(self.cgroup_path.join("tasks"), pid.to_string());
         Ok(())
     }
@@ -246,6 +361,42 @@ impl CgroupV2Manager {
             }
         }
         Ok(())
+    }
+
+    pub fn freeze_pid(pid: i32) {
+        if let Ok(cg) = fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+            for line in cg.lines() {
+                if let Some((_, rel)) = line.rsplit_once("::") {
+                    let rel = rel.trim().trim_start_matches('/');
+                    if !rel.is_empty() {
+                        let p = PathBuf::from("/sys/fs/cgroup")
+                            .join(rel)
+                            .join("cgroup.freeze");
+                        if p.exists() {
+                            let _ = fs::write(p, "1");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn unfreeze_pid(pid: i32) {
+        if let Ok(cg) = fs::read_to_string(format!("/proc/{pid}/cgroup")) {
+            for line in cg.lines() {
+                if let Some((_, rel)) = line.rsplit_once("::") {
+                    let rel = rel.trim().trim_start_matches('/');
+                    if !rel.is_empty() {
+                        let p = PathBuf::from("/sys/fs/cgroup")
+                            .join(rel)
+                            .join("cgroup.freeze");
+                        if p.exists() {
+                            let _ = fs::write(p, "0");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Clean up the container cgroup hierarchy

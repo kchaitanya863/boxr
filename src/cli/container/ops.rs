@@ -9,7 +9,13 @@ pub struct InspectArgs {
     pub format: Option<String>,
 
     /// Display total file sizes if the type is container
-    #[arg(short = 's', long = "size")]
+    #[arg(
+        short = 's',
+        long = "size",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
     pub size: bool,
 
     /// Return JSON for specified type (container|image)
@@ -139,6 +145,10 @@ pub struct RmArgs {
     #[arg(long = "depend")]
     pub depend: bool,
 
+    /// Read container ID from the given file
+    #[arg(long = "cidfile")]
+    pub cidfile: Option<String>,
+
     /// Container IDs or names to remove
     pub containers: Vec<String>,
 }
@@ -157,6 +167,9 @@ pub struct DiffArgs {
     /// Container to inspect changes on
     #[arg(required_unless_present = "latest")]
     pub container: Option<String>,
+
+    #[arg(hide = true)]
+    pub second: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -181,8 +194,24 @@ pub struct CommitArgs {
     #[arg(short = 'a', long = "author")]
     pub author: Option<String>,
 
+    /// Format of the committed image manifest (oci or docker)
+    #[arg(short = 'f', long = "format")]
+    pub format: Option<String>,
+
+    /// Suppress output
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
     /// Pause container during commit
-    #[arg(short = 'p', long = "pause", default_value_t = true)]
+    #[arg(
+        short = 'p',
+        long = "pause",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub pause: bool,
 
     /// Container to commit
@@ -191,7 +220,7 @@ pub struct CommitArgs {
     /// Repository and optional tag (e.g., "my-image:v1")
     pub repo_tag: Option<String>,
 
-    #[arg(long = "change")]
+    #[arg(short = 'c', long = "change")]
     pub change: Vec<String>,
 }
 
@@ -209,13 +238,31 @@ pub struct RenameArgs {
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct CpArgs {
     /// Source path (e.g. "my-container:/app/file" or "./local-file")
+    #[arg(value_name = "CONTAINER:SRC_PATH")]
     pub src: String,
 
     /// Destination path (e.g. "./dest" or "my-container:/app/dest")
+    #[arg(value_name = "CONTAINER:DEST_PATH")]
     pub dest: String,
 
-    #[arg(long = "archive")]
+    #[arg(
+        short = 'a',
+        long = "archive",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
     pub archive: bool,
+
+    #[arg(
+        long = "overwrite",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub overwrite: bool,
 
     #[arg(long = "follow-link")]
     pub follow_link: bool,
@@ -276,12 +323,75 @@ pub struct UpdateArgs {
     pub cpu_rt_runtime: Option<i64>,
 
     /// Maximum number of PIDs
-    #[arg(long = "pids-limit")]
+    #[arg(long = "pids-limit", allow_hyphen_values = true)]
     pub pids_limit: Option<i64>,
 
     /// Restart policy to apply when a container exits
     #[arg(long = "restart")]
     pub restart: Option<String>,
+
+    #[arg(long = "blkio-weight-device")]
+    pub blkio_weight_device: Vec<String>,
+
+    #[arg(long = "device-read-bps")]
+    pub device_read_bps: Vec<String>,
+
+    #[arg(long = "device-write-bps")]
+    pub device_write_bps: Vec<String>,
+
+    #[arg(long = "device-read-iops")]
+    pub device_read_iops: Vec<String>,
+
+    #[arg(long = "device-write-iops")]
+    pub device_write_iops: Vec<String>,
+
+    #[arg(long = "ulimit", allow_hyphen_values = true)]
+    pub ulimit: Vec<String>,
+
+    #[arg(long = "no-healthcheck")]
+    pub no_healthcheck: bool,
+
+    #[arg(long = "health-cmd")]
+    pub health_cmd: Option<String>,
+
+    #[arg(long = "health-interval")]
+    pub health_interval: Option<String>,
+
+    #[arg(long = "health-retries")]
+    pub health_retries: Option<u32>,
+
+    #[arg(long = "health-timeout")]
+    pub health_timeout: Option<String>,
+
+    #[arg(long = "health-start-period")]
+    pub health_start_period: Option<String>,
+
+    #[arg(long = "health-on-failure")]
+    pub health_on_failure: Option<String>,
+
+    #[arg(long = "health-log-destination")]
+    pub health_log_destination: Option<String>,
+
+    #[arg(long = "health-max-log-count")]
+    pub health_max_log_count: Option<u32>,
+
+    #[arg(long = "health-max-log-size")]
+    pub health_max_log_size: Option<u32>,
+
+    #[arg(long = "health-startup-cmd")]
+    pub health_startup_cmd: Option<String>,
+
+    #[arg(long = "health-startup-interval")]
+    pub health_startup_interval: Option<String>,
+
+    #[arg(long = "health-startup-retries")]
+    pub health_startup_retries: Option<u32>,
+
+    #[arg(long = "health-startup-success")]
+    pub health_startup_success: Option<u32>,
+
+    #[arg(long = "health-startup-timeout")]
+    pub health_startup_timeout: Option<String>,
 
     /// Container to update
     pub container: String,
@@ -352,9 +462,17 @@ pub struct ContainerCleanupArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
 
+    /// Clean up the given exec session instead of the container
+    #[arg(long = "exec")]
+    pub exec: Option<String>,
+
     /// Remove the container after cleanup
     #[arg(long = "rm")]
     pub rm: bool,
+
+    /// Remove the container image after cleanup
+    #[arg(long = "rmi")]
+    pub rmi: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -406,6 +524,35 @@ pub struct ContainerCloneArgs {
 pub struct ContainerRunlabelArgs {
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
+
+    /// Display the command that would be executed without running it
+    #[arg(long = "display")]
+    pub display: bool,
+
+    /// Assign a name to the container
+    #[arg(short = 'n', long = "name")]
+    pub name: Option<String>,
+
+    /// Optional parameter 1 for runlabel
+    #[arg(long = "opt1")]
+    pub opt1: Option<String>,
+
+    /// Optional parameter 2 for runlabel
+    #[arg(long = "opt2")]
+    pub opt2: Option<String>,
+
+    /// Optional parameter 3 for runlabel
+    #[arg(long = "opt3")]
+    pub opt3: Option<String>,
+
+    /// Suppress output
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    /// Replace existing container
+    #[arg(long = "replace")]
+    pub replace: bool,
+
     /// Label key to execute
     pub label: String,
 

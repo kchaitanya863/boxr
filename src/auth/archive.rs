@@ -174,6 +174,15 @@ impl ArchiveManager {
             } else {
                 Self::pack_docker_archive(&records, &by_id, &mut builder)?;
             }
+            if let Some(first) = records.first() {
+                crate::events::EventManager::record(crate::events::ContainerEvent::new(
+                    "image",
+                    "save",
+                    &format!("sha256:{}", first.id),
+                    &path.to_string_lossy(),
+                    std::collections::HashMap::new(),
+                ));
+            }
             if !quiet {
                 for rec in &records {
                     println!("Exported image {} to {:?}", rec.display_reference(), path);
@@ -488,6 +497,23 @@ impl ArchiveManager {
                 .join(image_id.replace(':', "_"))
                 .join("rootfs");
             fs::create_dir_all(&dest_rootfs)?;
+
+            let full_cfg_id = config_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&config_digest);
+            if !full_cfg_id.is_empty() {
+                let vfs_img_dir = home.join("vfs-images").join(full_cfg_id);
+                let _ = fs::create_dir_all(&vfs_img_dir);
+                let _ = fs::write(vfs_img_dir.join("manifest"), &manifest_content);
+                let b64_key = format!(
+                    "={}",
+                    crate::base64_encode(format!("sha256:{full_cfg_id}").as_bytes())
+                );
+                let _ = fs::write(
+                    vfs_img_dir.join(&b64_key),
+                    serde_json::to_string(&config).unwrap_or_default(),
+                );
+            }
 
             for layer in &item.layers {
                 let layer_path = temp_dir.path().join(layer);

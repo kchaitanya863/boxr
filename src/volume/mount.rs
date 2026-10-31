@@ -150,6 +150,7 @@ pub fn parse_mount_flag(
     let mut mount_type = "bind".to_string();
     let mut source = String::new();
     let mut target = String::new();
+    let mut subpath: Option<String> = None;
     let mut ro = false;
     let mut noexec = false;
     let mut noswap = false;
@@ -160,6 +161,7 @@ pub fn parse_mount_flag(
                 "type" => mount_type = v.trim().to_string(),
                 "source" | "src" => source = v.trim().to_string(),
                 "target" | "destination" | "dst" => target = v.trim().to_string(),
+                "subpath" => subpath = Some(v.trim().to_string()),
                 "readonly" | "ro" => ro = v.trim() != "false",
                 "rw" => ro = v.trim() == "false",
                 _ => {}
@@ -182,6 +184,7 @@ pub fn parse_mount_flag(
         && mount_type != "glob"
         && mount_type != "image"
         && mount_type != "devpts"
+        && mount_type != "artifact"
     {
         return Err(anyhow!("invalid filesystem type \"{}\"", mount_type));
     }
@@ -246,8 +249,12 @@ pub fn parse_mount_flag(
                 let vol = vol_store.create(Some(&source), None)?;
                 (vol.mountpoint, Some(vol.name))
             };
+            let mut final_src = PathBuf::from(src_path);
+            if let Some(sp) = &subpath {
+                final_src = final_src.join(sp.trim_start_matches('/'));
+            }
             Ok(vec![MountSpec {
-                source: PathBuf::from(src_path),
+                source: final_src,
                 destination: target,
                 read_only: ro,
                 noexec,
@@ -255,6 +262,30 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: None,
                 volume_name: vol_name,
                 is_volume: true,
+            }])
+        }
+        "artifact" => {
+            let store = crate::artifact::ArtifactStore::new();
+            let Some(art) = store.find(&source) else {
+                let display_src = if source.contains(':') {
+                    source.clone()
+                } else {
+                    format!("{}:latest", source)
+                };
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "{}: artifact does not exist",
+                    display_src
+                ));
+            };
+            Ok(vec![MountSpec {
+                source: PathBuf::from(art.file_path),
+                destination: target,
+                read_only: true,
+                noexec,
+                chown_u: false,
+                tmpfs_mount_data: None,
+                volume_name: None,
+                is_volume: false,
             }])
         }
         "ramfs" => {

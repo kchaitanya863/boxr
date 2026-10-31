@@ -26,7 +26,7 @@ pub fn write_health_supervisor_spec(
     health_cfg: &HealthConfig,
     on_failure: HealthOnFailureAction,
 ) -> Result<()> {
-    if health_cfg.test.is_empty() || on_failure == HealthOnFailureAction::None {
+    if health_cfg.test.is_empty() {
         return Ok(());
     }
     let spec = HealthSupervisorSpec {
@@ -46,17 +46,18 @@ pub fn spawn_detached_health_supervisor(
     health_cfg: HealthConfig,
     on_failure: HealthOnFailureAction,
 ) {
-    if health_cfg.test.is_empty() || on_failure == HealthOnFailureAction::None {
+    if health_cfg.test.is_empty() {
         return;
     }
-    if write_health_supervisor_spec(
+    let _ = write_health_supervisor_spec(
         &bundle_path,
         &container_id,
         &container_name,
         &health_cfg,
         on_failure,
-    )
-    .is_err()
+    );
+    if health_cfg.interval_secs == 0
+        || std::env::var("DISABLE_HC_SYSTEMD").ok().as_deref() == Some("true")
     {
         return;
     }
@@ -90,17 +91,42 @@ pub fn run_internal_health_supervisor(bundle_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn read_bundle_initial_delay_secs(bundle_path: &Path) -> u64 {
+    let config = bundle_path.join("config.json");
+    let Some(content) = std::fs::read_to_string(config).ok() else {
+        return 0;
+    };
+    let Some(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content).ok() else {
+        return 0;
+    };
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.health_initial_delay_secs"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn run_supervisor_loop(
     bundle_path: &Path,
     container_id: &str,
-    container_name: &str,
+    _container_name: &str,
     health_cfg: HealthConfig,
     on_failure: HealthOnFailureAction,
 ) {
-    let mut result = HealthCheckResult::default();
-    let started = Instant::now();
+    if health_cfg.interval_secs == 0 {
+        return;
+    }
+    let initial_delay = read_bundle_initial_delay_secs(bundle_path);
+    if initial_delay > 0 {
+        std::thread::sleep(Duration::from_secs(initial_delay));
+    }
     let interval = Duration::from_secs(health_cfg.interval_secs.max(1));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok();
     loop {
+        std::thread::sleep(interval);
         let store = ContainerStore::new();
         let cont = match store.find(container_id) {
             Some(c) => c,
@@ -108,52 +134,28 @@ fn run_supervisor_loop(
         };
         match cont.status {
             ContainerStatus::Running => {}
-            ContainerStatus::Stopping => {
-                std::thread::sleep(interval);
-                continue;
-            }
+            ContainerStatus::Stopping => continue,
             _ => break,
         }
-        let start_period_active =
-            started.elapsed() < Duration::from_secs(health_cfg.start_period_secs);
-        if let Err(e) =
-            check_container_health(bundle_path, &health_cfg, &mut result, start_period_active)
-        {
-            eprintln!("health check error for {}: {}", container_name, e);
-            result.failing_streak += 1;
-            result.status = if result.failing_streak >= health_cfg.retries && !start_period_active {
-                HealthStatus::Unhealthy
-            } else {
-                HealthStatus::Starting
-            };
+        if let Some(ref rt) = rt {
+            let _ = rt.block_on(crate::run_healthcheck_with_options(
+                container_id,
+                true,
+                true,
+            ));
         }
-        let _ = store.update_health_status(container_id, result.status.clone());
-        if result.status == HealthStatus::Unhealthy {
-            match on_failure {
-                HealthOnFailureAction::None => break,
-                HealthOnFailureAction::Stop => {
-                    let timeout = read_bundle_stop_timeout(bundle_path);
-                    let _ = crate::stop_container_with_home_and_timeout(
-                        container_name,
-                        None,
-                        timeout,
-                        None,
-                        false,
-                        None,
-                    );
-                    break;
-                }
-                HealthOnFailureAction::Kill => {
-                    let _ = crate::runtime::kill::ContainerKiller::kill(&cont, Some("KILL"));
-                    break;
-                }
-                HealthOnFailureAction::Restart => {
-                    let _ = crate::stop_container(container_name, None);
-                    break;
-                }
+        if let Some(after) = store.find(container_id) {
+            if after.health_status == HealthStatus::Unhealthy
+                && matches!(
+                    on_failure,
+                    HealthOnFailureAction::Stop | HealthOnFailureAction::Kill
+                )
+            {
+                break;
             }
+        } else {
+            break;
         }
-        std::thread::sleep(interval);
     }
 }
 

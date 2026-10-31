@@ -15,7 +15,10 @@ pub enum VolumeAction {
     Inspect {
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
-        name: String,
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(required_unless_present = "all")]
+        name: Option<String>,
     },
     Rm(VolumeRmArgs),
     Prune(VolumePruneArgs),
@@ -196,10 +199,14 @@ pub enum NetworkAction {
         /// Set driver specific options
         #[arg(short = 'o', long = "opt")]
         opts: Vec<String>,
+        /// Network interface name on the bridge
+        #[arg(long = "interface-name")]
+        interface_name: Option<String>,
         /// Control the network's scope
         #[arg(long = "scope")]
         scope: Option<String>,
     },
+    #[command(alias = "list")]
     Ls(NetworkLsArgs),
     Inspect {
         #[arg(short = 'f', long = "format")]
@@ -209,7 +216,11 @@ pub enum NetworkAction {
     Rm {
         #[arg(short = 'f', long = "force")]
         force: bool,
-        name: String,
+        #[arg(long = "ignore")]
+        ignore: bool,
+        #[arg(short = 't', long = "time", hide = true, allow_hyphen_values = true)]
+        time: Option<i32>,
+        names: Vec<String>,
     },
     Prune(NetworkPruneArgs),
     Connect {
@@ -218,6 +229,8 @@ pub enum NetworkAction {
     },
     /// Disconnect a container from a network
     Disconnect {
+        #[arg(short = 'f', long = "force")]
+        force: bool,
         network: String,
         container: String,
     },
@@ -225,6 +238,10 @@ pub enum NetworkAction {
     Update(NetworkUpdateArgs),
     /// Reload firewall rules and port forwarding for a container (Podman parity)
     Reload {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
         containers: Vec<String>,
     },
     /// Return 0 if the network exists, 1 otherwise

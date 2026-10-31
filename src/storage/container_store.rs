@@ -8,13 +8,16 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub fn rand_id() -> [u8; 6] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut bytes = [0u8; 6];
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let pid = std::process::id();
-    let combined = now ^ ((pid as u128) << 32);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let combined = now ^ ((pid as u128) << 32) ^ ((seq as u128) << 64);
     let mut hasher = Sha256::new();
     hasher.update(combined.to_le_bytes());
     let hash = hasher.finalize();
@@ -183,7 +186,7 @@ impl ContainerStore {
             {
                 // SIGKILL during `podman stop` (separate process) must not be downgraded.
                 if matches!(c.status, ContainerStatus::Exited(137))
-                    && !matches!(status, ContainerStatus::Exited(137))
+                    && matches!(status, ContainerStatus::Exited(code) if code != 137)
                 {
                     return Ok(());
                 }
@@ -286,6 +289,22 @@ impl ContainerStore {
         })
     }
 
+    pub fn set_image(&self, query: &str, new_image: &str) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            let q = Self::normalize_container_name(query);
+            if let Some(c) = data
+                .containers
+                .iter_mut()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+            {
+                c.image = new_image.to_string();
+                self.save_unlocked(&data)?;
+            }
+            Ok(())
+        })
+    }
+
     pub fn remove(&self, query: &str) -> Result<ContainerRecord> {
         let q = Self::normalize_container_name(query);
         if q.is_empty() {
@@ -352,7 +371,18 @@ impl ContainerStore {
                     if bundle_conmon_is_current_process(&bundle) {
                         let _ = fs::write(bundle.join("deferred-bundle-rm"), "1");
                     } else {
-                        let _ = fs::remove_dir_all(bundle);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = fs::set_permissions(
+                                bundle.join("rootfs"),
+                                fs::Permissions::from_mode(0o755),
+                            );
+                        }
+                        if fs::remove_dir_all(&bundle).is_err() {
+                            make_tree_writable(&bundle);
+                            let _ = fs::remove_dir_all(&bundle);
+                        }
                     }
                 }
 
@@ -362,6 +392,28 @@ impl ContainerStore {
             }
         })
     }
+}
+
+pub(crate) fn make_tree_writable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            if meta.is_dir() {
+                let mode = meta.permissions().mode();
+                if (mode & 0o700) != 0o700 {
+                    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700));
+                }
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        make_tree_writable(&entry.path());
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 #[cfg(unix)]

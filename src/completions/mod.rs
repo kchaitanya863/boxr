@@ -3,6 +3,8 @@
 //! Generates rich tab completions for **Zsh**, **Bash**, and **Fish**, with dynamic
 //! container and image name completions, and installs drop-in Docker wrappers.
 
+pub mod cobra;
+
 use crate::storage::boxr_home;
 use anyhow::{Result, anyhow};
 use std::fs;
@@ -467,6 +469,12 @@ complete -c boxr -n "__fish_seen_subcommand_from run rmi tag history save" -a "(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cli_debug_assert() {
+        use clap::CommandFactory;
+        crate::cli::Cli::command().debug_assert();
+    }
 
     #[test]
     fn test_completion_generation() {

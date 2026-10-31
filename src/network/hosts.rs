@@ -6,12 +6,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn resolved_bridge_network_name(network: &str) -> Option<String> {
-    let mode = pasta::NetworkMode::parse(network);
+    let base = if !network.starts_with("container:")
+        && !network.starts_with("pasta:")
+        && !network.starts_with("ns:")
+    {
+        network.split_once(':').map(|(n, _)| n).unwrap_or(network)
+    } else {
+        network
+    };
+    let mode = pasta::NetworkMode::parse(base);
     if mode != pasta::NetworkMode::Bridge {
         return None;
     }
-    let name = match network {
-        "bridge" | "default" | "auto" | "" => NetworkStore::DEFAULT_NETWORK,
+    let name = match base {
+        "bridge" | "default" | "auto" | "private" | "" => NetworkStore::DEFAULT_NETWORK,
         other => other,
     };
     Some(name.to_string())
@@ -115,6 +123,55 @@ pub fn refresh_bridge_hosts_for_network(network_name: &str, home: Option<&Path>)
                 assemble_bridge_hosts_content(&net_store, &net.name, &container_id, &bundle)?;
             write_bundle_hosts_file(&bundle, &content)?;
         }
+    }
+    Ok(())
+}
+
+pub fn refresh_disconnected_container_hosts(container_query: &str, home: Option<&Path>) -> Result<()> {
+    let net_store = match home {
+        Some(h) => NetworkStore::with_home(h.to_path_buf()),
+        None => NetworkStore::new(),
+    };
+    let c_store = match home {
+        Some(h) => ContainerStore::with_home(h.to_path_buf()),
+        None => ContainerStore::new(),
+    };
+    let Some(record) = c_store.find(container_query) else {
+        return Ok(());
+    };
+    let bundle = PathBuf::from(&record.bundle_path);
+    if !bundle.exists() {
+        return Ok(());
+    }
+    let connected_nets: Vec<String> = net_store
+        .list()
+        .into_iter()
+        .filter(|n| {
+            n.containers.contains_key(&record.id)
+                || n.containers.values().any(|ep| ep.container_name == record.name)
+        })
+        .map(|n| n.name)
+        .collect();
+    if let Some(first_net) = connected_nets.first() {
+        let _ = fs::remove_file(bundle.join("network_disconnected"));
+        let content = assemble_bridge_hosts_content(&net_store, first_net, &record.id, &bundle)?;
+        write_bundle_hosts_file(&bundle, &content)?;
+    } else {
+        let _ = fs::write(bundle.join("network_disconnected"), "1");
+        let (hostname, add_host_entries) = load_bundle_host_context(&bundle);
+        let mut lines = vec![
+            "127.0.0.1\tlocalhost".to_string(),
+            "::1\tlocalhost ip6-localhost ip6-loopback".to_string(),
+        ];
+        if let Some(h) = &hostname {
+            lines.push(format!("127.0.0.1\t{}", h));
+        }
+        for entry in &add_host_entries {
+            if let Some((host, ip)) = entry.split_once(':') {
+                lines.push(format!("{}\t{}", ip.trim(), host.trim()));
+            }
+        }
+        write_bundle_hosts_file(&bundle, &(lines.join("\n") + "\n"))?;
     }
     Ok(())
 }

@@ -57,9 +57,15 @@ impl NetworkMode {
                 return Self::Container(target.to_string());
             }
         }
-        match trimmed.to_lowercase().as_str() {
-            "pasta" => Self::Pasta,
-            "usernet" | "native" | "slirp" => Self::UserNet,
+        if trimmed.starts_with("ns:") {
+            return Self::Host;
+        }
+        let lower = trimmed.to_lowercase();
+        if lower == "pasta" || lower.starts_with("pasta:") {
+            return Self::Pasta;
+        }
+        match lower.as_str() {
+            "usernet" | "native" | "slirp" | "private" => Self::UserNet,
             "host" => Self::Host,
             "none" => Self::None,
             "bridge" => Self::Bridge,
@@ -133,6 +139,7 @@ pub struct PastaConfig {
     pub gateway: Option<String>,
     pub dns: Vec<String>,
     pub quiet: bool,
+    pub extra_args: Vec<String>,
 }
 
 impl PastaConfig {
@@ -146,6 +153,7 @@ impl PastaConfig {
             gateway: None,
             dns: Vec::new(),
             quiet: true,
+            extra_args: Vec::new(),
         }
     }
 
@@ -159,6 +167,83 @@ impl PastaConfig {
             gateway: None,
             dns: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
             quiet: true,
+            extra_args: Vec::new(),
+        }
+    }
+
+    pub fn for_container(
+        pid: i32,
+        ports: &[PortMapping],
+        raw_network: &str,
+        conf_pasta_opts: &[String],
+    ) -> Self {
+        let mut extra_args: Vec<String> = conf_pasta_opts.to_vec();
+        if let Some((_, rest)) = raw_network.trim().split_once(':') {
+            for part in rest.split(',') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    extra_args.push(p.to_string());
+                }
+            }
+        }
+        let has_custom_ifname = extra_args
+            .iter()
+            .any(|a| a == "-I" || a == "--ns-ifname" || a.starts_with("--ns-ifname="));
+        let has_dns_fwd = extra_args
+            .iter()
+            .any(|a| a == "--dns-forward" || a.starts_with("--dns-forward="));
+        let has_v6_only = extra_args.iter().any(|a| a == "-6" || a == "--ipv6-only");
+        if !has_dns_fwd && !has_v6_only {
+            extra_args.push("--dns-forward".to_string());
+            extra_args.push("169.254.1.1".to_string());
+        }
+        let has_tcp_flag = extra_args
+            .iter()
+            .any(|a| a == "-t" || a == "--tcp-ports" || a.starts_with("--tcp-ports="));
+        let has_tcp_port = ports.iter().any(|p| p.protocol.eq_ignore_ascii_case("tcp"));
+        if !has_tcp_flag && !has_tcp_port {
+            extra_args.push("-t".to_string());
+            extra_args.push("none".to_string());
+        }
+        let has_udp_flag = extra_args
+            .iter()
+            .any(|a| a == "-u" || a == "--udp-ports" || a.starts_with("--udp-ports="));
+        let has_udp_port = ports.iter().any(|p| p.protocol.eq_ignore_ascii_case("udp"));
+        if !has_udp_flag && !has_udp_port {
+            extra_args.push("-u".to_string());
+            extra_args.push("none".to_string());
+        }
+        let has_tcp_ns = extra_args
+            .iter()
+            .any(|a| a == "-T" || a == "--tcp-ns" || a.starts_with("--tcp-ns="));
+        if !has_tcp_ns {
+            extra_args.push("-T".to_string());
+            extra_args.push("none".to_string());
+        }
+        let has_udp_ns = extra_args
+            .iter()
+            .any(|a| a == "-U" || a == "--udp-ns" || a.starts_with("--udp-ns="));
+        if !has_udp_ns {
+            extra_args.push("-U".to_string());
+            extra_args.push("none".to_string());
+        }
+        let has_map_gw = extra_args
+            .iter()
+            .any(|a| a == "--no-map-gw" || a == "--map-gw");
+        if !has_map_gw {
+            extra_args.push("--no-map-gw".to_string());
+        }
+        let _ = has_custom_ifname;
+        Self {
+            netns_pid: Some(pid),
+            netns_path: None,
+            port_mappings: ports.to_vec(),
+            ifname: None,
+            address: None,
+            gateway: None,
+            dns: Vec::new(),
+            quiet: true,
+            extra_args,
         }
     }
 
@@ -194,21 +279,50 @@ impl PastaConfig {
             args.push(d.clone());
         }
 
-        // Port forwarding rules: -t <spec>, -u <spec>
-        // pasta supports: -t <host_port>:<container_port> or -t <port>
-        for p in &self.port_mappings {
-            let spec = if let Some(ip) = &p.host_ip {
-                format!("{}/{}:{}", ip, p.host_port, p.container_port)
-            } else {
-                format!("{}:{}", p.host_port, p.container_port)
-            };
+        for arg in &self.extra_args {
+            args.push(arg.clone());
+        }
 
-            if p.protocol.eq_ignore_ascii_case("udp") {
+        // Port forwarding rules: -t <spec>, -u <spec> (coalescing contiguous ranges)
+        let mut idx = 0;
+        while idx < self.port_mappings.len() {
+            let first = &self.port_mappings[idx];
+            let mut end_idx = idx;
+            while end_idx + 1 < self.port_mappings.len() {
+                let prev = &self.port_mappings[end_idx];
+                let next = &self.port_mappings[end_idx + 1];
+                if next.protocol.eq_ignore_ascii_case(&first.protocol)
+                    && next.host_ip == first.host_ip
+                    && next.host_port == prev.host_port.wrapping_add(1)
+                    && next.container_port == prev.container_port.wrapping_add(1)
+                {
+                    end_idx += 1;
+                } else {
+                    break;
+                }
+            }
+            let last = &self.port_mappings[end_idx];
+            let ports_part = if end_idx > idx {
+                format!(
+                    "{}-{}:{}-{}",
+                    first.host_port, last.host_port, first.container_port, last.container_port
+                )
+            } else {
+                format!("{}:{}", first.host_port, first.container_port)
+            };
+            let spec = if let Some(ip) = &first.host_ip {
+                let clean_ip = ip.trim_matches(|c| c == '[' || c == ']');
+                format!("{}/{}", clean_ip, ports_part)
+            } else {
+                ports_part
+            };
+            if first.protocol.eq_ignore_ascii_case("udp") {
                 args.push("-u".to_string());
             } else {
                 args.push("-t".to_string());
             }
             args.push(spec);
+            idx = end_idx + 1;
         }
 
         // Target network namespace PID or path
@@ -243,19 +357,35 @@ impl PastaDriver {
         };
 
         let args = config.build_args();
-        let child = Command::new(&bin)
+        let mut child = Command::new(&bin)
             .args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .with_context(|| format!("Failed to spawn pasta ({:?})", bin))?;
+
+        let status = child
+            .wait()
+            .with_context(|| format!("Failed to wait for pasta ({:?})", bin))?;
+        if !status.success() {
+            return Err(anyhow::anyhow!(
+                "pasta failed with exit code {}",
+                status.code().unwrap_or(1)
+            ));
+        }
 
         Ok(Some(child))
     }
 }
 
 fn which_pasta() -> Option<PathBuf> {
+    if let Ok(helper_dir) = std::env::var("CONTAINERS_HELPER_BINARY_DIR") {
+        let candidate = Path::new(&helper_dir).join("pasta");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
     for p in ["/usr/bin/pasta", "/bin/pasta", "/usr/local/bin/pasta"] {
         let path = Path::new(p);
         if path.exists() {

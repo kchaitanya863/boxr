@@ -17,7 +17,8 @@ pub fn append_k8s_log_chunk(path: &Path, stream: &str, data: &[u8]) -> Result<()
     let ts = chrono::Local::now()
         .format("%Y-%m-%dT%H:%M:%S%.9f%:z")
         .to_string();
-    file.write_all(format!("{} {} F ", ts, stream).as_bytes())?;
+    let flag = if data.ends_with(b"\n") { "F" } else { "P" };
+    file.write_all(format!("{} {} {} ", ts, stream, flag).as_bytes())?;
     file.write_all(data)?;
     if !data.ends_with(b"\n") {
         file.write_all(b"\n")?;
@@ -25,11 +26,33 @@ pub fn append_k8s_log_chunk(path: &Path, stream: &str, data: &[u8]) -> Result<()
     Ok(())
 }
 
+pub fn format_tty_crlf(chunk: &[u8], prev_was_cr: &mut bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chunk.len() + 8);
+    for &b in chunk {
+        if b == b'\n' && !*prev_was_cr {
+            out.push(b'\r');
+        }
+        out.push(b);
+        *prev_was_cr = b == b'\r';
+    }
+    out
+}
+
 pub fn tee_k8s_stream<R: Read>(
     mut reader: R,
     log_path: std::path::PathBuf,
     stream: &'static str,
     attach: bool,
+) {
+    tee_k8s_stream_with_tty(reader, log_path, stream, attach, false);
+}
+
+pub fn tee_k8s_stream_with_tty<R: Read>(
+    mut reader: R,
+    log_path: std::path::PathBuf,
+    stream: &'static str,
+    attach: bool,
+    tty: bool,
 ) {
     let mut buf = [0u8; 8192];
     let mut attach_out: Box<dyn Write + Send> = if attach {
@@ -41,13 +64,22 @@ pub fn tee_k8s_stream<R: Read>(
     } else {
         Box::new(std::io::sink())
     };
+    let mut prev_cr = false;
     while let Ok(n) = reader.read(&mut buf) {
         if n == 0 {
             break;
         }
+        if stream == "stderr" {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let chunk = &buf[..n];
         let _ = append_k8s_log_chunk(&log_path, stream, chunk);
-        let _ = attach_out.write_all(chunk);
+        if tty && stream == "stdout" {
+            let formatted = format_tty_crlf(chunk, &mut prev_cr);
+            let _ = attach_out.write_all(&formatted);
+        } else {
+            let _ = attach_out.write_all(chunk);
+        }
         let _ = attach_out.flush();
     }
 }
@@ -269,6 +301,13 @@ pub fn read_k8s_log_entries(path: &Path) -> Result<Vec<K8sLogEntry>> {
 }
 
 pub fn reconstruct_k8s_lines(entries: &[K8sLogEntry]) -> Vec<Vec<u8>> {
+    reconstruct_k8s_lines_opts(entries, true)
+}
+
+pub fn reconstruct_k8s_lines_opts(
+    entries: &[K8sLogEntry],
+    include_trailing_partial: bool,
+) -> Vec<Vec<u8>> {
     let mut lines: Vec<Vec<u8>> = Vec::new();
     let mut partial: Vec<u8> = Vec::new();
     for e in entries {
@@ -281,7 +320,7 @@ pub fn reconstruct_k8s_lines(entries: &[K8sLogEntry]) -> Vec<Vec<u8>> {
         line.extend_from_slice(&e.payload);
         lines.push(line);
     }
-    if !partial.is_empty() {
+    if include_trailing_partial && !partial.is_empty() {
         lines.push(partial);
     }
     lines
@@ -551,21 +590,7 @@ pub fn stream_k8s_container_logs(
     let follow_timeout = until.and_then(parse_follow_until_timeout);
     let initial_entry_count = read_k8s_log_entries(path).map(|e| e.len()).unwrap_or(0);
 
-    if since.is_none() {
-        let text = read_log_output_opts(path, since, until, tail, timestamps)?;
-        write_log_text_opts(&text, false, true)?;
-    }
-
-    let mut printed_lines = if since.is_none() {
-        let entries = filter_k8s_entries(read_k8s_log_entries(path)?, since_cutoff, until_cutoff);
-        tail_log_lines(
-            expand_embedded_newlines(reconstruct_k8s_lines(&entries)),
-            tail,
-        )
-        .len()
-    } else {
-        0
-    };
+    let mut printed_lines = 0usize;
     let mut printed_since_lines = 0usize;
 
     loop {
@@ -581,12 +606,16 @@ pub fn stream_k8s_container_logs(
             }
         }
 
+        let running = is_running();
+        if !running {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let entries = filter_k8s_entries(read_k8s_log_entries(path)?, since_cutoff, until_cutoff);
         if since.is_some() {
             let new_entries: Vec<K8sLogEntry> =
                 entries.into_iter().skip(initial_entry_count).collect();
             let new_lines = tail_log_lines(
-                expand_embedded_newlines(reconstruct_k8s_lines(&new_entries)),
+                expand_embedded_newlines(reconstruct_k8s_lines_opts(&new_entries, !running)),
                 tail,
             );
             if printed_since_lines < new_lines.len() {
@@ -595,7 +624,7 @@ pub fn stream_k8s_container_logs(
             }
         } else {
             let lines = tail_log_lines(
-                expand_embedded_newlines(reconstruct_k8s_lines(&entries)),
+                expand_embedded_newlines(reconstruct_k8s_lines_opts(&entries, !running)),
                 tail,
             );
             if printed_lines < lines.len() {
@@ -604,10 +633,10 @@ pub fn stream_k8s_container_logs(
             }
         }
 
-        if !is_running() {
+        if !running {
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
     }
 
     Ok(())

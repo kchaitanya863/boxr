@@ -237,7 +237,7 @@ pub struct RunArgs {
     pub dns_search: Vec<String>,
 
     /// Set DNS options
-    #[arg(long = "dns-option")]
+    #[arg(long = "dns-option", alias = "dns-opt")]
     pub dns_option: Vec<String>,
 
     /// Expose a port or a range of ports
@@ -255,6 +255,18 @@ pub struct RunArgs {
     /// Signal to stop the container
     #[arg(long = "stop-signal")]
     pub stop_signal: Option<String>,
+
+    /// Control sd-notify behavior ("container", "conmon", "healthy", "ignore")
+    #[arg(long = "sdnotify")]
+    pub sdnotify: Option<String>,
+
+    /// Control container cgroup configuration ("enabled", "disabled", "no-conmon", "split")
+    #[arg(long = "cgroups")]
+    pub cgroups: Option<String>,
+
+    /// Read the pod ID from the file
+    #[arg(long = "pod-id-file")]
+    pub pod_id_file: Option<String>,
 
     /// Add an annotation to the container (passed through to the OCI runtime)
     #[arg(long = "annotation")]
@@ -509,12 +521,22 @@ pub struct RunArgs {
     #[arg(long = "memory-swappiness")]
     pub memory_swappiness: Option<u64>,
 
+    /// Configure cgroup v2 values (key=value)
+    #[arg(long = "cgroup-conf")]
+    pub cgroup_conf: Vec<String>,
+
     /// Runtime to use for this container
     #[arg(long = "runtime")]
     pub runtime: Option<String>,
 
     /// Proxy received signals to the process
-    #[arg(long = "sig-proxy", default_value_t = true)]
+    #[arg(
+        long = "sig-proxy",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
     pub sig_proxy: bool,
 
     /// Storage driver options for the container
@@ -569,7 +591,12 @@ impl RunArgs {
         if crate::cli::READ_ONLY_EXPLICIT_FALSE.get() == Some(&true) {
             return false;
         }
-        self.read_only
+        if self.read_only {
+            return true;
+        }
+        crate::containers_conf_toml_value("read_only")
+            .map(|v| v == "true")
+            .unwrap_or(false)
     }
 
     /// When unset, Podman defaults read-only tmpfs mounts to match read-only rootfs.

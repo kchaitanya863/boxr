@@ -191,6 +191,7 @@ fn default_run_args(image: &str) -> RunArgs {
         cpuset_cpus: None,
         memory_swap: None,
         memory_reservation: None,
+        cgroup_conf: Vec::new(),
         dns_search: Vec::new(),
         dns_option: Vec::new(),
         expose: Vec::new(),
@@ -236,6 +237,9 @@ fn default_run_args(image: &str) -> RunArgs {
         log_driver: vec![],
         log_opt: Vec::new(),
         oom_kill_disable: false,
+        sdnotify: None,
+        cgroups: None,
+        pod_id_file: None,
         oom_score_adj: None,
         group_add: Vec::new(),
         label_file: None,
@@ -313,6 +317,7 @@ fn test_issue_164_images_accepts_invalid_filter_keys_without_returning_an_error(
         all: false,
         digests: false,
         no_trunc: false,
+        noheading: false,
         tree: false,
         format: None,
         sort: None,
@@ -371,8 +376,9 @@ fn test_issue_167_volume_inspect_fails_with_error_when_format_template_flag_is_s
     store.create(Some("vol167"), None).unwrap();
     let sub = VolumeSubcommands {
         command: VolumeAction::Inspect {
+            all: false,
             format: Some("{{.Name}}".to_string()),
-            name: "vol167".to_string(),
+            name: Some("vol167".to_string()),
         },
     };
     assert!(boxr::handle_volume(sub).is_ok());

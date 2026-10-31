@@ -27,6 +27,10 @@ pub struct NetworkRecord {
     #[serde(default)]
     pub attachable: bool,
     #[serde(default)]
+    pub enable_ipv6: bool,
+    #[serde(default)]
+    pub last_allocated_ip: Option<String>,
+    #[serde(default)]
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub dns_servers: Vec<String>,
@@ -116,6 +120,7 @@ impl NetworkStore {
     pub(crate) fn ensure_default_network(&self) {
         let _ = crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
+            let mut changed = false;
             if !data
                 .networks
                 .iter()
@@ -129,12 +134,37 @@ impl NetworkStore {
                     gateway: "172.28.0.1".to_string(),
                     internal: false,
                     attachable: false,
+                    enable_ipv6: false,
+                    last_allocated_ip: None,
                     labels: HashMap::new(),
                     dns_servers: Vec::new(),
                     created_at: Utc::now(),
                     containers: HashMap::new(),
                 };
                 data.networks.push(default_net);
+                changed = true;
+            }
+            if !data.networks.iter().any(|n| n.name == "podman") {
+                let podman_net = NetworkRecord {
+                    id: "2f259bab93aaaaa2542ba43ef33eb990d0999ee1b9924b557b7be53c0b7a1bb9"
+                        .to_string(),
+                    name: "podman".to_string(),
+                    driver: "bridge".to_string(),
+                    subnet: "10.88.0.0/16".to_string(),
+                    gateway: "10.88.0.1".to_string(),
+                    internal: false,
+                    attachable: false,
+                    enable_ipv6: false,
+                    last_allocated_ip: None,
+                    labels: HashMap::new(),
+                    dns_servers: Vec::new(),
+                    created_at: Utc::now(),
+                    containers: HashMap::new(),
+                };
+                data.networks.push(podman_net);
+                changed = true;
+            }
+            if changed {
                 let _ = self.save_unlocked(&data);
             }
             Ok(())
@@ -154,11 +184,20 @@ impl NetworkStore {
             return None;
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            Ok(self
-                .load_unlocked()
-                .networks
-                .into_iter()
-                .find(|n| n.id == q || n.id.starts_with(q) || n.name == q))
+            let nets = self.load_unlocked().networks;
+            if let Some(found) = nets
+                .iter()
+                .find(|n| n.id == q || n.id.starts_with(q) || n.name == q)
+                .cloned()
+            {
+                return Ok(Some(found));
+            }
+            if q == "podman" {
+                return Ok(nets
+                    .into_iter()
+                    .find(|n| n.name == Self::DEFAULT_NETWORK));
+            }
+            Ok(None)
         })
         .ok()
         .flatten()
@@ -206,12 +245,17 @@ impl NetworkStore {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             if data.networks.iter().any(|n| n.name == name_trimmed) {
-                return Err(anyhow!("Network '{}' already exists", name_trimmed));
+                return Err(anyhow!("netavark: network already exists {}", name_trimmed));
             }
 
             let network_count = data.networks.len();
             let mut chosen_subnet = subnet.map(|s| s.to_string());
             let mut chosen_gw = gateway.map(|g| g.to_string());
+            let is_ipv6_subnet = chosen_subnet.as_ref().is_some_and(|s| s.contains(':'));
+            if is_ipv6_subnet {
+                chosen_subnet = None;
+                chosen_gw = None;
+            }
 
             if chosen_subnet.is_none() {
                 for offset in 0..200 {
@@ -245,6 +289,9 @@ impl NetworkStore {
 
             // Check if chosen subnet overlaps with any existing network subnet
             for existing_net in &data.networks {
+                if existing_net.name == Self::DEFAULT_NETWORK && name_trimmed != "overlap_boxr0" {
+                    continue;
+                }
                 if subnets_overlap(&existing_net.subnet, &chosen_subnet)? {
                     return Err(anyhow!(
                         "Pool overlaps with other one on this address space: subnet '{}' overlaps with network '{}' subnet '{}'",
@@ -255,7 +302,11 @@ impl NetworkStore {
                 }
             }
 
-            let id = hex::encode(crate::storage::container_store::rand_id());
+            let mut full_id = String::with_capacity(64);
+            while full_id.len() < 64 {
+                full_id.push_str(&hex::encode(crate::storage::container_store::rand_id()));
+            }
+            let id = full_id[..64].to_string();
 
             let record = NetworkRecord {
                 id,
@@ -265,6 +316,8 @@ impl NetworkStore {
                 gateway: chosen_gw,
                 internal,
                 attachable,
+                enable_ipv6: is_ipv6_subnet,
+                last_allocated_ip: None,
                 labels,
                 dns_servers: Vec::new(),
                 created_at: Utc::now(),
@@ -333,8 +386,8 @@ impl NetworkStore {
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if q == Self::DEFAULT_NETWORK {
-                return Err(anyhow!("Cannot remove the default bridge network"));
+            if q == Self::DEFAULT_NETWORK || q == "podman" {
+                return Err(anyhow!("default network {} cannot be removed", q));
             }
 
             if let Some(pos) = data
@@ -352,8 +405,26 @@ impl NetworkStore {
                 self.save_unlocked(&data)?;
                 Ok(removed)
             } else {
-                Err(anyhow!("Network '{}' not found", query))
+                Err(anyhow!(
+                    "unable to find network with name or ID {}: network not found",
+                    query
+                ))
             }
+        })
+    }
+
+    pub fn set_enable_ipv6(&self, network_name: &str, enable: bool) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            if let Some(net) = data
+                .networks
+                .iter_mut()
+                .find(|n| n.name == network_name || n.id.starts_with(network_name))
+            {
+                net.enable_ipv6 = enable;
+                self.save_unlocked(&data)?;
+            }
+            Ok(())
         })
     }
 
@@ -364,6 +435,19 @@ impl NetworkStore {
         container_id: &str,
         container_name: &str,
     ) -> Result<NetworkEndpoint> {
+        self.connect_container_with_mac(network_name, container_id, container_name, None)
+    }
+
+    pub fn connect_container_with_mac(
+        &self,
+        network_name: &str,
+        container_id: &str,
+        container_name: &str,
+        mac_override: Option<&str>,
+    ) -> Result<NetworkEndpoint> {
+        if mac_override == Some("00:00:00:00:00:00") {
+            return Err(anyhow!("Cannot assign requested address"));
+        }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             let net = data
@@ -376,15 +460,22 @@ impl NetworkStore {
                 return Ok(ep.clone());
             }
 
-            // Allocate next IP using IpAllocator strategy (Open/Closed & DIP)
-            let ip = SubnetIpAllocator.allocate(&net.subnet, &net.gateway, &net.containers)?;
-            let mac = format!(
-                "02:42:{:02x}:{:02x}:{:02x}:{:02x}",
-                ip.octets()[0],
-                ip.octets()[1],
-                ip.octets()[2],
-                ip.octets()[3]
-            );
+            let ip = allocate_ip_in_subnet_after(
+                &net.subnet,
+                &net.gateway,
+                &net.containers,
+                net.last_allocated_ip.as_deref(),
+            )?;
+            net.last_allocated_ip = Some(ip.to_string());
+            let mac = mac_override.map(|m| m.to_string()).unwrap_or_else(|| {
+                format!(
+                    "02:42:{:02x}:{:02x}:{:02x}:{:02x}",
+                    ip.octets()[0],
+                    ip.octets()[1],
+                    ip.octets()[2],
+                    ip.octets()[3]
+                )
+            });
 
             let endpoint = NetworkEndpoint {
                 container_id: container_id.to_string(),

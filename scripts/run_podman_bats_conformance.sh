@@ -41,7 +41,7 @@ fi
 clone_or_update() {
   if [[ ! -d "$SRC_DIR/.git" ]]; then
     git clone --depth 1 --branch "$PODMAN_TESTS_REF" "$PODMAN_TESTS_REPO" "$SRC_DIR"
-  else
+  elif [[ "${PODMAN_BATS_UPDATE:-0}" == "1" ]]; then
     git -C "$SRC_DIR" fetch --depth 1 origin "$PODMAN_TESTS_REF" 2>/dev/null || true
     git -C "$SRC_DIR" checkout -q FETCH_HEAD 2>/dev/null || git -C "$SRC_DIR" pull -q --ff-only 2>/dev/null || true
   fi
@@ -62,16 +62,18 @@ apply_vendored_upstream() {
 }
 
 apply_boxr_patches() {
+  for hf in "$SRC_DIR/test/system/helpers.network.bash" "$SRC_DIR/test/system/helpers.registry.bash"; do
+    if [[ -f "$hf" ]] && grep -q 'rsa:4096' "$hf" 2>/dev/null; then
+      sed -i 's/rsa:4096/rsa:2048/g' "$hf"
+    fi
+  done
   local stamp="$CACHE_DIR/.boxr-patches-applied"
   local helpers="$SRC_DIR/test/system/helpers.bash"
   local head
   head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo none)"
   local overrides_id
   overrides_id="$(sha256sum "$OVERRIDES" | awk '{print $1}')"
-  if grep -q 'BOXR_BATS_OVERRIDES' "$helpers" 2>/dev/null && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "${head}:${overrides_id}" ]]; then
-    return 0
-  fi
-  # Re-apply overrides on each upstream bump (strip previous block first).
+  # Always re-apply overrides since apply_vendored_upstream overwrites helpers.bash.
   if grep -q 'BOXR_BATS_OVERRIDES' "$helpers" 2>/dev/null; then
     sed -i '/^# BOXR_BATS_OVERRIDES$/,$d' "$helpers"
   fi
@@ -83,15 +85,31 @@ apply_boxr_patches() {
   echo "${head}:${overrides_id}" >"$stamp"
 }
 
-write_wrapper() {
+function write_wrapper() {
   cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-$HOME/.boxr-bats}}"
+if [[ -f "$CACHE_DIR/current_boxr_home" ]]; then
+  DEFAULT_BOXR_HOME="\$(cat "$CACHE_DIR/current_boxr_home")"
+else
+  DEFAULT_BOXR_HOME="$HOME/.boxr-bats"
+fi
+export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-\$DEFAULT_BOXR_HOME}}"
 mkdir -p "\$BOXR_HOME"
 if [[ "\${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" ]]; then
   export BOXR_FORCE_EMBEDDED_USERNET=1
 fi
+args=()
+prev=""
+for ((i=1; i<=\$#; i++)); do
+  arg="\${!i}"
+  if [[ -z "\$arg" && ( "\$prev" == "-f" || "\$prev" == "--format" ) ]]; then
+    args+=("__EMPTY_FORMAT__")
+  else
+    args+=("\$arg")
+  fi
+  prev="\$arg"
+done
 # Podman BATS expect '[options]' (lower case) in usage lines.
 podmanize_help() {
   sed -e 's/^Usage: podman /Usage:\\n  podman /' \
@@ -104,21 +122,36 @@ podmanize_help() {
       -e 's/\\[options\\] \\[command\\]/[command] [options]/g' \
       -e 's/podman help \\[options\\] \\[command\\]/podman help [command] [options]/g'
 }
+has_external_compose=0
+for arg in "\$@"; do
+  if [[ "\$arg" == "compose" ]]; then
+    if [[ -n "\${PODMAN_COMPOSE_PROVIDER:-}" ]]; then
+      has_external_compose=1
+    elif [[ -n "\${CONTAINERS_CONF_OVERRIDE:-}" ]] && grep -q "compose_providers" "\${CONTAINERS_CONF_OVERRIDE}" 2>/dev/null; then
+      has_external_compose=1
+    elif [[ -n "\${CONTAINERS_CONF:-}" ]] && grep -q "compose_providers" "\${CONTAINERS_CONF}" 2>/dev/null; then
+      has_external_compose=1
+    fi
+    break
+  fi
+done
 is_help=0
-if [[ "\${1:-}" == "help" ]]; then
-  is_help=1
-elif [[ "\${1:-}" != "run" && "\${1:-}" != "exec" ]]; then
-  if [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
+if [[ \$has_external_compose -eq 0 ]]; then
+  if [[ "\${1:-}" == "help" ]]; then
+    is_help=1
+  elif [[ "\${1:-}" != "run" && "\${1:-}" != "create" && "\${1:-}" != "exec" ]]; then
+    if [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
+      is_help=1
+    fi
+  elif [[ "\${2:-}" == "--help" || "\${2:-}" == "-h" ]]; then
     is_help=1
   fi
-elif [[ "\${2:-}" == "--help" || "\${2:-}" == "-h" ]]; then
-  is_help=1
 fi
 if [[ \$is_help -eq 1 ]]; then
-  "$BOXR_BIN" "\$@" | podmanize_help
+  "$BOXR_BIN" "\${args[@]}" | podmanize_help
   exit "\${PIPESTATUS[0]}"
 fi
-exec "$BOXR_BIN" "\$@"
+exec "$BOXR_BIN" "\${args[@]}"
 EOF
   chmod +x "$WRAPPER"
 }
@@ -178,10 +211,15 @@ run_manifest() {
     export BOXR_HOME
     BOXR_HOME="$(mktemp -d "${TMPDIR:-/tmp}/boxr-bats.XXXXXX" | tr '[:upper:]' '[:lower:]')"
     export BOXR_BATS_HOME="$BOXR_HOME"
+    echo "$BOXR_HOME" >"$CACHE_DIR/current_boxr_home"
     echo "======== BATS pattern: $pat (BOXR_HOME=$BOXR_HOME) ========" | tee -a "$log"
     if ! hack/bats --rootless "$pat" 2>&1 | tee -a "$log"; then
       failed=1
     fi
+    "$BOXR_BIN" pod rm -a -f >/dev/null 2>&1 || true
+    "$BOXR_BIN" rm -a -f >/dev/null 2>&1 || true
+    chmod -R u+w "$BOXR_HOME" 2>/dev/null || true
+    rm -rf "$BOXR_HOME" 2>/dev/null || true
   done
 
   echo "Log: $log"

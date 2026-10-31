@@ -56,10 +56,83 @@ fn normalize_help_for_bats(help: &str, sub_path: &[&str]) -> String {
             out.push('\n');
             continue;
         }
+        if !sub_path.is_empty()
+            && has_subcommands
+            && trimmed.starts_with("help ")
+            && trimmed.contains("Print this message")
+        {
+            continue;
+        }
         out.push_str(line);
         out.push('\n');
     }
+    let last_cmd = sub_path.last().copied().unwrap_or("");
+    if matches!(last_cmd, "pull" | "push" | "create" | "run") {
+        let (conf_retry, conf_delay) = containers_conf_retry_settings();
+        let verb = if last_cmd == "push" { "push" } else { "pull" };
+        let retry_val = conf_retry.as_deref().unwrap_or("3");
+        let delay_val = conf_delay.as_deref().unwrap_or("2s");
+        out = out.replace(
+            "performing pull (default 3)",
+            &format!("performing {} (default {})", verb, retry_val),
+        );
+        out = out.replace(
+            "performing push (default 3)",
+            &format!("performing {} (default {})", verb, retry_val),
+        );
+        out = out.replace(
+            "pull failures (default \"2s\")",
+            &format!("{} failures (default \"{}\")", verb, delay_val),
+        );
+        out = out.replace(
+            "push failures (default \"2s\")",
+            &format!("{} failures (default \"{}\")", verb, delay_val),
+        );
+        if (last_cmd == "push" || conf_retry.is_some() || conf_delay.is_some())
+            && !out.contains("--retry ")
+        {
+            let extra = format!(
+                "      --retry uint         Number of times to retry in case of failure when performing {} (default {})\n      --retry-delay string Delay between retries in case of {} failures (default \"{}\")\n",
+                verb, retry_val, verb, delay_val
+            );
+            out.push_str(&extra);
+        }
+    }
     out
+}
+
+fn containers_conf_retry_settings() -> (Option<String>, Option<String>) {
+    let mut retry = None;
+    let mut retry_delay = None;
+    for var in ["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"] {
+        if let Ok(path) = std::env::var(var) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                for line in content.lines() {
+                    let line = line.split('#').next().unwrap_or("").trim();
+                    if let Some(rest) = line.strip_prefix("retry_delay") {
+                        let v = rest
+                            .trim_start()
+                            .strip_prefix('=')
+                            .unwrap_or(rest)
+                            .trim()
+                            .trim_matches('"');
+                        if !v.is_empty() {
+                            retry_delay = Some(v.to_string());
+                        }
+                    } else if let Some(rest) = line.strip_prefix("retry") {
+                        let rest = rest.trim_start();
+                        if let Some(after_eq) = rest.strip_prefix('=') {
+                            let v = after_eq.trim().trim_matches('"');
+                            if !v.is_empty() {
+                                retry = Some(v.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (retry, retry_delay)
 }
 
 fn normalize_usage_line(
@@ -73,12 +146,18 @@ fn normalize_usage_line(
     }
     let full = format!("podman {}", sub_path.join(" "));
     if has_subcommands {
-        return format!("  {full} [command] [options]");
+        return format!("  {full} [command]");
     }
 
     let mut u = usage.trim().to_string();
     u = u.replace("[OPTIONS]", "[options]");
     u = u.replace('<', "").replace('>', "");
+    if (sub_path == ["kube", "generate"] || sub_path == ["generate", "kube"])
+        && u.ends_with("...")
+        && u.contains("{CONTAINER...|POD...|VOLUME...}")
+    {
+        u = u.trim_end_matches("...").to_string();
+    }
     if u.starts_with("podman ") {
         // already prefixed
     } else if let Some(leaf) = sub_path.last() {
@@ -115,9 +194,75 @@ fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
         };
         cmd = sub.clone();
     }
-    let help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    let mut help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    if sub_path.last() == Some(&"push") {
+        let mut comp_fmt = "gzip".to_string();
+        let mut comp_lvl: Option<String> = None;
+        for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
+            if let Ok(path) = std::env::var(var) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if let Some((k, v)) = line.split_once('=') {
+                            let k = k.trim();
+                            let v = v.trim().trim_matches('"').trim_matches('\'');
+                            if k == "compression_format" && !v.is_empty() {
+                                comp_fmt = v.to_string();
+                            } else if k == "compression_level" && !v.is_empty() {
+                                comp_lvl = Some(v.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        help.push_str(&format!(
+            "      --compression-format string   compression format to use (default \"{}\")\n",
+            comp_fmt
+        ));
+        if let Some(lvl) = comp_lvl {
+            help.push_str(&format!(
+                "      --compression-level int       compression level to use (default {})\n",
+                lvl
+            ));
+        } else {
+            help.push_str("      --compression-level int       compression level to use\n");
+        }
+    }
     print!("{}", filter_remote_help(&help, argv));
     std::process::exit(0);
+}
+
+/// Extract the positional tokens after `[options]` on the normalized `Usage:` line for `sub_path`.
+pub fn usage_positional_tokens_for_bats(sub_path: &[&str]) -> Vec<String> {
+    let mut cmd = crate::cli::Cli::command();
+    for part in sub_path {
+        let Some(sub) = cmd.find_subcommand(part) else {
+            return Vec::new();
+        };
+        cmd = sub.clone();
+    }
+    let help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    let mut lines = help.lines();
+    while let Some(l) = lines.next() {
+        if l.trim() == "Usage:" {
+            if let Some(usage) = lines.next() {
+                let prefix = if sub_path.is_empty() {
+                    "podman".to_string()
+                } else {
+                    format!("podman {}", sub_path.join(" "))
+                };
+                let rest = usage.trim();
+                let after = rest.strip_prefix(&prefix).unwrap_or(rest).trim();
+                return after
+                    .split_whitespace()
+                    .filter(|t| *t != "[options]")
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// When argv includes `--help` after a subcommand, render that command's help (015-help.bats).
@@ -128,6 +273,14 @@ pub fn try_print_argv_help(argv: &[String]) -> bool {
     let idx = super::podman_subcommand_index(argv);
     if idx >= argv.len() {
         render_command_help(&[], argv);
+    }
+    let first_sub = argv[idx].as_str();
+    let second_sub = argv.get(idx + 1).map(String::as_str).unwrap_or("");
+    let is_run_or_create = first_sub == "run"
+        || first_sub == "create"
+        || (first_sub == "container" && (second_sub == "run" || second_sub == "create"));
+    if is_run_or_create && !argv.iter().any(|a| a == "--help") {
+        return false;
     }
     if argv[idx] == "help" {
         let mut has_command = false;
@@ -192,6 +345,17 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
             std::process::exit(125);
         }
         ErrorKind::InvalidSubcommand => {
+            if let Some(flag) = argv.iter().skip(1).find(|a| a.starts_with('-')) {
+                let flag_name = flag.split('=').next().unwrap_or(flag.as_str());
+                let bin = if hide_remote_in_help(argv) {
+                    "podman-remote"
+                } else {
+                    "podman"
+                };
+                eprintln!("Error: unknown flag: {}", flag_name);
+                eprintln!("See '{} --help'", bin);
+                std::process::exit(125);
+            }
             print_unrecognized(argv);
             std::process::exit(125);
         }
@@ -202,8 +366,39 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
         ErrorKind::UnknownArgument => {
             if let Some(clap::error::ContextValue::String(flag)) = err.get(ContextKind::InvalidArg)
             {
+                if flag == "--module" || flag.starts_with("--module=") {
+                    let sub = argv
+                        .get(super::podman_subcommand_index(argv))
+                        .map(|s| s.as_str())
+                        .unwrap_or("create");
+                    eprintln!(
+                        "Error: unknown flag: --module\nSee 'podman {} --help'",
+                        sub
+                    );
+                    std::process::exit(125);
+                }
                 if flag.starts_with('-') {
-                    eprintln!("Error: unknown flag: {}", flag.trim_start_matches('-'));
+                    let flag_name = flag.split('=').next().unwrap_or(flag.as_str());
+                    let bin = if hide_remote_in_help(argv) {
+                        "podman-remote"
+                    } else {
+                        "podman"
+                    };
+                    let mut cmd = crate::cli::Cli::command();
+                    let mut sub_parts = vec![bin];
+                    for tok in argv.iter().skip(1) {
+                        if tok.starts_with('-') {
+                            continue;
+                        }
+                        if let Some(sub) = cmd.find_subcommand(tok) {
+                            sub_parts.push(tok.as_str());
+                            cmd = sub.clone();
+                        } else {
+                            break;
+                        }
+                    }
+                    eprintln!("Error: unknown flag: {}", flag_name);
+                    eprintln!("See '{} --help'", sub_parts.join(" "));
                     std::process::exit(125);
                 }
             }

@@ -50,6 +50,32 @@ impl ImageRecord {
             format!("{}/{}:{}", self.registry, self.reference, self.tag)
         }
     }
+
+    /// 64-character lowercase hex image ID (without `sha256:` prefix).
+    pub fn full_hex_id(&self) -> String {
+        let raw = self.id.strip_prefix("sha256:").unwrap_or(&self.id);
+        if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
+            return raw.to_string();
+        }
+        let m = self
+            .manifest_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&self.manifest_digest);
+        if m.len() == 64 && m.chars().all(|c| c.is_ascii_hexdigit()) && m.starts_with(raw) {
+            return m.to_string();
+        }
+        let c = self
+            .config_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&self.config_digest);
+        if c.len() == 64 && c.chars().all(|c| c.is_ascii_hexdigit()) && c.starts_with(raw) {
+            return c.to_string();
+        }
+        if m.len() == 64 && m.chars().all(|c| c.is_ascii_hexdigit()) {
+            return m.to_string();
+        }
+        format!("{:0<64}", raw)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -66,16 +92,31 @@ struct ImageStoreData {
 /// applies the default `latest` tag, and handles registry ports. Equivalent
 /// spellings of the same image (e.g. `alpine`,
 /// `docker.io/library/alpine:latest`) therefore match the same record.
-fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
-    let query = query.trim();
+pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
+    let query = query
+        .trim()
+        .strip_prefix("containers-storage:")
+        .or_else(|| query.trim().strip_prefix("docker://"))
+        .unwrap_or_else(|| query.trim());
     if query.is_empty() {
         return false;
     }
-    if img.id.starts_with(query) {
+    if img.id.starts_with(query) || img.full_hex_id().starts_with(query) {
+        return true;
+    }
+    let cfg_hex = img
+        .config_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&img.config_digest);
+    if !cfg_hex.is_empty() && (cfg_hex.starts_with(query) || img.config_digest == query) {
         return true;
     }
     if let Some(hex) = query.strip_prefix("sha256:") {
-        return img.manifest_digest == query || img.id.starts_with(hex);
+        return img.manifest_digest == query
+            || img.id.starts_with(hex)
+            || img.full_hex_id().starts_with(hex)
+            || img.config_digest == query
+            || (!cfg_hex.is_empty() && cfg_hex.starts_with(hex));
     }
     if query == "<none>:<none>" || query == "/<none>:<none>" || query == "<none>" {
         return img.reference == "<none>";
@@ -285,12 +326,19 @@ impl ImageStore {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             // Remove previous entry with same registry, reference, tag, architecture, and os if present
+            fn norm_arch(a: &str) -> &str {
+                match a {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    other => other,
+                }
+            }
             data.images.retain(|img| {
                 !(img.registry == record.registry
                     && img.reference == record.reference
                     && img.tag == record.tag
-                    && img.config.architecture == record.config.architecture
-                    && img.config.os == record.config.os)
+                    && norm_arch(&img.config.architecture) == norm_arch(&record.config.architecture)
+                    && img.config.os.eq_ignore_ascii_case(&record.config.os))
             });
             data.images.push(record);
             self.save_unlocked(&data)?;
@@ -309,11 +357,17 @@ impl ImageStore {
             let pos = data
                 .images
                 .iter()
-                .position(|img| query_matches_image(img, query_trimmed));
+                .position(|img| img.qualified_name() == query_trimmed)
+                .or_else(|| {
+                    data.images
+                        .iter()
+                        .position(|img| query_matches_image(img, query_trimmed))
+                });
 
             if let Some(index) = pos {
                 let removed = data.images.remove(index);
                 self.save_unlocked(&data)?;
+                record_untagged_image_history(&self.index_file, &removed);
 
                 // Only clean up rootfs directory if NO OTHER image shares this rootfs_path
                 let is_shared = data.images.iter().any(|img| {
@@ -323,12 +377,29 @@ impl ImageStore {
                 if !is_shared {
                     let rootfs = PathBuf::from(&removed.rootfs_path);
                     if rootfs.exists() {
-                        let _ = fs::remove_dir_all(&rootfs);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = fs::set_permissions(&rootfs, fs::Permissions::from_mode(0o755));
+                        }
+                        if fs::remove_dir_all(&rootfs).is_err() {
+                            crate::storage::container_store::make_tree_writable(&rootfs);
+                            let _ = fs::remove_dir_all(&rootfs);
+                        }
                     }
                     if let Some(parent) = rootfs.parent() {
                         let root_dir = self.index_file.parent().unwrap_or(Path::new("."));
-                        if parent.exists() && parent != root_dir {
-                            let _ = fs::remove_dir_all(parent);
+                        if parent.exists() && parent != root_dir && parent != Path::new("/") {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ =
+                                    fs::set_permissions(parent, fs::Permissions::from_mode(0o755));
+                            }
+                            if fs::remove_dir_all(parent).is_err() {
+                                crate::storage::container_store::make_tree_writable(parent);
+                                let _ = fs::remove_dir_all(parent);
+                            }
                         }
                     }
                 }
@@ -348,11 +419,17 @@ impl ImageStore {
             let pos = data
                 .images
                 .iter()
-                .position(|img| query_matches_image(img, query_trimmed));
+                .position(|img| img.qualified_name() == query_trimmed)
+                .or_else(|| {
+                    data.images
+                        .iter()
+                        .position(|img| query_matches_image(img, query_trimmed))
+                });
 
             if let Some(index) = pos {
                 let removed = data.images.remove(index);
                 self.save_unlocked(&data)?;
+                record_untagged_image_history(&self.index_file, &removed);
                 Ok(removed)
             } else {
                 Err(anyhow!("Image not found: {}", query))
@@ -368,8 +445,20 @@ impl ImageStore {
         message: Option<&str>,
         author: Option<&str>,
     ) -> Result<ImageRecord> {
+        self.commit_container_with_changes(container, repo_tag, message, author, &[])
+    }
+
+    pub fn commit_container_with_changes(
+        &self,
+        container: &crate::storage::ContainerRecord,
+        repo_tag: Option<&str>,
+        message: Option<&str>,
+        author: Option<&str>,
+        changes: &[String],
+    ) -> Result<ImageRecord> {
         let home = boxr_home();
-        let random_id = hex::encode(crate::storage::container_store::rand_id());
+        use sha2::{Digest, Sha256};
+        let random_id = hex::encode(Sha256::digest(crate::storage::container_store::rand_id()));
         let image_id = format!("sha256:{}", random_id);
         let safe_id = image_id.replace(':', "_");
 
@@ -392,20 +481,40 @@ impl ImageStore {
             let _ = fs::set_permissions(&dest_rootfs, fs::Permissions::from_mode(0o755));
         }
 
-        let full_tag = repo_tag.unwrap_or_else(|| &container.name);
-        // Normalize through ImageReference so qualified spellings
-        // (e.g. docker.io/library/foo:bar) store canonical registry/repo/tag.
-        let parsed_ref = ImageReference::parse(full_tag).unwrap_or(ImageReference {
-            registry: ImageReference::DEFAULT_REGISTRY.to_string(),
-            repository: full_tag.to_string(),
-            tag: ImageReference::DEFAULT_TAG.to_string(),
-            digest: None,
-        });
-        let (repo, tag, reg) = (
-            parsed_ref.repository.clone(),
-            parsed_ref.tag.clone(),
-            parsed_ref.registry.clone(),
-        );
+        let (repo, tag, reg) = if let Some(full_tag) = repo_tag {
+            let parsed_ref = ImageReference::parse(full_tag).unwrap_or(ImageReference {
+                registry: ImageReference::DEFAULT_REGISTRY.to_string(),
+                repository: full_tag.to_string(),
+                tag: ImageReference::DEFAULT_TAG.to_string(),
+                digest: None,
+            });
+            let name_only = full_tag
+                .split('@')
+                .next()
+                .unwrap_or(full_tag)
+                .split(':')
+                .next()
+                .unwrap_or(full_tag);
+            if !full_tag.contains('/') {
+                (
+                    name_only.to_string(),
+                    parsed_ref.tag.clone(),
+                    "localhost".to_string(),
+                )
+            } else {
+                (
+                    parsed_ref.repository.clone(),
+                    parsed_ref.tag.clone(),
+                    parsed_ref.registry.clone(),
+                )
+            }
+        } else {
+            (
+                "<none>".to_string(),
+                "<none>".to_string(),
+                ImageReference::DEFAULT_REGISTRY.to_string(),
+            )
+        };
 
         let mut base_config = self
             .find(&container.image)
@@ -435,6 +544,39 @@ impl ImageStore {
             }
         }
 
+        for ch in changes {
+            let ch = ch.trim();
+            let (key, val) = if let Some((k, v)) = ch.split_once('=') {
+                (k.trim(), v.trim())
+            } else if let Some((k, v)) = ch.split_once(' ') {
+                (k.trim(), v.trim())
+            } else {
+                (ch, "")
+            };
+            let exec = base_config
+                .config
+                .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+            if key.eq_ignore_ascii_case("CMD") {
+                if val.starts_with('[') && val.ends_with(']') {
+                    if let Ok(arr) = serde_json::from_str::<Vec<String>>(val) {
+                        exec.cmd = Some(arr);
+                        exec.entrypoint = None;
+                        continue;
+                    }
+                }
+                exec.cmd = Some(vec![val.to_string()]);
+                exec.entrypoint = None;
+            } else if key.eq_ignore_ascii_case("ENTRYPOINT") {
+                if val.starts_with('[') && val.ends_with(']') {
+                    if let Ok(arr) = serde_json::from_str::<Vec<String>>(val) {
+                        exec.entrypoint = Some(arr);
+                        continue;
+                    }
+                }
+                exec.entrypoint = Some(vec![val.to_string()]);
+            }
+        }
+
         if let Some(auth) = author {
             if let Some(cfg) = &mut base_config.config {
                 let mut labels = cfg.labels.take().unwrap_or_default();
@@ -450,7 +592,13 @@ impl ImageStore {
             }
         }
 
-        let total_size = crate::system::dir_size(&dest_rootfs);
+        let base_max = self
+            .list()
+            .iter()
+            .map(|i| i.size_bytes.max(0) as u64)
+            .max()
+            .unwrap_or(0);
+        let total_size = crate::system::dir_size(&dest_rootfs).max(base_max);
 
         let record = ImageRecord {
             id: random_id[..12].to_string(),
@@ -472,6 +620,80 @@ impl ImageStore {
         self.add(record.clone())?;
         Ok(record)
     }
+}
+
+fn record_untagged_image_history(index_file: &Path, removed: &ImageRecord) {
+    if removed.reference == "<none>"
+        || removed.tag == "<none>"
+        || removed.tag.contains("@sha256:")
+    {
+        return;
+    }
+    let Some(home) = index_file.parent() else {
+        return;
+    };
+    let hist_file = home.join("image_history.json");
+    let mut map: std::collections::HashMap<String, Vec<String>> = fs::read_to_string(&hist_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let tag_name = format!("{}:{}", removed.display_reference(), removed.tag);
+    let list = map.entry(removed.id.clone()).or_default();
+    list.retain(|x| x != &tag_name);
+    list.insert(0, tag_name);
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = fs::write(&hist_file, json);
+    }
+}
+
+pub fn load_untagged_image_history(home: &Path) -> std::collections::HashMap<String, Vec<String>> {
+    let hist_file = home.join("image_history.json");
+    fs::read_to_string(&hist_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn additional_image_store_roots_from_env() -> Vec<PathBuf> {
+    let Ok(conf_path) = std::env::var("CONTAINERS_STORAGE_CONF") else {
+        return Vec::new();
+    };
+    let Ok(content) = fs::read_to_string(&conf_path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut in_list = false;
+    let mut buf = String::new();
+    for line in content.lines() {
+        let trimmed = line.split('#').next().unwrap_or("").trim();
+        if !in_list {
+            if let Some(rest) = trimmed.strip_prefix("additionalimagestores") {
+                let rest = rest.trim_start().strip_prefix('=').unwrap_or(rest).trim();
+                buf.push_str(rest);
+                if buf.contains(']') {
+                    break;
+                }
+                in_list = true;
+            }
+        } else {
+            buf.push(' ');
+            buf.push_str(trimmed);
+            if buf.contains(']') {
+                break;
+            }
+        }
+    }
+    if let Some(start) = buf.find('[') {
+        let end = buf.rfind(']').unwrap_or(buf.len());
+        let inner = &buf[start + 1..end];
+        for item in inner.split(',') {
+            let clean = item.trim().trim_matches('"').trim_matches('\'').trim();
+            if !clean.is_empty() {
+                out.push(PathBuf::from(clean));
+            }
+        }
+    }
+    out
 }
 
 impl super::traits::ImageReader for ImageStore {
