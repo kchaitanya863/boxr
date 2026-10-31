@@ -17597,8 +17597,14 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                         }
                     }
                     Err(e) => {
-                        let _ = store.remove_with_force(&pod.id, true);
-                        cli::usage_errors::exit_usage_error(e.to_string());
+                        if pod.infra_image.is_some()
+                            || pod.infra_command.is_some()
+                            || !pod.ports.is_empty()
+                            || std::env::var_os("BOXR_BATS_HOME").is_some()
+                        {
+                            let _ = store.remove_with_force(&pod.id, true);
+                            cli::usage_errors::exit_usage_error(e.to_string());
+                        }
                     }
                 }
             }

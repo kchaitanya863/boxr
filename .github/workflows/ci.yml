@@ -53,6 +53,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Build boxr binary
         run: cargo build
@@ -133,6 +134,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Build
         run: cargo build
       - name: Run all vendored upstream BATS (progress tracker)
