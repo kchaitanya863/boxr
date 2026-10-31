@@ -387,17 +387,23 @@ fn format_table(headers: &[String], rows: &[Vec<String>], no_header: bool) -> St
 #[cfg(target_os = "linux")]
 fn wait_container_pid(bundle_path: &Path) -> Option<i32> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut last_valid_pid = None;
     while std::time::Instant::now() < deadline {
         if let Ok(pid_str) = fs::read_to_string(bundle_path.join("container.pid")) {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {
                 if pid > 1 && unsafe { libc::kill(pid, 0) == 0 } {
-                    return Some(pid);
+                    last_valid_pid = Some(pid);
+                    let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                        .unwrap_or_default();
+                    if !cmdline.contains("__internal-trampoline") {
+                        return Some(pid);
+                    }
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    None
+    last_valid_pid
 }
 
 #[cfg(target_os = "linux")]

@@ -107,7 +107,7 @@ Uses `tests/podman_bats/e2e_manifest.txt` and `make localintegration FOCUS_FILE=
 
 | E2e file | Status |
 |----------|--------|
-| Full `e2e_manifest.txt` | **48/48** under `PODMAN_E2E_STRICT=1` (Oct 2026): exists, version, volume exists/rename, container clone, unshare, import |
+| Full `e2e_manifest.txt` (**31 suites**) | **401/401 specs** passing under `PODMAN_E2E_STRICT=1` (Oct 31, 2026):<br>• **Baseline (7 suites, 48 specs)**: `exists_test.go`, `version_test.go`, `volume_exists_test.go`, `volume_rename_test.go`, `container_clone_test.go`, `unshare_test.go`, `import_test.go`<br>• **Batch 1 — Images, History, Farm & Trust (5 suites, 24 specs)**: `tag_test.go` (4/4), `untag_test.go` (2/2), `history_test.go` (6/6), `farm_test.go` (8/8), `trust_test.go` (4/4)<br>• **Batch 2 — Container Lifecycle & Inspection (5 suites, 54 specs)**: `rename_test.go` (7/7), `export_test.go` (5/5), `diff_test.go` (11/11), `pause_test.go` (21/21), `top_test.go` (10/10)<br>• **Batch 3 — Volumes & Secrets (5 suites, 86 specs)**: `volume_create_test.go` (19/19), `volume_ls_test.go` (9/9), `volume_rm_test.go` (10/10), `volume_prune_test.go` (14/14), `secret_test.go` (34/34)<br>• **Batch 4 — Generate & System (4 suites, 102 specs)**: `generate_spec_test.go` (29/29), `generate_kube_test.go` (46/46), `system_connection_test.go` (20/20), `system_df_test.go` (7/7)<br>• **Batch 5 — Pods & Port Mapping (5 suites, 87 specs)**: `pod_create_test.go` (42/42), `pod_rm_test.go` (15/15), `pod_pause_test.go` (7/7), `pod_top_test.go` (8/8), `port_test.go` (15/15) |
 
 ## boxr fixes for upstream tests (ongoing)
 

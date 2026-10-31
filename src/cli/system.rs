@@ -803,7 +803,7 @@ pub enum SystemConnectionAction {
         /// Destination name
         name: String,
         /// Destination URI
-        uri: Option<String>,
+        uri: String,
         /// Default connection
         #[arg(short = 'd', long = "default")]
         default: bool,

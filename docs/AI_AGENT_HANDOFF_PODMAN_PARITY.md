@@ -63,8 +63,8 @@ All Podman-oriented **boxr black-box** gates pass on Linux rootless CI/VM:
 | `podman_parity_blackbox_test` | 16/16 |
 | `podman_upstream_parity_test` | 19/19 |
 | `run_blackbox_qa.sh -s podman` | 19/19 (K1–K19) |
-| Ginkgo E2E suites (`e2e_manifest.txt`) | 48/48 specs passed (7 suites) |
-| Curated BATS manifest (`manifest.txt`) | 182/182 ok (13 suites) |
+| Ginkgo E2E suites (`e2e_manifest.txt`) | **401/401 specs passed (31 suites)** |
+| Curated BATS manifest (`manifest.txt`) | **77/77 upstream BATS suites passed (100%)** |
 
 One command:
 

@@ -85,3 +85,19 @@ fn vendored_upstream_includes_helpers_bash() {
         "helpers.bash does not look like Podman test/system helpers"
     );
 }
+
+#[test]
+fn curated_e2e_manifest_contains_31_suites() {
+    let e2e_manifest = repo_root().join("tests/podman_bats/e2e_manifest.txt");
+    let raw = fs::read_to_string(&e2e_manifest).expect("e2e_manifest.txt");
+    let suites: Vec<&str> = raw
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(l).trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        suites.len(),
+        31,
+        "expected 31 Ginkgo E2E suites in e2e_manifest.txt"
+    );
+}

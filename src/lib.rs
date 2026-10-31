@@ -6799,7 +6799,9 @@ pub fn unpause_container(args: &cli::UnpauseArgs, output: &CliOutputPolicy) -> R
         cli::usage_errors::exit_usage_error("--filter takes no arguments");
     }
     if (args.all || args.latest) && !args.containers.is_empty() {
-        cli::usage_errors::exit_usage_error("cannot unpause --all with container names");
+        cli::usage_errors::exit_usage_error(
+            "--all or --latest and containers cannot be used together",
+        );
     }
 
     let c_store = ContainerStore::new();
@@ -17584,7 +17586,7 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             }
             if (all || latest) && !pods.is_empty() {
                 cli::usage_errors::exit_usage_error(
-                    "cannot specify pod names or IDs with --all or --latest",
+                    "--all or --latest and pods cannot be used together",
                 );
             }
             let _ = guardrails::ProcessReaper::reap_stale_containers();
@@ -17707,6 +17709,17 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             pod_id_file,
             pods,
         } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--all or --latest and pods cannot be used together",
+                );
+            }
+            if !all && !latest && pods.is_empty() && pod_id_file.is_empty() {
+                cli::usage_errors::exit_usage_error("you must provide at least one pod name or ID");
+            }
             let mut targets = if all {
                 store.list().into_iter().map(|p| p.id).collect()
             } else if latest {
@@ -17759,6 +17772,17 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             pod_id_file,
             pods,
         } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--all or --latest and pods cannot be used together",
+                );
+            }
+            if !all && !latest && pods.is_empty() && pod_id_file.is_empty() {
+                cli::usage_errors::exit_usage_error("you must provide at least one pod name or ID");
+            }
             let mut targets = if all {
                 store.list().into_iter().map(|p| p.id).collect()
             } else if latest {
@@ -17792,6 +17816,17 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             }
         }
         PodAction::Restart { all, latest, pods } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--all or --latest and pods cannot be used together",
+                );
+            }
+            if !all && !latest && pods.is_empty() {
+                cli::usage_errors::exit_usage_error("you must provide at least one pod name or ID");
+            }
             let targets = if all {
                 store.list().into_iter().map(|p| p.id).collect()
             } else if latest {
@@ -17823,6 +17858,17 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             latest,
             pods,
         } => {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--all or --latest and pods cannot be used together",
+                );
+            }
+            if !all && !latest && pods.is_empty() {
+                cli::usage_errors::exit_usage_error("you must provide at least one pod name or ID");
+            }
             if let Err(e) = runtime::kill::validate_podman_signal(&signal) {
                 cli::usage_errors::exit_usage_error(e);
             }
@@ -17878,7 +17924,7 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             }
             if (all || latest) && !pods.is_empty() {
                 cli::usage_errors::exit_usage_error(
-                    "cannot specify pod names or IDs with --all or --latest",
+                    "--all or --latest and pods cannot be used together",
                 );
             }
             if !all && !latest && pods.is_empty() {
@@ -17946,7 +17992,7 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             }
             if (all || latest) && !pods.is_empty() {
                 cli::usage_errors::exit_usage_error(
-                    "cannot specify pod names or IDs with --all or --latest",
+                    "--all or --latest and pods cannot be used together",
                 );
             }
             if !all && !latest && pods.is_empty() {
@@ -20173,7 +20219,7 @@ pub fn handle_system_connection(
             tls_cert,
             tls_key,
         } => {
-            let raw_uri = uri.unwrap_or_else(|| "unix:///run/podman/podman.sock".to_string());
+            let raw_uri = uri;
             let final_uri = if let Some(sp) = socket_path {
                 let sp_clean = sp.trim_start_matches('/');
                 if raw_uri.starts_with("unix://") {
