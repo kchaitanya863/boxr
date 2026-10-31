@@ -101,6 +101,12 @@ pub struct VolumeCreateArgs {
     /// Cluster Volume access type (mount, block)
     #[arg(long = "type")]
     pub vol_type: Option<String>,
+    /// Set UID of volume
+    #[arg(short = 'u', long = "uid")]
+    pub uid: Option<String>,
+    /// Set GID of volume
+    #[arg(short = 'g', long = "gid")]
+    pub gid: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -136,6 +142,8 @@ pub struct VolumePruneArgs {
     pub force: bool,
     #[arg(short = 'a', long = "all")]
     pub all: bool,
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
     #[arg(long = "filter")]
     pub filter: Vec<String>,
 }

@@ -417,7 +417,7 @@ impl SystemManager {
         // 5. Prune volumes if requested
         if prune_volumes {
             let v_store = VolumeStore::new();
-            let pruned_vols = v_store.prune()?;
+            let pruned_vols = v_store.prune_with_options(true, &[])?;
             for v in pruned_vols {
                 println!("Deleted Volume: {}", v);
             }
