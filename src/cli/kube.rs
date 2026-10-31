@@ -145,6 +145,9 @@ pub struct KubeGenerateArgs {
     /// Set the replicas number for Deployment kind
     #[arg(short = 'r', long = "replicas")]
     pub replicas: Option<i32>,
+    /// Add podman-only reserved annotations to the generated YAML file
+    #[arg(long = "podman-only")]
+    pub podman_only: bool,
     /// Don't truncate annotations to the Kubernetes maximum length of 63 characters
     #[arg(long = "no-trunc")]
     pub no_trunc: bool,

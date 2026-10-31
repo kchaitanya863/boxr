@@ -22,7 +22,17 @@ pub enum FarmAction {
 
     /// List existing farms
     #[command(alias = "list")]
-    Ls,
+    Ls {
+        /// Format farm output using Go template
+        #[arg(long = "format")]
+        format: Option<String>,
+        /// Print farm names only
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
+        /// Do not print headers
+        #[arg(short = 'n', long = "noheading")]
+        noheading: bool,
+    },
 
     /// Remove one or more farms
     #[command(alias = "remove")]
@@ -39,14 +49,21 @@ pub enum FarmAction {
         /// Farm name to update
         name: String,
         /// Connections to add to the farm
-        #[arg(long = "add")]
+        #[arg(short = 'a', long = "add", value_delimiter = ',')]
         add: Vec<String>,
         /// Connections to remove from the farm
-        #[arg(long = "remove")]
+        #[arg(short = 'r', long = "remove", value_delimiter = ',')]
         remove: Vec<String>,
         /// Set as default farm
-        #[arg(long = "default")]
-        default: bool,
+        #[arg(
+            short = 'd',
+            long = "default",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "true",
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        default: Option<bool>,
     },
 }
 

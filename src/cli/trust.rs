@@ -22,6 +22,12 @@ pub enum ImageTrustAction {
         /// Display raw policy JSON
         #[arg(long = "raw")]
         raw: bool,
+        /// Do not print column headings
+        #[arg(short = 'n', long = "noheading")]
+        noheading: bool,
+        /// Path to registries.d directory
+        #[arg(long = "registrypath", hide = true)]
+        registrypath: Option<String>,
     },
     /// Set trust policy
     Set {

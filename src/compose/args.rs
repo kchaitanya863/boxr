@@ -227,6 +227,7 @@ impl ComposeProject {
             pod: None,
             rootfs: None,
             default_mounts_file: None,
+            init_ctr: None,
             timeout: None,
             image: image_name.to_string(),
             command: cmd_vec,

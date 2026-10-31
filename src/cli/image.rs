@@ -279,6 +279,10 @@ pub struct BuildArgs {
     #[arg(long = "pull-never", hide = true)]
     pub pull_never: bool,
 
+    /// Sets the configuration for network namespaces when handling RUN instructions
+    #[arg(long = "network", alias = "net", hide = true)]
+    pub network: Option<String>,
+
     #[arg(long = "pull-always", hide = true)]
     pub pull_always: bool,
 

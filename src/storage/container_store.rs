@@ -245,11 +245,14 @@ impl ContainerStore {
         if new_name_trimmed.is_empty()
             || !new_name_trimmed
                 .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.')
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+            || !new_name_trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
         {
             return Err(anyhow!(
-                "Invalid container name '{}': must be alphanumeric, '_', '-', or '.'",
-                new_name
+                "names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*: invalid argument"
             ));
         }
 

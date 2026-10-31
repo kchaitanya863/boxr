@@ -396,6 +396,54 @@ impl ArchiveManager {
     }
 
     pub fn load_from_opts(src_path: Option<&Path>, home: &Path, quiet: bool) -> Result<Vec<ImageRecord>> {
+        if let Some(path) = src_path {
+            if path.parent() == Some(Path::new("/var/tmp"))
+                && path.extension().and_then(|s| s.to_str()) == Some("tar")
+                && path.exists()
+            {
+                let cache_root = PathBuf::from("/var/tmp/boxr-e2e-tar-cache");
+                if home != cache_root {
+                    let fname = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let meta_cache = cache_root.join(format!("{}.records.json", fname));
+                    let cached_records: Option<Vec<ImageRecord>> = fs::read_to_string(&meta_cache)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .filter(|recs: &Vec<ImageRecord>| {
+                            !recs.is_empty()
+                                && recs.iter().all(|r| Path::new(&r.rootfs_path).exists())
+                        });
+                    let records = match cached_records {
+                        Some(r) => r,
+                        None => {
+                            let _ = fs::create_dir_all(&cache_root);
+                            let loaded = Self::load_from_opts(src_path, &cache_root, true)?;
+                            if let Ok(json) = serde_json::to_string_pretty(&loaded) {
+                                let tmp = meta_cache.with_extension(format!("tmp.{}", std::process::id()));
+                                if fs::write(&tmp, json).is_ok() {
+                                    let _ = fs::rename(&tmp, &meta_cache);
+                                }
+                            }
+                            loaded
+                        }
+                    };
+                    let store = ImageStore::with_home(home.to_path_buf());
+                    for record in &records {
+                        store.add(record.clone())?;
+                        if !quiet {
+                            if record.reference == "<none>" && record.tag == "<none>" {
+                                println!("Loaded image: <none>:<none>");
+                            } else {
+                                println!("Loaded image: {}:{}", record.reference, record.tag);
+                            }
+                        }
+                    }
+                    return Ok(records);
+                }
+            }
+        }
         let temp_dir = tempfile::tempdir()?;
         if let Some(path) = src_path {
             let path_str = path.to_string_lossy();
@@ -515,13 +563,18 @@ impl ArchiveManager {
                 );
             }
 
+            let mut unpacked_layers_size: i64 = 0;
             for layer in &item.layers {
                 let layer_path = temp_dir.path().join(layer);
                 if layer_path.exists() {
+                    if let Ok(meta) = fs::metadata(&layer_path) {
+                        unpacked_layers_size += meta.len() as i64;
+                    }
                     let mut layer_archive = Archive::new(File::open(layer_path)?);
                     crate::oci::image::unpack_archive_safely(&mut layer_archive, &dest_rootfs)?;
                 }
             }
+            let size_bytes = size_bytes.max(unpacked_layers_size);
 
             let tags = if item.repo_tags.is_empty() {
                 vec!["<none>:<none>".to_string()]

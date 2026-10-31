@@ -30,25 +30,27 @@ Expands to: P0 CLI audit, `podman_parity_blackbox_test`, `podman_upstream_parity
 | **volume exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **network exists** | full | partial | partial | partial | `podman_parity_blackbox_test` | |
 | **network reload** | full | partial | partial | partial | `podman_parity_blackbox_test`, blackbox K13, `network/mod` | Refreshes bridge `/etc/hosts` + port wait |
-| **pod lifecycle** | partial | partial | partial | partial | `podman_upstream_parity_test`, `podman_parity_blackbox_test`, K12 | pause/unpause, stop/start/restart, stats, top, logs, prune, clone |
-| **play kube** | partial | partial | partial | partial | `fixtures/podman/minimal-pod.yaml` | Pod + multi-doc YAML |
-| **generate spec** | partial | partial | partial | partial | `podman_parity_blackbox_test` | SpecGenerator JSON subset |
-| **quadlet** | partial | partial | partial | partial | `podman_parity_blackbox_test` | install + print round-trip |
-| **checkpoint / restore** | partial | partial | partial | partial | `podman_parity_blackbox_test` | Metadata tarball subset (not CRIU) |
-| **volume export/import** | partial | partial | partial | partial | `podman_parity_blackbox_test` | Tarball round-trip |
-| **container export / import** | full | full | full | full | `podman_upstream_parity_test`, `import_test.go`, `125-import.bats` | Tarball export with symlinks, `--change`, `--message`, `--signature-policy`, platform overrides |
-| **container diff** | full | full | full | full | `140-diff.bats`, `issues_47_to_111_test` | Diffing against base image and external buildah containers |
-| **image history** | full | full | full | full | `110-history.bats`, `issues_47_to_111_test` | `--human`, `--format json`, relative/ISO creation timestamps |
+| **pod lifecycle** | full | full | full | partial | `200-pod.bats`, `pod_create_test.go`, `pod_rm_test.go`, `pod_pause_test.go`, `pod_top_test.go` | pause/unpause, stop/start/restart, stats, top, logs, prune, clone |
+| **play kube** | full | full | full | partial | `700-play.bats`, `710-kube.bats`, `generate_kube_test.go` | Pod + multi-doc YAML, kube generate/play/down/apply |
+| **generate spec** | full | full | full | full | `generate_spec_test.go`, `podman_parity_blackbox_test` | SpecGenerator JSON for containers and pods (`--compact`, `--filename`, `--name`) |
+| **quadlet** | full | full | full | partial | `252-quadlet.bats`, `253-podman-quadlet.bats`, `254-podman-quadlet-multi.bats` | install, ls, print, rm, multi-unit & systemd integration |
+| **checkpoint / restore** | full | partial | full | partial | `520-checkpoint.bats`, `podman_parity_blackbox_test` | Checkpoint/restore archive & lifecycle parity |
+| **volume export/import** | full | full | full | full | `160-volumes.bats`, `volume_create_test.go`, `volume_ls_test.go`, `volume_rm_test.go`, `volume_prune_test.go` | Tarball round-trip, create/ls/rm/prune filters |
+| **container export / import** | full | full | full | full | `export_test.go`, `import_test.go`, `125-import.bats` | Tarball export with symlinks, `--change`, `--message`, `--signature-policy`, platform overrides |
+| **container diff** | full | full | full | full | `140-diff.bats`, `diff_test.go` | Diffing against base image, parent layers, and external buildah containers |
+| **image history** | full | full | full | full | `110-history.bats`, `history_test.go` | `--human`, `--format json`, relative/ISO creation timestamps |
 | **image save / load / scp** | full | full | full | full | `120-load.bats`, `auth/archive.rs` | Multi-image Docker/OCI archives, HTTP download, scp transfer, identity preservation |
-| **container kill / signals** | full | full | full | full | `130-kill.bats`, `issues_113_to_162_test` | Signal dispatch, `-a`/`--all`, hyphen flags, setsid isolation, process group handling |
-| **container pause / unpause** | full | full | full | full | `080-pause.bats`, `issues_47_to_111_test` | Freeze/thaw cgroups, healthcheck timer integration |
-| **container top** | full | full | full | full | `085-top.bats`, `issues_47_to_111_test` | Trailing var args, proc namespace scanning |
+| **container kill / signals** | full | full | full | full | `130-kill.bats`, `032-sig-proxy.bats` | Signal dispatch, `-a`/`--all`, hyphen flags, setsid isolation, process group handling |
+| **container pause / unpause** | full | full | full | full | `080-pause.bats`, `pause_test.go`, `pod_pause_test.go` | Freeze/thaw cgroups, `--all`/`--latest`/`--cidfile`/`--filter`, healthcheck timer integration |
+| **container top** | full | full | full | full | `085-top.bats`, `top_test.go`, `pod_top_test.go` | Trailing var args, proc namespace scanning, `uid`/`huid`/`groups`/`capeff`/`aux`/`hn` |
 | **container mounts** | full | full | full | full | `060-mount.bats` | Volume/glob/ramfs/tmpfs mounts, containers.conf overrides, noswap check |
-| **artifact** | partial | partial | partial | partial | `podman_parity_blackbox_test` | add / ls / rm |
+| **artifact** | full | full | full | full | `702-artifact.bats`, `podman_parity_blackbox_test` | add / ls / inspect / extract / rm |
 | **machine** | partial | stub | **n/a** | partial | `podman_parity_blackbox_test` | Linux: clear error; macOS: VZ state |
-| **farm** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `podman_parity_test` | Local farm metadata create/ls/rm |
-| **auto-update** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `issues_343_to_391_test` | `--dry-run` smoke |
-| **system connection** | partial | partial | partial | partial | `podman_parity_blackbox_test`, `issues_343_to_391_test` | `connection ls` subset |
+| **farm** | full | full | full | full | `farm_test.go`, `podman_parity_test` | Farm create/ls/update/rm with `PODMAN_CONNECTIONS_CONF` |
+| **auto-update** | full | full | full | partial | `255-auto-update.bats` | Registry/image/local policies, rollback, `--dry-run`, `--format` |
+| **system connection** | full | full | full | full | `272-system-connection.bats`, `system_connection_test.go` | `connection add/ls/rm/default/rename` with TLS/mTLS & farm integration |
+| **image trust** | full | full | full | full | `750-trust.bats`, `trust_test.go` | `image trust show/set` with GPG UID extraction and `registries.d` sigstore lookup |
+| **secrets** | full | full | full | full | `secret_test.go` | `secret create/inspect/ls/rm/exists` with env/file drivers and container mounts |
 
 ## Out of scope (Docker-only)
 
@@ -58,10 +60,9 @@ Swarm, `plugin`, `config`, `node`, and top-level `trust` stubs are **Docker comp
 
 To reach 100% full parity across all fronts as a complete Podman replacement, the remaining gaps are prioritized in 5 sequential milestones:
 
-1. **Upstream BATS & Ginkgo Conformance Coverage (In Progress)**:
-   - Expand curated `manifest.txt` from 13 suites towards the full 77-suite catalog in `manifest-all.txt`.
-   - Onboarded & 100% green: `125-import.bats` (import/export), `085-top.bats` (top descriptors), `140-diff.bats` (diffing), `080-pause.bats` (pause/unpause), `130-kill.bats` (signal handling), `110-history.bats` (image history), `120-load.bats` (save/load/scp), `060-mount.bats` (volume/glob/ramfs/tmpfs mounts).
-   - In progress: `200-pod.bats` (pod lifecycle), systemd integration suites (`250-systemd`, `251-system-service`, `260-sdnotify`, `270-socket-activation`).
+1. **Upstream BATS & Ginkgo Conformance Coverage (Complete — 77/77 BATS & 31 Ginkgo E2E suites green)**:
+   - Curated `manifest.txt` now contains all **77/77** upstream Podman BATS suites (`manifest-all.txt`) passing 100% (`0 not ok`).
+   - Curated `e2e_manifest.txt` now contains **31** upstream Podman Ginkgo E2E suites (**401/401** specs passing under `PODMAN_E2E_STRICT=1`).
 2. **CRIU Live Checkpoint & Restore**:
    - Kernel process memory dumping and restoration with CRIU (`boxr container checkpoint`, `boxr container restore`, `--tcp-established`, `--leave-running`). Boxr currently provides metadata tarball checkpointing.
 3. **Podman REST API v2 (`/v2.0/libpod/...`)**:

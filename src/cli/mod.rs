@@ -405,6 +405,18 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 }
             }
         }
+        if i > sub_start
+            && !seen_positional_after_sub
+            && a == "--no-hosts"
+            && (is_run_or_create
+                || sub_name == "build"
+                || (sub_name == "image" && sub2_name == "build")
+                || (sub_name == "pod" && sub2_name == "create"))
+        {
+            let _ = RUN_NO_HOSTS.set(true);
+            i += 1;
+            continue;
+        }
         if i > sub_start && (is_run_or_create || is_exec) && !seen_positional_after_sub {
             if a == "-h" && is_run_or_create {
                 if i + 1 >= argv.len() {
@@ -421,11 +433,6 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 out.push("--hostname".to_string());
                 out.push(argv[i + 1].clone());
                 i += 2;
-                continue;
-            }
-            if a == "--no-hosts" && is_run_or_create {
-                let _ = RUN_NO_HOSTS.set(true);
-                i += 1;
                 continue;
             }
             if a == "--env-host" && is_run_or_create {

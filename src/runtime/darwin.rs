@@ -445,6 +445,7 @@ pub fn execute_bundle(
                     chown_u: false,
                     tmpfs_mount_data: None,
                     volume_name: None,
+                    subpath: None,
                     is_volume: false,
                 });
             }

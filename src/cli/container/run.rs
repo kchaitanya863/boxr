@@ -567,6 +567,10 @@ pub struct RunArgs {
     #[arg(long = "default-mounts-file")]
     pub default_mounts_file: Option<String>,
 
+    /// Make this a pod init container ("always" or "once")
+    #[arg(long = "init-ctr")]
+    pub init_ctr: Option<String>,
+
     /// Maximum time in seconds to run before killing the container
     #[arg(long = "timeout")]
     pub timeout: Option<u64>,

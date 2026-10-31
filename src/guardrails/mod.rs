@@ -368,8 +368,9 @@ impl ProcessReaper {
                     (Some(true), _) | (_, Some(true)) => true,
                     (Some(false), Some(false)) | (Some(false), None) | (None, Some(false)) => false,
                     (None, None) => {
-                        // Missing pid files during startup; do not reap a Running record yet.
-                        true
+                        // Missing pid files during startup; do not reap a Running record yet
+                        // unless boxr-exitcode has already been written.
+                        !bundle.join("boxr-exitcode").exists()
                     }
                 }
             };

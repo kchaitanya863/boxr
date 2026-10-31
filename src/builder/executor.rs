@@ -712,6 +712,9 @@ impl ImageBuilder {
                                 println!("--> Using cache");
                                 log_buf.push_str("--> Using cache\n");
                             }
+                            let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
+                            let _ = fs::remove_dir_all(&prev_layer_dir);
+                            let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
                             let _ = fs::remove_dir_all(&current_rootfs);
                             fs::create_dir_all(&current_rootfs)?;
                             copy_dir_all(&cached_rootfs, &current_rootfs)?;
@@ -719,6 +722,13 @@ impl ImageBuilder {
                             continue;
                         }
                     }
+
+                    let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
+                    if use_layers || !prev_layer_dir.exists() {
+                        let _ = fs::remove_dir_all(&prev_layer_dir);
+                        let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
+                    }
+                    let had_etc_hostname = current_rootfs.join("etc/hostname").exists();
 
                     // Execute RUN step
                     let step_bundle = temp_dir.path().join(format!("bundle-step-{}", step_count));
@@ -814,7 +824,14 @@ impl ImageBuilder {
                         ));
                     }
 
+                    if !had_etc_hostname && !cmd.contains("hostname") {
+                        let _ = fs::remove_file(bundle_rootfs.join("etc/hostname"));
+                    }
                     record_subuid_chowns(&bundle_rootfs, &bundle_rootfs, &mut chown_map);
+                    #[cfg(target_os = "linux")]
+                    if !chown_map.is_empty() {
+                        let _ = crate::runtime::linux::chown_path_rootless(&bundle_rootfs, 0, 0, true);
+                    }
                     let _ = fs::remove_dir_all(&current_rootfs);
                     if fs::rename(&bundle_rootfs, &current_rootfs).is_err() {
                         fs::create_dir_all(&current_rootfs)?;
@@ -846,6 +863,12 @@ impl ImageBuilder {
                     exposed.insert(format!("{}/tcp", port), serde_json::json!({}));
                     current_config.exposed_ports = Some(exposed);
                     cache_key = format!("{}_expose_{}", cache_key, port);
+                }
+                Instruction::ExposeRaw(spec) => {
+                    let mut exposed = current_config.exposed_ports.take().unwrap_or_default();
+                    exposed.insert(spec.clone(), serde_json::json!({}));
+                    current_config.exposed_ports = Some(exposed);
+                    cache_key = format!("{}_expose_{}", cache_key, spec);
                 }
                 Instruction::Label { key, value } => {
                     let k_exp = expand_build_vars(key, &arg_vars, &current_config.env);
@@ -914,6 +937,11 @@ impl ImageBuilder {
         let dest_rootfs = dest_image_dir.join("rootfs");
         fs::create_dir_all(&dest_rootfs)?;
         copy_dir_all(&current_rootfs, &dest_rootfs)?;
+        let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
+        if prev_layer_dir.exists() {
+            let parent_dest = dest_image_dir.join("parent_rootfs");
+            let _ = copy_dir_all(&prev_layer_dir, &parent_dest);
+        }
         if !chown_map.is_empty() {
             let _ = fs::write(
                 dest_image_dir.join("chown_meta.json"),
@@ -1005,6 +1033,7 @@ impl ImageBuilder {
         };
 
         self.store.add(record.clone())?;
+        crate::storage::container_store::make_tree_writable(temp_dir.path());
         if !opts.quiet {
             let commit_line = if let Some(rt) = &raw_tag_opt {
                 format!("COMMIT {}", rt)
@@ -1135,6 +1164,7 @@ fn format_instruction_for_log(
         Instruction::Volume(v) => format!("VOLUME {:?}", v),
         Instruction::User(u) => format!("USER {}", u),
         Instruction::Expose(p) => format!("EXPOSE {}", p),
+        Instruction::ExposeRaw(s) => format!("EXPOSE {}", s),
         Instruction::StopSignal(s) => format!("STOPSIGNAL {}", s),
         Instruction::Shell(s) => format!("SHELL {:?}", s),
         Instruction::Healthcheck(_) => "HEALTHCHECK".to_string(),
@@ -1161,6 +1191,10 @@ fn record_subuid_chowns(
         .unwrap_or(100_000);
 
     let Ok(entries) = fs::read_dir(cur) else {
+        #[cfg(target_os = "linux")]
+        {
+            let _ = crate::runtime::linux::chown_path_rootless(cur, 0, 0, true);
+        }
         return;
     };
     for entry in entries.flatten() {
@@ -1170,11 +1204,13 @@ fn record_subuid_chowns(
         };
         let u = meta.uid();
         let g = meta.gid();
-        if (u != host_uid || g != host_gid) && u >= subuid_base {
+        if (u != host_uid || g != host_gid) && (u >= subuid_base || g >= subgid_base) {
             let cont_u = if u == host_uid {
                 0
-            } else {
+            } else if u >= subuid_base {
                 u.saturating_sub(subuid_base) + 1
+            } else {
+                0
             };
             let cont_g = if g == host_gid {
                 0
@@ -1195,6 +1231,12 @@ fn record_subuid_chowns(
         }
         if meta.file_type().is_dir() {
             record_subuid_chowns(root, &p, chown_map);
+        }
+        if (u != host_uid || g != host_gid) && (u >= subuid_base || g >= subgid_base) {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = crate::runtime::linux::chown_path_rootless(&p, 0, 0, true);
+            }
         }
     }
 }
@@ -1265,7 +1307,12 @@ fn copy_dir_with_ignore_and_inodes(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o755));
+            if let Ok(meta) = fs::symlink_metadata(src) {
+                let mode = meta.permissions().mode() & 0o7777;
+                let _ = fs::set_permissions(dst, fs::Permissions::from_mode(mode | 0o700));
+            } else {
+                let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o755));
+            }
         }
     }
     for entry in fs::read_dir(src)? {

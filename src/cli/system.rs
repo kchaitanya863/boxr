@@ -273,8 +273,11 @@ pub struct PodSubcommands {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PodTopArgs {
+    /// Act on the latest pod
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
     /// Pod to inspect
-    pub pod: String,
+    pub pod: Option<String>,
     /// Format descriptors or ps arguments
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub descriptors: Vec<String>,
@@ -315,6 +318,12 @@ pub struct PodCreateArgs {
     /// Set pod hostname
     #[arg(long = "hostname")]
     pub hostname: Option<String>,
+    /// Do not create /etc/hostname in the pod's containers
+    #[arg(long = "no-hostname")]
+    pub no_hostname: bool,
+    /// Base file to create the /etc/hosts file inside the pod's containers
+    #[arg(long = "hosts-file", num_args = 0..=1, default_missing_value = "")]
+    pub hosts_file: Option<String>,
     /// Set metadata labels (key=value)
     #[arg(short = 'l', long = "label")]
     pub labels: Vec<String>,
@@ -390,6 +399,41 @@ pub struct PodCreateArgs {
     /// Volumes to mount in all containers in the pod
     #[arg(short = 'v', long = "volume")]
     pub volumes: Vec<String>,
+    /// Mount volumes from the specified container(s)
+    #[arg(long = "volumes-from")]
+    pub volumes_from: Vec<String>,
+    /// Add a host device to the pod
+    #[arg(long = "device")]
+    pub devices: Vec<String>,
+    /// Security options
+    #[arg(long = "security-opt")]
+    pub security_opt: Vec<String>,
+    /// Sysctl options
+    #[arg(long = "sysctl")]
+    pub sysctl: Vec<String>,
+    /// PID namespace to use for the pod
+    #[arg(long = "pid")]
+    pub pid: Option<String>,
+    /// UTS namespace to use for the pod
+    #[arg(long = "uts")]
+    pub uts: Option<String>,
+    /// IPC namespace to use for the pod
+    #[arg(long = "ipc")]
+    pub ipc: Option<String>,
+    /// Size of /dev/shm
+    #[arg(long = "shm-size")]
+    pub shm_size: Option<String>,
+    /// Size of systemd-specific tmpfs mounts (/run, /run/lock)
+    #[arg(long = "shm-size-systemd")]
+    pub shm_size_systemd: Option<String>,
+    /// Set all containers in the pod to use the pod cgroup as cgroup-parent
+    #[arg(
+        long = "share-parent",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
+    pub share_parent: Option<bool>,
     /// Network mode for the pod
     #[arg(long = "network", alias = "net")]
     pub network: Option<String>,
@@ -438,7 +482,9 @@ pub enum PodAction {
         time: Option<i32>,
         #[arg(short = 'a', long = "all")]
         all: bool,
-        #[arg(long = "ignore")]
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
+        #[arg(short = 'i', long = "ignore")]
         ignore: bool,
         #[arg(long = "pod-id-file")]
         pod_id_file: Vec<String>,
@@ -458,6 +504,8 @@ pub enum PodAction {
         time: Option<i32>,
         #[arg(short = 'a', long = "all")]
         all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
         #[arg(short = 'i', long = "ignore")]
         ignore: bool,
         #[arg(long = "pod-id-file")]
@@ -468,6 +516,8 @@ pub enum PodAction {
     Start {
         #[arg(short = 'a', long = "all")]
         all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
         #[arg(long = "pod-id-file")]
         pod_id_file: Vec<String>,
         pods: Vec<String>,
@@ -476,6 +526,8 @@ pub enum PodAction {
     Restart {
         #[arg(short = 'a', long = "all")]
         all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
         pods: Vec<String>,
     },
     /// Kill pods with a signal
@@ -487,12 +539,28 @@ pub enum PodAction {
             allow_hyphen_values = true
         )]
         signal: String,
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
         pods: Vec<String>,
     },
     /// Pause pods
-    Pause { pods: Vec<String> },
+    Pause {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
+        pods: Vec<String>,
+    },
     /// Unpause pods
-    Unpause { pods: Vec<String> },
+    Unpause {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
+        pods: Vec<String>,
+    },
     /// Display the running processes of containers in pods
     Top(PodTopArgs),
     /// Display a live stream of pod resource usage statistics
@@ -699,7 +767,16 @@ pub struct PodLogsArgs {
 #[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct GenerateSpecArgs {
-    /// Container name or ID to generate Specgen JSON for
+    /// Print the spec to a file instead of stdout
+    #[arg(short = 'f', long = "filename")]
+    pub filename: Option<String>,
+    /// Print the spec in compact format
+    #[arg(short = 'c', long = "compact")]
+    pub compact: bool,
+    /// Specify a new name for the generated spec
+    #[arg(short = 'n', long = "name", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::builder::BoolishValueParser::new())]
+    pub name: Option<bool>,
+    /// Container or pod name or ID to generate Specgen JSON for
     #[arg(value_name = "TARGET")]
     pub target: String,
 }
@@ -736,6 +813,9 @@ pub enum SystemConnectionAction {
         /// Path to podman socket on remote host
         #[arg(long = "socket-path")]
         socket_path: Option<String>,
+        /// Farm to add connection to
+        #[arg(long = "farm")]
+        farm: Option<String>,
         /// TLS CA cert
         #[arg(long = "tls-ca")]
         tls_ca: Option<String>,

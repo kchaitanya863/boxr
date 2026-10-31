@@ -226,6 +226,7 @@ fn test_apply_pod_to_run_args() {
         pod: Some("mypod".to_string()),
         rootfs: None,
         default_mounts_file: None,
+        init_ctr: None,
         timeout: None,
         image: "alpine".to_string(),
         command: vec![],

@@ -29,6 +29,10 @@ pub struct VolumeRecord {
     pub needs_copy_up: bool,
     #[serde(default = "default_volume_needs_flags")]
     pub needs_chown: bool,
+    #[serde(default)]
+    pub uid: Option<u32>,
+    #[serde(default)]
+    pub gid: Option<u32>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -73,6 +77,7 @@ impl VolumeStore {
     pub fn with_home(home: PathBuf) -> Self {
         let volumes_dir = crate::storage::db_config::effective_volume_path();
         let _ = fs::create_dir_all(&volumes_dir);
+        crate::storage::db_config::ensure_sqlite_db(&home);
         Self {
             index_file: home.join("volumes.json"),
             volumes_dir,
@@ -166,11 +171,55 @@ impl VolumeStore {
             }
 
             if data.volumes.iter().any(|v| v.name == vol_name) {
-                return Err(anyhow!("Volume with name '{}' already exists", vol_name));
+                return Err(anyhow!(
+                    "volume with name {} already exists: volume already exists",
+                    vol_name
+                ));
             }
 
-            let opts = options.clone().unwrap_or_default();
-            let mountpoint = if opts.get("type").map(|t| t.as_str()) == Some("bind") {
+            let mut opts = options.clone().unwrap_or_default();
+            let mut explicit_uid = opts.remove("__boxr_uid").and_then(|s| s.parse::<u32>().ok());
+            let mut explicit_gid = opts.remove("__boxr_gid").and_then(|s| s.parse::<u32>().ok());
+
+            if driver == "local" {
+                for k in opts.keys() {
+                    if !matches!(
+                        k.as_str(),
+                        "type" | "device" | "o" | "copy" | "nocopy" | "uid" | "gid" | "size" | "inodes" | "noquota" | "timeout"
+                    ) {
+                        return Err(anyhow!(
+                            "invalid mount option {} for driver 'local': invalid argument",
+                            k
+                        ));
+                    }
+                }
+            }
+            if let Some(o_val) = opts.get("o").cloned() {
+                for part in o_val.split(',') {
+                    if let Some(u_str) = part.trim().strip_prefix("uid=") {
+                        if let Ok(u) = u_str.parse::<u32>() {
+                            explicit_uid = Some(u);
+                            opts.insert("UID".to_string(), u_str.to_string());
+                        }
+                    } else if let Some(g_str) = part.trim().strip_prefix("gid=") {
+                        if let Ok(g) = g_str.parse::<u32>() {
+                            explicit_gid = Some(g);
+                            opts.insert("GID".to_string(), g_str.to_string());
+                        }
+                    }
+                }
+            }
+
+            let mountpoint = if driver == "image" {
+                let img_ref = opts
+                    .get("image")
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("image volume requires image option"))?;
+                let img_store = crate::storage::ImageStore::new();
+                let img_rec = crate::find_image_with_shortname(&img_store, img_ref, None)
+                    .ok_or_else(|| anyhow!("{}: image not known", img_ref))?;
+                PathBuf::from(&img_rec.rootfs_path)
+            } else if opts.get("type").map(|t| t.as_str()) == Some("bind") {
                 let device = opts
                     .get("device")
                     .filter(|d| !d.is_empty())
@@ -198,7 +247,7 @@ impl VolumeStore {
                 }
                 mp
             };
-            if opts.get("type").map(|t| t.as_str()) != Some("bind") {
+            if driver != "image" && opts.get("type").map(|t| t.as_str()) != Some("bind") {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -213,10 +262,12 @@ impl VolumeStore {
                 created_at: Utc::now(),
                 labels: labels.unwrap_or_default(),
                 scope: scope.to_string(),
-                options: options.unwrap_or_default(),
+                options: opts,
                 anonymous: !user_provided_name,
                 needs_copy_up: true,
                 needs_chown: true,
+                uid: explicit_uid,
+                gid: explicit_gid,
             };
 
             data.volumes.push(record.clone());
@@ -232,18 +283,42 @@ impl VolumeStore {
     pub fn delete_volume_record(&self, name: &str) -> Result<VolumeRecord> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(pos) = data.volumes.iter().position(|v| v.name == name) {
-                let removed = data.volumes.remove(pos);
-                self.save_unlocked(&data)?;
+            let pos = if let Some(p) = data.volumes.iter().position(|v| v.name == name) {
+                p
+            } else {
+                let prefix_matches: Vec<usize> = data
+                    .volumes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.name.starts_with(name))
+                    .map(|(i, _)| i)
+                    .collect();
+                if prefix_matches.len() == 1 {
+                    prefix_matches[0]
+                } else if prefix_matches.len() > 1 {
+                    return Err(anyhow!(
+                        "more than one result for volume name {}: volume already exists",
+                        name
+                    ));
+                } else {
+                    return Err(anyhow!("Volume '{}' not found", name));
+                }
+            };
+            let removed = data.volumes.remove(pos);
+            self.save_unlocked(&data)?;
 
                 let vol_dir = self.volumes_dir.join(&removed.name);
-                if vol_dir.exists() {
-                    let _ = fs::remove_dir_all(vol_dir);
+                if removed.driver != "image" && vol_dir.exists() {
+                    if fs::remove_dir_all(&vol_dir).is_err() {
+                        #[cfg(target_os = "linux")]
+                        {
+                            let _ = crate::runtime::linux::chown_path_rootless(&vol_dir, 0, 0, true);
+                        }
+                        crate::storage::container_store::make_tree_writable(&vol_dir);
+                        let _ = fs::remove_dir_all(&vol_dir);
+                    }
                 }
                 Ok(removed)
-            } else {
-                Err(anyhow!("Volume '{}' not found", name))
-            }
         })
     }
 
@@ -351,7 +426,7 @@ impl VolumeStore {
                         let _ = c_store
                             .update_status(&c.id, crate::storage::ContainerStatus::Exited(0));
                     }
-                    let _ = c_store.remove(&c.id);
+                    let _ = crate::remove_container_quiet(&c.id, true, false);
                 }
             }
         }
@@ -360,9 +435,16 @@ impl VolumeStore {
     }
 
     pub fn list_filtered(&self, filters: &[String]) -> Vec<VolumeRecord> {
-        self.list()
-            .into_iter()
-            .filter(|v| Self::matches_filters(v, filters))
+        let all_vols = self.list();
+        let used = if filters.iter().any(|f| f.starts_with("dangling=")) {
+            self.collect_used_volume_names()
+        } else {
+            std::collections::HashSet::new()
+        };
+        all_vols
+            .iter()
+            .filter(|v| Self::matches_filters_with_context(v, filters, &all_vols, &used))
+            .cloned()
             .collect()
     }
 
@@ -370,22 +452,105 @@ impl VolumeStore {
         if filters.is_empty() {
             return true;
         }
-        filters.iter().all(|f| Self::matches_filter(vol, f))
+        let used = std::collections::HashSet::new();
+        Self::matches_filters_with_context(vol, filters, &[], &used)
+    }
+
+    pub fn matches_filters_with_context(
+        vol: &VolumeRecord,
+        filters: &[String],
+        all_vols: &[VolumeRecord],
+        used_volume_names: &std::collections::HashSet<String>,
+    ) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+        filters
+            .iter()
+            .all(|f| Self::matches_filter_with_context(vol, f, all_vols, used_volume_names))
     }
 
     pub fn matches_filter(vol: &VolumeRecord, filter: &str) -> bool {
+        Self::matches_filter_with_context(
+            vol,
+            filter,
+            &[],
+            &std::collections::HashSet::new(),
+        )
+    }
+
+    fn label_filter_matches(labels: &HashMap<String, String>, expr: &str) -> bool {
+        if let Some((lk, lv)) = expr.split_once('=') {
+            labels.get(lk).map(|v| v == lv).unwrap_or(false)
+        } else if expr.contains('*') || expr.contains('?') {
+            let re_str = format!(
+                "^{}$",
+                regex::escape(expr).replace(r"\*", ".*").replace(r"\?", ".")
+            );
+            if let Ok(re) = regex::Regex::new(&re_str) {
+                labels.keys().any(|k| re.is_match(k))
+            } else {
+                labels.contains_key(expr)
+            }
+        } else {
+            labels.contains_key(expr)
+        }
+    }
+
+    pub fn matches_filter_with_context(
+        vol: &VolumeRecord,
+        filter: &str,
+        all_vols: &[VolumeRecord],
+        used_volume_names: &std::collections::HashSet<String>,
+    ) -> bool {
+        if let Some(neg_expr) = filter.strip_prefix("label!=") {
+            return !Self::label_filter_matches(&vol.labels, neg_expr);
+        }
         if let Some((key, value)) = filter.split_once('=') {
             match key {
                 "name" => volume_name_filter_matches(&vol.name, value),
                 "driver" => vol.driver == value,
-                "label" => {
-                    if let Some((lk, lv)) = value.split_once('=') {
-                        vol.labels.get(lk).map(|v| v == lv).unwrap_or(false)
+                "scope" => vol.scope == value,
+                "opt" => {
+                    if let Some((ok, ov)) = value.split_once('=') {
+                        vol.options.get(ok).map(|v| v == ov).unwrap_or(false)
                     } else {
-                        vol.labels.contains_key(value)
+                        vol.options.contains_key(value)
                     }
                 }
-                "dangling" => value == "true" && vol.labels.is_empty(),
+                "label" => Self::label_filter_matches(&vol.labels, value),
+                "dangling" => {
+                    let is_dangling = !used_volume_names.contains(&vol.name);
+                    if value == "true" || value == "1" {
+                        is_dangling
+                    } else if value == "false" || value == "0" {
+                        !is_dangling
+                    } else {
+                        false
+                    }
+                }
+                "until" => {
+                    if let Ok(ts) = value.trim().parse::<i64>() {
+                        vol.created_at.timestamp() < ts
+                    } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value.trim()) {
+                        vol.created_at < dt.with_timezone(&Utc)
+                    } else {
+                        true
+                    }
+                }
+                "since" | "after" => {
+                    if let Some(target_pos) = all_vols.iter().position(|v| v.name == value) {
+                        if let Some(self_pos) = all_vols.iter().position(|v| v.name == vol.name) {
+                            return self_pos > target_pos;
+                        }
+                    }
+                    if let Some(target) = all_vols.iter().find(|v| v.name == value) {
+                        vol.created_at > target.created_at && vol.name != target.name
+                    } else {
+                        false
+                    }
+                }
+                "all" => true,
                 _ => true,
             }
         } else {
@@ -411,6 +576,9 @@ impl VolumeStore {
                         for m in mounts {
                             if !m.is_volume {
                                 continue;
+                            }
+                            if let Some(vn) = &m.volume_name {
+                                used_volume_names.insert(vn.clone());
                             }
                             let src = m.source.to_string_lossy();
                             for v in &volumes {
@@ -444,25 +612,64 @@ impl VolumeStore {
         used_volume_names
     }
 
+    pub fn prune_candidates(&self, all: bool, filters: &[String]) -> Vec<String> {
+        let used_volume_names = self.collect_used_volume_names();
+        let all_vols = self.list();
+        let filter_all = filters.iter().any(|f| f == "all=true" || f == "all=1");
+        let has_non_all_filter = filters
+            .iter()
+            .any(|f| !f.starts_with("all="));
+        let include_named = all || filter_all || has_non_all_filter;
+
+        all_vols
+            .iter()
+            .filter(|v| {
+                let unused = !used_volume_names.contains(&v.name);
+                let matches =
+                    Self::matches_filters_with_context(v, filters, &all_vols, &used_volume_names);
+                if include_named {
+                    unused && matches
+                } else {
+                    unused && matches && v.anonymous
+                }
+            })
+            .map(|v| v.name.clone())
+            .collect()
+    }
+
     pub fn prune_with_options(&self, all: bool, filters: &[String]) -> Result<Vec<String>> {
         let used_volume_names = self.collect_used_volume_names();
+        let filter_all = filters.iter().any(|f| f == "all=true" || f == "all=1");
+        let has_non_all_filter = filters
+            .iter()
+            .any(|f| !f.starts_with("all="));
+        let include_named = all || filter_all || has_non_all_filter;
 
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
+            let snapshot = data.volumes.clone();
             let mut pruned = Vec::new();
             data.volumes.retain(|v| {
                 let unused = !used_volume_names.contains(&v.name);
-                let matches = Self::matches_filters(v, filters);
-                let eligible = if all {
+                let matches =
+                    Self::matches_filters_with_context(v, filters, &snapshot, &used_volume_names);
+                let eligible = if include_named {
                     unused && matches
                 } else {
                     unused && matches && v.anonymous
                 };
                 if eligible {
-                    if v.options.get("type").map(|t| t.as_str()) != Some("bind") {
+                    if v.driver != "image" && v.options.get("type").map(|t| t.as_str()) != Some("bind") {
                         let vol_dir = self.volumes_dir.join(&v.name);
                         if vol_dir.exists() {
-                            let _ = fs::remove_dir_all(vol_dir);
+                            if fs::remove_dir_all(&vol_dir).is_err() {
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let _ = crate::runtime::linux::chown_path_rootless(&vol_dir, 0, 0, true);
+                                }
+                                crate::storage::container_store::make_tree_writable(&vol_dir);
+                                let _ = fs::remove_dir_all(&vol_dir);
+                            }
                         }
                     }
                     pruned.push(v.name.clone());
@@ -592,6 +799,7 @@ impl VolumeStore {
                 chown_u,
                 tmpfs_mount_data,
                 volume_name: Some(record.name.clone()),
+                subpath: None,
                 is_volume: true,
             })
         }
@@ -608,6 +816,29 @@ impl VolumeStore {
             if let Some(v) = data.volumes.iter_mut().find(|v| v.name == name) {
                 v.needs_copy_up = needs_copy_up;
                 v.needs_chown = needs_chown;
+                self.save_unlocked(&data)?;
+                Ok(())
+            } else {
+                Err(anyhow!("Volume '{}' not found", name))
+            }
+        })
+    }
+
+    pub fn set_volume_uid_gid(
+        &self,
+        name: &str,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            if let Some(v) = data.volumes.iter_mut().find(|v| v.name == name) {
+                if uid.is_some() {
+                    v.uid = uid;
+                }
+                if gid.is_some() {
+                    v.gid = gid;
+                }
                 self.save_unlocked(&data)?;
                 Ok(())
             } else {

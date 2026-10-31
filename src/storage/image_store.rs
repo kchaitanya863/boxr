@@ -370,12 +370,16 @@ impl ImageStore {
                 record_untagged_image_history(&self.index_file, &removed);
 
                 // Only clean up rootfs directory if NO OTHER image shares this rootfs_path
+                // and the rootfs resides within this store's root directory.
                 let is_shared = data.images.iter().any(|img| {
                     img.rootfs_path == removed.rootfs_path
                         || img.manifest_digest == removed.manifest_digest
                 });
-                if !is_shared {
-                    let rootfs = PathBuf::from(&removed.rootfs_path);
+                let rootfs = PathBuf::from(&removed.rootfs_path);
+                let store_root = self.index_file.parent().unwrap_or(Path::new("."));
+                let is_local_to_store = rootfs.starts_with(store_root)
+                    && !removed.rootfs_path.starts_with("/var/tmp/boxr-e2e-tar-cache");
+                if !is_shared && is_local_to_store {
                     if rootfs.exists() {
                         #[cfg(unix)]
                         {
@@ -471,6 +475,12 @@ impl ImageStore {
             &container_rootfs,
             &dest_rootfs,
         )?;
+        if let Some(base_img) = self.find(&container.image) {
+            let _ = fs::write(
+                dest_image_dir.join("parent_rootfs.txt"),
+                &base_img.rootfs_path,
+            );
+        }
 
         let _ = fs::remove_file(dest_rootfs.join("boxr-run.sh"));
         let _ = fs::remove_file(dest_rootfs.join("boxr-exitcode"));
