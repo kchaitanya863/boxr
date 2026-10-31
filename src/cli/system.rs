@@ -184,7 +184,20 @@ pub enum SystemAction {
         filter: Vec<String>,
     },
     /// Check system configuration and storage health
-    Check,
+    Check {
+        /// Remove damaged layers, images, and containers
+        #[arg(short = 'r', long = "repair")]
+        repair: bool,
+        /// Remove damaged containers even if they are referenced
+        #[arg(short = 'f', long = "force")]
+        force: bool,
+        /// Maximum allowed age of unreferenced layers
+        #[arg(short = 'm', long = "max", allow_hyphen_values = true)]
+        max: Option<String>,
+        /// Quick check without verifying layer digests
+        #[arg(short = 'q', long = "quick")]
+        quick: bool,
+    },
     /// Manage remote system destination connections
     Connection(SystemConnectionSubcommands),
     /// Migrate container storage to current version
@@ -299,11 +312,14 @@ pub struct PodCreateArgs {
     #[arg(long = "cpus")]
     pub cpus: Option<String>,
     /// Network mode for the pod
-    #[arg(long = "network")]
+    #[arg(long = "network", alias = "net")]
     pub network: Option<String>,
     /// User namespace mode for the pod
     #[arg(long = "userns")]
     pub userns: Option<String>,
+    /// Add a custom host-to-IP mapping (host:ip)
+    #[arg(long = "add-host")]
+    pub add_host: Vec<String>,
     /// Share namespaces: ipc, net, uts, pid (comma-separated)
     #[arg(
         long = "share",
@@ -480,6 +496,9 @@ pub struct HealthcheckSubcommands {
 pub enum HealthcheckAction {
     /// Run health check on a container
     Run {
+        /// Ignore the healthcheck result (exit 0 even if unhealthy)
+        #[arg(long = "ignore-result")]
+        ignore_result: bool,
         /// Container to run health check for
         container: String,
     },

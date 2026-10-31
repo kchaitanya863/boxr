@@ -11,6 +11,12 @@ pub struct ArtifactSubcommands {
 pub enum ArtifactAction {
     /// Add an artifact to the artifact store
     Add {
+        /// Append files to an existing artifact
+        #[arg(short = 'a', long = "append")]
+        append: bool,
+        /// Replace an existing artifact
+        #[arg(long = "replace")]
+        replace: bool,
         /// Name of the artifact
         name: String,
         /// Path to the artifact file
@@ -32,6 +38,7 @@ pub enum ArtifactAction {
     },
     /// Display detailed information on an artifact
     Inspect {
+        /// Format output using Go template
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
         /// Name or digest of the artifact
@@ -50,9 +57,15 @@ pub enum ArtifactAction {
         /// OCI artifact reference
         reference: String,
     },
-    /// Remove an artifact from the store
+    /// Remove one or more artifacts from the store
     Rm {
-        /// Name or digest of the artifact
-        name: String,
+        /// Remove all artifacts
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        /// Ignore errors if artifact does not exist
+        #[arg(short = 'i', long = "ignore")]
+        ignore: bool,
+        /// Name or digest of the artifact(s)
+        names: Vec<String>,
     },
 }

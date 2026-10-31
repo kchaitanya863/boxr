@@ -498,6 +498,23 @@ impl ArchiveManager {
                 .join("rootfs");
             fs::create_dir_all(&dest_rootfs)?;
 
+            let full_cfg_id = config_digest
+                .strip_prefix("sha256:")
+                .unwrap_or(&config_digest);
+            if !full_cfg_id.is_empty() {
+                let vfs_img_dir = home.join("vfs-images").join(full_cfg_id);
+                let _ = fs::create_dir_all(&vfs_img_dir);
+                let _ = fs::write(vfs_img_dir.join("manifest"), &manifest_content);
+                let b64_key = format!(
+                    "={}",
+                    crate::base64_encode(format!("sha256:{full_cfg_id}").as_bytes())
+                );
+                let _ = fs::write(
+                    vfs_img_dir.join(&b64_key),
+                    serde_json::to_string(&config).unwrap_or_default(),
+                );
+            }
+
             for layer in &item.layers {
                 let layer_path = temp_dir.path().join(layer);
                 if layer_path.exists() {

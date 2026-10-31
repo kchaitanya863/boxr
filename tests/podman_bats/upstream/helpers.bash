@@ -1503,65 +1503,21 @@ function gen-cert-pair {
   shift 3
   openssl req -x509 \
     -nodes \
-    -newkey rsa:2048 -keyout "${key}" \
+    -newkey rsa:4096 -keyout "${key}" \
     -out "${cert}" \
     -days 1 \
     -subj "/C=US/ST=Test/L=Test/O=Boxr/OU=BATS/CN=${cn}" \
     "$@"
 }
 
-function timeout() {
-    if [[ "${1:-}" == "10" && "${2:-}" == "socat" ]]; then
-        shift
-        command timeout 60 "$@"
-        return $?
-    fi
-    command timeout "$@"
-}
-
-# boxr has no skopeo cache path; pull via the CLI under test with a local image store cache.
+# boxr has no skopeo cache path; pull via the CLI under test.
 function _prefetch() {
     local want=$1
     run_podman '?' image exists "$want"
     if [[ $status -eq 0 ]]; then
         return
     fi
-    local cache_root="/tmp/boxr-bats-imgcache-$(id -u)"
-    local cache_key
-    cache_key="$(echo "$want" | tr '/:@' '___')"
-    local cache_dir="$cache_root/$cache_key"
-    if [[ -n "${BOXR_HOME:-}" && -f "$cache_dir/images.json" && -d "$cache_dir/images" && -d "$cache_dir/layers" ]]; then
-        chmod u+w "$cache_dir/images"/*/rootfs 2>/dev/null || true
-        mkdir -p "$BOXR_HOME/images" "$BOXR_HOME/layers"
-        cp -al "$cache_dir/images/." "$BOXR_HOME/images/" 2>/dev/null || cp -a "$cache_dir/images/." "$BOXR_HOME/images/"
-        cp -al "$cache_dir/layers/." "$BOXR_HOME/layers/" 2>/dev/null || cp -a "$cache_dir/layers/." "$BOXR_HOME/layers/"
-        if [[ "$want" == *"libpod/testimage"* ]]; then
-            chmod 555 "$BOXR_HOME/images"/*/rootfs 2>/dev/null || true
-        fi
-        cp "$cache_dir/images.json" "$BOXR_HOME/images.json"
-        sed -i "s|$cache_dir/images|$BOXR_HOME/images|g" "$BOXR_HOME/images.json"
-        run_podman '?' image exists "$want"
-        if [[ $status -eq 0 ]]; then
-            return
-        fi
-    fi
     run_podman pull "$want"
-    if [[ -n "${BOXR_HOME:-}" && -f "$BOXR_HOME/images.json" && -d "$BOXR_HOME/images" && ! -d "$cache_dir/layers" ]]; then
-        local tmp_cache="$cache_dir.tmp.$$"
-        chmod u+w "$cache_dir/images"/*/rootfs "$BOXR_HOME/images"/*/rootfs 2>/dev/null || true
-        rm -rf "$cache_dir" "$tmp_cache"
-        mkdir -p "$tmp_cache/images" "$tmp_cache/layers"
-        cp -al "$BOXR_HOME/images/." "$tmp_cache/images/" 2>/dev/null || cp -a "$BOXR_HOME/images/." "$tmp_cache/images/"
-        if [[ -d "$BOXR_HOME/layers" ]]; then
-            cp -al "$BOXR_HOME/layers/." "$tmp_cache/layers/" 2>/dev/null || cp -a "$BOXR_HOME/layers/." "$tmp_cache/layers/"
-        fi
-        if [[ "$want" == *"libpod/testimage"* ]]; then
-            chmod 555 "$BOXR_HOME/images"/*/rootfs 2>/dev/null || true
-        fi
-        cp "$BOXR_HOME/images.json" "$tmp_cache/images.json"
-        sed -i "s|$BOXR_HOME/images|$cache_dir/images|g" "$tmp_cache/images.json"
-        mv "$tmp_cache" "$cache_dir" 2>/dev/null || rm -rf "$tmp_cache"
-    fi
 }
 
 function clean_setup() {

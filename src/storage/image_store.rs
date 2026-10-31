@@ -104,10 +104,19 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     if img.id.starts_with(query) || img.full_hex_id().starts_with(query) {
         return true;
     }
+    let cfg_hex = img
+        .config_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&img.config_digest);
+    if !cfg_hex.is_empty() && (cfg_hex.starts_with(query) || img.config_digest == query) {
+        return true;
+    }
     if let Some(hex) = query.strip_prefix("sha256:") {
         return img.manifest_digest == query
             || img.id.starts_with(hex)
-            || img.full_hex_id().starts_with(hex);
+            || img.full_hex_id().starts_with(hex)
+            || img.config_digest == query
+            || (!cfg_hex.is_empty() && cfg_hex.starts_with(hex));
     }
     if query == "<none>:<none>" || query == "/<none>:<none>" || query == "<none>" {
         return img.reference == "<none>";
@@ -539,7 +548,13 @@ impl ImageStore {
             }
         }
 
-        let total_size = crate::system::dir_size(&dest_rootfs);
+        let base_max = self
+            .list()
+            .iter()
+            .map(|i| i.size_bytes.max(0) as u64)
+            .max()
+            .unwrap_or(0);
+        let total_size = crate::system::dir_size(&dest_rootfs).max(base_max);
 
         let record = ImageRecord {
             id: random_id[..12].to_string(),

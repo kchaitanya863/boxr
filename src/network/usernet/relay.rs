@@ -12,7 +12,16 @@ use std::path::Path;
 use std::time::Duration;
 
 pub fn relay_socket_path(bundle_path: &Path) -> std::path::PathBuf {
-    bundle_path.join("usernet-relay.sock")
+    let candidate = bundle_path.join("usernet-relay.sock");
+    if candidate.to_string_lossy().len() < 100 {
+        return candidate;
+    }
+    let cid = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ctr");
+    let short = &cid[..12.min(cid.len())];
+    std::path::PathBuf::from(format!("/tmp/bx-relay-{}.sock", short))
 }
 
 /// Fork a relay child that serves `bundle/usernet-relay.sock`. Returns child PID.

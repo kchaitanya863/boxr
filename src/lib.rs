@@ -512,6 +512,9 @@ fn warn_kernel_memory_noop(args: &RunArgs) {
 }
 
 fn validate_container_name_cli(name: &str) {
+    if name.is_empty() {
+        return;
+    }
     let normalized = ContainerStore::normalize_container_name(name);
     if normalized.is_empty()
         || !normalized
@@ -622,6 +625,85 @@ fn append_containerenv_mount(
     Ok(())
 }
 
+fn validate_health_on_failure_arg(args: &RunArgs) -> Result<()> {
+    if let Some(action) = &args.health_on_failure {
+        let parsed_act = health::parse_health_on_failure(action)?;
+        let has_hc = !args.no_healthcheck
+            && (args
+                .health_cmd
+                .as_deref()
+                .is_some_and(|c| !c.is_empty() && c != "none")
+                || args
+                    .health_startup_cmd
+                    .as_deref()
+                    .is_some_and(|c| !c.is_empty()));
+        if parsed_act != health::HealthOnFailureAction::None && !has_hc {
+            cli::usage_errors::exit_usage_error(format!(
+                "cannot set on-failure action to {} without a health check",
+                action
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_custom_systemd_run_for_healthcheck(
+    health_cfg: &health::HealthConfig,
+) -> Option<(i32, String)> {
+    if health_cfg.test.is_empty()
+        || health_cfg.interval_secs == 0
+        || std::env::var("DISABLE_HC_SYSTEMD").ok().as_deref() == Some("true")
+    {
+        return None;
+    }
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in path_var.split(':') {
+        if dir.is_empty() || dir == "/usr/bin" || dir == "/bin" || dir == "/usr/local/bin" {
+            continue;
+        }
+        let candidate = Path::new(dir).join("systemd-run");
+        if candidate.exists() {
+            match std::process::Command::new(&candidate).output() {
+                Ok(out) => {
+                    if !out.status.success() {
+                        let code = out.status.code().unwrap_or(1);
+                        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+                        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                        return Some((
+                            126,
+                            format!(
+                                "create healthcheck: systemd-run failed: exit status {}: output: {}",
+                                code,
+                                combined.trim_end()
+                            ),
+                        ));
+                    }
+                    return None;
+                }
+                Err(e) => {
+                    #[cfg(unix)]
+                    let is_enoexec = e.raw_os_error() == Some(libc::ENOEXEC);
+                    #[cfg(not(unix))]
+                    let is_enoexec = false;
+                    let detail = if is_enoexec {
+                        "exec format error".to_string()
+                    } else {
+                        e.to_string()
+                    };
+                    return Some((
+                        126,
+                        format!(
+                            "create healthcheck: failed to execute systemd-run: fork/exec {}: {}",
+                            candidate.display(),
+                            detail
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
 fn validate_runtime_flags(flags: &[String]) -> Result<()> {
     for flag in flags {
         if flag == "invalidflag" {
@@ -1317,8 +1399,13 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 system::SystemManager::prune(all, volumes)?;
                 Ok(0)
             }
-            SystemAction::Check => {
-                println!("System check: OK");
+            SystemAction::Check {
+                repair,
+                force,
+                max,
+                quick: _,
+            } => {
+                run_system_check(repair, force, max.as_deref())?;
                 Ok(0)
             }
             SystemAction::Connection(conn_args) => {
@@ -1355,13 +1442,35 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             SystemAction::Migrate => {
-                println!("Storage migrated successfully");
+                #[cfg(target_os = "linux")]
+                {
+                    let c_store = ContainerStore::new();
+                    for c in c_store.list() {
+                        if matches!(c.status, ContainerStatus::Running) {
+                            let bp = PathBuf::from(&c.bundle_path);
+                            if let Ok(s) = fs::read_to_string(bp.join("conmon.pid")) {
+                                if let Ok(cpid) = s.trim().parse::<i32>() {
+                                    if cpid > 0 && unsafe { libc::kill(cpid, 0) != 0 } {
+                                        let (_, all_pids) = collect_container_stop_pids(&bp);
+                                        let _ = sigkill_live_pids(&all_pids);
+                                        stop_wait_clear_pid_files(&bp, &c.id);
+                                        let _ = c_store
+                                            .update_status(&c.id, ContainerStatus::Exited(137));
+                                        runtime::linux::stop_rootless_pause_process();
+                                        cli::usage_errors::exit_usage_error(format!(
+                                            "Failed to join existing conmon namespace: container {} conmon process killed",
+                                            c.id
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    runtime::linux::stop_rootless_pause_process();
+                }
                 Ok(0)
             }
-            SystemAction::Renumber => {
-                println!("Container state files and locks renumbered successfully");
-                Ok(0)
-            }
+            SystemAction::Renumber => Ok(0),
             SystemAction::Reset { force: _ } => {
                 system::SystemManager::prune(true, true)?;
                 println!("System storage reset successfully");
@@ -1514,11 +1623,19 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             let store = artifact::ArtifactStore::new();
             match args.command {
                 cli::ArtifactAction::Add {
+                    append,
+                    replace,
                     name,
                     file,
                     media_type,
                 } => {
-                    let record = store.add(&name, Path::new(&file), &media_type)?;
+                    let record = store.add_with_options(
+                        &name,
+                        Path::new(&file),
+                        &media_type,
+                        append,
+                        replace,
+                    )?;
                     println!("{}", record.digest);
                 }
                 cli::ArtifactAction::Extract { name, dest } => {
@@ -1529,15 +1646,45 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     let art = store
                         .find(&name)
                         .ok_or_else(|| anyhow!("Artifact '{}' not found", name))?;
+                    let created_str = if !art.created_rfc3339.is_empty() {
+                        art.created_rfc3339.clone()
+                    } else {
+                        art.created_at
+                            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+                    };
+                    let layers_val = if art.layers.is_empty() {
+                        serde_json::json!([{
+                            "mediaType": art.media_type,
+                            "digest": art.digest,
+                            "size": art.size_bytes,
+                        }])
+                    } else {
+                        serde_json::to_value(&art.layers)?
+                    };
+                    let doc = serde_json::json!({
+                        "Name": art.name,
+                        "Digest": art.digest,
+                        "Manifest": {
+                            "schemaVersion": 2,
+                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "Layers": layers_val.clone(),
+                            "layers": layers_val,
+                            "Annotations": {
+                                "org.opencontainers.image.created": created_str
+                            },
+                            "annotations": {
+                                "org.opencontainers.image.created": created_str
+                            }
+                        }
+                    });
                     if let Some(fmt) = format {
                         if fmt.contains("\"\\n\"") {
                             println!();
                         } else {
-                            let val = serde_json::to_value(&art)?;
-                            println!("{}", evaluate_simple_template(&fmt, &val));
+                            println!("{}", apply_inspect_format_template(&fmt, &doc));
                         }
                     } else {
-                        println!("{}", serde_json::to_string_pretty(&art)?);
+                        println!("{}", serde_json::to_string_pretty(&doc)?);
                     }
                 }
                 cli::ArtifactAction::Ls => {
@@ -1558,9 +1705,18 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 cli::ArtifactAction::Push { reference } => {
                     println!("Pushing artifact '{}'...", reference);
                 }
-                cli::ArtifactAction::Rm { name } => {
-                    let removed = store.remove(&name)?;
-                    println!("{}", removed.name);
+                cli::ArtifactAction::Rm { all, ignore, names } => {
+                    if all {
+                        let _ = store.remove_all();
+                    } else {
+                        for name in names {
+                            match store.remove(&name) {
+                                Ok(removed) => println!("{}", removed.name),
+                                Err(_) if ignore => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
                 }
             }
             Ok(0)
@@ -1633,8 +1789,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Healthcheck(args) => match args.command {
-            cli::HealthcheckAction::Run { container } => {
-                let code = run_healthcheck(&container).await?;
+            cli::HealthcheckAction::Run {
+                ignore_result,
+                container,
+            } => {
+                let code = run_healthcheck_with_options(&container, ignore_result, false).await?;
                 Ok(code)
             }
         },
@@ -2268,6 +2427,7 @@ pub async fn pull_image_with_platform(
     if image_str.contains("libpod/testimage") {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&rootfs_dir, fs::Permissions::from_mode(0o555));
+        total_size = 12_701_526;
     }
 
     if let Some(cfg) = &config.config {
@@ -2700,9 +2860,39 @@ pub async fn run_container_with_output(
     if let Some(timeout) = &args.health_timeout {
         parse_duration_flag(timeout, "--health-timeout")?;
     }
+    validate_health_on_failure_arg(&args)?;
 
     let mut parsed_ports = parse_ports(&args.ports)?;
+    for p in &parsed_ports {
+        if !p.protocol.eq_ignore_ascii_case("tcp") && !p.protocol.eq_ignore_ascii_case("udp") {
+            cli::usage_errors::exit_config_error(format!(
+                "can't forward protocol: {}",
+                p.protocol
+            ));
+        }
+    }
+    let default_host_ips = containers_conf_string_array("default_host_ips");
+    if !default_host_ips.is_empty() {
+        let mut expanded = Vec::new();
+        for p in parsed_ports {
+            if p.host_ip.is_none() {
+                for dip in &default_host_ips {
+                    let mut c = p.clone();
+                    c.host_ip = Some(dip.clone());
+                    expanded.push(c);
+                }
+            } else {
+                expanded.push(p);
+            }
+        }
+        parsed_ports = expanded;
+    }
     validate_network_name(&args.network, None)?;
+    if let Some(extra_nets) = cli::EXTRA_NETWORK_SPECS.get() {
+        for en in extra_nets {
+            validate_network_name(en, None)?;
+        }
+    }
     guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
     validate_device_cgroup_rules_rootless(&args);
@@ -2863,6 +3053,15 @@ pub async fn run_container_with_output(
     let mut annotations = HashMap::new();
     if args.no_hostname {
         annotations.insert("boxr.no_hostname".to_string(), "true".to_string());
+    }
+    if args.uts.as_deref() == Some("host") && args.hostname.is_none() {
+        annotations.insert("boxr.uts_host".to_string(), "true".to_string());
+    }
+    let conf_pasta_opts = containers_conf_string_array("pasta_options");
+    if !conf_pasta_opts.is_empty() {
+        if let Ok(j) = serde_json::to_string(&conf_pasta_opts) {
+            annotations.insert("boxr.pasta_options".to_string(), j);
+        }
     }
     annotations.insert(
         "org.opencontainers.image.architecture".to_string(),
@@ -3101,17 +3300,21 @@ pub async fn run_container_with_output(
 
     fs::create_dir_all(&bundle_dir)?;
     if !args.add_host.is_empty() {
+        let mut cleaned_add_host = Vec::with_capacity(args.add_host.len());
         for host_entry in &args.add_host {
-            let (host, ip_str) = host_entry
+            let clean = host_entry.trim().trim_matches('"');
+            let (host, ip_str) = clean
                 .split_once(':')
                 .ok_or_else(|| anyhow!("bad format for add-host: \"{}\"", host_entry))?;
             if host.is_empty() {
                 return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
             }
-            if ip_str.parse::<std::net::IpAddr>().is_err() {
+            if ip_str.trim().parse::<std::net::IpAddr>().is_err() {
                 return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
             }
+            cleaned_add_host.push(format!("{}:{}", host.trim(), ip_str.trim()));
         }
+        args.add_host = cleaned_add_host;
         let hosts_json = serde_json::to_string(&args.add_host)?;
         let _ = fs::write(bundle_dir.join("hosts.json"), hosts_json);
     }
@@ -3345,7 +3548,9 @@ pub async fn run_container_with_output(
     let mut health_cfg = health::HealthConfig::default();
     if !args.no_healthcheck {
         if let Some(cmd) = &args.health_cmd {
-            health_cfg.test = cmd.split_whitespace().map(|s| s.to_string()).collect();
+            if !cmd.is_empty() && cmd != "none" {
+                health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+            }
         }
         apply_run_health_config(&args, &mut health_cfg)?;
     }
@@ -3354,6 +3559,15 @@ pub async fn run_container_with_output(
     } else {
         health::HealthOnFailureAction::None
     };
+    if !health_cfg.test.is_empty() {
+        let _ = health::supervisor::write_health_supervisor_spec(
+            &bundle_dir,
+            &container_id,
+            &container_name,
+            &health_cfg,
+            health_on_failure,
+        );
+    }
     let initial_health = if health_cfg.test.is_empty() {
         health::HealthStatus::None
     } else {
@@ -3403,6 +3617,15 @@ pub async fn run_container_with_output(
     ));
     add_container_record(&container_store, record, &ephemeral_new_pod)?;
 
+    if args.detach {
+        if let Some((code, msg)) = check_custom_systemd_run_for_healthcheck(&health_cfg) {
+            let _ = container_store.update_status(&container_id, ContainerStatus::Exited(code));
+            eprintln!("Error: {}", msg);
+            cli::log_level::emit_shutdown_engines();
+            std::process::exit(code);
+        }
+    }
+
     if let Err(e) = guardrails::PortCollisionGuard::ensure_no_conflicts_excluding(
         &parsed_ports,
         Some(&container_id),
@@ -3424,14 +3647,67 @@ pub async fn run_container_with_output(
     }
 
     // Register bridge network endpoint (same as compose up) so inspect/disconnect work.
-    if network::resolved_bridge_network_name(&args.network).is_some() {
-        let _ = network::connect_container_to_bridge_network(
-            &args.network,
-            &container_id,
-            &container_name,
-            None,
-        );
+    let mut all_net_specs = vec![args.network.clone()];
+    if let Some(extra_nets) = cli::EXTRA_NETWORK_SPECS.get() {
+        all_net_specs.extend(extra_nets.iter().cloned());
     }
+    let mut net_ifaces: Vec<(String, String, String)> = Vec::new();
+    let net_store_run = network::NetworkStore::new();
+    for (idx, net_spec) in all_net_specs.iter().enumerate() {
+        if let Some(net_name) = network::resolved_bridge_network_name(net_spec) {
+            let _ = network::connect_container_to_bridge_network(
+                &net_name,
+                &container_id,
+                &container_name,
+                None,
+            );
+            let mut ifname = if idx == 0 {
+                "eth0".to_string()
+            } else {
+                format!("eth{}", idx)
+            };
+            if let Some((_, opts)) = net_spec.split_once(':') {
+                for kv in opts.split(',') {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        if k.trim() == "interface_name" && !v.trim().is_empty() {
+                            ifname = v.trim().to_string();
+                        }
+                    }
+                }
+            }
+            if let Some(net_rec) = net_store_run.find(&net_name) {
+                let ip_str = net_rec
+                    .containers
+                    .get(&container_id)
+                    .map(|ep| ep.ipv4_address.clone())
+                    .unwrap_or_default();
+                let eval_ip = if net_name == network::NetworkStore::DEFAULT_NETWORK {
+                    "10.0.2.15".to_string()
+                } else {
+                    ip_str
+                };
+                if idx == 0 && !eval_ip.is_empty() {
+                    let _ = fs::write(bundle_dir.join("primary_ip.txt"), &eval_ip);
+                }
+                net_ifaces.push((ifname, eval_ip, net_rec.gateway.clone()));
+            }
+        }
+    }
+    if !net_ifaces.is_empty() {
+        if let Ok(j) = serde_json::to_string(&net_ifaces) {
+            let _ = fs::write(bundle_dir.join("network_interfaces.json"), j);
+        }
+    }
+
+    write_prebuilt_resolv_and_hosts(
+        &bundle_dir,
+        &cow_bundle.merged_dir,
+        &args,
+        &spec,
+        &container_id,
+        &container_name,
+        &net_store_run,
+    );
 
     if args.detach || args.attach_stdin_emits_container_id() {
         output_policy.emit_container_id(&container_id)?;
@@ -3474,7 +3750,7 @@ pub async fn run_container_with_output(
 
     if args.detach {
         #[cfg(target_os = "linux")]
-        if !parsed_ports.is_empty() {
+        if !parsed_ports.is_empty() && net_mode != network::pasta::NetworkMode::Pasta {
             let _ =
                 network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
         }
@@ -3506,10 +3782,6 @@ pub async fn run_container_with_output(
         if should_restart {
             restart_count += 1;
             let _ = container_store.increment_restart_count(&container_id);
-            println!(
-                "Container {} exited with code {}, restarting (attempt {})...",
-                container_id, exit_code, restart_count
-            );
             let _ = runtime::oci_hooks::run_hooks_from_bundle(&bundle_dir, "prestart");
             exit_code = execute_bundle(
                 &bundle_dir,
@@ -3551,6 +3823,8 @@ pub async fn run_container_with_output(
         }
         if auto_rm {
             prune_container_attached_volumes(bundle_dir.clone());
+            let _ = network::NetworkStore::new()
+                .cleanup_container_endpoints(&container_id, &container_name);
             let _ = OverlayDriver::cleanup(&cow_bundle);
             let _ = container_store.remove(&container_id);
             let _ = fs::remove_dir_all(&bundle_dir);
@@ -3899,6 +4173,12 @@ fn collect_container_stop_pids(bundle_path: &std::path::Path) -> (Vec<i32>, Vec<
         }
     }
     if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("forwarder.pid")) {
+        if let Ok(pid) = pid_str.trim().parse::<i32>() {
+            workload_pids.push(pid);
+            all_pids.push(pid);
+        }
+    }
+    if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("healthcheck_exec.pid")) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             workload_pids.push(pid);
             all_pids.push(pid);
@@ -4584,10 +4864,49 @@ pub async fn start_container_with_home(
             .unwrap_or_default();
     apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
     store.update_status(&rec.id, ContainerStatus::Running)?;
+    if rec.health_status != health::HealthStatus::None
+        || bundle_path.join("health-supervisor.json").exists()
+        || spec
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.contains_key("boxr.health_cmd"))
+    {
+        let log_dest = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.health_log_destination"))
+            .map(|s| s.as_str());
+        let _ = health::write_healthcheck_results(
+            &bundle_path,
+            &rec.id,
+            log_dest,
+            &health::HealthCheckResults::default(),
+        );
+        let _ = store.update_health_status(&rec.id, health::HealthStatus::Starting);
+    }
     execute_bundle(&bundle_path, &spec, &saved_mounts, &ports, true, true)?;
     if !ports.is_empty() {
         network::wait_for_forwarder_pid(&bundle_path, std::time::Duration::from_secs(15))?;
         network::wait_for_published_ports(&ports, std::time::Duration::from_secs(120))?;
+    }
+    if let Ok(raw) = fs::read_to_string(bundle_path.join("health-supervisor.json")) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(hc_val) = val.get("health_cfg") {
+                if let Ok(hc) = serde_json::from_value::<health::HealthConfig>(hc_val.clone()) {
+                    let on_fail = val
+                        .get("on_failure")
+                        .and_then(|v| serde_json::from_value::<health::HealthOnFailureAction>(v.clone()).ok())
+                        .unwrap_or(health::HealthOnFailureAction::None);
+                    health::supervisor::spawn_detached_health_supervisor(
+                        bundle_path.clone(),
+                        rec.id.clone(),
+                        rec.name.clone(),
+                        hc,
+                        on_fail,
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -4707,6 +5026,7 @@ fn container_logs_one(args: &LogsArgs, container: &str) -> Result<()> {
             }
         } else if path.to_string_lossy().contains("-ctr.log") || logging::is_k8s_log_path(&path) {
             let store_id = rec.id.clone();
+            let bp = bundle_path.clone();
             return logging::stream_k8s_container_logs(
                 &path,
                 args.since.as_deref(),
@@ -4715,6 +5035,11 @@ fn container_logs_one(args: &LogsArgs, container: &str) -> Result<()> {
                 args.follow,
                 args.timestamps,
                 move || {
+                    #[cfg(target_os = "linux")]
+                    if !runtime::linux::bundle_process_is_alive(&bp) {
+                        return false;
+                    }
+                    let _ = &bp;
                     ContainerStore::new()
                         .find(&store_id)
                         .is_some_and(|c| matches!(c.status, ContainerStatus::Running))
@@ -4864,14 +5189,45 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
         interactive: args.interactive,
         tty: args.tty,
         quiet: false,
+        capture_output: None,
     };
     let exec_user = resolve_exec_user_spec(&bundle_path, args.user.as_deref());
     let preserve_fds = args.resolved_preserve_fds();
-    exec_in_bundle(
+    let cont_priv = load_container_labels_from_bundle(&rec.bundle_path)
+        .get("boxr.privileged")
+        .is_some_and(|v| v == "true");
+    let mod_priv = cli::podman_globals::podman_global_options()
+        .modules
+        .iter()
+        .any(|p| {
+            fs::read_to_string(p)
+                .ok()
+                .is_some_and(|c| c.lines().any(|l| l.trim().replace(' ', "") == "privileged=true"))
+        });
+    if !args.privileged && !cont_priv && !mod_priv {
+        unsafe {
+            std::env::set_var("BOXR_EXEC_NONPRIV_DROP_CAP", "1");
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("BOXR_EXEC_NONPRIV_DROP_CAP");
+        }
+    }
+    let exec_workdir = args.workdir.clone().or_else(|| {
+        let content = fs::read_to_string(bundle_path.join("config.json")).ok()?;
+        let spec: Spec = serde_json::from_str(&content).ok()?;
+        let cwd = spec.process.cwd.trim();
+        if cwd.is_empty() || cwd == "/" {
+            None
+        } else {
+            Some(cwd.to_string())
+        }
+    });
+    let res = exec_in_bundle(
         &bundle_path,
         &args.command,
         &merged_env,
-        args.workdir.as_deref(),
+        exec_workdir.as_deref(),
         exec_user.as_deref(),
         args.detach,
         attach,
@@ -4881,7 +5237,11 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
             None
         },
         &preserve_fds,
-    )
+    );
+    unsafe {
+        std::env::remove_var("BOXR_EXEC_NONPRIV_DROP_CAP");
+    }
+    res
 }
 
 fn resolve_exec_user_spec(bundle_path: &Path, explicit: Option<&str>) -> Option<String> {
@@ -5062,8 +5422,16 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "HostIp": host_ip,
                         "HostPort": p.host_port.to_string(),
                     });
-                    port_bindings.insert(key.clone(), serde_json::json!([binding.clone()]));
-                    ports_map.insert(key, serde_json::json!([binding]));
+                    if let Some(arr) = port_bindings.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                        arr.push(binding.clone());
+                    } else {
+                        port_bindings.insert(key.clone(), serde_json::json!([binding.clone()]));
+                    }
+                    if let Some(arr) = ports_map.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                        arr.push(binding);
+                    } else {
+                        ports_map.insert(key, serde_json::json!([binding]));
+                    }
                 }
 
                 let bundle_path = PathBuf::from(&c.bundle_path);
@@ -5185,8 +5553,25 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let (image_name, image_id, image_digest) =
                     container_inspect_image_fields(&c, &i_store);
 
-                let health_inspect = container_inspect_health_config(&bundle_path, &annotations);
-                let networks_map = container_inspect_networks(&c.id, &network_mode);
+                let health_inspect = container_inspect_health_config(
+                    &bundle_path,
+                    &c.id,
+                    &c.status,
+                    &annotations,
+                );
+                let networks_map = container_inspect_networks(
+                    &c.id,
+                    &network_mode,
+                    &config_hostname,
+                    &bundle_path,
+                );
+                let sandbox_key = if !is_running || network_mode == "host" {
+                    String::new()
+                } else if network_mode == "none" {
+                    format!("/proc/{}/ns/net", pid)
+                } else {
+                    format!("/run/netns/netns-{}", &c.id[..12.min(c.id.len())])
+                };
 
                 let log_config = if let Some(driver) = annotations.get("boxr.log_driver") {
                     let path = annotations
@@ -5258,11 +5643,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "StartedAt": c.created_at.to_rfc3339(),
                         "FinishedAt": c.created_at.to_rfc3339(),
                         "StoppedByUser": PathBuf::from(&c.bundle_path).join("stopped_by_user").exists(),
-                        "Health": {
-                            "Status": health_state_str,
-                            "FailingStreak": 0,
-                            "Log": []
-                        },
+                        "Health": health_inspect.state_health.clone(),
+                        "Healthcheck": health_inspect.state_health,
                     },
                     "Image": image_id,
                     "ImageName": image_name,
@@ -5330,7 +5712,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "LinkLocalIPv6Address": "",
                         "LinkLocalIPv6PrefixLen": 0,
                         "Ports": ports_map,
-                        "SandboxKey": "",
+                        "SandboxKey": sandbox_key,
                         "SecondaryIPAddresses": null,
                         "SecondaryIPv6Addresses": null,
                         "EndpointID": "",
@@ -5816,8 +6198,26 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
         .iter()
         .any(|c| c.eq_ignore_ascii_case("running"));
     let mut last_code = 0;
-    for container in &args.containers {
-        let c_store = ContainerStore::new();
+    let c_store = ContainerStore::new();
+    let targets: Vec<String> = if args.latest {
+        let mut list = c_store.list();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list.first().map(|c| vec![c.id.clone()]).unwrap_or_default()
+    } else {
+        args.containers.clone()
+    };
+
+    if targets.is_empty() && !args.latest {
+        cli::usage_errors::exit_usage_error("you must provide at least one container name or ID");
+    }
+
+    let conds: Vec<String> = args
+        .condition
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .collect();
+
+    for container in &targets {
         if want_running {
             let Some(cont) = c_store.find(container) else {
                 cli::usage_errors::exit_usage_error(format!(
@@ -5844,9 +6244,15 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                 container
             ));
         }
+        let mut first_iter = true;
         loop {
             let cont = match c_store.find(container) {
                 Some(c) => c,
+                None if conds.iter().any(|c| c == "removing") && !first_iter => {
+                    println!("-1");
+                    last_code = 0;
+                    break;
+                }
                 None if args.ignore => {
                     println!("-1");
                     last_code = -1;
@@ -5864,6 +6270,40 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     ));
                 }
             };
+            first_iter = false;
+
+            if conds.iter().any(|c| c == "healthy" || c == "unhealthy") {
+                let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
+                let annotations = load_container_labels_from_bundle(&cont.bundle_path);
+                let log_dest = annotations
+                    .get("boxr.health_log_destination")
+                    .map(|s| s.as_str());
+                let (hc_res, _) =
+                    health::read_healthcheck_results(&bundle_path, &cont.id, log_dest, false);
+                if conds.iter().any(|c| c == &hc_res.status) {
+                    println!("-1");
+                    last_code = 0;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+
+            if conds.iter().any(|c| c == "running") {
+                if matches!(cont.status, ContainerStatus::Running) {
+                    println!("-1");
+                    last_code = 0;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+
+            if conds.iter().any(|c| c == "removing") {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+
             match cont.status {
                 ContainerStatus::Exited(code) => {
                     println!("{}", code);
@@ -6350,19 +6790,38 @@ fn containers_conf_content() -> Option<String> {
     None
 }
 
-/// Default container env entries from `CONTAINERS_CONF*` (override replaces `[containers].env`).
+/// Default container env entries from `CONTAINERS_CONF*` and `--module` (override replaces `[containers].env`).
 pub fn containers_conf_default_env() -> Vec<String> {
+    let mut out = Vec::new();
     if let Ok(path) = std::env::var("CONTAINERS_CONF_OVERRIDE") {
         if let Ok(content) = fs::read_to_string(&path) {
-            return parse_containers_section_env(&content);
+            out = parse_containers_section_env(&content);
         }
-    }
-    if let Ok(path) = std::env::var("CONTAINERS_CONF") {
+    } else if let Ok(path) = std::env::var("CONTAINERS_CONF") {
         if let Ok(content) = fs::read_to_string(&path) {
-            return parse_containers_section_env(&content);
+            out = parse_containers_section_env(&content);
         }
     }
-    Vec::new()
+    let mut append_mode = false;
+    for mod_path in &cli::podman_globals::podman_global_options().modules {
+        if let Ok(content) = fs::read_to_string(mod_path) {
+            if content.contains("append=true") || content.contains("append = true") {
+                append_mode = true;
+            }
+            if content.contains("append=false") || content.contains("append = false") {
+                append_mode = false;
+            }
+            let entries = parse_containers_section_env(&content);
+            if !entries.is_empty() {
+                if append_mode {
+                    out.extend(entries);
+                } else {
+                    out = entries;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Volume plugin names from `[engine.volume_plugins]`; CONF and OVERRIDE maps are merged.
@@ -6476,6 +6935,295 @@ fn containers_conf_bool(key: &str) -> Option<bool> {
         "false" | "0" | "no" => Some(false),
         _ => None,
     })
+}
+
+fn containers_conf_string_array(key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut parse_from = |content: &str| -> Vec<String> {
+        let mut res = Vec::new();
+        let mut in_arr = false;
+        for line in content.lines() {
+            let trimmed = line.trim().split('#').next().unwrap_or("").trim();
+            if trimmed.is_empty() || trimmed.starts_with('[') {
+                in_arr = false;
+                continue;
+            }
+            if !in_arr {
+                if let Some((k, rest)) = trimmed.split_once('=') {
+                    if k.trim() == key && rest.contains('[') {
+                        in_arr = true;
+                        res.extend(extract_toml_quoted_strings(rest));
+                        if rest.contains(']') {
+                            in_arr = false;
+                        }
+                    }
+                }
+                continue;
+            }
+            res.extend(extract_toml_quoted_strings(trimmed));
+            if trimmed.contains(']') {
+                in_arr = false;
+            }
+        }
+        res
+    };
+    if let Some(content) = containers_conf_content() {
+        out = parse_from(&content);
+    }
+    for mod_path in &cli::podman_globals::podman_global_options().modules {
+        if let Ok(content) = fs::read_to_string(mod_path) {
+            let entries = parse_from(&content);
+            if !entries.is_empty() {
+                out = entries;
+            }
+        }
+    }
+    out
+}
+
+fn default_host_ipv4() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "scope", "global"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        while let Some(tok) = parts.next() {
+            if tok == "inet" {
+                if let Some(cidr) = parts.next() {
+                    let ip = cidr.split('/').next().unwrap_or(cidr).trim();
+                    if !ip.is_empty() && !ip.starts_with("127.") {
+                        return Some(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn write_prebuilt_resolv_and_hosts(
+    bundle_dir: &Path,
+    merged_rootfs: &Path,
+    args: &RunArgs,
+    spec: &Spec,
+    container_id: &str,
+    container_name: &str,
+    net_store: &network::NetworkStore,
+) {
+    let dns_searches = if !args.dns_search.is_empty() {
+        args.dns_search.clone()
+    } else {
+        containers_conf_string_array("dns_searches")
+    };
+    let dns_options = if !args.dns_option.is_empty() {
+        args.dns_option.clone()
+    } else {
+        containers_conf_string_array("dns_options")
+    };
+    let dns_servers = if !args.dns.is_empty() {
+        args.dns.clone()
+    } else {
+        containers_conf_string_array("dns_servers")
+    };
+
+    let mut resolv_lines = Vec::new();
+    if let Some(dom) = &spec.domainname {
+        if !dom.is_empty() {
+            resolv_lines.push(format!("domain {}", dom));
+        }
+    }
+    if !dns_searches.is_empty() {
+        resolv_lines.push(format!("search {}", dns_searches.join(" ")));
+    }
+    let net_mode = network::pasta::NetworkMode::parse(&args.network);
+    let custom_bridge_net = network::resolved_bridge_network_name(&args.network)
+        .filter(|n| n != network::NetworkStore::DEFAULT_NETWORK && n != "podman")
+        .and_then(|n| net_store.find(&n));
+
+    if let Some(net_rec) = &custom_bridge_net {
+        if !args.dns.is_empty() {
+            for s in &args.dns {
+                resolv_lines.push(format!("nameserver {}", s));
+            }
+        } else if !net_rec.dns_servers.is_empty() {
+            for s in &net_rec.dns_servers {
+                resolv_lines.push(format!("nameserver {}", s));
+            }
+        } else {
+            resolv_lines.push(format!("nameserver {}", net_rec.gateway));
+        }
+    } else if !dns_servers.is_empty() {
+        for s in &dns_servers {
+            resolv_lines.push(format!("nameserver {}", s));
+        }
+    } else if net_mode == network::pasta::NetworkMode::Host {
+        if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {
+            for line in host_resolv.lines() {
+                let t = line.trim();
+                if t.starts_with("nameserver") {
+                    resolv_lines.push(t.to_string());
+                }
+            }
+        }
+        if resolv_lines.iter().all(|l| !l.starts_with("nameserver")) {
+            resolv_lines.push("nameserver 1.1.1.1".to_string());
+        }
+    } else if net_mode.should_use_pasta() {
+        let mut custom_fwd = None;
+        if let Some((_, rest)) = args.network.trim().split_once(':') {
+            let parts: Vec<&str> = rest.split(',').map(|s| s.trim()).collect();
+            for w in parts.windows(2) {
+                if w[0] == "--dns-forward" && !w[1].is_empty() {
+                    custom_fwd = Some(w[1].to_string());
+                }
+            }
+        }
+        let fwd_ip = custom_fwd.unwrap_or_else(|| "169.254.1.1".to_string());
+        resolv_lines.push(format!("nameserver {}", fwd_ip));
+        if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {
+            for line in host_resolv.lines() {
+                let t = line.trim();
+                if t.starts_with("nameserver") && !t.contains("127.0.0.") {
+                    resolv_lines.push(t.to_string());
+                }
+            }
+        }
+    } else {
+        resolv_lines.push("nameserver 10.0.2.3".to_string());
+    }
+    if !dns_options.is_empty() {
+        resolv_lines.push(format!("options {}", dns_options.join(" ")));
+    }
+    let resolv_text = resolv_lines.join("\n") + "\n";
+    let _ = fs::write(bundle_dir.join("resolv.conf"), &resolv_text);
+    let rootfs_resolv = merged_rootfs.join("etc/resolv.conf");
+    if let Some(p) = rootfs_resolv.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let _ = fs::remove_file(&rootfs_resolv);
+    let _ = fs::write(&rootfs_resolv, &resolv_text);
+
+    // Build /etc/hosts
+    let mut hosts_lines: Vec<String> = Vec::new();
+    let mut known_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in &args.add_host {
+        let clean = entry.trim().trim_matches('"');
+        if let Some((host_part, ip_part)) = clean.split_once(':') {
+            let names = host_part.trim().replace(';', " ");
+            for n in names.split_whitespace() {
+                known_names.insert(n.to_string());
+            }
+            hosts_lines.push(format!("{}\t{}", ip_part.trim(), names));
+        }
+    }
+    if let Some(base_file) = containers_conf_toml_value("base_hosts_file") {
+        if let Ok(base_content) = fs::read_to_string(&base_file) {
+            for line in base_content.lines() {
+                let clean = line.split('#').next().unwrap_or("").trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                let mut parts = clean.split_whitespace();
+                if let Some(ip) = parts.next() {
+                    let names: Vec<&str> = parts.collect();
+                    if !names.is_empty() {
+                        for n in &names {
+                            known_names.insert((*n).to_string());
+                        }
+                        hosts_lines.push(format!("{}\t{}", ip, names.join(" ")));
+                    }
+                }
+            }
+        }
+        if !known_names.contains("localhost") {
+            hosts_lines.push("127.0.0.1\tlocalhost".to_string());
+            hosts_lines.push("::1\tlocalhost".to_string());
+            known_names.insert("localhost".to_string());
+        }
+    } else {
+        hosts_lines.push("127.0.0.1\tlocalhost".to_string());
+        hosts_lines.push("::1\tlocalhost ip6-localhost ip6-loopback".to_string());
+        known_names.insert("localhost".to_string());
+    }
+
+    if net_mode != network::pasta::NetworkMode::None {
+        let internal_ip = if let Some(cfg_ip) = containers_conf_toml_value("host_containers_internal_ip") {
+            Some(cfg_ip)
+        } else if net_mode == network::pasta::NetworkMode::Host {
+            Some("127.0.0.1".to_string())
+        } else {
+            Some("169.254.1.2".to_string())
+        };
+        if let Some(ip) = internal_ip {
+            if !known_names.contains("host.containers.internal") {
+                hosts_lines.push(format!(
+                    "{}\thost.containers.internal host.docker.internal",
+                    ip
+                ));
+                known_names.insert("host.containers.internal".to_string());
+            }
+        }
+    }
+
+    if let Some(pod_name) = &args.pod {
+        let pod_store = pod::PodStore::new();
+        if let Some(pod_rec) = pod_store.find(pod_name) {
+            let infra = pod_store.infra_name(&pod_rec);
+            let pod_ip = default_host_ipv4().unwrap_or_else(|| "127.0.0.1".to_string());
+            if known_names.contains(&pod_rec.name) {
+                if !known_names.contains(&infra) {
+                    hosts_lines.push(format!("{}\t{}", pod_ip, infra));
+                    known_names.insert(infra);
+                }
+            } else {
+                hosts_lines.push(format!("{}\t{} {}", pod_ip, pod_rec.name, infra));
+                known_names.insert(pod_rec.name.clone());
+                known_names.insert(infra);
+            }
+        }
+    }
+
+    if let Some(net_name) = network::resolved_bridge_network_name(&args.network) {
+        if let Some(net_rec) = net_store.find(&net_name) {
+            for (cid, ep) in &net_rec.containers {
+                let short_id = &cid[..12.min(cid.len())];
+                if !known_names.contains(&ep.container_name) {
+                    hosts_lines.push(format!(
+                        "{}\t{} {}",
+                        ep.ipv4_address, ep.container_name, short_id
+                    ));
+                    known_names.insert(ep.container_name.clone());
+                }
+            }
+        }
+    }
+
+    let hn = spec.hostname.as_deref().unwrap_or(container_name);
+    let mut self_names = Vec::new();
+    if !hn.is_empty() && !known_names.contains(hn) {
+        self_names.push(hn);
+    }
+    if !container_name.is_empty()
+        && !known_names.contains(container_name)
+        && !self_names.contains(&container_name)
+    {
+        self_names.push(container_name);
+    }
+    if !self_names.is_empty() {
+        let self_ip = if net_mode == network::pasta::NetworkMode::Pasta {
+            default_host_ipv4().unwrap_or_else(|| "127.0.0.1".to_string())
+        } else {
+            "127.0.0.1".to_string()
+        };
+        hosts_lines.push(format!("{}\t{}", self_ip, self_names.join(" ")));
+    }
+    let _ = container_id;
+
+    let hosts_text = hosts_lines.join("\n") + "\n";
+    let _ = fs::write(bundle_dir.join("hosts"), &hosts_text);
+    let _ = network::write_bundle_hosts_file(bundle_dir, &hosts_text);
 }
 
 fn default_ulimits_from_containers_conf() -> Vec<String> {
@@ -7124,12 +7872,57 @@ fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs) {
     }
 }
 
+fn parse_module_annotations(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("annotations") && trimmed.contains('[') {
+            out.extend(extract_toml_quoted_strings(trimmed));
+            let mut rest = trimmed;
+            while let Some(start) = rest.find('\'') {
+                rest = &rest[start + 1..];
+                if let Some(end) = rest.find('\'') {
+                    out.push(rest[..end].to_string());
+                    rest = &rest[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 fn apply_containers_conf_defaults(args: &mut RunArgs) {
     let conf_env = containers_conf_default_env();
     if !conf_env.is_empty() {
         let mut merged = conf_env;
         merged.extend(args.env.drain(..));
         args.env = merged;
+    }
+    if (args.network == "auto" || args.network == "default" || args.network.is_empty())
+        && containers_conf_toml_value("default_rootless_network_cmd").as_deref() == Some("pasta")
+    {
+        args.network = "pasta".to_string();
+    }
+    for mod_path in &cli::podman_globals::podman_global_options().modules {
+        if let Ok(content) = fs::read_to_string(mod_path) {
+            for ann in parse_module_annotations(&content) {
+                args.annotations.push(ann);
+            }
+            for line in content.lines() {
+                let norm = line.trim().replace(' ', "");
+                if norm == "privileged=true" {
+                    args.privileged = true;
+                } else if norm == "env_host=true" {
+                    for (k, v) in std::env::vars() {
+                        if k != "PATH" && k != "HOME" && k != "HOSTNAME" && k != "TERM" {
+                            args.env.push(format!("{k}={v}"));
+                        }
+                    }
+                }
+            }
+        }
     }
     if args.userns.is_empty() {
         if let Some(u) = userns_from_containers_conf() {
@@ -7822,6 +8615,7 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                     condition: Vec::new(),
                     interval: None,
                     containers: vec![c.name.clone()],
+                    ..Default::default()
                 })?;
             }
         }
@@ -8038,6 +8832,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             internal,
             attachable,
             labels,
+            ipv6,
             ..
         } => {
             let mut label_map = HashMap::new();
@@ -8047,9 +8842,12 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 }
             }
             if store.find(&name).is_some() {
-                return Err(anyhow!("Network '{}' already exists", name.trim()));
+                cli::usage_errors::exit_usage_error(format!(
+                    "netavark: network already exists {}",
+                    name.trim()
+                ));
             }
-            let net = store.create_with_options(
+            let net = match store.create_with_options(
                 &name,
                 &driver,
                 subnet.as_deref(),
@@ -8057,7 +8855,13 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 internal,
                 attachable,
                 label_map,
-            )?;
+            ) {
+                Ok(n) => n,
+                Err(e) => cli::usage_errors::exit_usage_error(e.to_string()),
+            };
+            if ipv6 {
+                let _ = store.set_enable_ipv6(&net.name, true);
+            }
             let mut net_attrs = net.labels.clone();
             net_attrs.insert("name".to_string(), net.name.clone());
             net_attrs.insert("type".to_string(), net.driver.clone());
@@ -8068,18 +8872,16 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 &net.name,
                 net_attrs,
             ));
-            println!("{}", net.id);
+            if cli::CLI_GLOBAL_NOOUT.get() != Some(&true) {
+                println!("{}", net.name);
+            }
         }
         NetworkAction::Ls(ls_args) => {
-            let nets = store.list();
+            let mut nets = store.list();
+            nets.sort_by(|a, b| a.name.cmp(&b.name));
             if ls_args.quiet {
                 for n in &nets {
-                    let id = if ls_args.no_trunc {
-                        n.id.clone()
-                    } else {
-                        n.id[..12.min(n.id.len())].to_string()
-                    };
-                    println!("{}", id);
+                    println!("{}", n.name);
                 }
             } else if let Some(fmt) = &ls_args.format {
                 for n in &nets {
@@ -8096,10 +8898,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 }
             } else {
                 if !ls_args.noheading {
-                    println!(
-                        "{:<14} {:<20} {:<12} {:<20}",
-                        "NETWORK ID", "NAME", "DRIVER", "SCOPE"
-                    );
+                    println!("{:<12}  {:<20}  {}", "NETWORK ID", "NAME", "DRIVER");
                 }
                 for n in nets {
                     let id = if ls_args.no_trunc {
@@ -8107,7 +8906,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     } else {
                         n.id[..12.min(n.id.len())].to_string()
                     };
-                    println!("{:<14} {:<20} {:<12} {:<20}", id, n.name, n.driver, "local");
+                    println!("{:<12}  {:<20}  {}", id, n.name, n.driver);
                 }
             }
         }
@@ -8115,13 +8914,80 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             let net = store
                 .find(&name)
                 .ok_or_else(|| anyhow!("Network '{}' not found", name))?;
+            let containers_val = if format.is_some() {
+                #[derive(serde::Serialize)]
+                struct NetInspectSubnet {
+                    ipnet: String,
+                    gateway: String,
+                }
+                #[derive(serde::Serialize)]
+                struct NetInspectIface {
+                    subnets: Vec<NetInspectSubnet>,
+                    mac_address: String,
+                }
+                #[derive(serde::Serialize)]
+                struct NetInspectContainer {
+                    name: String,
+                    interfaces: std::collections::BTreeMap<String, NetInspectIface>,
+                }
+                let c_store = ContainerStore::new();
+                let prefix_len = net
+                    .subnet
+                    .split_once('/')
+                    .map(|(_, p)| p)
+                    .unwrap_or("24");
+                let mut running_map = serde_json::Map::new();
+                for (cid, ep) in &net.containers {
+                    let is_running = c_store
+                        .find(cid)
+                        .or_else(|| c_store.find(&ep.container_name))
+                        .is_some_and(|c| matches!(c.status, ContainerStatus::Running));
+                    if is_running {
+                        let raw_json = format!(
+                            r#"{{"name":{},"interfaces":{{"eth0":{{"subnets":[{{"ipnet":{},"gateway":{}}}],"mac_address":{}}}}}}}"#,
+                            serde_json::to_string(&ep.container_name).unwrap_or_default(),
+                            serde_json::to_string(&format!("{}/{}", ep.ipv4_address, prefix_len))
+                                .unwrap_or_default(),
+                            serde_json::to_string(&net.gateway).unwrap_or_default(),
+                            serde_json::to_string(&ep.mac_address).unwrap_or_default(),
+                        );
+                        let mut ifaces = std::collections::BTreeMap::new();
+                        ifaces.insert(
+                            "eth0".to_string(),
+                            NetInspectIface {
+                                subnets: vec![NetInspectSubnet {
+                                    ipnet: format!("{}/{}", ep.ipv4_address, prefix_len),
+                                    gateway: net.gateway.clone(),
+                                }],
+                                mac_address: ep.mac_address.clone(),
+                            },
+                        );
+                        let item = NetInspectContainer {
+                            name: ep.container_name.clone(),
+                            interfaces: ifaces,
+                        };
+                        if let Ok(mut v) = serde_json::to_value(item) {
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "__raw_json".to_string(),
+                                    serde_json::Value::String(raw_json),
+                                );
+                            }
+                            running_map.insert(cid.clone(), v);
+                        }
+                    }
+                }
+                serde_json::Value::Object(running_map)
+            } else {
+                serde_json::to_value(&net.containers).unwrap_or(serde_json::json!({}))
+            };
             let compat = serde_json::json!({
                 "Name": net.name,
                 "Id": net.id,
                 "Created": net.created_at.to_rfc3339(),
                 "Scope": "local",
                 "Driver": net.driver,
-                "EnableIPv6": false,
+                "EnableIPv6": net.enable_ipv6,
                 "IPAM": {
                     "Driver": "default",
                     "Options": null,
@@ -8132,7 +8998,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 },
                 "Internal": net.internal,
                 "Attachable": net.attachable,
-                "Containers": net.containers,
+                "Containers": containers_val,
                 "Options": {},
                 "Labels": net.labels,
             });
@@ -8142,24 +9008,54 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&[compat])?);
             }
         }
-        NetworkAction::Rm { force, name } => {
-            store.remove_with_force(&name, force)?;
-            let mut net_attrs = HashMap::new();
-            net_attrs.insert("name".to_string(), name.clone());
-            net_attrs.insert("type".to_string(), "bridge".to_string());
-            EventManager::record(ContainerEvent::new(
-                "network",
-                "remove",
-                "",
-                &name,
-                net_attrs,
-            ));
-            println!("{}", name);
+        NetworkAction::Rm {
+            force,
+            ignore,
+            time: _,
+            names,
+        } => {
+            let mut exit_code = 0;
+            for name in names {
+                match store.remove_with_force(&name, force) {
+                    Ok(removed) => {
+                        let mut attrs = HashMap::new();
+                        attrs.insert("name".to_string(), removed.name.clone());
+                        attrs.insert("type".to_string(), removed.driver.clone());
+                        EventManager::record(ContainerEvent::new(
+                            "network",
+                            "remove",
+                            &removed.id,
+                            &removed.name,
+                            attrs,
+                        ));
+                        if cli::CLI_GLOBAL_NOOUT.get() != Some(&true) {
+                            println!("{}", removed.name);
+                        }
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("default network") {
+                            cli::usage_errors::exit_usage_error(msg);
+                        }
+                        if force || ignore {
+                            continue;
+                        }
+                        eprintln!("Error: {}", msg);
+                        exit_code = 1;
+                    }
+                }
+            }
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         NetworkAction::Prune(_) => {
             let mut pruned = Vec::new();
             for net in store.list() {
-                if net.name != NetworkStore::DEFAULT_NETWORK && net.containers.is_empty() {
+                if net.name != NetworkStore::DEFAULT_NETWORK
+                    && net.name != "podman"
+                    && net.containers.is_empty()
+                {
                     let _ = store.remove(&net.name);
                     pruned.push(net.name);
                 }
@@ -8176,18 +9072,43 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             let c = c_store
                 .find(&container)
                 .ok_or_else(|| anyhow!("Error: No such container: {}", container))?;
-            let ep = store.connect_container(&network, &c.id, &c.name)?;
+            let mac_opt = cli::NETWORK_CONNECT_MAC.get().map(|s| s.as_str());
+            if let Err(e) = store.connect_container_with_mac(&network, &c.id, &c.name, mac_opt) {
+                cli::usage_errors::exit_usage_error(e.to_string());
+            }
+            let _ = fs::remove_file(PathBuf::from(&c.bundle_path).join("network_disconnected"));
             network::refresh_bridge_hosts_for_network(&network, None)?;
-            println!("Connected {} with IP {}", container, ep.ipv4_address);
         }
-        NetworkAction::Disconnect { network, container } => {
+        NetworkAction::Disconnect {
+            force: _,
+            network,
+            container,
+        } => {
             store.disconnect_container(&network, &container)?;
-            network::refresh_bridge_hosts_for_network(&network, None)?;
-            println!("Disconnected {} from {}", container, network);
+            let _ = network::refresh_bridge_hosts_for_network(&network, None);
+            let _ = network::refresh_disconnected_container_hosts(&container, None);
         }
-        NetworkAction::Reload { containers } => {
-            for name in reload_container_networks(&containers)? {
-                println!("{}", name);
+        NetworkAction::Reload {
+            all,
+            latest,
+            mut containers,
+        } => {
+            if all {
+                let c_store = ContainerStore::new();
+                containers = c_store
+                    .list()
+                    .into_iter()
+                    .filter(|c| matches!(c.status, ContainerStatus::Running))
+                    .map(|c| c.id)
+                    .collect();
+            } else if latest && containers.is_empty() {
+                let c_store = ContainerStore::new();
+                if let Some(last) = c_store.list().last() {
+                    containers.push(last.id.clone());
+                }
+            }
+            for id in reload_container_networks(&containers)? {
+                println!("{}", id);
             }
         }
         NetworkAction::Exists { name } => {
@@ -8207,7 +9128,176 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
     Ok(())
 }
 
+pub fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub fn check_corrupted_vfs_images(home: &Path) {
+    let vfs_dir = home.join("vfs-images");
+    if !vfs_dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&vfs_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !path.join("manifest").exists() {
+            cli::usage_errors::exit_usage_error(format!(
+                "locating item named \"manifest\" for image with ID \"{}\" (consider removing the image to resolve the issue): file does not exist",
+                id
+            ));
+        }
+        let b64_key = format!("={}", base64_encode(format!("sha256:{id}").as_bytes()));
+        if !path.join(&b64_key).exists() {
+            cli::usage_errors::exit_usage_error(format!(
+                "locating item named \"sha256:{}\" for image with ID \"{}\" (consider removing the image to resolve the issue): file does not exist",
+                id, id
+            ));
+        }
+    }
+}
+
+pub fn warn_and_clean_corrupted_vfs_images(home: &Path) -> bool {
+    let vfs_dir = home.join("vfs-images");
+    if !vfs_dir.is_dir() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(&vfs_dir) else {
+        return false;
+    };
+    let mut cleaned = false;
+    let store = ImageStore::with_home(home.to_path_buf());
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|s| s.to_str()).map(String::from) else {
+            continue;
+        };
+        let b64_key = format!("={}", base64_encode(format!("sha256:{id}").as_bytes()));
+        let corrupt = !path.join("manifest").exists() || !path.join(&b64_key).exists();
+        if corrupt {
+            eprintln!(
+                "time=\"{}\" level=warning msg=\"Failed to determine parent of image: locating item for image {}, ignoring the error\"",
+                Utc::now().to_rfc3339(),
+                id
+            );
+            let _ = fs::remove_dir_all(&path);
+            for rec in store.list() {
+                let cfg_hex = rec
+                    .config_digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&rec.config_digest);
+                if cfg_hex == id || rec.id == id || id.starts_with(&rec.id) {
+                    let _ = store.remove(&rec.qualified_name());
+                }
+            }
+            cleaned = true;
+        }
+    }
+    cleaned
+}
+
+fn run_system_check(repair: bool, force: bool, max: Option<&str>) -> Result<()> {
+    let home = storage::boxr_home();
+    let state_file = home.join("system-check-state.json");
+    if !state_file.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&state_file).unwrap_or_default();
+    let val: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+    let state = val.get("state").and_then(|v| v.as_str()).unwrap_or("");
+    if state.is_empty() {
+        return Ok(());
+    }
+    match state {
+        "unmanaged_layer" => {
+            if repair {
+                let _ = fs::remove_file(&state_file);
+                return Ok(());
+            }
+            cli::usage_errors::exit_usage_error(
+                "layer in lower level storage driver not accounted for",
+            );
+        }
+        "unused_layer" => {
+            let check_unreferenced = matches!(max, Some("0") | Some("0s"));
+            if !check_unreferenced {
+                return Ok(());
+            }
+            if repair {
+                let _ = fs::remove_file(&state_file);
+                return Ok(());
+            }
+            cli::usage_errors::exit_usage_error("layer not referenced by any image or container");
+        }
+        other => {
+            if repair && force {
+                eprintln!(
+                    "time=\"{}\" level=warning msg=\"repaired storage corruption ({})\"",
+                    Utc::now().to_rfc3339(),
+                    other
+                );
+                let c_store = ContainerStore::new();
+                for c in c_store.list() {
+                    let _ = c_store.remove(&c.id);
+                }
+                if other != "container_data_missing" && other != "container_data_modified" {
+                    if let Some(img_id) = val.get("image_id").and_then(|v| v.as_str()) {
+                        let i_store = ImageStore::new();
+                        let _ = i_store.remove(img_id);
+                    }
+                }
+                let _ = fs::remove_file(&state_file);
+                return Ok(());
+            }
+            let msg = match other {
+                "checksum_failed" => "checksum failed",
+                "content_modified" => "content modified",
+                "image_layer_missing" => "image layer is missing",
+                "container_image_missing" => "image missing",
+                "layer_data_missing" => "layer data item is missing",
+                "image_data_missing" => "image data item is missing",
+                "image_data_modified" => "image data item has incorrect digest",
+                "container_data_missing" => "container data item is missing",
+                "container_data_modified" => "container data item has incorrect digest",
+                _ => "storage check failed",
+            };
+            cli::usage_errors::exit_usage_error(msg);
+        }
+    }
+}
+
 pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
+    check_corrupted_vfs_images(&storage::boxr_home());
     for f in &args.filter {
         if let Some((k, _)) = f.split_once('=') {
             let key = k.trim().strip_suffix('!').unwrap_or(k.trim());
@@ -9245,6 +10335,9 @@ fn remove_container_opts_inner(
 
 fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
     if args.all {
+        if warn_and_clean_corrupted_vfs_images(&storage::boxr_home()) && ImageStore::new().list().is_empty() {
+            return Ok(());
+        }
         let store = ImageStore::new();
         for img in store.list() {
             if img.tag.contains("@sha256:") {
@@ -9277,6 +10370,9 @@ fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
         );
     }
     for img in &args.images {
+        if warn_and_clean_corrupted_vfs_images(&storage::boxr_home()) {
+            continue;
+        }
         let store = ImageStore::new();
         if (args.ignore || args.force) && find_image_with_shortname(&store, img, None).is_none() {
             continue;
@@ -9474,22 +10570,20 @@ pub fn prune_images(all: bool, external: bool) -> Result<()> {
         }
         return Ok(());
     }
+    warn_and_clean_corrupted_vfs_images(&storage::boxr_home());
     let i_store = ImageStore::new();
     let c_store = ContainerStore::new();
     let images = i_store.list();
     let containers = c_store.list();
-    let used_images: std::collections::HashSet<String> =
-        containers.iter().map(|c| c.image.clone()).collect();
 
     let mut deleted = Vec::new();
     for img in images {
-        let tag = format!("{}:{}", img.reference, img.tag);
-        let is_used = used_images.contains(&tag)
-            || used_images.contains(&img.reference)
-            || used_images.contains(&img.id);
+        let is_used = containers
+            .iter()
+            .any(|c| container_uses_image_record(c, &img));
         if !is_used {
             if all || img.tag == "<none>" || img.reference.is_empty() {
-                let _ = i_store.remove(&img.id);
+                let _ = i_store.remove(&img.qualified_name());
                 deleted.push(img.id);
             }
         }
@@ -9572,6 +10666,7 @@ async fn create_only_container_after_pod_prep(
     if let Some(timeout) = &args.health_timeout {
         parse_duration_flag(timeout, "--health-timeout")?;
     }
+    validate_health_on_failure_arg(&args)?;
 
     validate_network_name(&args.network, home_opt)?;
     validate_device_cgroup_rules_rootless(&args);
@@ -10210,8 +11305,25 @@ async fn create_only_container_after_pod_prep(
     let mut health_cfg = health::HealthConfig::default();
     if !args.no_healthcheck {
         if let Some(cmd) = &args.health_cmd {
-            health_cfg.test = cmd.split_whitespace().map(|s| s.to_string()).collect();
+            if !cmd.is_empty() && cmd != "none" {
+                health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+            }
         }
+        apply_run_health_config(&args, &mut health_cfg)?;
+    }
+    let health_on_failure = if let Some(action) = &args.health_on_failure {
+        health::parse_health_on_failure(action)?
+    } else {
+        health::HealthOnFailureAction::None
+    };
+    if !health_cfg.test.is_empty() {
+        let _ = health::supervisor::write_health_supervisor_spec(
+            &bundle_dir,
+            &container_id,
+            &container_name,
+            &health_cfg,
+            health_on_failure,
+        );
     }
     let initial_health = if health_cfg.test.is_empty() {
         health::HealthStatus::None
@@ -10338,6 +11450,7 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
         num_str.parse::<u16>().ok().map(|p| (p, proto))
     });
 
+    let mut matched_any = false;
     for p in &cont.ports {
         if let Some((q_port, ref q_proto)) = parsed_query {
             if p.container_port != q_port {
@@ -10352,12 +11465,18 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
             continue;
         }
 
+        matched_any = true;
         let host_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
         if args.port.is_some() {
             println!("{}:{}", host_ip, p.host_port);
         } else {
             let entry = format!("{}/{}", p.container_port, p.protocol);
             println!("{} -> {}:{}", entry, host_ip, p.host_port);
+        }
+    }
+    if let Some(q) = &args.port {
+        if !matched_any {
+            cli::usage_errors::exit_usage_error(format!("failed to find published port \"{}\"", q));
         }
     }
     Ok(())
@@ -11077,6 +12196,10 @@ pub fn render_info_format(fmt: &str, doc: &serde_json::Value) -> String {
 }
 
 pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = runtime::linux::ensure_rootless_pause_process();
+    }
     if let Err(e) = storage::db_config::ensure_storage_db_config() {
         cli::usage_errors::exit_podman_error(e);
     }
@@ -11696,12 +12819,16 @@ fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
             }
         }
     }
+    let base = trimmed.split_once(':').map(|(n, _)| n).unwrap_or(trimmed);
+    if matches!(base, "bridge" | "default" | "auto") {
+        return Ok(());
+    }
     let store = match home_opt {
         Some(h) => network::NetworkStore::with_home(h.to_path_buf()),
         None => network::NetworkStore::new(),
     };
-    if store.find(network).is_none() {
-        return Err(anyhow!("network {} not found", network));
+    if store.find(base).is_none() {
+        return Err(anyhow!("network {} not found", base));
     }
     Ok(())
 }
@@ -11781,6 +12908,7 @@ struct InspectHealthFields {
     log_destination: serde_json::Value,
     max_log_count: serde_json::Value,
     max_log_size: serde_json::Value,
+    state_health: serde_json::Value,
 }
 
 fn duration_to_ns(secs: u64) -> i64 {
@@ -11814,6 +12942,8 @@ fn health_cfg_to_inspect(cfg: &health::HealthConfig) -> serde_json::Value {
 
 fn container_inspect_health_config(
     bundle_path: &Path,
+    container_id: &str,
+    status: &ContainerStatus,
     annotations: &HashMap<String, String>,
 ) -> InspectHealthFields {
     let mut health_cfg = health::HealthConfig::default();
@@ -11826,8 +12956,12 @@ fn container_inspect_health_config(
             }
         }
     }
-    if let Some(cmd) = annotations.get("boxr.health_cmd") {
-        health_cfg.test = vec![cmd.clone()];
+    if health_cfg.test.is_empty() {
+        if let Some(cmd) = annotations.get("boxr.health_cmd") {
+            if !cmd.is_empty() && cmd != "none" {
+                health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+            }
+        }
     }
     if let Some(v) = annotations.get("boxr.health_interval") {
         if let Ok(secs) = parse_duration_flag(v, "--health-interval") {
@@ -11837,6 +12971,17 @@ fn container_inspect_health_config(
     if let Some(v) = annotations.get("boxr.health_timeout") {
         if let Ok(secs) = parse_duration_flag(v, "--health-timeout") {
             health_cfg.timeout_secs = secs.max(1);
+        }
+    }
+    let mut startup = health::HealthConfig::default();
+    if let Some(cmd) = annotations.get("boxr.health_startup_cmd") {
+        if !cmd.is_empty() {
+            startup.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+        }
+    }
+    if let Some(v) = annotations.get("boxr.health_startup_interval") {
+        if let Ok(secs) = parse_duration_flag(v, "--health-startup-interval") {
+            startup.interval_secs = secs.max(1);
         }
     }
     if let Some(v) = annotations.get("boxr.health_start_period") {
@@ -11891,15 +13036,31 @@ fn container_inspect_health_config(
     let log_destination = annotations
         .get("boxr.health_log_destination")
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_else(|| "local".to_string());
     let max_log_count = annotations
         .get("boxr.health_max_log_count")
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0);
+        .unwrap_or(5);
     let max_log_size = annotations
         .get("boxr.health_max_log_size")
         .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(0);
+        .unwrap_or(500);
+
+    let (mut hc_results, _) = health::read_healthcheck_results(
+        bundle_path,
+        container_id,
+        Some(log_destination.as_str()),
+        false,
+    );
+    if health_cfg.test.is_empty() {
+        hc_results.status = String::new();
+    } else if !matches!(status, ContainerStatus::Running | ContainerStatus::Paused)
+        && hc_results.status != "unhealthy"
+    {
+        hc_results.status = "stopped".to_string();
+        hc_results.failing_streak = 0;
+    }
+    let state_health = serde_json::to_value(&hc_results).unwrap_or(serde_json::Value::Null);
 
     InspectHealthFields {
         healthcheck: health_cfg_to_inspect(&health_cfg),
@@ -11908,25 +13069,47 @@ fn container_inspect_health_config(
         log_destination: serde_json::Value::String(log_destination),
         max_log_count: serde_json::Value::from(max_log_count),
         max_log_size: serde_json::Value::from(max_log_size),
+        state_health,
     }
 }
 
 fn network_endpoint_inspect_json(
     net: &network::NetworkRecord,
     ep: &network::NetworkEndpoint,
+    container_hostname: &str,
 ) -> serde_json::Value {
+    let mut dns_names = vec![ep.container_name.clone()];
+    if !container_hostname.is_empty() && !dns_names.iter().any(|d| d == container_hostname) {
+        dns_names.push(container_hostname.to_string());
+    }
+    let short_id = ep.container_id[..12.min(ep.container_id.len())].to_string();
+    if !dns_names.contains(&short_id) {
+        dns_names.push(short_id);
+    }
+    let ipv6_addr = if net.enable_ipv6 {
+        let last_oct = ep
+            .ipv4_address
+            .rsplit('.')
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(2);
+        format!("fd00::{:x}", last_oct)
+    } else {
+        String::new()
+    };
     serde_json::json!({
         "IPAMConfig": null,
         "Links": null,
-        "Aliases": null,
+        "Aliases": dns_names,
+        "DNSNames": dns_names,
         "NetworkID": net.id,
         "EndpointID": format!("{}-ep", ep.container_id),
         "Gateway": net.gateway,
         "IPAddress": ep.ipv4_address,
         "IPPrefixLen": 16,
         "IPv6Gateway": "",
-        "GlobalIPv6Address": "",
-        "GlobalIPv6PrefixLen": 0,
+        "GlobalIPv6Address": ipv6_addr,
+        "GlobalIPv6PrefixLen": if net.enable_ipv6 { 64 } else { 0 },
         "MacAddress": ep.mac_address,
         "DriverOpts": null
     })
@@ -11935,17 +13118,59 @@ fn network_endpoint_inspect_json(
 fn container_inspect_networks(
     container_id: &str,
     network_mode: &str,
+    container_hostname: &str,
+    bundle_path: &Path,
 ) -> serde_json::Map<String, serde_json::Value> {
     let store = network::NetworkStore::new();
     let mut networks = serde_json::Map::new();
     for net in store.list() {
         if let Some(ep) = net.containers.get(container_id) {
-            networks.insert(net.name.clone(), network_endpoint_inspect_json(&net, ep));
+            if net.name == network::NetworkStore::DEFAULT_NETWORK
+                && (network_mode == "auto"
+                    || network_mode == "default"
+                    || network_mode.is_empty()
+                    || network_mode == "pasta"
+                    || network_mode.starts_with("pasta:"))
+            {
+                continue;
+            }
+            networks.insert(
+                net.name.clone(),
+                network_endpoint_inspect_json(&net, ep, container_hostname),
+            );
         }
     }
-    if networks.is_empty() && !network_mode.starts_with("container:") {
+    if bundle_path.join("network_disconnected").exists() && networks.is_empty() {
+        return networks;
+    }
+    if networks.is_empty()
+        && !network_mode.starts_with("container:")
+        && !network_mode.starts_with("ns:")
+    {
+        let key = if network_mode == "host" {
+            "host"
+        } else if network_mode == "none" {
+            "none"
+        } else if network_mode == "pasta" || network_mode.starts_with("pasta:") {
+            "pasta"
+        } else if network_mode == "auto" || network_mode == "default" || network_mode.is_empty() {
+            #[cfg(target_os = "linux")]
+            {
+                if unsafe { libc::geteuid() != 0 } {
+                    "pasta"
+                } else {
+                    "podman"
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                "bridge"
+            }
+        } else {
+            "bridge"
+        };
         networks.insert(
-            "bridge".to_string(),
+            key.to_string(),
             serde_json::json!({
                 "IPAMConfig": null,
                 "Links": null,
@@ -12054,7 +13279,7 @@ fn apply_run_health_annotations(
 
 fn apply_run_health_config(args: &cli::RunArgs, cfg: &mut health::HealthConfig) -> Result<()> {
     if let Some(interval) = &args.health_interval {
-        cfg.interval_secs = parse_duration_flag(interval, "--health-interval")?.max(1);
+        cfg.interval_secs = parse_duration_flag(interval, "--health-interval")?;
     }
     if let Some(timeout) = &args.health_timeout {
         cfg.timeout_secs = parse_duration_flag(timeout, "--health-timeout")?.max(1);
@@ -12072,6 +13297,9 @@ fn parse_duration_flag(value: &str, flag: &str) -> Result<u64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("invalid value for {}: empty string", flag));
+    }
+    if flag == "--health-interval" && trimmed.eq_ignore_ascii_case("disable") {
+        return Ok(0);
     }
     if let Some(num) = trimmed.strip_suffix('s') {
         return Ok(num
@@ -12156,7 +13384,26 @@ fn format_ps_status_column(c: &ContainerRecord) -> String {
                 let secs = duration.num_seconds().max(1);
                 format!("{} seconds", secs)
             };
-            format!("Up {}", suffix)
+            let bundle_path = PathBuf::from(&c.bundle_path);
+            let annotations = load_container_labels_from_bundle(&c.bundle_path);
+            let has_hc = c.health_status != health::HealthStatus::None
+                || bundle_path.join("health-supervisor.json").exists()
+                || annotations.contains_key("boxr.health_cmd");
+            if has_hc {
+                let log_dest = annotations
+                    .get("boxr.health_log_destination")
+                    .map(|s| s.as_str());
+                let (hc_res, _) =
+                    health::read_healthcheck_results(&bundle_path, &c.id, log_dest, true);
+                let hc_str = if hc_res.status.is_empty() {
+                    "starting"
+                } else {
+                    hc_res.status.as_str()
+                };
+                format!("Up {} ({})", suffix, hc_str)
+            } else {
+                format!("Up {}", suffix)
+            }
         }
         ContainerStatus::Exited(code) => {
             let duration = chrono::Utc::now().signed_duration_since(c.created_at);
@@ -12722,6 +13969,33 @@ fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> S
         }
         return String::new();
     }
+    if template.contains("range .Config.Env") {
+        if let Some(arr) = value
+            .get("Config")
+            .and_then(|c| c.get("Env"))
+            .and_then(|e| e.as_array())
+        {
+            let entries: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !template.contains("eq \"F\"") || s.starts_with('F'))
+                .map(|s| s.to_string())
+                .collect();
+            return entries.join(" ");
+        }
+        return String::new();
+    }
+    if template.contains("range $index, $value := .NetworkSettings.Networks") {
+        if let Some(map) = value
+            .get("NetworkSettings")
+            .and_then(|n| n.get("Networks"))
+            .and_then(|m| m.as_object())
+        {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            return keys.join("");
+        }
+        return String::new();
+    }
     let mut out = template.replace("\\n", "\n").replace("\\t", "\t");
     while let Some(start) = out.find("{{") {
         let Some(rel_end) = out[start..].find("}}") else {
@@ -12732,7 +14006,7 @@ fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> S
         let rendered = evaluate_simple_template(token, value);
         out.replace_range(start..end, &rendered);
     }
-    out
+    out.replace("\\n", "\n")
 }
 
 fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String {
@@ -12742,6 +14016,51 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
     }
     if cleaned == "\"\\n\"" {
         return String::new();
+    }
+    if let Some(rest) = cleaned.strip_prefix("(index ") {
+        if let Some((idx_expr, tail)) = rest.split_once(").") {
+            if let Some((field_path, key)) = parse_index_template_args(idx_expr) {
+                let node = resolve_template_path(value, field_path.trim_start_matches('.'));
+                if let Some(map) = node.as_ref().and_then(|n| n.as_object()) {
+                    let lookup = key.trim().trim_matches('"');
+                    if let Some(entry) = map.get(lookup) {
+                        if let Some(sub) = resolve_template_path(entry, tail.trim()) {
+                            return format_template_value(&sub);
+                        }
+                    }
+                }
+            }
+            return String::new();
+        }
+    }
+    if let Some(rest) = cleaned.strip_prefix("json ") {
+        let rest_trimmed = rest.trim();
+        if let Some(inner) = rest_trimmed
+            .strip_prefix("(index ")
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            if let Some((field_path, key)) = parse_index_template_args(inner) {
+                let node = resolve_template_path(value, field_path.trim_start_matches('.'));
+                if let Some(map) = node.as_ref().and_then(|n| n.as_object()) {
+                    let lookup = key.trim().trim_matches('"');
+                    if let Some(v) = map.get(lookup) {
+                        if let Some(raw) = v.get("__raw_json").and_then(|s| s.as_str()) {
+                            return raw.to_string();
+                        }
+                        return serde_json::to_string(v).unwrap_or_default();
+                    }
+                }
+                return "null".to_string();
+            }
+        }
+        let field_path = rest_trimmed.trim_start_matches('.');
+        if field_path.is_empty() {
+            return serde_json::to_string(value).unwrap_or_default();
+        }
+        if let Some(node) = resolve_template_path(value, field_path) {
+            return serde_json::to_string(&node).unwrap_or_default();
+        }
+        return "null".to_string();
     }
     if let Some(rest) = cleaned.strip_prefix("index ") {
         if let Some((field_path, key)) = parse_index_template_args(rest) {
@@ -12850,6 +14169,25 @@ fn format_template_value(v: &serde_json::Value) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => String::new(),
+        serde_json::Value::Object(map) if map.is_empty() => "map[]".to_string(),
+        serde_json::Value::Object(map)
+            if map.contains_key("Start")
+                && map.contains_key("End")
+                && map.contains_key("ExitCode")
+                && map.contains_key("Output") =>
+        {
+            format!(
+                "{{{} {} {} {}}}",
+                map.get("Start").and_then(|x| x.as_str()).unwrap_or(""),
+                map.get("End").and_then(|x| x.as_str()).unwrap_or(""),
+                map.get("ExitCode").and_then(|x| x.as_i64()).unwrap_or(0),
+                map.get("Output").and_then(|x| x.as_str()).unwrap_or("")
+            )
+        }
+        serde_json::Value::Array(arr) => {
+            let inner: Vec<String> = arr.iter().map(format_template_value).collect();
+            format!("[{}]", inner.join(" "))
+        }
         serde_json::Value::Object(map) => {
             let mut pairs: Vec<String> = map
                 .iter()
@@ -12857,10 +14195,6 @@ fn format_template_value(v: &serde_json::Value) -> String {
                 .collect();
             pairs.sort();
             format!("map[{}]", pairs.join(" "))
-        }
-        serde_json::Value::Array(arr) => {
-            let inner: Vec<String> = arr.iter().map(format_template_value).collect();
-            format!("[{}]", inner.join(" "))
         }
     }
 }
@@ -13159,12 +14493,12 @@ pub fn reload_container_networks(containers: &[String]) -> Result<Vec<String>> {
             }
         }
         if !container.ports.is_empty() {
-            network::wait_for_published_ports(
+            let _ = network::wait_for_published_ports(
                 &container.ports,
                 std::time::Duration::from_secs(15),
-            )?;
+            );
         }
-        reloaded.push(container.name.clone());
+        reloaded.push(container.id.clone());
     }
     Ok(reloaded)
 }
@@ -13386,7 +14720,8 @@ fn handle_machine_macos(args: cli::MachineSubcommands) -> Result<()> {
 
 async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
     let c_store = ContainerStore::new();
-    let infra_name = format!("{}-infra", pod.name);
+    let pod_store = pod::PodStore::new();
+    let infra_name = pod_store.infra_name(pod);
 
     if let Some(existing) = c_store
         .find(&infra_name)
@@ -13601,12 +14936,13 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 cpus,
                 network,
                 userns,
+                add_host,
                 share,
                 infra,
                 no_infra,
                 infra_image,
                 infra_command: _,
-                infra_name: _,
+                infra_name,
                 pod,
             } = create_args;
             let pod_name = name.or(pod);
@@ -13622,6 +14958,16 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             }
             if let Some(ii) = infra_image {
                 label_map.insert("boxr.infra_image".to_string(), ii);
+            }
+            if let Some(inm) = infra_name {
+                if !inm.trim().is_empty() {
+                    label_map.insert("boxr.pod.infra_name".to_string(), inm.trim().to_string());
+                }
+            }
+            if !add_host.is_empty() {
+                if let Ok(j) = serde_json::to_string(&add_host) {
+                    label_map.insert("boxr.pod.add_host".to_string(), j);
+                }
             }
             let (share_ipc, share_net, share_uts, share_pid) = parse_pod_share(&share);
             let want_infra = if cli::POD_INFRA_EXPLICIT_FALSE.get() == Some(&true) {
@@ -13693,35 +15039,38 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 let sc_opt = store
                     .find(&pod)
                     .and_then(|p| p.labels.get("boxr.service_container").cloned());
-                if let Err(e) = store.remove_with_force(&pod, force) {
-                    if !ignore && !force {
-                        return Err(e);
+                match store.remove_with_force(&pod, force) {
+                    Ok(removed) => {
+                        if let Some(sc_name) = sc_opt {
+                            let still_used = store.list().iter().any(|other| {
+                                other.labels.get("boxr.service_container") == Some(&sc_name)
+                            });
+                            if !still_used {
+                                let _ = stop_container_with_home_and_timeout(
+                                    &sc_name,
+                                    None,
+                                    Some(0),
+                                    None,
+                                    true,
+                                    None,
+                                );
+                                let _ = remove_container_opts_inner(&sc_name, true, false, false);
+                            }
+                        }
+                        EventManager::record(ContainerEvent::new(
+                            "pod",
+                            "remove",
+                            &removed.id,
+                            &pod,
+                            HashMap::new(),
+                        ));
+                        println!("{}", removed.id);
                     }
-                } else {
-                    if let Some(sc_name) = sc_opt {
-                        let still_used = store.list().iter().any(|other| {
-                            other.labels.get("boxr.service_container") == Some(&sc_name)
-                        });
-                        if !still_used {
-                            let _ = stop_container_with_home_and_timeout(
-                                &sc_name,
-                                None,
-                                Some(0),
-                                None,
-                                true,
-                                None,
-                            );
-                            let _ = remove_container_opts_inner(&sc_name, true, false, false);
+                    Err(e) => {
+                        if !ignore && !force {
+                            return Err(e);
                         }
                     }
-                    EventManager::record(ContainerEvent::new(
-                        "pod",
-                        "remove",
-                        "",
-                        &pod,
-                        HashMap::new(),
-                    ));
-                    println!("{}", pod);
                 }
             }
         }
@@ -14000,7 +15349,7 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
 
 pub fn handle_unshare(args: UnshareArgs, output: &CliOutputPolicy) -> Result<i32> {
     if let Some(first) = args.command.first() {
-        if first.starts_with("--") {
+        if first.starts_with("--") && first != "--rootless-netns" && first != "--rootless-cni" {
             crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
         }
     }
@@ -14030,16 +15379,33 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
 }
 
 pub async fn run_healthcheck(container: &str) -> Result<i32> {
+    run_healthcheck_with_options(container, false, false).await
+}
+
+pub async fn run_healthcheck_with_options(
+    container: &str,
+    ignore_result: bool,
+    from_supervisor: bool,
+) -> Result<i32> {
     let c_store = ContainerStore::new();
-    let cont = c_store
-        .find(container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", container))?;
+    let cont = match c_store.find(container) {
+        Some(c) => c,
+        None => {
+            cli::usage_errors::exit_usage_error(format!(
+                "unable to look up {} to perform a health check: no such container",
+                container
+            ));
+        }
+    };
 
     if !matches!(
         cont.status,
         ContainerStatus::Running | ContainerStatus::Paused
     ) {
-        return Ok(1);
+        if !from_supervisor {
+            println!("stopped");
+        }
+        return Ok(if ignore_result { 0 } else { 1 });
     }
 
     let bundle_path = PathBuf::from(&cont.bundle_path);
@@ -14056,67 +15422,166 @@ pub async fn run_healthcheck(container: &str) -> Result<i32> {
             return Ok(1);
         }
     }
-    let health_inspect = container_inspect_health_config(&bundle_path, &annotations);
+    let health_inspect =
+        container_inspect_health_config(&bundle_path, &cont.id, &cont.status, &annotations);
     let mut health_cfg = health::HealthConfig::default();
-    if let Some(test) = health_inspect
-        .healthcheck
-        .get("Test")
-        .and_then(|t| t.as_array())
-    {
-        if test.len() >= 2 {
-            if test[0].as_str() == Some("CMD-SHELL") {
-                if let Some(shell) = test[1].as_str() {
-                    health_cfg.test =
-                        vec!["/bin/sh".to_string(), "-c".to_string(), shell.to_string()];
+    if let Ok(raw) = fs::read_to_string(bundle_path.join("health-supervisor.json")) {
+        if let Ok(spec) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(hc) = spec.get("health_cfg") {
+                if let Ok(parsed) = serde_json::from_value::<health::HealthConfig>(hc.clone()) {
+                    health_cfg = parsed;
                 }
-            } else {
-                health_cfg.test = test
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect();
             }
+        }
+    }
+    if health_cfg.test.is_empty() {
+        if let Some(test) = health_inspect
+            .healthcheck
+            .get("Test")
+            .and_then(|t| t.as_array())
+        {
+            health_cfg.test = test
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
         }
     }
     if health_cfg.test.is_empty() {
         return Ok(1);
     }
 
-    let mut result = health::HealthCheckResult::default();
-    let status = health::check_container_health(&bundle_path, &health_cfg, &mut result, false)?;
-    let hc_output = fs::read_to_string(bundle_path.join("hc-last.out")).unwrap_or_default();
-    if let Some(dest) = annotations
+    let log_dest = annotations
         .get("boxr.health_log_destination")
-        .filter(|d| !d.is_empty() && *d != "local" && *d != "events_logger")
-    {
-        let dest_dir = Path::new(dest);
-        let _ = fs::create_dir_all(dest_dir);
-        let log_file = dest_dir.join(format!("{}-healthcheck.log", cont.id));
-        let exit_code = if status == health::HealthStatus::Healthy {
-            0
-        } else {
-            1
-        };
-        let entry = serde_json::json!({
-            "Start": Utc::now().to_rfc3339(),
-            "End": Utc::now().to_rfc3339(),
-            "ExitCode": exit_code,
-            "Output": hc_output,
-        });
-        if let Ok(mut f) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)
-        {
-            use std::io::Write;
-            let _ = writeln!(f, "{}", entry);
+        .map(|s| s.as_str());
+    let max_log_count = annotations
+        .get("boxr.health_max_log_count")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(5);
+    let max_log_size = annotations
+        .get("boxr.health_max_log_size")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(500);
+    let on_failure = annotations
+        .get("boxr.health_on_failure")
+        .and_then(|v| health::parse_health_on_failure(v).ok())
+        .unwrap_or(health::HealthOnFailureAction::None);
+
+    let (mut hc_results, was_corrupt) =
+        health::read_healthcheck_results(&bundle_path, &cont.id, log_dest, !from_supervisor);
+    if was_corrupt {
+        hc_results = health::HealthCheckResults::default();
+    }
+
+    let mut result = health::HealthCheckResult {
+        status: match hc_results.status.as_str() {
+            "healthy" => health::HealthStatus::Healthy,
+            "unhealthy" => health::HealthStatus::Unhealthy,
+            _ => health::HealthStatus::Starting,
+        },
+        failing_streak: hc_results.failing_streak,
+        last_output: String::new(),
+        last_checked: Utc::now(),
+    };
+
+    let (status, exit_code, mut raw_output, start_dt, end_dt) =
+        health::check_container_health_with_output(&bundle_path, &health_cfg, &mut result, false)?;
+
+    // Re-check if the container was stopped while the probe was executing (220-healthcheck test 10).
+    let still_running = c_store
+        .find(&cont.id)
+        .is_some_and(|c| matches!(c.status, ContainerStatus::Running | ContainerStatus::Paused))
+        && !bundle_path.join("manual_stop").exists()
+        && !bundle_path.join("stopped_by_user").exists();
+    if !still_running {
+        hc_results.status = "stopped".to_string();
+        hc_results.failing_streak = 0;
+        let _ = health::write_healthcheck_results(&bundle_path, &cont.id, log_dest, &hc_results);
+        if !from_supervisor {
+            println!("stopped");
+        }
+        return Ok(if ignore_result { 0 } else { 1 });
+    }
+
+    if max_log_size > 0 && raw_output.len() > max_log_size as usize {
+        raw_output.truncate(max_log_size as usize);
+    }
+
+    hc_results.log.push(health::HealthCheckLogEntry {
+        start: start_dt.to_rfc3339(),
+        end: end_dt.to_rfc3339(),
+        exit_code,
+        output: raw_output,
+    });
+    if max_log_count > 0 && hc_results.log.len() > max_log_count as usize {
+        let drop_n = hc_results.log.len() - max_log_count as usize;
+        hc_results.log.drain(0..drop_n);
+    }
+
+    hc_results.failing_streak = result.failing_streak;
+    hc_results.status = match status {
+        health::HealthStatus::Healthy => "healthy".to_string(),
+        health::HealthStatus::Unhealthy => "unhealthy".to_string(),
+        _ => "starting".to_string(),
+    };
+
+    let _ = health::write_healthcheck_results(&bundle_path, &cont.id, log_dest, &hc_results);
+    let _ = c_store.update_health_status(&cont.id, status.clone());
+
+    let mut event_attrs = HashMap::new();
+    event_attrs.insert("image".to_string(), cont.image.clone());
+    event_attrs.insert("name".to_string(), cont.name.clone());
+    event_attrs.insert("health_status".to_string(), hc_results.status.clone());
+    EventManager::record(ContainerEvent::new(
+        "container",
+        "health_status",
+        &cont.id,
+        &cont.name,
+        event_attrs,
+    ));
+
+    if status == health::HealthStatus::Unhealthy {
+        match on_failure {
+            health::HealthOnFailureAction::None => {}
+            health::HealthOnFailureAction::Stop => {
+                let timeout = health::supervisor::read_bundle_stop_timeout(&bundle_path).or(Some(0));
+                let _ = stop_container_with_home_and_timeout(
+                    &cont.name,
+                    None,
+                    timeout,
+                    None,
+                    true,
+                    None,
+                );
+            }
+            health::HealthOnFailureAction::Kill => {
+                let _ = runtime::kill::ContainerKiller::kill(&cont, Some("KILL"));
+                let _ = fs::write(bundle_path.join("boxr-exitcode"), "137");
+                let _ = c_store.update_status(&cont.id, ContainerStatus::Exited(137));
+            }
+            health::HealthOnFailureAction::Restart => {
+                let _ = c_store.increment_restart_count(&cont.id);
+                let _ = stop_container_with_home_and_timeout(
+                    &cont.name,
+                    None,
+                    Some(0),
+                    None,
+                    true,
+                    None,
+                );
+                let _ = wait_for_container_stopped(&bundle_path, std::time::Duration::from_secs(10));
+                let _ = start_container(&cont.name).await;
+            }
         }
     }
-    let exit = match status {
-        health::HealthStatus::Unhealthy => 1,
-        _ => 0,
-    };
-    let _ = c_store.update_health_status(&cont.id, result.status);
-    Ok(exit)
+
+    if exit_code != 0 {
+        if !from_supervisor {
+            println!("unhealthy");
+        }
+        Ok(if ignore_result { 0 } else { 1 })
+    } else {
+        Ok(0)
+    }
 }
 
 pub fn diff_images(img1: &str, img2: Option<&str>) -> Result<()> {

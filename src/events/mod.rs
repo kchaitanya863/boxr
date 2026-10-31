@@ -108,13 +108,14 @@ impl ContainerEvent {
                 attrs_str.push(format!("{}={}", k, v));
             }
         }
+        attrs_str.sort();
         let attrs_formatted = if attrs_str.is_empty() {
             "".to_string()
         } else {
             format!(" ({})", attrs_str.join(", "))
         };
 
-        let id_str = if no_trunc {
+        let id_str = if no_trunc || self.event_type == "network" {
             self.actor_id.as_str()
         } else {
             &self.actor_id[..12.min(self.actor_id.len())]

@@ -38,6 +38,14 @@ pub fn spawn_port_forward_daemon(bundle_path: &Path, ports: &[PortMapping]) -> R
     {
         use std::os::unix::process::CommandExt;
         fwd_cmd.process_group(0);
+        unsafe {
+            fwd_cmd.pre_exec(|| {
+                for fd in 3..1024 {
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
     }
     fwd_cmd.spawn().with_context(|| {
         format!(
@@ -88,13 +96,44 @@ impl PortMapping {
     }
 
     /// Parse port string, expanding ranges into multiple mappings.
-    /// e.g. "8080:80", "127.0.0.1:3000:3000/tcp", "8000-8002:8000-8002"
+    /// e.g. "8080:80", "127.0.0.1:3000:3000/tcp", "8000-8002:8000-8002", "[::1]:8080:80/tcp"
     pub fn parse_all(spec: &str) -> Result<Vec<Self>> {
-        let (proto, port_spec) = if let Some((p, pr)) = spec.split_once('/') {
+        let trimmed = spec.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (proto, port_spec) = if let Some((p, pr)) = trimmed.split_once('/') {
             (pr.to_lowercase(), p)
         } else {
-            ("tcp".to_string(), spec)
+            ("tcp".to_string(), trimmed)
         };
+
+        if let Some(rest) = port_spec.strip_prefix('[') {
+            if let Some((ip_raw, rem)) = rest.split_once("]:") {
+                let ip = ip_raw.trim().to_string();
+                let rem_parts: Vec<&str> = rem.split(':').collect();
+                if rem_parts.len() == 2 {
+                    let host_ports = Self::parse_port_or_range(rem_parts[0])?;
+                    let container_ports = Self::parse_port_or_range(rem_parts[1])?;
+                    if host_ports.len() != container_ports.len() {
+                        return Err(anyhow!(
+                            "host and container port ranges must have equal length: {}",
+                            spec
+                        ));
+                    }
+                    return Ok(host_ports
+                        .into_iter()
+                        .zip(container_ports)
+                        .map(|(h_port, c_port)| Self {
+                            host_ip: Some(ip.clone()),
+                            host_port: h_port,
+                            container_port: c_port,
+                            protocol: proto.clone(),
+                        })
+                        .collect());
+                }
+            }
+        }
 
         let parts: Vec<&str> = port_spec.split(':').collect();
         match parts.len() {

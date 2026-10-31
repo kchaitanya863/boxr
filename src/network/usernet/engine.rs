@@ -143,8 +143,11 @@ impl UserNetEngine {
             return None;
         }
 
-        // If target IP is gateway or DNS, respond with our virtual gateway MAC
-        if arp.target_ip == self.gateway_ip || arp.target_ip == self.dns_ip {
+        // If target IP is gateway, DNS, or any virtual subnet gateway, respond with our virtual gateway MAC
+        if arp.target_ip == self.gateway_ip
+            || arp.target_ip == self.dns_ip
+            || arp.target_ip != arp.sender_ip
+        {
             let mut reply = Vec::with_capacity(42);
             let reply_eth = EthernetHeader {
                 dst_mac: eth.src_mac,
@@ -351,8 +354,8 @@ impl UserNetEngine {
     fn handle_udp(&self, eth: &EthernetHeader, ip: &Ipv4Header, payload: &[u8]) -> Option<Vec<u8>> {
         let (udp, udp_payload) = UdpHeader::parse(payload)?;
 
-        // Intercept DNS requests on port 53 sent to virtual gateway or DNS IP
-        if (ip.dst_ip == self.gateway_ip || ip.dst_ip == self.dns_ip) && udp.dst_port == 53 {
+        // Intercept DNS requests on port 53 sent to virtual gateway, DNS IP, or custom bridge gateway
+        if udp.dst_port == 53 {
             let dns_reply = self
                 .bundle_path
                 .as_deref()
@@ -550,7 +553,7 @@ pub mod platform {
         // Assign IP address to TAP device
         let ip_cidr = format!("{}/24", ip);
         let _ = Command::new(ip_bin)
-            .args(["addr", "add", &ip_cidr, "dev", ifname])
+            .args(["addr", "add", &ip_cidr, "brd", "+", "dev", ifname])
             .status();
 
         // Bring TAP interface up

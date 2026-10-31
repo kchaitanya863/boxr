@@ -13,12 +13,14 @@ pub use kill::{ContainerKiller, ProcessKiller};
 pub use traits::{ContainerRuntime, NativeContainerRuntime};
 
 /// Stdin/TTY attachment for `exec_in_bundle` (Podman `exec -i` / `exec -t`).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ExecAttach {
     pub interactive: bool,
     pub tty: bool,
     /// Do not inherit probe stdout/stderr to the boxr process (health checks, etc.).
     pub quiet: bool,
+    /// Optional host file path to capture combined stdout + stderr of the exec probe.
+    pub capture_output: Option<std::path::PathBuf>,
 }
 
 #[cfg(target_os = "linux")]
