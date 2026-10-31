@@ -8,13 +8,16 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub fn rand_id() -> [u8; 6] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut bytes = [0u8; 6];
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let pid = std::process::id();
-    let combined = now ^ ((pid as u128) << 32);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let combined = now ^ ((pid as u128) << 32) ^ ((seq as u128) << 64);
     let mut hasher = Sha256::new();
     hasher.update(combined.to_le_bytes());
     let hash = hasher.finalize();

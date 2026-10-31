@@ -1,6 +1,7 @@
 pub mod args;
 pub mod config;
 mod interpolate;
+pub mod provider;
 
 #[cfg(test)]
 mod tests;

@@ -513,6 +513,16 @@ pub fn bundle_forward_sock_path(bundle_path: &Path, sock_name: &str) -> PathBuf 
     PathBuf::from(format!("/tmp/bx-{}-{}", short, sock_name))
 }
 
+#[cfg(unix)]
+pub fn forward_sock_path(bundle_path: &Path, container_port: u16) -> PathBuf {
+    bundle_forward_sock_path(bundle_path, &forward_sock_name(container_port))
+}
+
+#[cfg(unix)]
+pub fn forward_udp_sock_path(bundle_path: &Path, container_port: u16) -> PathBuf {
+    bundle_forward_sock_path(bundle_path, &forward_udp_sock_name(container_port))
+}
+
 /// Runs INSIDE the container's network namespace (call after unsharing
 /// CLONE_NEWNET). For each published port, listens on a Unix socket in the
 /// bundle dir and bridges connections to the container's localhost.
@@ -595,8 +605,10 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                         (Ok(mut u2), Ok(mut t2)) => {
                             let h = std::thread::spawn(move || {
                                 let _ = std::io::copy(&mut u2, &mut t2);
+                                let _ = t2.shutdown(std::net::Shutdown::Write);
                             });
                             let _ = std::io::copy(&mut tcp, &mut unix_stream);
+                            let _ = unix_stream.shutdown(std::net::Shutdown::Write);
                             let _ = h.join();
                         }
                         _ => {}

@@ -289,6 +289,8 @@ pub struct PodLsArgs {
     pub filter: Vec<String>,
     #[arg(long = "format")]
     pub format: Option<String>,
+    #[arg(long = "sort")]
+    pub sort: Option<String>,
     #[arg(long = "no-trunc")]
     pub no_trunc: bool,
     #[arg(short = 'l', long = "latest")]
@@ -305,7 +307,7 @@ pub struct PodLsArgs {
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct PodCreateArgs {
     /// Pod name
-    #[arg(long = "name")]
+    #[arg(short = 'n', long = "name")]
     pub name: Option<String>,
     /// Publish port (e.g. 8080:80)
     #[arg(short = 'p', long = "publish")]
@@ -319,21 +321,78 @@ pub struct PodCreateArgs {
     /// Custom DNS servers
     #[arg(long = "dns")]
     pub dns: Vec<String>,
-    /// Memory limit for all containers in the pod
-    #[arg(short = 'm', long = "memory")]
-    pub memory: Option<String>,
-    /// CPU limit for all containers in the pod
-    #[arg(long = "cpus")]
-    pub cpus: Option<String>,
-    /// Network mode for the pod
-    #[arg(long = "network", alias = "net")]
-    pub network: Option<String>,
-    /// User namespace mode for the pod
-    #[arg(long = "userns")]
-    pub userns: Option<String>,
+    /// Set custom DNS search domains
+    #[arg(long = "dns-search")]
+    pub dns_search: Vec<String>,
+    /// Set custom DNS options
+    #[arg(long = "dns-option", alias = "dns-opt")]
+    pub dns_option: Vec<String>,
     /// Add a custom host-to-IP mapping (host:ip)
     #[arg(long = "add-host")]
     pub add_host: Vec<String>,
+    /// Pod network interface MAC address
+    #[arg(long = "mac-address")]
+    pub mac_address: Option<String>,
+    /// Pod static IPv4 address
+    #[arg(long = "ip")]
+    pub ip: Option<String>,
+    /// Write the pod ID to the file
+    #[arg(long = "pod-id-file")]
+    pub pod_id_file: Option<String>,
+    /// Custom image for infra container
+    #[arg(long = "infra-image")]
+    pub infra_image: Option<String>,
+    /// Custom command for infra container
+    #[arg(long = "infra-command")]
+    pub infra_command: Option<String>,
+    /// Custom name for infra container
+    #[arg(long = "infra-name")]
+    pub infra_name: Option<String>,
+    /// Replace an existing pod with the same name
+    #[arg(long = "replace")]
+    pub replace: bool,
+    /// Behaviour when the last container exits (continue or stop)
+    #[arg(long = "exit-policy")]
+    pub exit_policy: Option<String>,
+    /// Restart policy to follow when containers exit
+    #[arg(long = "restart")]
+    pub restart: Option<String>,
+    /// User namespace to use
+    #[arg(long = "userns")]
+    pub userns: Option<String>,
+    /// Memory limit for all containers in the pod
+    #[arg(short = 'm', long = "memory")]
+    pub memory: Option<String>,
+    /// Limit memory + swap
+    #[arg(long = "memory-swap")]
+    pub memory_swap: Option<String>,
+    /// CPU limit for all containers in the pod
+    #[arg(long = "cpus")]
+    pub cpus: Option<String>,
+    /// CPU shares (relative weight)
+    #[arg(long = "cpu-shares")]
+    pub cpu_shares: Option<u64>,
+    /// CPUs in which to allow execution
+    #[arg(long = "cpuset-cpus")]
+    pub cpuset_cpus: Option<String>,
+    /// Memory nodes (MEMs) in which to allow execution
+    #[arg(long = "cpuset-mems")]
+    pub cpuset_mems: Option<String>,
+    /// Limit read rate (bytes per second) from a device
+    #[arg(long = "device-read-bps")]
+    pub device_read_bps: Vec<String>,
+    /// Limit write rate (bytes per second) to a device
+    #[arg(long = "device-write-bps")]
+    pub device_write_bps: Vec<String>,
+    /// Block IO weight
+    #[arg(long = "blkio-weight")]
+    pub blkio_weight: Option<u16>,
+    /// Volumes to mount in all containers in the pod
+    #[arg(short = 'v', long = "volume")]
+    pub volumes: Vec<String>,
+    /// Network mode for the pod
+    #[arg(long = "network", alias = "net")]
+    pub network: Option<String>,
     /// Share namespaces: ipc, net, uts, pid (comma-separated)
     #[arg(
         long = "share",
@@ -343,32 +402,20 @@ pub struct PodCreateArgs {
     )]
     pub share: String,
     /// Create an infra container
-    #[arg(long = "infra", default_value_t = true)]
+    #[arg(
+        long = "infra",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     pub infra: bool,
     /// Do not create an infra container
     #[arg(long = "no-infra", default_value_t = false)]
     pub no_infra: bool,
-    /// Custom image for infra container
-    #[arg(long = "infra-image")]
-    pub infra_image: Option<String>,
-    /// Custom command for infra container
-    #[arg(long = "infra-command")]
-    pub infra_command: Option<String>,
-    /// Write the pod ID to the file
-    #[arg(long = "pod-id-file")]
-    pub pod_id_file: Option<String>,
     /// Write the infra container's conmon PID to the file
     #[arg(long = "infra-conmon-pidfile")]
     pub infra_conmon_pidfile: Option<String>,
-    /// Replace an existing pod with the same name
-    #[arg(long = "replace")]
-    pub replace: bool,
-    /// Behaviour when the last container exits ("continue" or "stop")
-    #[arg(long = "exit-policy")]
-    pub exit_policy: Option<String>,
-    /// Infra container name
-    #[arg(long = "infra-name")]
-    pub infra_name: Option<String>,
     /// Pod name (positional; same as --name)
     #[arg(value_name = "NAME")]
     pub pod: Option<String>,
@@ -387,8 +434,8 @@ pub enum PodAction {
     Rm {
         #[arg(short = 'f', long = "force")]
         force: bool,
-        #[arg(short = 't', long = "time", value_name = "SECONDS")]
-        time: Option<u32>,
+        #[arg(short = 't', long = "time", allow_hyphen_values = true, value_name = "SECONDS")]
+        time: Option<i32>,
         #[arg(short = 'a', long = "all")]
         all: bool,
         #[arg(long = "ignore")]
@@ -401,26 +448,36 @@ pub enum PodAction {
     Inspect {
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
         pods: Vec<String>,
     },
     /// Stop one or more pods
     Stop {
-        #[arg(long = "ignore")]
-        ignore: bool,
-        #[arg(short = 't', long = "time")]
+        #[arg(short = 't', long = "time", allow_hyphen_values = true, value_name = "SECONDS")]
         time: Option<i32>,
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'i', long = "ignore")]
+        ignore: bool,
         #[arg(long = "pod-id-file")]
         pod_id_file: Vec<String>,
         pods: Vec<String>,
     },
     /// Start one or more pods
     Start {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
         #[arg(long = "pod-id-file")]
         pod_id_file: Vec<String>,
         pods: Vec<String>,
     },
     /// Restart one or more pods
-    Restart { pods: Vec<String> },
+    Restart {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        pods: Vec<String>,
+    },
     /// Kill pods with a signal
     Kill {
         #[arg(

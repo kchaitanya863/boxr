@@ -82,7 +82,13 @@ impl std::fmt::Display for RestartPolicy {
         match self {
             RestartPolicy::No => write!(f, "no"),
             RestartPolicy::Always => write!(f, "always"),
-            RestartPolicy::OnFailure { max_retries } => write!(f, "on-failure:{}", max_retries),
+            RestartPolicy::OnFailure { max_retries } => {
+                if *max_retries == 0 {
+                    write!(f, "on-failure")
+                } else {
+                    write!(f, "on-failure:{}", max_retries)
+                }
+            }
             RestartPolicy::UnlessStopped => write!(f, "unless-stopped"),
         }
     }
@@ -119,7 +125,7 @@ pub fn parse_restart_policy(input: &str) -> Result<RestartPolicy> {
     } else if input == "unless-stopped" {
         Ok(RestartPolicy::UnlessStopped)
     } else if input == "on-failure" {
-        Ok(RestartPolicy::OnFailure { max_retries: 3 })
+        Ok(RestartPolicy::OnFailure { max_retries: 0 })
     } else if let Some(retries_str) = input.strip_prefix("on-failure:") {
         let retries: u32 = retries_str
             .parse()
@@ -376,7 +382,7 @@ mod tests {
         );
         assert_eq!(
             parse_restart_policy("on-failure").unwrap(),
-            RestartPolicy::OnFailure { max_retries: 3 }
+            RestartPolicy::OnFailure { max_retries: 0 }
         );
         assert_eq!(
             parse_restart_policy("on-failure:5").unwrap(),

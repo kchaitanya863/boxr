@@ -19,7 +19,7 @@ pub fn resolved_bridge_network_name(network: &str) -> Option<String> {
         return None;
     }
     let name = match base {
-        "bridge" | "default" | "auto" | "" => NetworkStore::DEFAULT_NETWORK,
+        "bridge" | "default" | "auto" | "private" | "" => NetworkStore::DEFAULT_NETWORK,
         other => other,
     };
     Some(name.to_string())

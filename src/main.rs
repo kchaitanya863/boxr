@@ -167,6 +167,9 @@ fn main() -> Result<()> {
         .build()?;
     rt.block_on(async {
         let raw_argv: Vec<String> = std::env::args().collect();
+        if boxr::compose::provider::try_run_external_compose_provider(&raw_argv) {
+            unreachable!();
+        }
         let argv: Vec<String> = boxr::cli::preprocess_argv(raw_argv);
         let cli = match boxr::cli::Cli::try_parse_from(&argv) {
             Ok(c) => c,

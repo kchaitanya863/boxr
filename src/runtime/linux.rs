@@ -19,6 +19,66 @@ use std::time::{Duration, Instant};
 
 use crate::storage::container_store::ContainerStore;
 
+struct TargetNamespaceFds {
+    user: Option<fs::File>,
+    ipc: Option<fs::File>,
+    uts: Option<fs::File>,
+    net: Option<fs::File>,
+}
+
+fn open_container_target_ns(bundle_path: &Path, target: &str, ns: &str) -> Option<fs::File> {
+    let store = if let Some(home) = bundle_path.parent().and_then(|p| p.parent()) {
+        crate::storage::ContainerStore::with_home(home.to_path_buf())
+    } else {
+        crate::storage::ContainerStore::new()
+    };
+    let rec = store.find(target)?;
+    let bundle = PathBuf::from(&rec.bundle_path);
+    let pid = crate::pod::read_container_pid_from_bundle(&bundle)?;
+    fs::File::open(format!("/proc/{pid}/ns/{ns}")).ok()
+}
+
+fn open_target_namespace_fds(bundle_path: &Path, spec: &Spec) -> TargetNamespaceFds {
+    let mut fds = TargetNamespaceFds {
+        user: None,
+        ipc: None,
+        uts: None,
+        net: None,
+    };
+    let Some(ann) = spec.annotations.as_ref() else {
+        return fds;
+    };
+    if let Some(target) = ann.get("boxr.network_container") {
+        if fds.user.is_none() {
+            fds.user = open_container_target_ns(bundle_path, target, "user");
+        }
+        fds.net = open_container_target_ns(bundle_path, target, "net");
+    }
+    if let Some(val) = ann.get("boxr.ipc") {
+        if let Some(target) = val
+            .strip_prefix("container:")
+            .or_else(|| val.strip_prefix("container://"))
+        {
+            if fds.user.is_none() {
+                fds.user = open_container_target_ns(bundle_path, target, "user");
+            }
+            fds.ipc = open_container_target_ns(bundle_path, target, "ipc");
+        }
+    }
+    if let Some(val) = ann.get("boxr.uts") {
+        if let Some(target) = val
+            .strip_prefix("container:")
+            .or_else(|| val.strip_prefix("container://"))
+        {
+            if fds.user.is_none() {
+                fds.user = open_container_target_ns(bundle_path, target, "user");
+            }
+            fds.uts = open_container_target_ns(bundle_path, target, "uts");
+        }
+    }
+    fds
+}
+
 struct NamespaceJoinState {
     ipc: bool,
     uts: bool,
@@ -44,7 +104,7 @@ fn namespace_clone_flag(ns: &str) -> Option<CloneFlags> {
         "ipc" => Some(CloneFlags::CLONE_NEWIPC),
         "uts" => Some(CloneFlags::CLONE_NEWUTS),
         "net" | "network" => Some(CloneFlags::CLONE_NEWNET),
-        "mnt" => Some(CloneFlags::CLONE_NEWNS),
+        "mnt" | "mount" => Some(CloneFlags::CLONE_NEWNS),
         "pid" => Some(CloneFlags::CLONE_NEWPID),
         "cgroup" | "cgroupns" => Some(CloneFlags::CLONE_NEWCGROUP),
         "user" => Some(CloneFlags::CLONE_NEWUSER),
@@ -58,6 +118,7 @@ fn proc_ns_name(ns: &str) -> &str {
         "cgroupns" => "cgroup",
         other => other,
     }
+    false
 }
 
 fn is_same_as_self_ns(path: &str, ns: &str) -> bool {
@@ -1725,6 +1786,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         let requires_netns = network_mode.requires_new_netns();
         let donor_userns = find_donor_userns_fd(&spec);
         let pre_joined = precheck_host_namespace_joins(&spec);
+        let target_ns_fds = open_target_namespace_fds(bundle_path, &spec);
 
         let (mut parent_sock, mut child_sock) = UnixStream::pair()
             .context("Failed to create UnixStream pair for user namespace sync")?;
@@ -1737,13 +1799,14 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             ForkResult::Parent { child } => {
                 drop(child_sock);
                 drop(donor_userns);
+                drop(target_ns_fds);
                 // 1. Wait for child to unshare/join user namespace
                 let mut sync_buf = [0u8; 5];
                 parent_sock
                     .read_exact(&mut sync_buf)
                     .context("Failed to read sync from container child (unshare failed)")?;
 
-                // 2. Configure UID and GID mapping for child PID in parent namespace
+                // 2. Configure UID and GID mapping for child PID in parent namespace (only when unshared)
                 if &sync_buf != b"joind" {
                     let mapping_res =
                         if let Some((uid_maps, gid_maps)) = crate::id_maps_from_spec(&spec) {
@@ -1845,23 +1908,34 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 }
                 drop(parent_sock);
-                // 1. Join donor user namespace or unshare a new user namespace
-                let sync_msg: &[u8; 5] = if let Some(ref donor_f) = donor_userns {
-                    if let Err(e) = setns(donor_f, CloneFlags::CLONE_NEWUSER) {
-                        eprintln!("Failed to join donor user namespace: {:?}", e);
-                        std::process::exit(1);
+                let mut joined_existing_userns = false;
+                if let Some(ref donor_f) = donor_userns {
+                    if setns(donor_f, CloneFlags::CLONE_NEWUSER).is_ok() {
+                        joined_existing_userns = true;
                     }
-                    b"joind"
-                } else {
+                }
+                if !joined_existing_userns {
+                    if let Some(ufd) = &target_ns_fds.user {
+                        if setns(ufd, CloneFlags::CLONE_NEWUSER).is_ok() {
+                            joined_existing_userns = true;
+                        }
+                    }
+                }
+                if !joined_existing_userns {
+                    // 1. Unshare user namespace cleanly in single-threaded child
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWUSER) {
                         eprintln!("Failed to unshare user namespace: {:?}", e);
                         std::process::exit(1);
                     }
-                    b"ready"
-                };
+                }
                 drop(donor_userns);
 
-                // 2. Notify parent that user namespace has been created/joined
+                // 2. Notify parent that user namespace has been created or joined
+                let sync_msg: &[u8; 5] = if joined_existing_userns {
+                    b"joind"
+                } else {
+                    b"ready"
+                };
                 if let Err(e) = child_sock.write_all(sync_msg) {
                     eprintln!("Failed to notify parent: {:?}", e);
                     std::process::exit(1);
@@ -1898,6 +1972,16 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         None
                     };
                 let mut ns_join = apply_spec_namespace_joins(&spec, pre_joined);
+                if let Some(ipc_fd) = &target_ns_fds.ipc {
+                    if !ns_join.ipc && setns(ipc_fd, CloneFlags::CLONE_NEWIPC).is_ok() {
+                        ns_join.ipc = true;
+                    }
+                }
+                if let Some(uts_fd) = &target_ns_fds.uts {
+                    if !ns_join.uts && setns(uts_fd, CloneFlags::CLONE_NEWUTS).is_ok() {
+                        ns_join.uts = true;
+                    }
+                }
                 if requires_netns && !ns_join.net {
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWNET) {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
@@ -1910,8 +1994,14 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         .stderr(Stdio::null())
                         .status();
                 } else {
+                    if let Some(net_fd) = &target_ns_fds.net {
+                        if !ns_join.net && setns(net_fd, CloneFlags::CLONE_NEWNET).is_ok() {
+                            ns_join.net = true;
+                        }
+                    }
                     join_network_namespace_for_spec(&spec, &mut ns_join);
                 }
+                drop(target_ns_fds);
 
                 // If using pasta, notify parent that netns has been unshared so pasta can attach
                 if use_pasta {
@@ -4068,12 +4158,14 @@ fn run_container_child(
     let uts_host = spec
         .annotations
         .as_ref()
-        .and_then(|a| a.get("boxr.uts_host"))
-        .map(|v| v == "true")
-        .unwrap_or(false);
+        .is_some_and(|a| {
+            a.get("boxr.uts_host").is_some_and(|v| v == "true")
+                || a.get("boxr.uts").is_some_and(|s| s == "host")
+        });
     if !skip_hostname_file {
         let host_label = if uts_host {
             fs::read_to_string("/proc/sys/kernel/hostname")
+                .or_else(|_| fs::read_to_string("/etc/hostname"))
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -4349,6 +4441,22 @@ fn run_container_child(
     } else {
         let shm_path = dev_path.join("shm");
         let _ = fs::create_dir_all(&shm_path);
+        let shared_ipc_shm = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.ipc"))
+            .and_then(|v| {
+                v.strip_prefix("container:")
+                    .or_else(|| v.strip_prefix("container://"))
+            })
+            .and_then(|target| {
+                let home = bundle_path.parent()?.parent()?;
+                let c_store = crate::storage::ContainerStore::with_home(home.to_path_buf());
+                let parent = c_store.find(target)?;
+                let parent_shm = Path::new(&parent.bundle_path).join("shm");
+                let _ = fs::create_dir_all(&parent_shm);
+                Some(parent_shm)
+            });
         if ipc_mode_ann == Some("host") {
             let _ = bind_mount_path(Path::new("/dev/shm"), &shm_path, false);
         } else if let Some(host_shm) = spec
@@ -4359,13 +4467,33 @@ fn run_container_child(
             let host_shm_path = Path::new(host_shm);
             let _ = fs::create_dir_all(host_shm_path);
             let _ = bind_mount_path(host_shm_path, &shm_path, false);
-        } else {
+        } else if let Some(src_shm) = shared_ipc_shm {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&src_shm, fs::Permissions::from_mode(0o1777));
+            }
             let _ = mount(
-                Some("tmpfs"),
+                Some(&src_shm),
                 &shm_path,
-                Some("tmpfs"),
-                MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
-                Some("mode=1777,size=67108864"),
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            );
+        } else {
+            let own_shm = bundle_path.join("shm");
+            let _ = fs::create_dir_all(&own_shm);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&own_shm, fs::Permissions::from_mode(0o1777));
+            }
+            let _ = mount(
+                Some(&own_shm),
+                &shm_path,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
             );
         }
     }
@@ -4692,9 +4820,9 @@ fn run_container_child(
     // Ensure /etc/hosts exists and contains localhost and container hostname
     let hosts_path = rootfs.join("etc/hosts");
     let mut hosts_content =
-        String::from("127.0.0.1 localhost\n::1 localhost ip6-localhost ip6-loopback\n");
+        String::from("127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
     if let Some(h) = &spec.hostname {
-        hosts_content.push_str(&format!("127.0.0.1 {}\n", h));
+        hosts_content.push_str(&format!("127.0.0.1\t{}\n", h));
     }
     // Also include any custom hosts from bundle
     let bundle_dir = rootfs.parent().unwrap_or(rootfs);
@@ -4704,7 +4832,8 @@ fn run_container_child(
             if let Ok(add_hosts) = serde_json::from_str::<Vec<String>>(&content) {
                 for entry in add_hosts {
                     if let Some((host, ip)) = entry.split_once(':') {
-                        hosts_content.push_str(&format!("{} {}\n", ip.trim(), host.trim()));
+                        let names = host.trim().replace(';', " ");
+                        hosts_content.push_str(&format!("{}\t{}\n", ip.trim(), names));
                     }
                 }
             }

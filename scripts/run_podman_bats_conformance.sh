@@ -122,15 +122,30 @@ podmanize_help() {
       -e 's/\\[options\\] \\[command\\]/[command] [options]/g' \
       -e 's/podman help \\[options\\] \\[command\\]/podman help [command] [options]/g'
 }
+has_external_compose=0
+for arg in "\$@"; do
+  if [[ "\$arg" == "compose" ]]; then
+    if [[ -n "\${PODMAN_COMPOSE_PROVIDER:-}" ]]; then
+      has_external_compose=1
+    elif [[ -n "\${CONTAINERS_CONF_OVERRIDE:-}" ]] && grep -q "compose_providers" "\${CONTAINERS_CONF_OVERRIDE}" 2>/dev/null; then
+      has_external_compose=1
+    elif [[ -n "\${CONTAINERS_CONF:-}" ]] && grep -q "compose_providers" "\${CONTAINERS_CONF}" 2>/dev/null; then
+      has_external_compose=1
+    fi
+    break
+  fi
+done
 is_help=0
-if [[ "\${1:-}" == "help" ]]; then
-  is_help=1
-elif [[ "\${1:-}" != "run" && "\${1:-}" != "create" && "\${1:-}" != "exec" ]]; then
-  if [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
+if [[ \$has_external_compose -eq 0 ]]; then
+  if [[ "\${1:-}" == "help" ]]; then
+    is_help=1
+  elif [[ "\${1:-}" != "run" && "\${1:-}" != "create" && "\${1:-}" != "exec" ]]; then
+    if [[ " \$* " == *" --help "* ]] || [[ " \$* " == *" -h "* ]]; then
+      is_help=1
+    fi
+  elif [[ "\${2:-}" == "--help" || "\${2:-}" == "-h" ]]; then
     is_help=1
   fi
-elif [[ "\${2:-}" == "--help" ]]; then
-  is_help=1
 fi
 if [[ \$is_help -eq 1 ]]; then
   "$BOXR_BIN" "\${args[@]}" | podmanize_help
