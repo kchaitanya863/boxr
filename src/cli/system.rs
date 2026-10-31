@@ -298,8 +298,14 @@ pub struct PodCreateArgs {
     #[arg(long = "cpus")]
     pub cpus: Option<String>,
     /// Network mode for the pod
-    #[arg(long = "network")]
+    #[arg(long = "network", alias = "net")]
     pub network: Option<String>,
+    /// Name of the infra container
+    #[arg(long = "infra-name")]
+    pub infra_name: Option<String>,
+    /// Add a custom host-to-IP mapping (host:ip)
+    #[arg(long = "add-host")]
+    pub add_host: Vec<String>,
     /// Share namespaces: ipc, net, uts, pid (comma-separated)
     #[arg(
         long = "share",

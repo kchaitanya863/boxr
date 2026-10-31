@@ -40,10 +40,17 @@ impl ContainerEvent {
         for (k, v) in &self.attributes {
             attrs_str.push(format!("{}={}", k, v));
         }
+        attrs_str.sort();
         let attrs_formatted = if attrs_str.is_empty() {
             "".to_string()
         } else {
             format!(" ({})", attrs_str.join(", "))
+        };
+
+        let id_display = if self.event_type == "network" {
+            self.actor_id.as_str()
+        } else {
+            &self.actor_id[..12.min(self.actor_id.len())]
         };
 
         format!(
@@ -51,7 +58,7 @@ impl ContainerEvent {
             self.timestamp.to_rfc3339(),
             self.event_type,
             self.action,
-            &self.actor_id[..12.min(self.actor_id.len())],
+            id_display,
             attrs_formatted
         )
     }

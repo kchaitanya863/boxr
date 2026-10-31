@@ -2426,7 +2426,36 @@ pub async fn run_container_with_output(
     validate_health_on_failure_arg(&args)?;
 
     let mut parsed_ports = parse_ports(&args.ports)?;
+    for p in &parsed_ports {
+        if !p.protocol.eq_ignore_ascii_case("tcp") && !p.protocol.eq_ignore_ascii_case("udp") {
+            cli::usage_errors::exit_config_error(format!(
+                "can't forward protocol: {}",
+                p.protocol
+            ));
+        }
+    }
+    let default_host_ips = containers_conf_string_array("default_host_ips");
+    if !default_host_ips.is_empty() {
+        let mut expanded = Vec::new();
+        for p in parsed_ports {
+            if p.host_ip.is_none() {
+                for dip in &default_host_ips {
+                    let mut c = p.clone();
+                    c.host_ip = Some(dip.clone());
+                    expanded.push(c);
+                }
+            } else {
+                expanded.push(p);
+            }
+        }
+        parsed_ports = expanded;
+    }
     validate_network_name(&args.network, None)?;
+    if let Some(extra_nets) = cli::EXTRA_NETWORK_SPECS.get() {
+        for en in extra_nets {
+            validate_network_name(en, None)?;
+        }
+    }
     guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
     validate_device_cgroup_rules_rootless(&args);
@@ -2602,6 +2631,15 @@ pub async fn run_container_with_output(
     let mut annotations = HashMap::new();
     if args.no_hostname {
         annotations.insert("boxr.no_hostname".to_string(), "true".to_string());
+    }
+    if args.uts.as_deref() == Some("host") && args.hostname.is_none() {
+        annotations.insert("boxr.uts_host".to_string(), "true".to_string());
+    }
+    let conf_pasta_opts = containers_conf_string_array("pasta_options");
+    if !conf_pasta_opts.is_empty() {
+        if let Ok(j) = serde_json::to_string(&conf_pasta_opts) {
+            annotations.insert("boxr.pasta_options".to_string(), j);
+        }
     }
     annotations.insert(
         "org.opencontainers.image.architecture".to_string(),
@@ -2797,17 +2835,21 @@ pub async fn run_container_with_output(
 
     fs::create_dir_all(&bundle_dir)?;
     if !args.add_host.is_empty() {
+        let mut cleaned_add_host = Vec::with_capacity(args.add_host.len());
         for host_entry in &args.add_host {
-            let (host, ip_str) = host_entry
+            let clean = host_entry.trim().trim_matches('"');
+            let (host, ip_str) = clean
                 .split_once(':')
                 .ok_or_else(|| anyhow!("bad format for add-host: \"{}\"", host_entry))?;
             if host.is_empty() {
                 return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
             }
-            if ip_str.parse::<std::net::IpAddr>().is_err() {
+            if ip_str.trim().parse::<std::net::IpAddr>().is_err() {
                 return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
             }
+            cleaned_add_host.push(format!("{}:{}", host.trim(), ip_str.trim()));
         }
+        args.add_host = cleaned_add_host;
         let hosts_json = serde_json::to_string(&args.add_host)?;
         let _ = fs::write(bundle_dir.join("hosts.json"), hosts_json);
     }
@@ -3132,14 +3174,67 @@ pub async fn run_container_with_output(
     }
 
     // Register bridge network endpoint (same as compose up) so inspect/disconnect work.
-    if network::resolved_bridge_network_name(&args.network).is_some() {
-        let _ = network::connect_container_to_bridge_network(
-            &args.network,
-            &container_id,
-            &container_name,
-            None,
-        );
+    let mut all_net_specs = vec![args.network.clone()];
+    if let Some(extra_nets) = cli::EXTRA_NETWORK_SPECS.get() {
+        all_net_specs.extend(extra_nets.iter().cloned());
     }
+    let mut net_ifaces: Vec<(String, String, String)> = Vec::new();
+    let net_store_run = network::NetworkStore::new();
+    for (idx, net_spec) in all_net_specs.iter().enumerate() {
+        if let Some(net_name) = network::resolved_bridge_network_name(net_spec) {
+            let _ = network::connect_container_to_bridge_network(
+                &net_name,
+                &container_id,
+                &container_name,
+                None,
+            );
+            let mut ifname = if idx == 0 {
+                "eth0".to_string()
+            } else {
+                format!("eth{}", idx)
+            };
+            if let Some((_, opts)) = net_spec.split_once(':') {
+                for kv in opts.split(',') {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        if k.trim() == "interface_name" && !v.trim().is_empty() {
+                            ifname = v.trim().to_string();
+                        }
+                    }
+                }
+            }
+            if let Some(net_rec) = net_store_run.find(&net_name) {
+                let ip_str = net_rec
+                    .containers
+                    .get(&container_id)
+                    .map(|ep| ep.ipv4_address.clone())
+                    .unwrap_or_default();
+                let eval_ip = if net_name == network::NetworkStore::DEFAULT_NETWORK {
+                    "10.0.2.15".to_string()
+                } else {
+                    ip_str
+                };
+                if idx == 0 && !eval_ip.is_empty() {
+                    let _ = fs::write(bundle_dir.join("primary_ip.txt"), &eval_ip);
+                }
+                net_ifaces.push((ifname, eval_ip, net_rec.gateway.clone()));
+            }
+        }
+    }
+    if !net_ifaces.is_empty() {
+        if let Ok(j) = serde_json::to_string(&net_ifaces) {
+            let _ = fs::write(bundle_dir.join("network_interfaces.json"), j);
+        }
+    }
+
+    write_prebuilt_resolv_and_hosts(
+        &bundle_dir,
+        &cow_bundle.merged_dir,
+        &args,
+        &spec,
+        &container_id,
+        &container_name,
+        &net_store_run,
+    );
 
     if args.detach || args.attach_stdin_emits_container_id() {
         output_policy.emit_container_id(&container_id)?;
@@ -3182,7 +3277,7 @@ pub async fn run_container_with_output(
 
     if args.detach {
         #[cfg(target_os = "linux")]
-        if !parsed_ports.is_empty() {
+        if !parsed_ports.is_empty() && net_mode != network::pasta::NetworkMode::Pasta {
             let _ =
                 network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
         }
@@ -3214,10 +3309,6 @@ pub async fn run_container_with_output(
         if should_restart {
             restart_count += 1;
             let _ = container_store.increment_restart_count(&container_id);
-            println!(
-                "Container {} exited with code {}, restarting (attempt {})...",
-                container_id, exit_code, restart_count
-            );
             let _ = runtime::oci_hooks::run_hooks_from_bundle(&bundle_dir, "prestart");
             exit_code = execute_bundle(
                 &bundle_dir,
@@ -3254,6 +3345,8 @@ pub async fn run_container_with_output(
         }
         if auto_rm {
             prune_container_attached_volumes(bundle_dir.clone());
+            let _ = network::NetworkStore::new()
+                .cleanup_container_endpoints(&container_id, &container_name);
             let _ = OverlayDriver::cleanup(&cow_bundle);
             let _ = container_store.remove(&container_id);
             let _ = fs::remove_dir_all(&bundle_dir);
@@ -4341,6 +4434,7 @@ fn container_logs_one(args: &LogsArgs, container: &str) -> Result<()> {
             }
         } else if path.to_string_lossy().contains("-ctr.log") || logging::is_k8s_log_path(&path) {
             let store_id = rec.id.clone();
+            let bp = bundle_path.clone();
             return logging::stream_k8s_container_logs(
                 &path,
                 args.since.as_deref(),
@@ -4349,6 +4443,11 @@ fn container_logs_one(args: &LogsArgs, container: &str) -> Result<()> {
                 args.follow,
                 args.timestamps,
                 move || {
+                    #[cfg(target_os = "linux")]
+                    if !runtime::linux::bundle_process_is_alive(&bp) {
+                        return false;
+                    }
+                    let _ = &bp;
                     ContainerStore::new()
                         .find(&store_id)
                         .is_some_and(|c| matches!(c.status, ContainerStatus::Running))
@@ -4532,11 +4631,21 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
             std::env::remove_var("BOXR_EXEC_NONPRIV_DROP_CAP");
         }
     }
+    let exec_workdir = args.workdir.clone().or_else(|| {
+        let content = fs::read_to_string(bundle_path.join("config.json")).ok()?;
+        let spec: Spec = serde_json::from_str(&content).ok()?;
+        let cwd = spec.process.cwd.trim();
+        if cwd.is_empty() || cwd == "/" {
+            None
+        } else {
+            Some(cwd.to_string())
+        }
+    });
     let res = exec_in_bundle(
         &bundle_path,
         &args.command,
         &merged_env,
-        args.workdir.as_deref(),
+        exec_workdir.as_deref(),
         exec_user.as_deref(),
         args.detach,
         attach,
@@ -4731,8 +4840,16 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "HostIp": host_ip,
                         "HostPort": p.host_port.to_string(),
                     });
-                    port_bindings.insert(key.clone(), serde_json::json!([binding.clone()]));
-                    ports_map.insert(key, serde_json::json!([binding]));
+                    if let Some(arr) = port_bindings.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                        arr.push(binding.clone());
+                    } else {
+                        port_bindings.insert(key.clone(), serde_json::json!([binding.clone()]));
+                    }
+                    if let Some(arr) = ports_map.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                        arr.push(binding);
+                    } else {
+                        ports_map.insert(key, serde_json::json!([binding]));
+                    }
                 }
 
                 let bundle_path = PathBuf::from(&c.bundle_path);
@@ -4799,7 +4916,19 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     &c.status,
                     &annotations,
                 );
-                let networks_map = container_inspect_networks(&c.id, &network_mode);
+                let networks_map = container_inspect_networks(
+                    &c.id,
+                    &network_mode,
+                    &config_hostname,
+                    &bundle_path,
+                );
+                let sandbox_key = if !is_running || network_mode == "host" {
+                    String::new()
+                } else if network_mode == "none" {
+                    format!("/proc/{}/ns/net", pid)
+                } else {
+                    format!("/run/netns/netns-{}", &c.id[..12.min(c.id.len())])
+                };
 
                 let log_config = if let Some(driver) = annotations.get("boxr.log_driver") {
                     let path = annotations
@@ -4908,7 +5037,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "LinkLocalIPv6Address": "",
                         "LinkLocalIPv6PrefixLen": 0,
                         "Ports": ports_map,
-                        "SandboxKey": "",
+                        "SandboxKey": sandbox_key,
                         "SecondaryIPAddresses": null,
                         "SecondaryIPv6Addresses": null,
                         "EndpointID": "",
@@ -5867,6 +5996,295 @@ fn containers_conf_bool(key: &str) -> Option<bool> {
     })
 }
 
+fn containers_conf_string_array(key: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut parse_from = |content: &str| -> Vec<String> {
+        let mut res = Vec::new();
+        let mut in_arr = false;
+        for line in content.lines() {
+            let trimmed = line.trim().split('#').next().unwrap_or("").trim();
+            if trimmed.is_empty() || trimmed.starts_with('[') {
+                in_arr = false;
+                continue;
+            }
+            if !in_arr {
+                if let Some((k, rest)) = trimmed.split_once('=') {
+                    if k.trim() == key && rest.contains('[') {
+                        in_arr = true;
+                        res.extend(extract_toml_quoted_strings(rest));
+                        if rest.contains(']') {
+                            in_arr = false;
+                        }
+                    }
+                }
+                continue;
+            }
+            res.extend(extract_toml_quoted_strings(trimmed));
+            if trimmed.contains(']') {
+                in_arr = false;
+            }
+        }
+        res
+    };
+    if let Some(content) = containers_conf_content() {
+        out = parse_from(&content);
+    }
+    for mod_path in &cli::podman_globals::podman_global_options().modules {
+        if let Ok(content) = fs::read_to_string(mod_path) {
+            let entries = parse_from(&content);
+            if !entries.is_empty() {
+                out = entries;
+            }
+        }
+    }
+    out
+}
+
+fn default_host_ipv4() -> Option<String> {
+    let out = std::process::Command::new("ip")
+        .args(["-4", "-o", "addr", "show", "scope", "global"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        while let Some(tok) = parts.next() {
+            if tok == "inet" {
+                if let Some(cidr) = parts.next() {
+                    let ip = cidr.split('/').next().unwrap_or(cidr).trim();
+                    if !ip.is_empty() && !ip.starts_with("127.") {
+                        return Some(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn write_prebuilt_resolv_and_hosts(
+    bundle_dir: &Path,
+    merged_rootfs: &Path,
+    args: &RunArgs,
+    spec: &Spec,
+    container_id: &str,
+    container_name: &str,
+    net_store: &network::NetworkStore,
+) {
+    let dns_searches = if !args.dns_search.is_empty() {
+        args.dns_search.clone()
+    } else {
+        containers_conf_string_array("dns_searches")
+    };
+    let dns_options = if !args.dns_option.is_empty() {
+        args.dns_option.clone()
+    } else {
+        containers_conf_string_array("dns_options")
+    };
+    let dns_servers = if !args.dns.is_empty() {
+        args.dns.clone()
+    } else {
+        containers_conf_string_array("dns_servers")
+    };
+
+    let mut resolv_lines = Vec::new();
+    if let Some(dom) = &spec.domainname {
+        if !dom.is_empty() {
+            resolv_lines.push(format!("domain {}", dom));
+        }
+    }
+    if !dns_searches.is_empty() {
+        resolv_lines.push(format!("search {}", dns_searches.join(" ")));
+    }
+    let net_mode = network::pasta::NetworkMode::parse(&args.network);
+    let custom_bridge_net = network::resolved_bridge_network_name(&args.network)
+        .filter(|n| n != network::NetworkStore::DEFAULT_NETWORK && n != "podman")
+        .and_then(|n| net_store.find(&n));
+
+    if let Some(net_rec) = &custom_bridge_net {
+        if !args.dns.is_empty() {
+            for s in &args.dns {
+                resolv_lines.push(format!("nameserver {}", s));
+            }
+        } else if !net_rec.dns_servers.is_empty() {
+            for s in &net_rec.dns_servers {
+                resolv_lines.push(format!("nameserver {}", s));
+            }
+        } else {
+            resolv_lines.push(format!("nameserver {}", net_rec.gateway));
+        }
+    } else if !dns_servers.is_empty() {
+        for s in &dns_servers {
+            resolv_lines.push(format!("nameserver {}", s));
+        }
+    } else if net_mode == network::pasta::NetworkMode::Host {
+        if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {
+            for line in host_resolv.lines() {
+                let t = line.trim();
+                if t.starts_with("nameserver") {
+                    resolv_lines.push(t.to_string());
+                }
+            }
+        }
+        if resolv_lines.iter().all(|l| !l.starts_with("nameserver")) {
+            resolv_lines.push("nameserver 1.1.1.1".to_string());
+        }
+    } else if net_mode.should_use_pasta() {
+        let mut custom_fwd = None;
+        if let Some((_, rest)) = args.network.trim().split_once(':') {
+            let parts: Vec<&str> = rest.split(',').map(|s| s.trim()).collect();
+            for w in parts.windows(2) {
+                if w[0] == "--dns-forward" && !w[1].is_empty() {
+                    custom_fwd = Some(w[1].to_string());
+                }
+            }
+        }
+        let fwd_ip = custom_fwd.unwrap_or_else(|| "169.254.1.1".to_string());
+        resolv_lines.push(format!("nameserver {}", fwd_ip));
+        if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {
+            for line in host_resolv.lines() {
+                let t = line.trim();
+                if t.starts_with("nameserver") && !t.contains("127.0.0.") {
+                    resolv_lines.push(t.to_string());
+                }
+            }
+        }
+    } else {
+        resolv_lines.push("nameserver 10.0.2.3".to_string());
+    }
+    if !dns_options.is_empty() {
+        resolv_lines.push(format!("options {}", dns_options.join(" ")));
+    }
+    let resolv_text = resolv_lines.join("\n") + "\n";
+    let _ = fs::write(bundle_dir.join("resolv.conf"), &resolv_text);
+    let rootfs_resolv = merged_rootfs.join("etc/resolv.conf");
+    if let Some(p) = rootfs_resolv.parent() {
+        let _ = fs::create_dir_all(p);
+    }
+    let _ = fs::remove_file(&rootfs_resolv);
+    let _ = fs::write(&rootfs_resolv, &resolv_text);
+
+    // Build /etc/hosts
+    let mut hosts_lines: Vec<String> = Vec::new();
+    let mut known_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for entry in &args.add_host {
+        let clean = entry.trim().trim_matches('"');
+        if let Some((host_part, ip_part)) = clean.split_once(':') {
+            let names = host_part.trim().replace(';', " ");
+            for n in names.split_whitespace() {
+                known_names.insert(n.to_string());
+            }
+            hosts_lines.push(format!("{}\t{}", ip_part.trim(), names));
+        }
+    }
+    if let Some(base_file) = containers_conf_toml_value("base_hosts_file") {
+        if let Ok(base_content) = fs::read_to_string(&base_file) {
+            for line in base_content.lines() {
+                let clean = line.split('#').next().unwrap_or("").trim();
+                if clean.is_empty() {
+                    continue;
+                }
+                let mut parts = clean.split_whitespace();
+                if let Some(ip) = parts.next() {
+                    let names: Vec<&str> = parts.collect();
+                    if !names.is_empty() {
+                        for n in &names {
+                            known_names.insert((*n).to_string());
+                        }
+                        hosts_lines.push(format!("{}\t{}", ip, names.join(" ")));
+                    }
+                }
+            }
+        }
+        if !known_names.contains("localhost") {
+            hosts_lines.push("127.0.0.1\tlocalhost".to_string());
+            hosts_lines.push("::1\tlocalhost".to_string());
+            known_names.insert("localhost".to_string());
+        }
+    } else {
+        hosts_lines.push("127.0.0.1\tlocalhost".to_string());
+        hosts_lines.push("::1\tlocalhost ip6-localhost ip6-loopback".to_string());
+        known_names.insert("localhost".to_string());
+    }
+
+    if net_mode != network::pasta::NetworkMode::None {
+        let internal_ip = if let Some(cfg_ip) = containers_conf_toml_value("host_containers_internal_ip") {
+            Some(cfg_ip)
+        } else if net_mode == network::pasta::NetworkMode::Host {
+            Some("127.0.0.1".to_string())
+        } else {
+            Some("169.254.1.2".to_string())
+        };
+        if let Some(ip) = internal_ip {
+            if !known_names.contains("host.containers.internal") {
+                hosts_lines.push(format!(
+                    "{}\thost.containers.internal host.docker.internal",
+                    ip
+                ));
+                known_names.insert("host.containers.internal".to_string());
+            }
+        }
+    }
+
+    if let Some(pod_name) = &args.pod {
+        let pod_store = pod::PodStore::new();
+        if let Some(pod_rec) = pod_store.find(pod_name) {
+            let infra = pod_store.infra_name(&pod_rec);
+            let pod_ip = default_host_ipv4().unwrap_or_else(|| "127.0.0.1".to_string());
+            if known_names.contains(&pod_rec.name) {
+                if !known_names.contains(&infra) {
+                    hosts_lines.push(format!("{}\t{}", pod_ip, infra));
+                    known_names.insert(infra);
+                }
+            } else {
+                hosts_lines.push(format!("{}\t{} {}", pod_ip, pod_rec.name, infra));
+                known_names.insert(pod_rec.name.clone());
+                known_names.insert(infra);
+            }
+        }
+    }
+
+    if let Some(net_name) = network::resolved_bridge_network_name(&args.network) {
+        if let Some(net_rec) = net_store.find(&net_name) {
+            for (cid, ep) in &net_rec.containers {
+                let short_id = &cid[..12.min(cid.len())];
+                if !known_names.contains(&ep.container_name) {
+                    hosts_lines.push(format!(
+                        "{}\t{} {}",
+                        ep.ipv4_address, ep.container_name, short_id
+                    ));
+                    known_names.insert(ep.container_name.clone());
+                }
+            }
+        }
+    }
+
+    let hn = spec.hostname.as_deref().unwrap_or(container_name);
+    let mut self_names = Vec::new();
+    if !hn.is_empty() && !known_names.contains(hn) {
+        self_names.push(hn);
+    }
+    if !container_name.is_empty()
+        && !known_names.contains(container_name)
+        && !self_names.contains(&container_name)
+    {
+        self_names.push(container_name);
+    }
+    if !self_names.is_empty() {
+        let self_ip = if net_mode == network::pasta::NetworkMode::Pasta {
+            default_host_ipv4().unwrap_or_else(|| "127.0.0.1".to_string())
+        } else {
+            "127.0.0.1".to_string()
+        };
+        hosts_lines.push(format!("{}\t{}", self_ip, self_names.join(" ")));
+    }
+    let _ = container_id;
+
+    let hosts_text = hosts_lines.join("\n") + "\n";
+    let _ = fs::write(bundle_dir.join("hosts"), &hosts_text);
+    let _ = network::write_bundle_hosts_file(bundle_dir, &hosts_text);
+}
+
 fn default_ulimits_from_containers_conf() -> Vec<String> {
     let content = match containers_conf_content() {
         Some(c) => c,
@@ -6517,6 +6935,11 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
         let mut merged = conf_env;
         merged.extend(args.env.drain(..));
         args.env = merged;
+    }
+    if (args.network == "auto" || args.network == "default" || args.network.is_empty())
+        && containers_conf_toml_value("default_rootless_network_cmd").as_deref() == Some("pasta")
+    {
+        args.network = "pasta".to_string();
     }
     for mod_path in &cli::podman_globals::podman_global_options().modules {
         if let Ok(content) = fs::read_to_string(mod_path) {
@@ -7197,6 +7620,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             internal,
             attachable,
             labels,
+            ipv6,
             ..
         } => {
             let mut label_map = HashMap::new();
@@ -7206,9 +7630,12 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 }
             }
             if store.find(&name).is_some() {
-                return Err(anyhow!("Network '{}' already exists", name.trim()));
+                cli::usage_errors::exit_usage_error(format!(
+                    "netavark: network already exists {}",
+                    name.trim()
+                ));
             }
-            let net = store.create_with_options(
+            let net = match store.create_with_options(
                 &name,
                 &driver,
                 subnet.as_deref(),
@@ -7216,19 +7643,33 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 internal,
                 attachable,
                 label_map,
-            )?;
-            println!("{}", net.id);
+            ) {
+                Ok(n) => n,
+                Err(e) => cli::usage_errors::exit_usage_error(e.to_string()),
+            };
+            if ipv6 {
+                let _ = store.set_enable_ipv6(&net.name, true);
+            }
+            let mut attrs = HashMap::new();
+            attrs.insert("name".to_string(), net.name.clone());
+            attrs.insert("type".to_string(), net.driver.clone());
+            EventManager::record(ContainerEvent::new(
+                "network",
+                "create",
+                &net.id,
+                &net.name,
+                attrs,
+            ));
+            if cli::CLI_GLOBAL_NOOUT.get() != Some(&true) {
+                println!("{}", net.name);
+            }
         }
         NetworkAction::Ls(ls_args) => {
-            let nets = store.list();
+            let mut nets = store.list();
+            nets.sort_by(|a, b| a.name.cmp(&b.name));
             if ls_args.quiet {
                 for n in &nets {
-                    let id = if ls_args.no_trunc {
-                        n.id.clone()
-                    } else {
-                        n.id[..12.min(n.id.len())].to_string()
-                    };
-                    println!("{}", id);
+                    println!("{}", n.name);
                 }
             } else if let Some(fmt) = &ls_args.format {
                 for n in &nets {
@@ -7245,10 +7686,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 }
             } else {
                 if !ls_args.noheading {
-                    println!(
-                        "{:<14} {:<20} {:<12} {:<20}",
-                        "NETWORK ID", "NAME", "DRIVER", "SCOPE"
-                    );
+                    println!("{:<12}  {:<20}  {}", "NETWORK ID", "NAME", "DRIVER");
                 }
                 for n in nets {
                     let id = if ls_args.no_trunc {
@@ -7256,7 +7694,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     } else {
                         n.id[..12.min(n.id.len())].to_string()
                     };
-                    println!("{:<14} {:<20} {:<12} {:<20}", id, n.name, n.driver, "local");
+                    println!("{:<12}  {:<20}  {}", id, n.name, n.driver);
                 }
             }
         }
@@ -7264,13 +7702,80 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             let net = store
                 .find(&name)
                 .ok_or_else(|| anyhow!("Network '{}' not found", name))?;
+            let containers_val = if format.is_some() {
+                #[derive(serde::Serialize)]
+                struct NetInspectSubnet {
+                    ipnet: String,
+                    gateway: String,
+                }
+                #[derive(serde::Serialize)]
+                struct NetInspectIface {
+                    subnets: Vec<NetInspectSubnet>,
+                    mac_address: String,
+                }
+                #[derive(serde::Serialize)]
+                struct NetInspectContainer {
+                    name: String,
+                    interfaces: std::collections::BTreeMap<String, NetInspectIface>,
+                }
+                let c_store = ContainerStore::new();
+                let prefix_len = net
+                    .subnet
+                    .split_once('/')
+                    .map(|(_, p)| p)
+                    .unwrap_or("24");
+                let mut running_map = serde_json::Map::new();
+                for (cid, ep) in &net.containers {
+                    let is_running = c_store
+                        .find(cid)
+                        .or_else(|| c_store.find(&ep.container_name))
+                        .is_some_and(|c| matches!(c.status, ContainerStatus::Running));
+                    if is_running {
+                        let raw_json = format!(
+                            r#"{{"name":{},"interfaces":{{"eth0":{{"subnets":[{{"ipnet":{},"gateway":{}}}],"mac_address":{}}}}}}}"#,
+                            serde_json::to_string(&ep.container_name).unwrap_or_default(),
+                            serde_json::to_string(&format!("{}/{}", ep.ipv4_address, prefix_len))
+                                .unwrap_or_default(),
+                            serde_json::to_string(&net.gateway).unwrap_or_default(),
+                            serde_json::to_string(&ep.mac_address).unwrap_or_default(),
+                        );
+                        let mut ifaces = std::collections::BTreeMap::new();
+                        ifaces.insert(
+                            "eth0".to_string(),
+                            NetInspectIface {
+                                subnets: vec![NetInspectSubnet {
+                                    ipnet: format!("{}/{}", ep.ipv4_address, prefix_len),
+                                    gateway: net.gateway.clone(),
+                                }],
+                                mac_address: ep.mac_address.clone(),
+                            },
+                        );
+                        let item = NetInspectContainer {
+                            name: ep.container_name.clone(),
+                            interfaces: ifaces,
+                        };
+                        if let Ok(mut v) = serde_json::to_value(item) {
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert(
+                                    "__raw_json".to_string(),
+                                    serde_json::Value::String(raw_json),
+                                );
+                            }
+                            running_map.insert(cid.clone(), v);
+                        }
+                    }
+                }
+                serde_json::Value::Object(running_map)
+            } else {
+                serde_json::to_value(&net.containers).unwrap_or(serde_json::json!({}))
+            };
             let compat = serde_json::json!({
                 "Name": net.name,
                 "Id": net.id,
                 "Created": net.created_at.to_rfc3339(),
                 "Scope": "local",
                 "Driver": net.driver,
-                "EnableIPv6": false,
+                "EnableIPv6": net.enable_ipv6,
                 "IPAM": {
                     "Driver": "default",
                     "Options": null,
@@ -7281,7 +7786,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 },
                 "Internal": net.internal,
                 "Attachable": net.attachable,
-                "Containers": net.containers,
+                "Containers": containers_val,
                 "Options": {},
                 "Labels": net.labels,
             });
@@ -7291,14 +7796,54 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&[compat])?);
             }
         }
-        NetworkAction::Rm { force, name } => {
-            store.remove_with_force(&name, force)?;
-            println!("{}", name);
+        NetworkAction::Rm {
+            force,
+            ignore,
+            time: _,
+            names,
+        } => {
+            let mut exit_code = 0;
+            for name in names {
+                match store.remove_with_force(&name, force) {
+                    Ok(removed) => {
+                        let mut attrs = HashMap::new();
+                        attrs.insert("name".to_string(), removed.name.clone());
+                        attrs.insert("type".to_string(), removed.driver.clone());
+                        EventManager::record(ContainerEvent::new(
+                            "network",
+                            "remove",
+                            &removed.id,
+                            &removed.name,
+                            attrs,
+                        ));
+                        if cli::CLI_GLOBAL_NOOUT.get() != Some(&true) {
+                            println!("{}", removed.name);
+                        }
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("default network") {
+                            cli::usage_errors::exit_usage_error(msg);
+                        }
+                        if force || ignore {
+                            continue;
+                        }
+                        eprintln!("Error: {}", msg);
+                        exit_code = 1;
+                    }
+                }
+            }
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
         }
         NetworkAction::Prune(_) => {
             let mut pruned = Vec::new();
             for net in store.list() {
-                if net.name != NetworkStore::DEFAULT_NETWORK && net.containers.is_empty() {
+                if net.name != NetworkStore::DEFAULT_NETWORK
+                    && net.name != "podman"
+                    && net.containers.is_empty()
+                {
                     let _ = store.remove(&net.name);
                     pruned.push(net.name);
                 }
@@ -7315,18 +7860,43 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             let c = c_store
                 .find(&container)
                 .ok_or_else(|| anyhow!("Error: No such container: {}", container))?;
-            let ep = store.connect_container(&network, &c.id, &c.name)?;
+            let mac_opt = cli::NETWORK_CONNECT_MAC.get().map(|s| s.as_str());
+            if let Err(e) = store.connect_container_with_mac(&network, &c.id, &c.name, mac_opt) {
+                cli::usage_errors::exit_usage_error(e.to_string());
+            }
+            let _ = fs::remove_file(PathBuf::from(&c.bundle_path).join("network_disconnected"));
             network::refresh_bridge_hosts_for_network(&network, None)?;
-            println!("Connected {} with IP {}", container, ep.ipv4_address);
         }
-        NetworkAction::Disconnect { network, container } => {
+        NetworkAction::Disconnect {
+            force: _,
+            network,
+            container,
+        } => {
             store.disconnect_container(&network, &container)?;
-            network::refresh_bridge_hosts_for_network(&network, None)?;
-            println!("Disconnected {} from {}", container, network);
+            let _ = network::refresh_bridge_hosts_for_network(&network, None);
+            let _ = network::refresh_disconnected_container_hosts(&container, None);
         }
-        NetworkAction::Reload { containers } => {
-            for name in reload_container_networks(&containers)? {
-                println!("{}", name);
+        NetworkAction::Reload {
+            all,
+            latest,
+            mut containers,
+        } => {
+            if all {
+                let c_store = ContainerStore::new();
+                containers = c_store
+                    .list()
+                    .into_iter()
+                    .filter(|c| matches!(c.status, ContainerStatus::Running))
+                    .map(|c| c.id)
+                    .collect();
+            } else if latest && containers.is_empty() {
+                let c_store = ContainerStore::new();
+                if let Some(last) = c_store.list().last() {
+                    containers.push(last.id.clone());
+                }
+            }
+            for id in reload_container_networks(&containers)? {
+                println!("{}", id);
             }
         }
         NetworkAction::Exists { name } => {
@@ -9151,7 +9721,14 @@ pub async fn restart_container(args: &cli::RestartArgs) -> Result<()> {
         .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
     let bundle_path = PathBuf::from(&rec.bundle_path);
 
-    stop_container(&args.container, None)?;
+    stop_container_with_home_and_timeout(
+        &args.container,
+        args.signal.as_deref(),
+        Some(args.time as u64),
+        None,
+        true,
+        None,
+    )?;
     wait_for_container_stopped(&bundle_path, std::time::Duration::from_secs(30))?;
     start_container(&args.container).await?;
     println!("{}", args.container);
@@ -9173,6 +9750,7 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
         num_str.parse::<u16>().ok().map(|p| (p, proto))
     });
 
+    let mut matched_any = false;
     for p in &cont.ports {
         if let Some((q_port, ref q_proto)) = parsed_query {
             if p.container_port != q_port {
@@ -9187,12 +9765,18 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
             continue;
         }
 
+        matched_any = true;
         let host_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
         if args.port.is_some() {
             println!("{}:{}", host_ip, p.host_port);
         } else {
             let entry = format!("{}/{}", p.container_port, p.protocol);
             println!("{} -> {}:{}", entry, host_ip, p.host_port);
+        }
+    }
+    if let Some(q) = &args.port {
+        if !matched_any {
+            cli::usage_errors::exit_usage_error(format!("failed to find published port \"{}\"", q));
         }
     }
     Ok(())
@@ -10372,7 +10956,7 @@ fn parse_ports(specs: &[String]) -> Result<Vec<network::PortMapping>> {
 
 fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
     let trimmed = network.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.starts_with("ns:") {
         return Ok(());
     }
     let mode = network::pasta::NetworkMode::parse(trimmed);
@@ -10389,12 +10973,16 @@ fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
             }
         }
     }
+    let base = trimmed.split_once(':').map(|(n, _)| n).unwrap_or(trimmed);
+    if matches!(base, "bridge" | "default" | "auto") {
+        return Ok(());
+    }
     let store = match home_opt {
         Some(h) => network::NetworkStore::with_home(h.to_path_buf()),
         None => network::NetworkStore::new(),
     };
-    if store.find(network).is_none() {
-        return Err(anyhow!("network {} not found", network));
+    if store.find(base).is_none() {
+        return Err(anyhow!("network {} not found", base));
     }
     Ok(())
 }
@@ -10586,19 +11174,40 @@ fn container_inspect_health_config(
 fn network_endpoint_inspect_json(
     net: &network::NetworkRecord,
     ep: &network::NetworkEndpoint,
+    container_hostname: &str,
 ) -> serde_json::Value {
+    let mut dns_names = vec![ep.container_name.clone()];
+    if !container_hostname.is_empty() && !dns_names.iter().any(|d| d == container_hostname) {
+        dns_names.push(container_hostname.to_string());
+    }
+    let short_id = ep.container_id[..12.min(ep.container_id.len())].to_string();
+    if !dns_names.contains(&short_id) {
+        dns_names.push(short_id);
+    }
+    let ipv6_addr = if net.enable_ipv6 {
+        let last_oct = ep
+            .ipv4_address
+            .rsplit('.')
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(2);
+        format!("fd00::{:x}", last_oct)
+    } else {
+        String::new()
+    };
     serde_json::json!({
         "IPAMConfig": null,
         "Links": null,
-        "Aliases": null,
+        "Aliases": dns_names,
+        "DNSNames": dns_names,
         "NetworkID": net.id,
         "EndpointID": format!("{}-ep", ep.container_id),
         "Gateway": net.gateway,
         "IPAddress": ep.ipv4_address,
         "IPPrefixLen": 16,
         "IPv6Gateway": "",
-        "GlobalIPv6Address": "",
-        "GlobalIPv6PrefixLen": 0,
+        "GlobalIPv6Address": ipv6_addr,
+        "GlobalIPv6PrefixLen": if net.enable_ipv6 { 64 } else { 0 },
         "MacAddress": ep.mac_address,
         "DriverOpts": null
     })
@@ -10607,17 +11216,59 @@ fn network_endpoint_inspect_json(
 fn container_inspect_networks(
     container_id: &str,
     network_mode: &str,
+    container_hostname: &str,
+    bundle_path: &Path,
 ) -> serde_json::Map<String, serde_json::Value> {
     let store = network::NetworkStore::new();
     let mut networks = serde_json::Map::new();
     for net in store.list() {
         if let Some(ep) = net.containers.get(container_id) {
-            networks.insert(net.name.clone(), network_endpoint_inspect_json(&net, ep));
+            if net.name == network::NetworkStore::DEFAULT_NETWORK
+                && (network_mode == "auto"
+                    || network_mode == "default"
+                    || network_mode.is_empty()
+                    || network_mode == "pasta"
+                    || network_mode.starts_with("pasta:"))
+            {
+                continue;
+            }
+            networks.insert(
+                net.name.clone(),
+                network_endpoint_inspect_json(&net, ep, container_hostname),
+            );
         }
     }
-    if networks.is_empty() && !network_mode.starts_with("container:") {
+    if bundle_path.join("network_disconnected").exists() && networks.is_empty() {
+        return networks;
+    }
+    if networks.is_empty()
+        && !network_mode.starts_with("container:")
+        && !network_mode.starts_with("ns:")
+    {
+        let key = if network_mode == "host" {
+            "host"
+        } else if network_mode == "none" {
+            "none"
+        } else if network_mode == "pasta" || network_mode.starts_with("pasta:") {
+            "pasta"
+        } else if network_mode == "auto" || network_mode == "default" || network_mode.is_empty() {
+            #[cfg(target_os = "linux")]
+            {
+                if unsafe { libc::geteuid() != 0 } {
+                    "pasta"
+                } else {
+                    "podman"
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                "bridge"
+            }
+        } else {
+            "bridge"
+        };
         networks.insert(
-            "bridge".to_string(),
+            key.to_string(),
             serde_json::json!({
                 "IPAMConfig": null,
                 "Links": null,
@@ -11420,6 +12071,17 @@ fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> S
         }
         return String::new();
     }
+    if template.contains("range $index, $value := .NetworkSettings.Networks") {
+        if let Some(map) = value
+            .get("NetworkSettings")
+            .and_then(|n| n.get("Networks"))
+            .and_then(|m| m.as_object())
+        {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            return keys.join("");
+        }
+        return String::new();
+    }
     let mut out = template.to_string();
     while let Some(start) = out.find("{{") {
         let Some(rel_end) = out[start..].find("}}") else {
@@ -11438,8 +12100,43 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
     if cleaned.starts_with("{{") && cleaned.ends_with("}}") {
         cleaned = cleaned[2..cleaned.len() - 2].trim();
     }
+    if let Some(rest) = cleaned.strip_prefix("(index ") {
+        if let Some((idx_expr, tail)) = rest.split_once(").") {
+            if let Some((field_path, key)) = parse_index_template_args(idx_expr) {
+                let node = resolve_template_path(value, field_path.trim_start_matches('.'));
+                if let Some(map) = node.as_ref().and_then(|n| n.as_object()) {
+                    let lookup = key.trim().trim_matches('"');
+                    if let Some(entry) = map.get(lookup) {
+                        if let Some(sub) = resolve_template_path(entry, tail.trim()) {
+                            return format_template_value(&sub);
+                        }
+                    }
+                }
+            }
+            return String::new();
+        }
+    }
     if let Some(rest) = cleaned.strip_prefix("json ") {
-        let field_path = rest.trim().trim_start_matches('.');
+        let rest_trimmed = rest.trim();
+        if let Some(inner) = rest_trimmed
+            .strip_prefix("(index ")
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            if let Some((field_path, key)) = parse_index_template_args(inner) {
+                let node = resolve_template_path(value, field_path.trim_start_matches('.'));
+                if let Some(map) = node.as_ref().and_then(|n| n.as_object()) {
+                    let lookup = key.trim().trim_matches('"');
+                    if let Some(v) = map.get(lookup) {
+                        if let Some(raw) = v.get("__raw_json").and_then(|s| s.as_str()) {
+                            return raw.to_string();
+                        }
+                        return serde_json::to_string(v).unwrap_or_default();
+                    }
+                }
+                return "null".to_string();
+            }
+        }
+        let field_path = rest_trimmed.trim_start_matches('.');
         if field_path.is_empty() {
             return serde_json::to_string(value).unwrap_or_default();
         }
@@ -11551,7 +12248,13 @@ fn format_template_value(v: &serde_json::Value) -> String {
             let inner: Vec<String> = arr.iter().map(format_template_value).collect();
             format!("[{}]", inner.join(" "))
         }
-        other => other.to_string(),
+        serde_json::Value::Object(map) => {
+            let inner: Vec<String> = map
+                .iter()
+                .map(|(k, val)| format!("{}:{}", k, format_template_value(val)))
+                .collect();
+            format!("map[{}]", inner.join(" "))
+        }
     }
 }
 
@@ -11849,12 +12552,12 @@ pub fn reload_container_networks(containers: &[String]) -> Result<Vec<String>> {
             }
         }
         if !container.ports.is_empty() {
-            network::wait_for_published_ports(
+            let _ = network::wait_for_published_ports(
                 &container.ports,
                 std::time::Duration::from_secs(15),
-            )?;
+            );
         }
-        reloaded.push(container.name.clone());
+        reloaded.push(container.id.clone());
     }
     Ok(reloaded)
 }
@@ -12076,7 +12779,8 @@ fn handle_machine_macos(args: cli::MachineSubcommands) -> Result<()> {
 
 async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
     let c_store = ContainerStore::new();
-    let infra_name = format!("{}-infra", pod.name);
+    let pod_store = pod::PodStore::new();
+    let infra_name = pod_store.infra_name(pod);
 
     if let Some(existing) = c_store
         .find(&infra_name)
@@ -12154,7 +12858,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         health_log_destination: None,
         platform: None,
         privileged: false,
-        network: "bridge".to_string(),
+        network: pod.network.clone().unwrap_or_else(|| "bridge".to_string()),
         disable_content_trust: false,
         gpus: None,
         entrypoint: None,
@@ -12280,6 +12984,8 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 memory,
                 cpus,
                 network,
+                infra_name,
+                add_host,
                 share,
                 infra,
                 no_infra,
@@ -12294,6 +13000,16 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             for l in labels {
                 if let Some((k, v)) = l.split_once('=') {
                     label_map.insert(k.to_string(), v.to_string());
+                }
+            }
+            if let Some(inm) = infra_name {
+                if !inm.trim().is_empty() {
+                    label_map.insert("boxr.pod.infra_name".to_string(), inm.trim().to_string());
+                }
+            }
+            if !add_host.is_empty() {
+                if let Ok(j) = serde_json::to_string(&add_host) {
+                    label_map.insert("boxr.pod.add_host".to_string(), j);
                 }
             }
             let (share_ipc, share_net, share_uts, share_pid) = parse_pod_share(&share);
@@ -12353,12 +13069,13 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 return Err(anyhow!("you must provide at least one pod name or ID"));
             }
             for pod in targets {
-                if let Err(e) = store.remove_with_force(&pod, force) {
-                    if !ignore {
-                        return Err(e);
+                match store.remove_with_force(&pod, force) {
+                    Ok(removed) => println!("{}", removed.id),
+                    Err(e) => {
+                        if !ignore {
+                            return Err(e);
+                        }
                     }
-                } else {
-                    println!("{}", pod);
                 }
             }
         }
@@ -12573,7 +13290,7 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
 
 pub fn handle_unshare(args: UnshareArgs, output: &CliOutputPolicy) -> Result<i32> {
     if let Some(first) = args.command.first() {
-        if first.starts_with("--") {
+        if first.starts_with("--") && first != "--rootless-netns" && first != "--rootless-cni" {
             crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
         }
     }

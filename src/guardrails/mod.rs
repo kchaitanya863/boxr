@@ -182,6 +182,30 @@ pub fn validate_network_port_compatibility(
     Ok(())
 }
 
+fn norm_host_ip(s: Option<&str>) -> &str {
+    match s {
+        None => "*",
+        Some(v) => {
+            let t = v.trim().trim_matches(|c| c == '[' || c == ']');
+            if t.is_empty() { "*" } else { t }
+        }
+    }
+}
+
+fn host_ips_overlap(a: Option<&str>, b: Option<&str>) -> bool {
+    let ip_a = norm_host_ip(a);
+    let ip_b = norm_host_ip(b);
+    if ip_a == "*" || ip_b == "*" || ip_a == ip_b {
+        return true;
+    }
+    let a_v6 = ip_a.contains(':');
+    let b_v6 = ip_b.contains(':');
+    if a_v6 != b_v6 {
+        return false;
+    }
+    ip_a == "0.0.0.0" || ip_b == "0.0.0.0" || ip_a == "::" || ip_b == "::"
+}
+
 impl PortCollisionGuard {
     /// Ensure none of the requested host ports are already bound by other running containers
     pub fn ensure_no_conflicts(requested_ports: &[crate::network::PortMapping]) -> Result<()> {
@@ -226,19 +250,16 @@ impl PortCollisionGuard {
                 if req_b.host_port == 0 {
                     continue;
                 }
-                let ip_b = req_b.host_ip.as_deref().unwrap_or("0.0.0.0");
                 if req_a.protocol.eq_ignore_ascii_case(&req_b.protocol)
                     && req_a.host_port == req_b.host_port
+                    && host_ips_overlap(req_a.host_ip.as_deref(), req_b.host_ip.as_deref())
                 {
-                    let ips_overlap = ip_a == "0.0.0.0" || ip_b == "0.0.0.0" || ip_a == ip_b;
-                    if ips_overlap {
-                        return Err(anyhow!(
-                            "Port conflict: duplicate host port binding {}:{}/{} requested multiple times",
-                            ip_a,
-                            req_a.host_port,
-                            req_a.protocol
-                        ));
-                    }
+                    return Err(anyhow!(
+                        "Port conflict: duplicate host port binding {}:{}/{} requested multiple times",
+                        ip_a,
+                        req_a.host_port,
+                        req_a.protocol
+                    ));
                 }
             }
         }
@@ -261,21 +282,16 @@ impl PortCollisionGuard {
                 for p in &c.ports {
                     if p.protocol.eq_ignore_ascii_case(&req.protocol)
                         && p.host_port == req.host_port
+                        && host_ips_overlap(req.host_ip.as_deref(), p.host_ip.as_deref())
                     {
-                        let running_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
-                        let ips_overlap =
-                            req_ip == "0.0.0.0" || running_ip == "0.0.0.0" || req_ip == running_ip;
-
-                        if ips_overlap {
-                            return Err(anyhow!(
-                                "address already in use: host port {}:{}/{} bound by container '{}' ({})",
-                                req_ip,
-                                req.host_port,
-                                req.protocol,
-                                c.name,
-                                &c.id[..12.min(c.id.len())]
-                            ));
-                        }
+                        return Err(anyhow!(
+                            "host port {}:{}/{} bound by container '{}' ({}): address already in use",
+                            req_ip,
+                            req.host_port,
+                            req.protocol,
+                            c.name,
+                            &c.id[..12.min(c.id.len())]
+                        ));
                     }
                 }
             }

@@ -48,10 +48,11 @@ fn namespace_clone_flag(ns: &str) -> Option<CloneFlags> {
     }
 }
 
-fn setns_file_path(path: &str, flag: CloneFlags) {
+fn setns_file_path(path: &str, flag: CloneFlags) -> bool {
     if let Ok(f) = fs::File::open(path) {
-        let _ = setns(&f, flag);
+        return setns(&f, flag).is_ok();
     }
+    false
 }
 
 fn join_namespace_for_container_target(target: &str, ns: &str) -> bool {
@@ -66,8 +67,7 @@ fn join_namespace_for_container_target(target: &str, ns: &str) -> bool {
     let Some(pid) = crate::pod::read_container_pid_from_bundle(&bundle) else {
         return false;
     };
-    setns_file_path(&format!("/proc/{pid}/ns/{ns}"), flag);
-    true
+    setns_file_path(&format!("/proc/{pid}/ns/{ns}"), flag)
 }
 
 fn apply_spec_namespace_joins(spec: &Spec) -> NamespaceJoinState {
@@ -77,12 +77,13 @@ fn apply_spec_namespace_joins(spec: &Spec) -> NamespaceJoinState {
             if let (Some(path), Some(flag)) =
                 (ns.path.as_deref(), namespace_clone_flag(&ns.ns_type))
             {
-                setns_file_path(path, flag);
-                match ns.ns_type.as_str() {
-                    "ipc" => state.ipc = true,
-                    "uts" => state.uts = true,
-                    "net" => state.net = true,
-                    _ => {}
+                if setns_file_path(path, flag) {
+                    match ns.ns_type.as_str() {
+                        "ipc" => state.ipc = true,
+                        "uts" => state.uts = true,
+                        "net" => state.net = true,
+                        _ => {}
+                    }
                 }
             }
         }
@@ -628,7 +629,10 @@ fn wait_for_detached_conmon_start(bundle_path: &Path, supervisor: &mut Child) ->
         crate::bundle_auto_remove(bundle_path) || crate::bundle_auto_remove_image(bundle_path);
     let wait_start = Instant::now();
     while wait_start.elapsed() < Duration::from_secs(30) {
-        if bundle_path.join("conmon.pid").exists() {
+        if bundle_path.join("conmon.pid").exists()
+            && (bundle_path.join("container.pid").exists()
+                || bundle_path.join("boxr-exitcode").exists())
+        {
             return Ok(());
         }
         if expect_auto_cleanup {
@@ -839,7 +843,7 @@ pub fn execute_bundle(
         let ports_json = serde_json::to_string(&ports)?;
         let _ = fs::write(bundle_path.join("ports.json"), ports_json);
         // Host-side Unix relay conflicts with passt/pasta binding the same host ports.
-        if !network_mode.should_use_pasta() {
+        if network_mode != crate::network::pasta::NetworkMode::Pasta {
             let _ = crate::network::spawn_port_forward_daemon(bundle_path, &ports);
         }
     }
@@ -850,6 +854,9 @@ pub fn execute_bundle(
     if use_conmon_shim(_spec) || detach {
         let conmon = prepare_conmon_shim(bundle_path, _spec, &exe)?;
         if detach {
+            let _ = fs::remove_file(bundle_path.join("conmon.pid"));
+            let _ = fs::remove_file(bundle_path.join("container.pid"));
+            let _ = fs::remove_file(bundle_path.join("boxr-exitcode"));
             let _ = fs::write(bundle_path.join("conmon-detach.flag"), "1");
         }
         let mut cmd = std::process::Command::new(&conmon);
@@ -1237,12 +1244,44 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     let got_netok =
                         parent_sock.read_exact(&mut net_sync).is_ok() && &net_sync == b"netok";
                     if got_netok {
-                        let pasta_cfg =
-                            crate::network::pasta::PastaConfig::for_pid(child.as_raw(), &ports);
-                        pasta_child = crate::network::pasta::PastaDriver::spawn(&pasta_cfg)
-                            .ok()
-                            .flatten();
-                        let _ = parent_sock.write_all(b"gofor");
+                        let raw_net = spec
+                            .annotations
+                            .as_ref()
+                            .and_then(|a| a.get("boxr.network"))
+                            .map(|s| s.as_str())
+                            .unwrap_or("pasta");
+                        let conf_pasta_opts: Vec<String> = spec
+                            .annotations
+                            .as_ref()
+                            .and_then(|a| a.get("boxr.pasta_options"))
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or_default();
+                        let pasta_ports: &[PortMapping] =
+                            if network_mode == crate::network::pasta::NetworkMode::Pasta {
+                                &ports
+                            } else {
+                                &[]
+                            };
+                        let pasta_cfg = crate::network::pasta::PastaConfig::for_container(
+                            child.as_raw(),
+                            pasta_ports,
+                            raw_net,
+                            &conf_pasta_opts,
+                        );
+                        match crate::network::pasta::PastaDriver::spawn(&pasta_cfg) {
+                            Ok(pc) => {
+                                pasta_child = pc;
+                                let _ = parent_sock.write_all(b"gofor");
+                            }
+                            Err(e) => {
+                                let _ = nix::sys::signal::kill(
+                                    child,
+                                    nix::sys::signal::Signal::SIGKILL,
+                                );
+                                let _ = waitpid(child, None);
+                                return Err(e);
+                            }
+                        }
                     }
                 }
                 drop(parent_sock);
@@ -1348,15 +1387,62 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 // If using native pure-Rust user-mode networking stack:
                 let mut tap_worker_pid = None;
                 let mut fwd_helper_pid = None;
+                let mut _extra_tap_files = Vec::new();
                 if network_mode.should_use_native_usernet() {
                     use crate::network::usernet::engine::platform;
                     use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
-                    if let Ok(tap_file) = platform::create_tap_device("eth0") {
+                    let net_ifaces: Vec<(String, String, String)> = fs::read_to_string(
+                        bundle_path.join("network_interfaces.json"),
+                    )
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                    let primary_ifname = net_ifaces
+                        .first()
+                        .map(|(ifn, _, _)| ifn.as_str())
+                        .unwrap_or("eth0");
+                    if let Ok(tap_file) = platform::create_tap_device(primary_ifname) {
                         let _ = platform::configure_container_netns(
-                            "eth0",
+                            primary_ifname,
                             DEFAULT_CONTAINER_IP,
                             DEFAULT_GATEWAY_IP,
                         );
+                        if let Some((_, ip_str, _)) = net_ifaces.first() {
+                            if ip_str != "10.0.2.15" && !ip_str.is_empty() {
+                                let _ = std::process::Command::new("ip")
+                                    .args([
+                                        "addr",
+                                        "add",
+                                        &format!("{}/24", ip_str),
+                                        "brd",
+                                        "+",
+                                        "dev",
+                                        primary_ifname,
+                                    ])
+                                    .status();
+                            }
+                        }
+                        for (ifn, ip_str, _) in net_ifaces.iter().skip(1) {
+                            if let Ok(tf) = platform::create_tap_device(ifn) {
+                                if !ip_str.is_empty() {
+                                    let _ = std::process::Command::new("ip")
+                                        .args([
+                                            "addr",
+                                            "add",
+                                            &format!("{}/24", ip_str),
+                                            "brd",
+                                            "+",
+                                            "dev",
+                                            ifn,
+                                        ])
+                                        .status();
+                                }
+                                let _ = std::process::Command::new("ip")
+                                    .args(["link", "set", ifn, "up"])
+                                    .status();
+                                _extra_tap_files.push(tf);
+                            }
+                        }
                         // Fork background TAP engine worker before unsharing PID namespace
                         match unsafe { fork() } {
                             Ok(ForkResult::Child) => {
@@ -1377,7 +1463,9 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
                 // Fork port-forward helper inside the container netns for any published
                 // ports when pasta is not handling forwarding.
-                if !ports.is_empty() && !use_pasta {
+                if !ports.is_empty()
+                    && (!use_pasta || network_mode != crate::network::pasta::NetworkMode::Pasta)
+                {
                     match unsafe { fork() } {
                         Ok(ForkResult::Child) => {
                             let _ =
@@ -1812,18 +1900,31 @@ pub fn run_internal_pause(args: &[String]) -> Result<i32> {
 
 /// Run an unshare command in a new user namespace (boxr unshare)
 pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
-    if let Some(first) = args.first() {
-        if first.starts_with("--") {
-            crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", first));
+    let mut rootless_netns = false;
+    let mut filtered = Vec::new();
+    let mut past_flags = false;
+    for a in args {
+        if !past_flags && (a == "--rootless-netns" || a == "--rootless-cni") {
+            rootless_netns = true;
+            continue;
         }
+        if !past_flags && a.starts_with("--") {
+            crate::cli::usage_errors::exit_usage_error(format!("unknown flag: {}", a));
+        }
+        past_flags = true;
+        filtered.push(a.clone());
     }
     let default_cmd = vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())];
-    let cmd = if args.is_empty() { &default_cmd } else { args };
+    let cmd = if filtered.is_empty() {
+        &default_cmd
+    } else {
+        &filtered
+    };
 
     let is_rootless = unsafe { libc::getuid() != 0 };
     if is_rootless {
         let pause_pid = ensure_rootless_pause_process();
-        if cmd.len() == 2 && cmd[0] == "readlink" && cmd[1] == "/proc/self/ns/user" {
+        if !rootless_netns && cmd.len() == 2 && cmd[0] == "readlink" && cmd[1] == "/proc/self/ns/user" {
             if let Some(ppid) = pause_pid {
                 if let Ok(link) = fs::read_link(format!("/proc/{ppid}/ns/user")) {
                     if !suppress_stdout {
@@ -1844,6 +1945,23 @@ pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
                 parent_sock.read_exact(&mut buf)?;
                 crate::security::RootlessUserConfig::setup_child_mappings(child.as_raw())?;
                 parent_sock.write_all(b"done")?;
+                if rootless_netns {
+                    let mut net_buf = [0u8; 5];
+                    if parent_sock.read_exact(&mut net_buf).is_ok() {
+                        let pasta_cfg = crate::network::pasta::PastaConfig::for_container(
+                            child.as_raw(),
+                            &[],
+                            "pasta",
+                            &[],
+                        );
+                        if let Err(e) = crate::network::pasta::PastaDriver::spawn(&pasta_cfg) {
+                            let _ = nix::sys::signal::kill(child, nix::sys::signal::Signal::SIGKILL);
+                            let _ = waitpid(child, None);
+                            crate::cli::usage_errors::exit_usage_error(e.to_string());
+                        }
+                        let _ = parent_sock.write_all(b"netgo");
+                    }
+                }
                 drop(parent_sock);
 
                 match waitpid(child, None)? {
@@ -1861,6 +1979,12 @@ pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
                 child_sock.write_all(b"ready")?;
                 let mut buf = [0u8; 4];
                 child_sock.read_exact(&mut buf)?;
+                if rootless_netns {
+                    let _ = unshare(CloneFlags::CLONE_NEWNET);
+                    child_sock.write_all(b"netok")?;
+                    let mut net_go = [0u8; 5];
+                    let _ = child_sock.read_exact(&mut net_go);
+                }
                 drop(child_sock);
                 crate::security::RootlessUserConfig::try_enable_setgroups_after_mapping();
 
@@ -2930,6 +3054,8 @@ fn exec_in_bundle_via_setns(
             if !preserve_fds.is_empty() {
                 clear_close_on_exec(preserve_fds);
                 close_fds_except(preserve_fds);
+            } else if detach {
+                close_fds_except(&[]);
             }
             if let Some(cap) = capture_file {
                 let fd = cap.as_raw_fd();
@@ -2938,13 +3064,21 @@ fn exec_in_bundle_via_setns(
                 if let Ok(null) = std::fs::OpenOptions::new().read(true).open("/dev/null") {
                     let _ = nix::unistd::dup2(null.as_raw_fd(), 0);
                 }
-            } else if attach.quiet && !attach.interactive {
+            } else if detach || (attach.quiet && !attach.interactive) {
+                if detach {
+                    unsafe {
+                        libc::setsid();
+                    }
+                }
                 if let Ok(null) = std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open("/dev/null")
                 {
                     let fd = null.as_raw_fd();
+                    if detach {
+                        let _ = nix::unistd::dup2(fd, 0);
+                    }
                     let _ = nix::unistd::dup2(fd, 1);
                     let _ = nix::unistd::dup2(fd, 2);
                 }
@@ -3251,20 +3385,35 @@ fn run_container_child(
         .and_then(|a| a.get("boxr.no_hostname"))
         .map(|v| v == "true")
         .unwrap_or(false);
+    let uts_host = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.uts_host"))
+        .map(|v| v == "true")
+        .unwrap_or(false);
     if !skip_hostname_file {
-        let host_label = spec
-            .hostname
-            .as_deref()
-            .filter(|h| !h.is_empty())
-            .unwrap_or("localhost");
+        let host_label = if uts_host {
+            fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "localhost".to_string())
+        } else {
+            spec.hostname
+                .as_deref()
+                .filter(|h| !h.is_empty())
+                .unwrap_or("localhost")
+                .to_string()
+        };
         let hostname_path = rootfs.join("etc/hostname");
         if let Some(parent) = hostname_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        let _ = fs::remove_file(&hostname_path);
         let _ = fs::write(&hostname_path, format!("{host_label}\n"));
     }
     if let Some(hostname) = &spec.hostname {
-        if !skip_hostname_file {
+        if !skip_hostname_file && !uts_host {
             let host_c = CString::new(hostname.as_str())?;
             unsafe {
                 libc::sethostname(host_c.as_ptr(), host_c.as_bytes().len());
@@ -3666,6 +3815,10 @@ fn run_container_child(
     if let Some(domain) = &spec.domainname {
         dns_content.push_str(&format!("domain {}\n", domain));
     }
+    if let Ok(prebuilt_resolv) = fs::read_to_string(bundle_dir.join("resolv.conf")) {
+        dns_content = prebuilt_resolv;
+    }
+    let _ = fs::remove_file(&resolv_path);
     let _ = fs::write(&resolv_path, dns_content);
 
     // Ensure /etc/hosts exists and contains localhost and container hostname
@@ -3713,6 +3866,10 @@ fn run_container_child(
             }
         }
     }
+    if let Ok(prebuilt_hosts) = fs::read_to_string(bundle_dir.join("hosts")) {
+        hosts_content = prebuilt_hosts;
+    }
+    let _ = fs::remove_file(&hosts_path);
     let _ = fs::write(&hosts_path, &hosts_content);
     let upper_hosts = bundle_dir.join("upper/etc/hosts");
     if let Some(parent) = upper_hosts.parent() {
@@ -3833,6 +3990,13 @@ fn run_container_child(
     }
 
     become_effective_container_root();
+    for etc_file in ["/etc/hosts", "/etc/resolv.conf", "/etc/hostname"] {
+        let _ = nix::unistd::chown(
+            etc_file,
+            Some(nix::unistd::Uid::from_raw(0)),
+            Some(nix::unistd::Gid::from_raw(0)),
+        );
+    }
     set_supplementary_group_list(spec.process.user.additional_gids.as_deref().unwrap_or(&[]));
 
     #[cfg(target_os = "linux")]

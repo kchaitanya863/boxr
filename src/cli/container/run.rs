@@ -237,7 +237,7 @@ pub struct RunArgs {
     pub dns_search: Vec<String>,
 
     /// Set DNS options
-    #[arg(long = "dns-option")]
+    #[arg(long = "dns-option", alias = "dns-opt")]
     pub dns_option: Vec<String>,
 
     /// Expose a port or a range of ports

@@ -183,6 +183,11 @@ impl PodStore {
     }
 
     pub fn infra_name(&self, pod: &PodRecord) -> String {
+        if let Some(custom) = pod.labels.get("boxr.pod.infra_name") {
+            if !custom.is_empty() {
+                return custom.clone();
+            }
+        }
         format!("{}-infra", pod.name)
     }
 
@@ -207,7 +212,12 @@ impl PodStore {
                 return Err(anyhow!("Pod name '{}' already exists", pod_name));
             }
 
-            let infra_name = format!("{}-infra", pod_name);
+            let infra_name = config
+                .labels
+                .get("boxr.pod.infra_name")
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("{}-infra", pod_name));
             let pod = PodRecord {
                 id: random_id[..12].to_string(),
                 name: pod_name,
@@ -271,7 +281,7 @@ impl PodStore {
                 .position(|p| p.id == q || p.id.starts_with(q) || p.name == q)
             {
                 let pod = &data.pods[pos];
-                let infra_name = format!("{}-infra", pod.name);
+                let infra_name = self.infra_name(pod);
 
                 if !force {
                     for cid in &pod.containers {
@@ -284,30 +294,19 @@ impl PodStore {
                             }
                         }
                     }
-                    if let Some(infra) = c_store
-                        .find(&infra_name)
-                        .or_else(|| c_store.find(&pod.infra_container_id))
-                    {
-                        if matches!(infra.status, ContainerStatus::Running) {
-                            return Err(anyhow!(
-                                "conflict: cannot remove running pod {}. Stop the pod or use force",
-                                pod.name
-                            ));
-                        }
-                    }
                 }
 
                 let removed = data.pods.remove(pos);
                 self.save_unlocked(&data)?;
 
                 for cid in &removed.containers {
-                    let _ = crate::remove_container(cid, force);
+                    let _ = crate::remove_container_quiet(cid, true, false);
                 }
                 if let Some(infra) = c_store
                     .find(&infra_name)
                     .or_else(|| c_store.find(&removed.infra_container_id))
                 {
-                    let _ = crate::remove_container(&infra.id, force);
+                    let _ = crate::remove_container_quiet(&infra.id, true, false);
                 }
                 Ok(removed)
             } else {
@@ -459,7 +458,9 @@ pub fn resolve_namespace_spec(spec: &str, ns_type: &str) -> Result<Option<String
 
 /// Apply pod namespace sharing settings onto run arguments.
 pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate::cli::RunArgs) {
-    if pod.share_net {
+    if pod.network.as_deref() == Some("host") {
+        args.network = "host".to_string();
+    } else if pod.share_net {
         args.network = format!("container:{}", infra_name);
     } else if let Some(net) = &pod.network {
         args.network = net.clone();
@@ -485,8 +486,19 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
     if args.cpus.is_none() {
         args.cpus = pod.cpus.clone();
     }
+    if let Some(ah_json) = pod.labels.get("boxr.pod.add_host") {
+        if let Ok(ah_list) = serde_json::from_str::<Vec<String>>(ah_json) {
+            for entry in ah_list {
+                if !args.add_host.contains(&entry) {
+                    args.add_host.push(entry);
+                }
+            }
+        }
+    }
     for (k, v) in &pod.labels {
-        args.labels.push(format!("{}={}", k, v));
+        if !k.starts_with("boxr.pod.") {
+            args.labels.push(format!("{}={}", k, v));
+        }
     }
 }
 
