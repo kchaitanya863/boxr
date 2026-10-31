@@ -136,19 +136,21 @@ impl RootlessPortForwarder {
     /// Start the user-space TCP proxy forwarding traffic between host and container target
     pub async fn start(&self) -> Result<()> {
         #[cfg(target_os = "linux")]
-        let listener = bind_linux_tcp_listener(self.host_addr, self.v6_only).or_else(|e| {
-            if self.v6_only == Some(false) {
-                let fallback = SocketAddr::from(([0, 0, 0, 0], self.host_addr.port()));
-                bind_linux_tcp_listener(fallback, None)
-            } else {
-                Err(e)
-            }
-        }).with_context(|| {
-            format!(
-                "Failed to bind rootless port forwarder on {}",
-                self.host_addr
-            )
-        })?;
+        let listener = bind_linux_tcp_listener(self.host_addr, self.v6_only)
+            .or_else(|e| {
+                if self.v6_only == Some(false) {
+                    let fallback = SocketAddr::from(([0, 0, 0, 0], self.host_addr.port()));
+                    bind_linux_tcp_listener(fallback, None)
+                } else {
+                    Err(e)
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to bind rootless port forwarder on {}",
+                    self.host_addr
+                )
+            })?;
         #[cfg(not(target_os = "linux"))]
         let listener = TcpListener::bind(self.host_addr).await.with_context(|| {
             format!(
@@ -393,7 +395,10 @@ impl PortForwardManager {
         let _ = bundle_path;
         let mut forwarders = Vec::new();
         for p in ports {
-            let raw_ip = p.host_ip.as_deref().map(|s| s.trim().trim_matches(|c| c == '[' || c == ']'));
+            let raw_ip = p
+                .host_ip
+                .as_deref()
+                .map(|s| s.trim().trim_matches(|c| c == '[' || c == ']'));
             #[cfg(target_os = "linux")]
             let (host_addr, v6_only): (SocketAddr, Option<bool>) = match raw_ip {
                 None | Some("") => (
@@ -407,7 +412,9 @@ impl PortForwardManager {
                 Some(ip) if ip.contains(':') => (
                     format!("[{}]:{}", ip, p.host_port)
                         .parse()
-                        .unwrap_or_else(|_| SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 0], p.host_port))),
+                        .unwrap_or_else(|_| {
+                            SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 0], p.host_port))
+                        }),
                     Some(true),
                 ),
                 Some(ip) => (
@@ -593,8 +600,13 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                 std::thread::spawn(move || {
                     let tcp = primary_ip
                         .as_deref()
-                        .and_then(|ip| std::net::TcpStream::connect(format!("{}:{}", ip, container_port)).ok())
-                        .or_else(|| std::net::TcpStream::connect(format!("127.0.0.1:{}", container_port)).ok());
+                        .and_then(|ip| {
+                            std::net::TcpStream::connect(format!("{}:{}", ip, container_port)).ok()
+                        })
+                        .or_else(|| {
+                            std::net::TcpStream::connect(format!("127.0.0.1:{}", container_port))
+                                .ok()
+                        });
                     let Some(tcp) = tcp else {
                         return;
                     };

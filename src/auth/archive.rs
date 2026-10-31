@@ -291,10 +291,7 @@ impl ArchiveManager {
         Ok(())
     }
 
-    fn pack_oci_archive<W: Write>(
-        records: &[ImageRecord],
-        builder: &mut Builder<W>,
-    ) -> Result<()> {
+    fn pack_oci_archive<W: Write>(records: &[ImageRecord], builder: &mut Builder<W>) -> Result<()> {
         let layout_bytes = serde_json::to_vec_pretty(&OciLayout {
             image_layout_version: "1.0.0".to_string(),
         })?;
@@ -362,7 +359,11 @@ impl ArchiveManager {
             manifest_header.set_size(manifest_bytes.len() as u64);
             manifest_header.set_mode(0o644);
             manifest_header.set_cksum();
-            builder.append_data(&mut manifest_header, &manifest_blob_path, &manifest_bytes[..])?;
+            builder.append_data(
+                &mut manifest_header,
+                &manifest_blob_path,
+                &manifest_bytes[..],
+            )?;
 
             let mut annotations = std::collections::HashMap::new();
             let ref_name = format!("{}:{}", image.display_reference(), image.tag);
@@ -395,7 +396,11 @@ impl ArchiveManager {
         Self::load_from_opts(src_path, home, false)
     }
 
-    pub fn load_from_opts(src_path: Option<&Path>, home: &Path, quiet: bool) -> Result<Vec<ImageRecord>> {
+    pub fn load_from_opts(
+        src_path: Option<&Path>,
+        home: &Path,
+        quiet: bool,
+    ) -> Result<Vec<ImageRecord>> {
         if let Some(path) = src_path {
             if path.parent() == Some(Path::new("/var/tmp"))
                 && path.extension().and_then(|s| s.to_str()) == Some("tar")
@@ -421,7 +426,8 @@ impl ArchiveManager {
                             let _ = fs::create_dir_all(&cache_root);
                             let loaded = Self::load_from_opts(src_path, &cache_root, true)?;
                             if let Ok(json) = serde_json::to_string_pretty(&loaded) {
-                                let tmp = meta_cache.with_extension(format!("tmp.{}", std::process::id()));
+                                let tmp = meta_cache
+                                    .with_extension(format!("tmp.{}", std::process::id()));
                                 if fs::write(&tmp, json).is_ok() {
                                     let _ = fs::rename(&tmp, &meta_cache);
                                 }

@@ -40,9 +40,7 @@ impl SystemManager {
         let total_containers = containers.len();
         let active_containers = containers
             .iter()
-            .filter(|c| {
-                matches!(c.status, ContainerStatus::Running) && !c.name.ends_with("-infra")
-            })
+            .filter(|c| matches!(c.status, ContainerStatus::Running) && !c.name.ends_with("-infra"))
             .count();
         let mut total_container_size = 0u64;
         let mut reclaimable_container_size = 0u64;
@@ -217,7 +215,9 @@ impl SystemManager {
                         r.size_bytes,
                         doc.get("Size").and_then(|v| v.as_str()).unwrap_or("0B"),
                         r.reclaimable_bytes,
-                        doc.get("Reclaimable").and_then(|v| v.as_str()).unwrap_or("0B (0%)"),
+                        doc.get("Reclaimable")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0B (0%)"),
                         r.total
                     );
                 }
@@ -288,7 +288,9 @@ impl SystemManager {
         for img in &images {
             let non_infra_count = containers
                 .iter()
-                .filter(|c| !c.name.ends_with("-infra") && crate::container_uses_image_record(c, img))
+                .filter(|c| {
+                    !c.name.ends_with("-infra") && crate::container_uses_image_record(c, img)
+                })
                 .count();
             let id_short = &img.id[..12.min(img.id.len())];
             let sz = format_df_bytes(img.size_bytes.max(0) as u64);

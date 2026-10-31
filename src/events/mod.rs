@@ -40,17 +40,11 @@ impl ContainerEvent {
     }
 
     pub fn display_line_with_trunc(&self, no_trunc: bool) -> String {
-        let ts = self
-            .timestamp
-            .to_rfc3339_opts(SecondsFormat::Nanos, false);
+        let ts = self.timestamp.to_rfc3339_opts(SecondsFormat::Nanos, false);
         match self.event_type.as_str() {
             "image" => {
                 if self.action == "pull-error" {
-                    let err_msg = self
-                        .attributes
-                        .get("error")
-                        .cloned()
-                        .unwrap_or_default();
+                    let err_msg = self.attributes.get("error").cloned().unwrap_or_default();
                     return format!("{} image pull-error  {} {}", ts, self.actor_name, err_msg);
                 }
                 return format!(
@@ -59,7 +53,10 @@ impl ContainerEvent {
                 );
             }
             "volume" | "pod" => {
-                return format!("{} {} {} {}", ts, self.event_type, self.action, self.actor_name);
+                return format!(
+                    "{} {} {} {}",
+                    ts, self.event_type, self.action, self.actor_name
+                );
             }
             "network" => {
                 let mut attrs_str = Vec::new();
@@ -100,7 +97,11 @@ impl ContainerEvent {
         let mut extra_keys: Vec<&String> = self
             .attributes
             .keys()
-            .filter(|k| k.as_str() != "image" && k.as_str() != "name" && k.as_str() != "containerInspectData")
+            .filter(|k| {
+                k.as_str() != "image"
+                    && k.as_str() != "name"
+                    && k.as_str() != "containerInspectData"
+            })
             .collect();
         extra_keys.sort();
         for k in extra_keys {
@@ -128,20 +129,14 @@ impl ContainerEvent {
     }
 
     pub fn to_podman_file_json(&self) -> String {
-        let time_str = self
-            .timestamp
-            .to_rfc3339_opts(SecondsFormat::Nanos, false);
+        let time_str = self.timestamp.to_rfc3339_opts(SecondsFormat::Nanos, false);
         let attrs_val = if self.attributes.is_empty() {
             serde_json::Value::Null
         } else {
             serde_json::to_value(&self.attributes).unwrap_or(serde_json::Value::Null)
         };
         if self.event_type == "container" {
-            let img = self
-                .attributes
-                .get("image")
-                .cloned()
-                .unwrap_or_default();
+            let img = self.attributes.get("image").cloned().unwrap_or_default();
             let obj = serde_json::json!({
                 "ID": self.actor_id,
                 "Image": img,
@@ -179,18 +174,17 @@ impl ContainerEvent {
 
     pub fn to_podman_stream_json(&self) -> String {
         let secs = self.timestamp.timestamp();
-        let nanos = self.timestamp.timestamp_nanos_opt().unwrap_or(secs * 1_000_000_000);
+        let nanos = self
+            .timestamp
+            .timestamp_nanos_opt()
+            .unwrap_or(secs * 1_000_000_000);
         let attrs_val = if self.attributes.is_empty() {
             serde_json::Value::Null
         } else {
             serde_json::to_value(&self.attributes).unwrap_or(serde_json::Value::Null)
         };
         if self.event_type == "container" {
-            let img = self
-                .attributes
-                .get("image")
-                .cloned()
-                .unwrap_or_default();
+            let img = self.attributes.get("image").cloned().unwrap_or_default();
             format!(
                 "{{\"ID\":{},\"Image\":{},\"Name\":{},\"Status\":{},\"time\":{},\"timeNano\":{},\"Type\":{},\"Attributes\":{}}}",
                 serde_json::to_string(&self.actor_id).unwrap_or_default(),
@@ -395,20 +389,14 @@ fn append_podman_strict_event_line(path: &Path, event: &ContainerEvent) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let time_str = event
-        .timestamp
-        .to_rfc3339_opts(SecondsFormat::Nanos, false);
+    let time_str = event.timestamp.to_rfc3339_opts(SecondsFormat::Nanos, false);
     let attrs_val = if event.attributes.is_empty() {
         serde_json::Value::Null
     } else {
         serde_json::to_value(&event.attributes).unwrap_or(serde_json::Value::Null)
     };
     let line = if event.event_type == "container" {
-        let img = event
-            .attributes
-            .get("image")
-            .cloned()
-            .unwrap_or_default();
+        let img = event.attributes.get("image").cloned().unwrap_or_default();
         format!(
             "{{\"ID\":{},\"Image\":{},\"Name\":{},\"Status\":{},\"Time\":{},\"Type\":\"container\",\"Attributes\":{}}}",
             serde_json::to_string(&event.actor_id).unwrap_or_default(),
@@ -532,12 +520,12 @@ pub fn matches_all_filters(event: &ContainerEvent, filters: &[String]) -> Result
                 "event" | "action" | "status" => "event".to_string(),
                 other => other.to_string(),
             };
-            grouped
-                .entry(key)
-                .or_default()
-                .push(v.trim().to_string());
+            grouped.entry(key).or_default().push(v.trim().to_string());
         } else {
-            return Err(anyhow!("failed to parse event filters: invalid filter {:?}", filt));
+            return Err(anyhow!(
+                "failed to parse event filters: invalid filter {:?}",
+                filt
+            ));
         }
     }
     for (k, vals) in &grouped {
@@ -562,11 +550,7 @@ fn format_event_with_template(event: &ContainerEvent, fmt: &str) -> String {
         let inner = out[start + 2..end - 2].trim();
         let val = match inner {
             ".ID" | ".Id" => event.actor_id.clone(),
-            ".Image" => event
-                .attributes
-                .get("image")
-                .cloned()
-                .unwrap_or_default(),
+            ".Image" => event.attributes.get("image").cloned().unwrap_or_default(),
             ".Name" => event.actor_name.clone(),
             ".Status" | ".Action" => event.action.clone(),
             ".Type" => event.event_type.clone(),

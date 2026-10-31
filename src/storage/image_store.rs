@@ -337,7 +337,8 @@ impl ImageStore {
                 !(img.registry == record.registry
                     && img.reference == record.reference
                     && img.tag == record.tag
-                    && norm_arch(&img.config.architecture) == norm_arch(&record.config.architecture)
+                    && norm_arch(&img.config.architecture)
+                        == norm_arch(&record.config.architecture)
                     && img.config.os.eq_ignore_ascii_case(&record.config.os))
             });
             data.images.push(record);
@@ -378,7 +379,9 @@ impl ImageStore {
                 let rootfs = PathBuf::from(&removed.rootfs_path);
                 let store_root = self.index_file.parent().unwrap_or(Path::new("."));
                 let is_local_to_store = rootfs.starts_with(store_root)
-                    && !removed.rootfs_path.starts_with("/var/tmp/boxr-e2e-tar-cache");
+                    && !removed
+                        .rootfs_path
+                        .starts_with("/var/tmp/boxr-e2e-tar-cache");
                 if !is_shared && is_local_to_store {
                     if rootfs.exists() {
                         #[cfg(unix)]
@@ -633,9 +636,7 @@ impl ImageStore {
 }
 
 fn record_untagged_image_history(index_file: &Path, removed: &ImageRecord) {
-    if removed.reference == "<none>"
-        || removed.tag == "<none>"
-        || removed.tag.contains("@sha256:")
+    if removed.reference == "<none>" || removed.tag == "<none>" || removed.tag.contains("@sha256:")
     {
         return;
     }

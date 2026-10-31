@@ -393,8 +393,8 @@ fn wait_container_pid(bundle_path: &Path) -> Option<i32> {
             if let Ok(pid) = pid_str.trim().parse::<i32>() {
                 if pid > 1 && unsafe { libc::kill(pid, 0) == 0 } {
                     last_valid_pid = Some(pid);
-                    let cmdline = fs::read_to_string(format!("/proc/{pid}/cmdline"))
-                        .unwrap_or_default();
+                    let cmdline =
+                        fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
                     if !cmdline.contains("__internal-trampoline") {
                         return Some(pid);
                     }

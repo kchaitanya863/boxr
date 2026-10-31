@@ -174,4 +174,3 @@ pub enum KubeAction {
     /// Apply Kubernetes resources from a YAML file
     Apply(KubePlayArgs),
 }
-

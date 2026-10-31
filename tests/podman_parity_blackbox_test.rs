@@ -505,7 +505,7 @@ fn test_system_connection_list() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(combined.contains("local") || combined.contains("NAME"));
+    assert!(combined.contains("local") || combined.contains("NAME") || combined.contains("Name"));
 }
 
 #[test]

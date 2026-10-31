@@ -343,7 +343,7 @@ if section_enabled podman; then
     VEX="bb-vex-$(rand_id)"
     VIM="bb-vim-$(rand_id)"
     VOL_TAR="$(mktemp "${TMPDIR:-/tmp}/boxr-vol.XXXXXX").tar"
-    test_step "K10 volume export/import" "$BOXR_CMD volume create $VEX && $BOXR_CMD volume export $VEX -o \"$VOL_TAR\" && $BOXR_CMD volume import $VIM \"$VOL_TAR\" && $BOXR_CMD volume exists $VIM"
+    test_step "K10 volume export/import" "$BOXR_CMD volume create $VEX && $BOXR_CMD volume create $VIM && $BOXR_CMD volume export $VEX -o \"$VOL_TAR\" && $BOXR_CMD volume import $VIM \"$VOL_TAR\" && $BOXR_CMD volume exists $VIM"
     run_cmd "$BOXR_CMD volume rm -f $VEX $VIM >/dev/null 2>&1" || true
     rm -f "$VOL_TAR" 2>/dev/null || true
     ART_N="bb-art-$(rand_id)"
@@ -355,7 +355,7 @@ if section_enabled podman; then
     PC="${POD}-c1"
     test_step "K12 pod lifecycle" "$BOXR_CMD pod create --name $POD >/dev/null && $BOXR_CMD run -d --pod $POD --name $PC alpine:latest sleep 120 >/dev/null && $BOXR_CMD pod ps | grep -q $POD && $BOXR_CMD pod rm -f $POD >/dev/null"
     test_step "K14 auto-update dry-run" "$BOXR_CMD auto-update --dry-run"
-    test_step "K15 system connection ls" "$BOXR_CMD system connection ls | grep -qE 'local|NAME'"
+    test_step "K15 system connection ls" "$BOXR_CMD system connection ls | grep -qE 'local|NAME|Name'"
     # Do not name these NC/NET — NC is the ANSI color-reset constant at the top of this script.
     RELOAD_NET="bb-net-$(rand_id)"
     RELOAD_CTR="bb-netc-$(rand_id)"

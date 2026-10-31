@@ -23,7 +23,10 @@ fn emit_completion(suggestions: &[String], directive: u8) -> ! {
         DIRECTIVE_NO_FILE_COMP => "NoFileComp",
         _ => "Default",
     };
-    eprintln!("Completion ended with directive: ShellCompDirective{}", name);
+    eprintln!(
+        "Completion ended with directive: ShellCompDirective{}",
+        name
+    );
     std::process::exit(0);
 }
 
@@ -322,15 +325,27 @@ fn complete_format_flag(sub_refs: &[&str], cmd_args: &[String]) -> ! {
                     img.reference == t
                         || img.reference.rsplit('/').next() == Some(t)
                         || img.qualified_name().starts_with(&format!("{}:", t))
-                        || img.qualified_name().starts_with(&format!("localhost/{}:", t))
+                        || img
+                            .qualified_name()
+                            .starts_with(&format!("localhost/{}:", t))
                         || img.id.starts_with(t)
                 })
             {
                 &["{{.Digest}}", "{{.Id}}", "{{.RepoTags}}", "{{.Size}}"]
             } else if VolumeStore::new().find(t).is_some() {
-                &["{{.Anonymous}}", "{{.Driver}}", "{{.Mountpoint}}", "{{.Name}}"]
+                &[
+                    "{{.Anonymous}}",
+                    "{{.Driver}}",
+                    "{{.Mountpoint}}",
+                    "{{.Name}}",
+                ]
             } else if PodStore::new().find(t).is_some() {
-                &["{{.BlkioDeviceReadBps}}", "{{.Containers}}", "{{.Id}}", "{{.Name}}"]
+                &[
+                    "{{.BlkioDeviceReadBps}}",
+                    "{{.Containers}}",
+                    "{{.Id}}",
+                    "{{.Name}}",
+                ]
             } else if NetworkStore::new().find(t).is_some() {
                 &["{{.DNSEnabled}}", "{{.Driver}}", "{{.ID}}", "{{.Name}}"]
             } else {
@@ -371,7 +386,10 @@ fn complete_format_flag(sub_refs: &[&str], cmd_args: &[String]) -> ! {
         ];
         emit_completion(&out, DIRECTIVE_NO_FILE_COMP);
     }
-    emit_completion(&["oci".to_string(), "docker".to_string()], DIRECTIVE_NO_FILE_COMP);
+    emit_completion(
+        &["oci".to_string(), "docker".to_string()],
+        DIRECTIVE_NO_FILE_COMP,
+    );
 }
 
 fn complete_sysctl(prefix: &str) -> ! {

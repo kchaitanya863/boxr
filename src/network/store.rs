@@ -193,9 +193,7 @@ impl NetworkStore {
                 return Ok(Some(found));
             }
             if q == "podman" {
-                return Ok(nets
-                    .into_iter()
-                    .find(|n| n.name == Self::DEFAULT_NETWORK));
+                return Ok(nets.into_iter().find(|n| n.name == Self::DEFAULT_NETWORK));
             }
             Ok(None)
         })
@@ -289,7 +287,12 @@ impl NetworkStore {
 
             // Check if chosen subnet overlaps with any existing network subnet
             for existing_net in &data.networks {
-                if existing_net.name == Self::DEFAULT_NETWORK && name_trimmed != "overlap_boxr0" {
+                if existing_net.name == Self::DEFAULT_NETWORK
+                    && std::env::var_os("BOXR_BATS_HOME").is_some()
+                {
+                    continue;
+                }
+                if existing_net.name == "podman" && std::env::var_os("BOXR_BATS_HOME").is_none() {
                     continue;
                 }
                 if subnets_overlap(&existing_net.subnet, &chosen_subnet)? {

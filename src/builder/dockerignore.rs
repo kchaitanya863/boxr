@@ -39,7 +39,10 @@ impl DockerIgnore {
         let mut ignored = false;
         for p in &self.patterns {
             if let Some(exception) = p.strip_prefix('!') {
-                let ex = exception.trim().trim_start_matches('/').trim_end_matches('/');
+                let ex = exception
+                    .trim()
+                    .trim_start_matches('/')
+                    .trim_end_matches('/');
                 if pattern_matches(ex, path_str) {
                     ignored = false;
                 }

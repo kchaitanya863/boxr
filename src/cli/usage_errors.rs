@@ -371,10 +371,7 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
                         .get(super::podman_subcommand_index(argv))
                         .map(|s| s.as_str())
                         .unwrap_or("create");
-                    eprintln!(
-                        "Error: unknown flag: --module\nSee 'podman {} --help'",
-                        sub
-                    );
+                    eprintln!("Error: unknown flag: --module\nSee 'podman {} --help'", sub);
                     std::process::exit(125);
                 }
                 if flag.starts_with('-') {

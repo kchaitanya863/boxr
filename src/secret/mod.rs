@@ -100,10 +100,7 @@ impl SecretStore {
                     q
                 ))
             } else {
-                Err(anyhow!(
-                    "no secret with name or id {:?}: no such secret",
-                    q
-                ))
+                Err(anyhow!("no secret with name or id {:?}: no such secret", q))
             }
         })
     }
@@ -239,10 +236,7 @@ impl SecretStore {
                         q
                     ));
                 } else {
-                    return Err(anyhow!(
-                        "no secret with name or id {:?}: no such secret",
-                        q
-                    ));
+                    return Err(anyhow!("no secret with name or id {:?}: no such secret", q));
                 }
             };
             let removed = store.secrets.remove(pos);

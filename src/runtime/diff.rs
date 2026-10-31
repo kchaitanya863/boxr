@@ -222,14 +222,7 @@ impl FilesystemDiff {
             }
 
             if path.is_dir() && !path.is_symlink() {
-                Self::walk_and_compare(
-                    &path,
-                    root_dir,
-                    base_dir,
-                    diffs,
-                    seen_base,
-                    changed_dirs,
-                )?;
+                Self::walk_and_compare(&path, root_dir, base_dir, diffs, seen_base, changed_dirs)?;
             }
         }
         Ok(())

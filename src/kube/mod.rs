@@ -1,5 +1,5 @@
-use crate::cli::kube::{KubeDownArgs, KubeGenerateArgs, KubePlayArgs};
 use crate::cli::RunArgs;
+use crate::cli::kube::{KubeDownArgs, KubeGenerateArgs, KubePlayArgs};
 use crate::pod::{PodConfig, PodStore};
 use crate::storage::{ContainerStatus, ContainerStore};
 use crate::volume::MountSpec;
@@ -36,9 +36,17 @@ pub struct KubeMetadata {
     pub name: String,
     #[serde(rename = "creationTimestamp", skip_serializing_if = "Option::is_none")]
     pub creation_timestamp: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_null_default", skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
     pub labels: HashMap<String, String>,
-    #[serde(default, deserialize_with = "deserialize_null_default", skip_serializing_if = "HashMap::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
     pub annotations: HashMap<String, String>,
 }
 
@@ -57,21 +65,45 @@ pub struct KubePodSpec {
     pub hostname: Option<String>,
     #[serde(default)]
     pub containers: Vec<KubeContainerSpec>,
-    #[serde(rename = "initContainers", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "initContainers",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub init_containers: Option<Vec<KubeContainerSpec>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volumes: Option<Vec<KubeVolume>>,
-    #[serde(rename = "restartPolicy", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "restartPolicy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub restart_policy: Option<String>,
-    #[serde(rename = "hostNetwork", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "hostNetwork",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub host_network: Option<bool>,
     #[serde(rename = "hostUsers", default, skip_serializing_if = "Option::is_none")]
     pub host_users: Option<bool>,
-    #[serde(rename = "shareProcessNamespace", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "shareProcessNamespace",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub share_process_namespace: Option<bool>,
-    #[serde(rename = "terminationGracePeriodSeconds", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "terminationGracePeriodSeconds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub termination_grace_period_seconds: Option<i64>,
-    #[serde(rename = "hostAliases", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "hostAliases",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub host_aliases: Option<Vec<KubeHostAlias>>,
     #[serde(rename = "dnsConfig", default, skip_serializing_if = "Option::is_none")]
     pub dns_config: Option<KubeDnsConfig>,
@@ -101,7 +133,9 @@ pub struct KubeDnsOption {
     pub value: Option<String>,
 }
 
-fn deserialize_opt_string_vec<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
+fn deserialize_opt_string_vec<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -112,7 +146,10 @@ where
                 serde_yaml::Value::String(s) => s,
                 serde_yaml::Value::Bool(b) => b.to_string(),
                 serde_yaml::Value::Number(n) => n.to_string(),
-                other => serde_yaml::to_string(&other).unwrap_or_default().trim().to_string(),
+                other => serde_yaml::to_string(&other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
             })
             .collect()
     }))
@@ -140,29 +177,61 @@ pub struct KubeContainerSpec {
     pub env: Option<Vec<KubeEnvVar>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<serde_json::Value>,
-    #[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "workingDir",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub working_dir: Option<String>,
-    #[serde(rename = "securityContext", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "securityContext",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub security_context: Option<KubeSecurityContext>,
-    #[serde(rename = "volumeMounts", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "volumeMounts",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub volume_mounts: Option<Vec<KubeVolumeMount>>,
-    #[serde(rename = "livenessProbe", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "livenessProbe",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub liveness_probe: Option<KubeProbe>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KubeSecurityContext {
-    #[serde(rename = "readOnlyRootFilesystem", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "readOnlyRootFilesystem",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub read_only_root_filesystem: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privileged: Option<bool>,
-    #[serde(rename = "runAsNonRoot", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "runAsNonRoot",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub run_as_non_root: Option<bool>,
     #[serde(rename = "runAsUser", default, skip_serializing_if = "Option::is_none")]
     pub run_as_user: Option<u32>,
-    #[serde(rename = "runAsGroup", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "runAsGroup",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub run_as_group: Option<u32>,
-    #[serde(rename = "seLinuxOptions", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "seLinuxOptions",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub selinux_options: Option<KubeSeLinuxOptions>,
     #[serde(rename = "procMount", default, skip_serializing_if = "Option::is_none")]
     pub proc_mount: Option<String>,
@@ -174,7 +243,12 @@ pub struct KubeSecurityContext {
 pub struct KubeSeLinuxOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
-    #[serde(rename = "type", default, alias = "filetype", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "type",
+        default,
+        alias = "filetype",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub filetype: Option<String>,
 }
 
@@ -220,7 +294,11 @@ pub struct KubePvcVolumeSource {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KubeImageVolumeSource {
     pub reference: String,
-    #[serde(rename = "pullPolicy", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "pullPolicy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub pull_policy: Option<String>,
 }
 
@@ -228,13 +306,29 @@ pub struct KubeImageVolumeSource {
 pub struct KubeProbe {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<KubeExecAction>,
-    #[serde(rename = "initialDelaySeconds", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "initialDelaySeconds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub initial_delay_seconds: Option<u64>,
-    #[serde(rename = "timeoutSeconds", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "timeoutSeconds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout_seconds: Option<u64>,
-    #[serde(rename = "failureThreshold", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "failureThreshold",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub failure_threshold: Option<u32>,
-    #[serde(rename = "periodSeconds", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "periodSeconds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub period_seconds: Option<u64>,
 }
 
@@ -299,7 +393,11 @@ pub struct KubeEnvVar {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KubeEnvVarSource {
-    #[serde(rename = "configMapKeyRef", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "configMapKeyRef",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub config_map_key_ref: Option<KubeKeySelector>,
 }
 
@@ -391,10 +489,7 @@ impl KubeManager {
             }
             let kind = val.get("kind").and_then(|k| k.as_str()).unwrap_or("");
             if kind == "ConfigMap" {
-                let cm_name = val["metadata"]["name"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let cm_name = val["metadata"]["name"].as_str().unwrap_or("").to_string();
                 if let Some(data) = val.get("data").and_then(|d| d.as_mapping()) {
                     for (k, v) in data {
                         if let Some(k_str) = k.as_str() {
@@ -481,7 +576,9 @@ impl KubeManager {
             }
         }
 
-        let saved_notify_sock = std::env::var("NOTIFY_SOCKET").ok().filter(|s| !s.is_empty());
+        let saved_notify_sock = std::env::var("NOTIFY_SOCKET")
+            .ok()
+            .filter(|s| !s.is_empty());
         if saved_notify_sock.is_some() && args.service_container {
             unsafe {
                 std::env::remove_var("NOTIFY_SOCKET");
@@ -585,13 +682,9 @@ impl KubeManager {
             if args.replace && saved_notify_sock.is_some() {
                 let _ = Self::play_kube_down_value(val.clone());
             }
-            if let Err(e) = Self::play_kube_value_with_args(
-                val,
-                args,
-                &configmaps,
-                service_ctr_name.as_deref(),
-            )
-            .await
+            if let Err(e) =
+                Self::play_kube_value_with_args(val, args, &configmaps, service_ctr_name.as_deref())
+                    .await
             {
                 if let Some(ref sc) = service_ctr_name {
                     let _ = crate::remove_container_quiet(sc, true, false);
@@ -875,8 +968,8 @@ impl KubeManager {
             }
         }
 
-        let default_host_ip = crate::containers_conf_toml_value("default_host_ips")
-            .and_then(|raw| {
+        let default_host_ip =
+            crate::containers_conf_toml_value("default_host_ips").and_then(|raw| {
                 let cleaned = raw
                     .trim()
                     .trim_start_matches('[')
@@ -1064,12 +1157,11 @@ impl KubeManager {
         let mut created_cids = Vec::new();
         for c_spec in &pod_yaml.spec.containers {
             if crate::cli::podman_globals::podman_global_options().debug {
-                let policy =
-                    if c_spec.image.ends_with(":latest") || !c_spec.image.contains(':') {
-                        "newer"
-                    } else {
-                        "missing"
-                    };
+                let policy = if c_spec.image.ends_with(":latest") || !c_spec.image.contains(':') {
+                    "newer"
+                } else {
+                    "missing"
+                };
                 eprintln!("Pulling image {} (policy: {})", c_spec.image, policy);
             }
 
@@ -1214,28 +1306,24 @@ impl KubeManager {
 
             if let Some(vms) = &c_spec.volume_mounts {
                 for vm in vms {
-                    let clean_dest = vm
-                        .mount_path
-                        .split(':')
-                        .next()
-                        .unwrap_or(&vm.mount_path);
+                    let clean_dest = vm.mount_path.split(':').next().unwrap_or(&vm.mount_path);
                     if let Some((src_path, force_ro)) = volume_sources.get(&vm.name) {
-                    let is_ro = *force_ro || vm.read_only.unwrap_or(false);
-                    if let Some(sub) = &vm.sub_path {
-                        if !sub.is_empty() {
-                            let ro_part = if is_ro { ",readonly" } else { "" };
-                            volumes_vec.push(format!(
-                                "type=volume,source={},target={},volume-subpath={}{}",
-                                src_path, clean_dest, sub, ro_part
-                            ));
-                            continue;
+                        let is_ro = *force_ro || vm.read_only.unwrap_or(false);
+                        if let Some(sub) = &vm.sub_path {
+                            if !sub.is_empty() {
+                                let ro_part = if is_ro { ",readonly" } else { "" };
+                                volumes_vec.push(format!(
+                                    "type=volume,source={},target={},volume-subpath={}{}",
+                                    src_path, clean_dest, sub, ro_part
+                                ));
+                                continue;
+                            }
                         }
-                    }
-                    if is_ro {
-                        volumes_vec.push(format!("{}:{}:ro", src_path, clean_dest));
-                    } else {
-                        volumes_vec.push(format!("{}:{}", src_path, clean_dest));
-                    }
+                        if is_ro {
+                            volumes_vec.push(format!("{}:{}:ro", src_path, clean_dest));
+                        } else {
+                            volumes_vec.push(format!("{}:{}", src_path, clean_dest));
+                        }
                     }
                 }
             }
@@ -1252,7 +1340,11 @@ impl KubeManager {
             }
             if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
                 let trimmed = unit.trim();
-                if !trimmed.is_empty() && !labels_vec.iter().any(|l| l.starts_with("PODMAN_SYSTEMD_UNIT=")) {
+                if !trimmed.is_empty()
+                    && !labels_vec
+                        .iter()
+                        .any(|l| l.starts_with("PODMAN_SYSTEMD_UNIT="))
+                {
                     labels_vec.push(format!("PODMAN_SYSTEMD_UNIT={}", trimmed));
                 }
             }
@@ -1329,7 +1421,10 @@ impl KubeManager {
 
             let _ = ports_vec;
             let mut tmpfs_vec = Vec::new();
-            if !volumes_vec.iter().any(|v| v.contains(":/tmp:") || v.ends_with(":/tmp")) {
+            if !volumes_vec
+                .iter()
+                .any(|v| v.contains(":/tmp:") || v.ends_with(":/tmp"))
+            {
                 tmpfs_vec.push("/tmp:rw,nosuid,nodev,mode=1777".to_string());
             }
 
@@ -1532,11 +1627,10 @@ impl KubeManager {
     }
 
     pub fn generate_kube_with_args(args: &KubeGenerateArgs) -> Result<String> {
-        let target = args
-            .targets
-            .first()
-            .map(String::as_str)
-            .ok_or_else(|| anyhow!("must provide at least one container, pod, or volume name"))?;
+        let target =
+            args.targets.first().map(String::as_str).ok_or_else(|| {
+                anyhow!("must provide at least one container, pod, or volume name")
+            })?;
 
         let c_store = ContainerStore::new();
         let p_store = PodStore::new();
@@ -1831,11 +1925,10 @@ impl KubeManager {
                 fs::read_to_string(bundle_path.join("config.json"))
                     .ok()
                     .and_then(|s| serde_json::from_str(&s).ok());
-            let mounts: Vec<MountSpec> =
-                fs::read_to_string(bundle_path.join("mounts.json"))
-                    .ok()
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_default();
+            let mounts: Vec<MountSpec> = fs::read_to_string(bundle_path.join("mounts.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
 
             let readonly = spec.as_ref().map(|s| s.root.readonly).unwrap_or(false);
             let annotations = spec
@@ -1904,7 +1997,9 @@ impl KubeManager {
                                     "" => None,
                                     "always" | "unless-stopped" => Some("Always".to_string()),
                                     "on-failure" => Some("OnFailure".to_string()),
-                                    s if s.starts_with("on-failure:") => Some("OnFailure".to_string()),
+                                    s if s.starts_with("on-failure:") => {
+                                        Some("OnFailure".to_string())
+                                    }
                                     "no" | "never" | "none" => Some("Never".to_string()),
                                     _ => None,
                                 };
@@ -1915,7 +2010,9 @@ impl KubeManager {
                                     "" => None,
                                     "always" | "unless-stopped" => Some("Always".to_string()),
                                     "on-failure" => Some("OnFailure".to_string()),
-                                    s if s.starts_with("on-failure:") => Some("OnFailure".to_string()),
+                                    s if s.starts_with("on-failure:") => {
+                                        Some("OnFailure".to_string())
+                                    }
                                     "no" | "never" | "none" => Some("Never".to_string()),
                                     _ => None,
                                 };
@@ -1931,7 +2028,8 @@ impl KubeManager {
                 if !p.share_uts && pod_hostname.is_none() {
                     if let Some(sp) = &spec {
                         if let Some(h) = &sp.hostname {
-                            if !h.is_empty() && h != &c.name && h != &p.name && !c.id.starts_with(h) {
+                            if !h.is_empty() && h != &c.name && h != &p.name && !c.id.starts_with(h)
+                            {
                                 pod_hostname = Some(h.clone());
                             }
                         }
@@ -1963,10 +2061,8 @@ impl KubeManager {
             if let Ok(raw_ul) = fs::read_to_string(bundle_path.join("ulimits.json")) {
                 if let Ok(uls) = serde_json::from_str::<Vec<String>>(&raw_ul) {
                     if !uls.is_empty() {
-                        metadata_annotations.insert(
-                            "io.podman.annotations.ulimit".to_string(),
-                            uls.join(","),
-                        );
+                        metadata_annotations
+                            .insert("io.podman.annotations.ulimit".to_string(), uls.join(","));
                     }
                 }
             }
@@ -1984,10 +2080,8 @@ impl KubeManager {
                                 "bind-mount-options".to_string(),
                                 format!("{}:{}", src_p.display(), opts),
                             );
-                            metadata_annotations.insert(
-                                format!("bind-mount-options:{}", src_p.display()),
-                                opts,
-                            );
+                            metadata_annotations
+                                .insert(format!("bind-mount-options:{}", src_p.display()), opts);
                         }
                     }
                 }
@@ -2077,7 +2171,11 @@ impl KubeManager {
                     protocol: proto.clone(),
                 });
                 if args.service {
-                    let s_port = if p.host_port > 0 { p.host_port } else { p.container_port };
+                    let s_port = if p.host_port > 0 {
+                        p.host_port
+                    } else {
+                        p.container_port
+                    };
                     service_ports.push(serde_json::json!({
                         "name": p.container_port.to_string(),
                         "port": s_port,
@@ -2107,7 +2205,11 @@ impl KubeManager {
                         protocol: proto.clone(),
                     });
                     if args.service {
-                        let s_port = if p.host_port > 0 { p.host_port } else { p.container_port };
+                        let s_port = if p.host_port > 0 {
+                            p.host_port
+                        } else {
+                            p.container_port
+                        };
                         service_ports.push(serde_json::json!({
                             "name": p.container_port.to_string(),
                             "port": s_port,
@@ -2118,7 +2220,8 @@ impl KubeManager {
                 }
             }
 
-            let is_privileged = annotations.get("boxr.privileged").map(|s| s.as_str()) == Some("true");
+            let is_privileged =
+                annotations.get("boxr.privileged").map(|s| s.as_str()) == Some("true");
             let cap_drop: Vec<String> = annotations
                 .get("boxr.cap_drop")
                 .and_then(|v| serde_json::from_str(v).ok())
@@ -2127,34 +2230,43 @@ impl KubeManager {
                 .get("boxr.cap_add")
                 .and_then(|v| serde_json::from_str(v).ok())
                 .unwrap_or_default();
-            let capabilities_val = if !is_privileged && (!cap_drop.is_empty() || !cap_add.is_empty()) {
-                let mut caps = serde_json::Map::new();
-                if !cap_drop.is_empty() {
-                    let norm_drops: Vec<serde_json::Value> = cap_drop
-                        .iter()
-                        .map(|d| {
-                            let u = d.to_uppercase();
-                            let s = if u.starts_with("CAP_") { u } else { format!("CAP_{}", u) };
-                            serde_json::Value::String(s)
-                        })
-                        .collect();
-                    caps.insert("drop".to_string(), serde_json::Value::Array(norm_drops));
-                }
-                if !cap_add.is_empty() {
-                    let norm_adds: Vec<serde_json::Value> = cap_add
-                        .iter()
-                        .map(|a| {
-                            let u = a.to_uppercase();
-                            let s = if u.starts_with("CAP_") { u } else { format!("CAP_{}", u) };
-                            serde_json::Value::String(s)
-                        })
-                        .collect();
-                    caps.insert("add".to_string(), serde_json::Value::Array(norm_adds));
-                }
-                Some(serde_json::Value::Object(caps))
-            } else {
-                None
-            };
+            let capabilities_val =
+                if !is_privileged && (!cap_drop.is_empty() || !cap_add.is_empty()) {
+                    let mut caps = serde_json::Map::new();
+                    if !cap_drop.is_empty() {
+                        let norm_drops: Vec<serde_json::Value> = cap_drop
+                            .iter()
+                            .map(|d| {
+                                let u = d.to_uppercase();
+                                let s = if u.starts_with("CAP_") {
+                                    u
+                                } else {
+                                    format!("CAP_{}", u)
+                                };
+                                serde_json::Value::String(s)
+                            })
+                            .collect();
+                        caps.insert("drop".to_string(), serde_json::Value::Array(norm_drops));
+                    }
+                    if !cap_add.is_empty() {
+                        let norm_adds: Vec<serde_json::Value> = cap_add
+                            .iter()
+                            .map(|a| {
+                                let u = a.to_uppercase();
+                                let s = if u.starts_with("CAP_") {
+                                    u
+                                } else {
+                                    format!("CAP_{}", u)
+                                };
+                                serde_json::Value::String(s)
+                            })
+                            .collect();
+                        caps.insert("add".to_string(), serde_json::Value::Array(norm_adds));
+                    }
+                    Some(serde_json::Value::Object(caps))
+                } else {
+                    None
+                };
 
             let mut proc_mount = None;
             let mut selinux_opts = None;
@@ -2306,13 +2418,24 @@ impl KubeManager {
             let (kube_cmd, kube_args) = if let Some(ep_str) = explicit_ep {
                 let ep_vec = crate::parse_entrypoint_override(ep_str);
                 (
-                    if ep_vec.is_empty() { None } else { Some(ep_vec) },
+                    if ep_vec.is_empty() {
+                        None
+                    } else {
+                        Some(ep_vec)
+                    },
                     explicit_cmd.filter(|v| !v.is_empty()),
                 )
             } else if !img_entrypoint.is_empty() {
                 (None, explicit_cmd.filter(|v| !v.is_empty()))
             } else if let Some(cmd_vec) = explicit_cmd {
-                (if cmd_vec.is_empty() { None } else { Some(cmd_vec) }, None)
+                (
+                    if cmd_vec.is_empty() {
+                        None
+                    } else {
+                        Some(cmd_vec)
+                    },
+                    None,
+                )
             } else {
                 (None, None)
             };
@@ -2341,7 +2464,10 @@ impl KubeManager {
             let mut limits_map = serde_json::Map::new();
             if let Some(mem) = annotations.get("boxr.memory") {
                 if let Ok(bytes) = mem.parse::<i64>() {
-                    limits_map.insert("memory".to_string(), serde_json::Value::Number(bytes.into()));
+                    limits_map.insert(
+                        "memory".to_string(),
+                        serde_json::Value::Number(bytes.into()),
+                    );
                 }
             }
             if let Some(cpus) = annotations.get("boxr.cpus") {
@@ -2386,7 +2512,9 @@ impl KubeManager {
                     };
                     let hs_val: Option<serde_json::Value> =
                         fs::read_to_string(bundle_path.join("health-supervisor.json"))
-                            .or_else(|_| fs::read_to_string(bundle_path.join("health_supervisor.json")))
+                            .or_else(|_| {
+                                fs::read_to_string(bundle_path.join("health_supervisor.json"))
+                            })
                             .ok()
                             .and_then(|s| serde_json::from_str(&s).ok());
                     let hc_obj = hs_val
@@ -2479,18 +2607,16 @@ impl KubeManager {
         labels.insert("app".to_string(), app_label.clone());
         let creation_ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-        let dns_config = if !dns_nameservers.is_empty()
-            || !dns_searches.is_empty()
-            || !dns_options.is_empty()
-        {
-            Some(KubeDnsConfig {
-                nameservers: dns_nameservers,
-                searches: dns_searches,
-                options: dns_options,
-            })
-        } else {
-            None
-        };
+        let dns_config =
+            if !dns_nameservers.is_empty() || !dns_searches.is_empty() || !dns_options.is_empty() {
+                Some(KubeDnsConfig {
+                    nameservers: dns_nameservers,
+                    searches: dns_searches,
+                    options: dns_options,
+                })
+            } else {
+                None
+            };
 
         let pod_spec = KubePodSpec {
             hostname: pod_hostname,

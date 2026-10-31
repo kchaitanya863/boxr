@@ -286,13 +286,7 @@ pub fn check_container_health_with_output(
     let start_dt = Utc::now();
     if config.test.is_empty() {
         current.status = HealthStatus::None;
-        return Ok((
-            HealthStatus::None,
-            0,
-            String::new(),
-            start_dt,
-            Utc::now(),
-        ));
+        return Ok((HealthStatus::None, 0, String::new(), start_dt, Utc::now()));
     }
 
     let exec_cmd: Vec<String> = if config.test.first().map(|s| s.as_str()) == Some("CMD-SHELL") {

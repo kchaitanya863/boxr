@@ -22,8 +22,8 @@ pub fn try_run_external_compose_provider(raw_argv: &[String]) -> bool {
         Vec::new()
     };
 
-    let is_help = compose_args.is_empty()
-        || compose_args.iter().any(|a| a == "--help" || a == "-h");
+    let is_help =
+        compose_args.is_empty() || compose_args.iter().any(|a| a == "--help" || a == "-h");
 
     // When `podman compose` is invoked with no arguments, Podman treats it as `compose --help`
     // and passes `["--help"]` to the external provider.
@@ -137,7 +137,10 @@ fn resolve_docker_host(raw_argv: &[String]) -> String {
         }
     }
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run".to_string());
-    format!("unix://{}/podman/podman.sock", runtime_dir.trim_end_matches('/'))
+    format!(
+        "unix://{}/podman/podman.sock",
+        runtime_dir.trim_end_matches('/')
+    )
 }
 
 fn resolve_compose_provider() -> Option<(String, bool)> {

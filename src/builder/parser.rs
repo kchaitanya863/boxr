@@ -180,6 +180,14 @@ impl DockerfileParser {
                         Some((p, proto)) => (p, Some(proto.to_lowercase())),
                         None => (raw.as_str(), None),
                     };
+                    let is_valid_port_or_range = port_part.starts_with('$')
+                        || port_part.parse::<u16>().is_ok()
+                        || port_part.split_once('-').is_some_and(|(a, b)| {
+                            a.parse::<u16>().is_ok() && b.parse::<u16>().is_ok()
+                        });
+                    if !is_valid_port_or_range {
+                        return Err(anyhow!("Invalid EXPOSE port number: {}", raw));
+                    }
                     if proto_part.is_none() || proto_part.as_deref() == Some("tcp") {
                         if let Ok(port) = port_part.parse::<u16>() {
                             insts.push(Instruction::Expose(port));

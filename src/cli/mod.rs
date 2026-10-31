@@ -269,7 +269,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         .any(|w| w[0] == "network" && w[1] == "connect");
     let subcommand_idx = podman_subcommand_index(&argv);
     let sub_name = argv.get(subcommand_idx).map(String::as_str).unwrap_or("");
-    let sub2_name = argv.get(subcommand_idx + 1).map(String::as_str).unwrap_or("");
+    let sub2_name = argv
+        .get(subcommand_idx + 1)
+        .map(String::as_str)
+        .unwrap_or("");
     if sub_name == "buildx" {
         if sub2_name == "version" {
             println!("buildah 1.36.0");
@@ -297,7 +300,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         || (sub_name == "container" && (sub2_name == "run" || sub2_name == "create"));
     let is_exec = sub_name == "exec" || (sub_name == "container" && sub2_name == "exec");
     let mut seen_positional_after_sub = false;
-    let sub_start = if sub_name == "container" && (sub2_name == "run" || sub2_name == "create" || sub2_name == "exec") {
+    let sub_start = if sub_name == "container"
+        && (sub2_name == "run" || sub2_name == "create" || sub2_name == "exec")
+    {
         subcommand_idx + 1
     } else {
         subcommand_idx
@@ -310,7 +315,11 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
-        if i >= subcommand_idx && (a == "-p" || a == "--publish") && i + 1 < argv.len() && argv[i + 1].is_empty() {
+        if i >= subcommand_idx
+            && (a == "-p" || a == "--publish")
+            && i + 1 < argv.len()
+            && argv[i + 1].is_empty()
+        {
             i += 2;
             continue;
         }
@@ -337,9 +346,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 2;
             continue;
         }
-        if i >= subcommand_idx
-            && (a.starts_with("--net=") || a.starts_with("--network="))
-        {
+        if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) {
             let val = a.split_once('=').map(|(_, v)| v).unwrap_or("");
             if !seen_first_net {
                 seen_first_net = true;
@@ -420,7 +427,11 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         if i > sub_start && (is_run_or_create || is_exec) && !seen_positional_after_sub {
             if a == "-h" && is_run_or_create {
                 if i + 1 >= argv.len() {
-                    let bin = if hide_remote { "podman-remote" } else { "podman" };
+                    let bin = if hide_remote {
+                        "podman-remote"
+                    } else {
+                        "podman"
+                    };
                     let verb = if sub_name == "container" {
                         format!("container {}", sub2_name)
                     } else {
@@ -604,7 +615,8 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         // Multiple --format / -f options on non-run/exec commands: last one wins (010-images.bats line 113, 070-build.bats line 515)
         if !is_run_or_create && !is_exec && i > subcommand_idx {
-            if (a == "--format" || (a == "-f" && matches!(sub_name, "inspect" | "info" | "version" | "history")))
+            if (a == "--format"
+                || (a == "-f" && matches!(sub_name, "inspect" | "info" | "version" | "history")))
                 && i + 1 < argv.len()
             {
                 if let Some(pos) = out.iter().position(|x| x == "--format") {

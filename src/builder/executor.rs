@@ -72,14 +72,9 @@ impl ImageBuilder {
             }
         }
 
-        let ignorefile_override = opts
-            .build_args
-            .get("__BOXR_IGNOREFILE")
-            .map(PathBuf::from);
-        let dockerignore = DockerIgnore::load_with_override(
-            &opts.context_dir,
-            ignorefile_override.as_deref(),
-        );
+        let ignorefile_override = opts.build_args.get("__BOXR_IGNOREFILE").map(PathBuf::from);
+        let dockerignore =
+            DockerIgnore::load_with_override(&opts.context_dir, ignorefile_override.as_deref());
         let pull_policy = opts
             .build_args
             .get("__BOXR_PULL_POLICY")
@@ -671,7 +666,11 @@ impl ImageBuilder {
                             } else {
                                 target_dir.clone()
                             };
-                            copy_file_preserving_hardlinks(&source_path, &dst_file, &mut seen_inodes)?;
+                            copy_file_preserving_hardlinks(
+                                &source_path,
+                                &dst_file,
+                                &mut seen_inodes,
+                            )?;
                         }
                     }
                     if !any_copied {
@@ -787,10 +786,13 @@ impl ImageBuilder {
                         if seccomp_unconfined {
                             l.seccomp = None;
                         } else if l.seccomp.is_none() {
-                            l.seccomp = Some(
-                                serde_json::to_value(crate::security::SeccompRule::default_filter())
+                            l.seccomp =
+                                Some(
+                                    serde_json::to_value(
+                                        crate::security::SeccompRule::default_filter(),
+                                    )
                                     .unwrap_or(serde_json::Value::Null),
-                            );
+                                );
                         }
                     }
                     spec.save_to_bundle(&step_bundle)?;
@@ -830,7 +832,8 @@ impl ImageBuilder {
                     record_subuid_chowns(&bundle_rootfs, &bundle_rootfs, &mut chown_map);
                     #[cfg(target_os = "linux")]
                     if !chown_map.is_empty() {
-                        let _ = crate::runtime::linux::chown_path_rootless(&bundle_rootfs, 0, 0, true);
+                        let _ =
+                            crate::runtime::linux::chown_path_rootless(&bundle_rootfs, 0, 0, true);
                     }
                     let _ = fs::remove_dir_all(&current_rootfs);
                     if fs::rename(&bundle_rootfs, &current_rootfs).is_err() {
@@ -1109,8 +1112,7 @@ fn expand_build_vars(
                 }
             } else if chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '_' {
                 let mut end = i + 1;
-                while end < chars.len()
-                    && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
                 {
                     end += 1;
                 }
@@ -1173,11 +1175,7 @@ fn format_instruction_for_log(
 }
 
 #[cfg(unix)]
-fn record_subuid_chowns(
-    root: &Path,
-    cur: &Path,
-    chown_map: &mut HashMap<String, (u32, u32)>,
-) {
+fn record_subuid_chowns(root: &Path, cur: &Path, chown_map: &mut HashMap<String, (u32, u32)>) {
     use std::os::unix::fs::MetadataExt;
     let host_uid = unsafe { libc::geteuid() };
     let host_gid = unsafe { libc::getegid() };
@@ -1242,12 +1240,7 @@ fn record_subuid_chowns(
 }
 
 #[cfg(not(unix))]
-fn record_subuid_chowns(
-    _root: &Path,
-    _cur: &Path,
-    _chown_map: &mut HashMap<String, (u32, u32)>,
-) {
-}
+fn record_subuid_chowns(_root: &Path, _cur: &Path, _chown_map: &mut HashMap<String, (u32, u32)>) {}
 
 fn copy_file_preserving_hardlinks(
     from: &Path,
