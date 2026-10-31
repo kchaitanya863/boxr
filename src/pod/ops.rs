@@ -90,7 +90,7 @@ impl PodOps {
         Ok(new_pod)
     }
 
-    pub fn pod_logs(pod_query: &str) -> Result<Vec<(String, String)>> {
+    pub fn pod_logs(pod_query: &str) -> Result<Vec<(String, String, String)>> {
         let pod_store = PodStore::new();
         let c_store = ContainerStore::new();
 
@@ -101,20 +101,31 @@ impl PodOps {
         let mut lines = Vec::new();
         for cid in &pod.containers {
             if let Some(c) = c_store.find(cid) {
-                let log_path = PathBuf::from(&c.bundle_path).join("logs.txt");
-                let rootfs_log = PathBuf::from(&c.bundle_path)
-                    .join("rootfs")
-                    .join("logs.txt");
-                let content = if log_path.exists() {
-                    fs::read_to_string(&log_path).unwrap_or_default()
-                } else if rootfs_log.exists() {
-                    fs::read_to_string(&rootfs_log).unwrap_or_default()
-                } else {
-                    String::new()
-                };
+                let bundle_path = PathBuf::from(&c.bundle_path);
+                let annotations = crate::load_container_labels_from_bundle(&c.bundle_path);
+                let mut content = String::new();
+                if let Some(path) = crate::logging::resolve_container_log_path(&bundle_path, &annotations) {
+                    if path.to_string_lossy().contains("-ctr.log")
+                        || crate::logging::is_k8s_log_path(&path)
+                        || annotations.get("boxr.log_driver").is_some_and(|d| d == "journald")
+                    {
+                        content = crate::logging::decode_k8s_log_file(&path).unwrap_or_default();
+                    } else if path.exists() {
+                        content = fs::read_to_string(&path).unwrap_or_default();
+                    }
+                }
+                if content.is_empty() {
+                    let log_path = bundle_path.join("logs.txt");
+                    let rootfs_log = bundle_path.join("rootfs").join("logs.txt");
+                    if log_path.exists() {
+                        content = fs::read_to_string(&log_path).unwrap_or_default();
+                    } else if rootfs_log.exists() {
+                        content = fs::read_to_string(&rootfs_log).unwrap_or_default();
+                    }
+                }
 
                 for line in content.lines() {
-                    lines.push((c.name.clone(), line.to_string()));
+                    lines.push((c.name.clone(), c.id.clone(), line.to_string()));
                 }
             }
         }

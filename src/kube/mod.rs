@@ -366,6 +366,24 @@ impl KubeManager {
         Self::play_kube_with_args(&args).await
     }
 
+    pub async fn play_kube_with_opts(
+        yaml_path: &Path,
+        replace: bool,
+        service_container: bool,
+        exit_code_propagation: Option<&str>,
+    ) -> Result<()> {
+        let args = KubePlayArgs {
+            file: yaml_path.to_string_lossy().to_string(),
+            replace,
+            service_container,
+            service_exit_code_propagation: exit_code_propagation.map(String::from),
+            start: true,
+            tls_verify: true,
+            ..Default::default()
+        };
+        Self::play_kube_with_args(&args).await
+    }
+
     pub async fn play_kube_with_args(args: &KubePlayArgs) -> Result<()> {
         if args.down {
             return Self::play_kube_down_str(&args.file);
@@ -402,6 +420,13 @@ impl KubeManager {
                         v, k
                     ));
                 }
+            }
+        }
+
+        let saved_notify_sock = std::env::var("NOTIFY_SOCKET").ok().filter(|s| !s.is_empty());
+        if saved_notify_sock.is_some() && args.service_container {
+            unsafe {
+                std::env::remove_var("NOTIFY_SOCKET");
             }
         }
 
@@ -443,89 +468,150 @@ impl KubeManager {
         }
 
         if let Some(sc_name) = &service_ctr_name {
-            let sc_image = first_image.unwrap_or_else(|| "alpine:3.20".to_string());
+            let sc_image = first_image.unwrap_or_else(|| {
+                crate::storage::ImageStore::new()
+                    .list()
+                    .first()
+                    .map(|i| i.qualified_name())
+                    .unwrap_or_else(|| "alpine:3.20".to_string())
+            });
             if args.replace {
-                let _ = crate::remove_container(sc_name, true);
+                let _ = crate::remove_container_quiet(sc_name, true, false);
+            }
+            let mut sc_annotations = vec![
+                "boxr.is_service=true".to_string(),
+                "boxr.kube_service_container=true".to_string(),
+                format!("boxr.service_pods={}", pod_names.join(",")),
+                "boxr.stop_timeout=10".to_string(),
+            ];
+            if let Some(prop) = &args.service_exit_code_propagation {
+                sc_annotations.push(format!(
+                    "io.podman.annotations.kube.play.exit-code-propagation={}",
+                    prop
+                ));
+            }
+            if let Some(ref sock) = saved_notify_sock {
+                sc_annotations.push(format!("boxr.sdnotify_socket={}", sock));
+                sc_annotations.push("boxr.sdnotify_mode=ignore".to_string());
             }
             let sc_run = RunArgs {
                 name: Some(sc_name.clone()),
+                replace: true,
                 detach: true,
                 restart: "no".to_string(),
                 stop_timeout: Some(10),
-                annotations: vec![
-                    "boxr.is_service=true".to_string(),
-                    format!("boxr.service_pods={}", pod_names.join(",")),
-                    "boxr.stop_timeout=10".to_string(),
-                ],
+                annotations: sc_annotations,
                 image: sc_image,
                 command: vec!["sleep".to_string(), "infinity".to_string()],
                 network: "none".to_string(),
                 rootless: true,
                 sig_proxy: true,
+                sdnotify: if saved_notify_sock.is_some() {
+                    Some("ignore".to_string())
+                } else {
+                    None
+                },
                 ..Default::default()
             };
-            let _ = crate::run_container(sc_run).await;
+            let _ = crate::run_container_with_output(
+                sc_run,
+                crate::CliOutputPolicy {
+                    noout: true,
+                    out: None,
+                },
+            )
+            .await;
         }
 
         for val in docs.clone() {
-            Self::play_kube_value_with_args(
+            if args.replace && saved_notify_sock.is_some() {
+                let _ = Self::play_kube_down_value(val.clone());
+            }
+            if let Err(e) = Self::play_kube_value_with_args(
                 val,
                 args,
                 &configmaps,
                 service_ctr_name.as_deref(),
             )
-            .await?;
+            .await
+            {
+                if let Some(ref sc) = service_ctr_name {
+                    let _ = crate::remove_container_quiet(sc, true, false);
+                }
+                return Err(e);
+            }
+        }
+
+        #[cfg(unix)]
+        if let (Some(sock), Some(sc)) = (saved_notify_sock.as_ref(), service_ctr_name.as_deref()) {
+            let c_store = ContainerStore::new();
+            if let Some(sc_rec) = c_store.find(sc) {
+                let b = std::path::PathBuf::from(&sc_rec.bundle_path);
+                if let Ok(pid_str) = fs::read_to_string(b.join("conmon.pid")) {
+                    let pid_trim = pid_str.trim();
+                    if !pid_trim.is_empty() {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        use std::os::unix::net::UnixDatagram;
+                        if let Ok(dgram) = UnixDatagram::unbound() {
+                            let msg = format!("MAINPID={}\nREADY=1", pid_trim);
+                            let _ = dgram.send_to(msg.as_bytes(), sock);
+                        }
+                    }
+                }
+            }
         }
 
         if let Some(sc_name) = &service_ctr_name {
-            loop {
-                let c_store = ContainerStore::new();
-                let sc_running = c_store
-                    .find(sc_name)
-                    .map(|c| matches!(c.status, ContainerStatus::Running))
-                    .unwrap_or(false);
-                if !sc_running {
-                    break;
-                }
-                let mut any_pod_running = false;
-                let p_store = PodStore::new();
-                for pname in &pod_names {
-                    if let Some(p) = p_store.find(pname) {
-                        for cid in &p.containers {
-                            if let Some(c) = c_store.find(cid) {
-                                if matches!(c.status, ContainerStatus::Running) {
-                                    #[cfg(target_os = "linux")]
-                                    {
-                                        if crate::runtime::linux::is_bundle_container_alive(
-                                            Path::new(&c.bundle_path),
-                                        ) {
+            if saved_notify_sock.is_none() {
+                loop {
+                    let c_store = ContainerStore::new();
+                    let sc_running = c_store
+                        .find(sc_name)
+                        .map(|c| matches!(c.status, ContainerStatus::Running))
+                        .unwrap_or(false);
+                    if !sc_running {
+                        break;
+                    }
+                    let mut any_pod_running = false;
+                    let p_store = PodStore::new();
+                    for pname in &pod_names {
+                        if let Some(p) = p_store.find(pname) {
+                            for cid in &p.containers {
+                                if let Some(c) = c_store.find(cid) {
+                                    if matches!(c.status, ContainerStatus::Running) {
+                                        #[cfg(target_os = "linux")]
+                                        {
+                                            if crate::runtime::linux::is_bundle_container_alive(
+                                                Path::new(&c.bundle_path),
+                                            ) {
+                                                any_pod_running = true;
+                                            }
+                                        }
+                                        #[cfg(not(target_os = "linux"))]
+                                        {
                                             any_pod_running = true;
                                         }
-                                    }
-                                    #[cfg(not(target_os = "linux"))]
-                                    {
-                                        any_pod_running = true;
                                     }
                                 }
                             }
                         }
                     }
-                }
-                if !any_pod_running && !pod_names.is_empty() {
-                    for pname in &pod_names {
-                        let _ = p_store.update_status(pname, "Exited");
+                    if !any_pod_running && !pod_names.is_empty() {
+                        for pname in &pod_names {
+                            let _ = p_store.update_status(pname, "Exited");
+                        }
+                        let _ = crate::stop_container_with_home_and_timeout(
+                            sc_name,
+                            None,
+                            Some(0),
+                            None,
+                            true,
+                            None,
+                        );
+                        break;
                     }
-                    let _ = crate::stop_container_with_home_and_timeout(
-                        sc_name,
-                        None,
-                        Some(0),
-                        None,
-                        true,
-                        None,
-                    );
-                    break;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
 
@@ -773,8 +859,15 @@ impl KubeManager {
                 }
             }
         }
-
         let mut pod_labels = pod_yaml.metadata.labels.clone();
+        if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
+            let trimmed = unit.trim();
+            if !trimmed.is_empty() {
+                pod_labels
+                    .entry("PODMAN_SYSTEMD_UNIT".to_string())
+                    .or_insert_with(|| trimmed.to_string());
+            }
+        }
         for l in &args.labels {
             if let Some((k, v)) = l.split_once('=') {
                 pod_labels.insert(k.to_string(), v.to_string());
@@ -782,6 +875,11 @@ impl KubeManager {
         }
         if let Some(sc) = service_ctr_name {
             pod_labels.insert("boxr.service_container".to_string(), sc.to_string());
+            let c_store = ContainerStore::new();
+            if let Some(sc_rec) = c_store.find(sc) {
+                let b = std::path::PathBuf::from(&sc_rec.bundle_path);
+                let _ = fs::write(b.join("service_for_pod"), &pod_yaml.metadata.name);
+            }
         }
 
         let mut pod_annotations = pod_yaml.metadata.annotations.clone();
@@ -1070,6 +1168,18 @@ impl KubeManager {
                 .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect();
+            if let Some(au) = pod_annotations
+                .get(&format!("io.containers.autoupdate/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.containers.autoupdate"))
+            {
+                labels_vec.push(format!("io.containers.autoupdate={}", au));
+            }
+            if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
+                let trimmed = unit.trim();
+                if !trimmed.is_empty() && !labels_vec.iter().any(|l| l.starts_with("PODMAN_SYSTEMD_UNIT=")) {
+                    labels_vec.push(format!("PODMAN_SYSTEMD_UNIT={}", trimmed));
+                }
+            }
             labels_vec.sort();
 
             let mut annotations_vec: Vec<String> = pod_annotations
@@ -1199,6 +1309,13 @@ impl KubeManager {
 
     pub fn play_kube_down_str(source: &str) -> Result<()> {
         let content = Self::read_yaml_source_blocking(source)?;
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let hex_hash = hex::encode(hasher.finalize());
+        let svc_name = format!("{}-service", &hex_hash[..12]);
+        let _ = crate::remove_container_quiet(&svc_name, true, false);
 
         for doc in serde_yaml::Deserializer::from_str(&content) {
             if let Ok(val) = serde_yaml::Value::deserialize(doc) {

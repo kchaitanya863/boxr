@@ -125,6 +125,14 @@ PY
 }
 
 function clean_setup() {
+    if command -v systemctl >/dev/null 2>&1; then
+        for u in $(systemctl --user list-units --all --no-legend "pod-*" "container-*" "podman-test*" "podman-kube@*" 2>/dev/null | awk '{print $1}'); do
+            systemctl --user stop "$u" 2>/dev/null || true
+            systemctl --user reset-failed "$u" 2>/dev/null || true
+        done
+        rm -f "/run/user/$(id -u)/systemd/user"/pod-*.service "/run/user/$(id -u)/systemd/user"/container-*.service "/run/user/$(id -u)/systemd/user"/podman-test*.service 2>/dev/null || true
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
     local actions=(
         "pod rm --all --force"
         "rm --all --force"
@@ -179,8 +187,50 @@ function journald_unavailable() {
     return 0
 }
 
-# Emulate podman-testing helper for 331-system-check.bats.
+function _wait_service_ready() {
+    local sname=$1
+
+    local timeout=30
+    while [[ $timeout -gt 1 ]]; do
+        if systemctl -q is-active $sname; then
+            return
+        fi
+        sleep 1
+        let timeout=$timeout-1
+    done
+
+    systemctl status $sname
+    die "Timed out waiting for $sname to start"
+}
+
+# Emulate podman-testing helper for 331-system-check.bats and 255-auto-update.bats.
 function run_podman_testing() {
+    local expected_rc=""
+    case "${1:-}" in
+        [0-9]*)
+            expected_rc=$1
+            shift
+            ;;
+        '?') shift ;;
+    esac
+    for arg in "$@"; do
+        if [[ "$arg" == "noop" ]]; then
+            local prev=""
+            for a in "$@"; do
+                if [[ "$prev" == "noop" ]]; then
+                    output="$a"
+                    lines=("$output")
+                    status=0
+                    return 0
+                fi
+                prev="$a"
+            done
+            output="{}"
+            lines=("$output")
+            status=0
+            return 0
+        fi
+    done
     local subcmd="${1:-}"
     shift || true
     local state_file="${BOXR_HOME}/system-check-state.json"

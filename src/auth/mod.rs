@@ -150,6 +150,16 @@ impl CredentialStore {
     }
 
     pub fn login(&self, server: &str, username: &str, secret: &str) -> Result<()> {
+        self.login_with_authfile(server, username, secret, None)
+    }
+
+    pub fn login_with_authfile(
+        &self,
+        server: &str,
+        username: &str,
+        secret: &str,
+        authfile: Option<&str>,
+    ) -> Result<()> {
         let mut cfg = self.load();
         let creds = format!("{}:{}", username, secret);
         let encoded = custom_base64_encode(&creds);
@@ -157,6 +167,13 @@ impl CredentialStore {
         let srv_key = Self::normalize_server(server);
         cfg.auths.insert(srv_key, AuthEntry { auth: encoded });
         self.save(&cfg)?;
+        if let Some(af) = authfile {
+            if let Some(parent) = Path::new(af).parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let content = serde_json::to_string_pretty(&cfg)?;
+            fs::write(af, content)?;
+        }
         Ok(())
     }
 
@@ -393,6 +410,9 @@ mod tests;
 
 /// Podman-compatible check for `--authfile` (exit 125 when missing).
 pub fn validate_authfile(path: &str) -> Result<()> {
+    if path == "/dev/null" {
+        return Ok(());
+    }
     let p = Path::new(path);
     if !p.exists() {
         return Err(anyhow!(
@@ -401,7 +421,7 @@ pub fn validate_authfile(path: &str) -> Result<()> {
         ));
     }
     let meta = fs::metadata(p)?;
-    if !meta.is_file() {
+    if meta.is_dir() {
         return Err(anyhow!(
             "credential file is not accessible: faccessat {}: no such file or directory",
             path

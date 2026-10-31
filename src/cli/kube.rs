@@ -29,6 +29,9 @@ pub struct KubePlayArgs {
         require_equals = true
     )]
     pub service_container: bool,
+    /// Specify how the service container exit code is determined
+    #[arg(long = "service-exit-code-propagation")]
+    pub service_exit_code_propagation: Option<String>,
     /// Logging driver for the container
     #[arg(long = "log-driver")]
     pub log_driver: Option<String>,

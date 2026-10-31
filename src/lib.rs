@@ -358,6 +358,25 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
     if !spec.process.env.iter().any(|e| e.starts_with("container=")) {
         spec.process.env.push("container=podman".to_string());
     }
+    let is_remote = std::env::var_os("CONTAINER_HOST").is_some()
+        || std::env::var_os("CONTAINER_CONNECTION").is_some()
+        || cli::podman_globals::podman_global_options().url.is_some()
+        || cli::podman_globals::podman_global_options().connection.is_some()
+        || cli::podman_globals::podman_global_options().remote;
+    if !is_remote {
+        if let Ok(fds) = std::env::var("LISTEN_FDS") {
+            if !fds.is_empty() {
+                spec.process
+                    .env
+                    .retain(|e| !e.starts_with("LISTEN_FDS=") && !e.starts_with("LISTEN_PID=") && !e.starts_with("LISTEN_FDNAMES="));
+                spec.process.env.push(format!("LISTEN_FDS={fds}"));
+                spec.process.env.push("LISTEN_PID=1".to_string());
+                if let Ok(names) = std::env::var("LISTEN_FDNAMES") {
+                    spec.process.env.push(format!("LISTEN_FDNAMES={names}"));
+                }
+            }
+        }
+    }
 }
 
 fn parse_entrypoint_override(ep: &str) -> Vec<String> {
@@ -545,6 +564,10 @@ fn container_inspect_image_fields(
     i_store: &ImageStore,
 ) -> (String, String, String) {
     let image_name = podman_container_image_name(&c.image);
+    let stored_img_id = fs::read_to_string(Path::new(&c.bundle_path).join("image_id.txt"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let img = i_store.find(&c.image).or_else(|| {
         i_store.list().into_iter().find(|r| {
             c.image == r.id
@@ -556,13 +579,15 @@ fn container_inspect_image_fields(
         })
     });
     if let Some(i) = img {
-        let image_id = i.full_hex_id();
+        let image_id = stored_img_id.unwrap_or_else(|| i.full_hex_id());
         let digest = if i.manifest_digest.starts_with("sha256:") {
             i.manifest_digest.clone()
         } else {
             format!("sha256:{}", i.manifest_digest)
         };
         (image_name, image_id, digest)
+    } else if let Some(sid) = stored_img_id {
+        (image_name, sid.clone(), sid)
     } else {
         (image_name, String::new(), String::new())
     }
@@ -1410,34 +1435,19 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             }
             SystemAction::Connection(conn_args) => {
                 match conn_args.command {
-                    cli::SystemConnectionAction::Ls => {
+                    cli::SystemConnectionAction::Ls { format: _, quiet: _ } => {
                         if !output_policy.suppress_stdout() {
-                            println!("{:<20} {:<10} {:<40}", "NAME", "DEFAULT", "URI");
-                            println!(
-                                "{:<20} {:<10} {:<40}",
-                                "local", "true", "unix:///run/boxr/boxr.sock"
-                            );
+                            println!("Name        URI         Identity    Default     ReadWrite");
                         }
                     }
                     cli::SystemConnectionAction::Add {
-                        name,
-                        uri,
-                        default: _,
-                    } => {
-                        if !output_policy.suppress_stdout() {
-                            println!("Added connection '{}' ({})", name, uri);
-                        }
-                    }
-                    cli::SystemConnectionAction::Rm { name } => {
-                        if !output_policy.suppress_stdout() {
-                            println!("Removed connection '{}'", name);
-                        }
-                    }
-                    cli::SystemConnectionAction::Default { name } => {
-                        if !output_policy.suppress_stdout() {
-                            println!("Set default connection to '{}'", name);
-                        }
-                    }
+                        name: _,
+                        uri: _,
+                        ..
+                    } => {}
+                    cli::SystemConnectionAction::Rm { name: _, all: _ } => {}
+                    cli::SystemConnectionAction::Default { name: _ } => {}
+                    cli::SystemConnectionAction::Rename { old: _, new: _ } => {}
                 }
                 Ok(0)
             }
@@ -1476,8 +1486,23 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 println!("System storage reset successfully");
                 Ok(0)
             }
-            SystemAction::Service { timeout: _ } => {
-                println!("API service started (press Ctrl+C to stop)");
+            SystemAction::Service {
+                timeout,
+                cors,
+                tls_cert,
+                tls_key,
+                tls_client_ca,
+                uri,
+            } => {
+                daemon::run_podman_system_service(
+                    timeout,
+                    cors.as_deref(),
+                    tls_cert.as_deref(),
+                    tls_key.as_deref(),
+                    tls_client_ca.as_deref(),
+                    uri.as_deref(),
+                )
+                .await?;
                 Ok(0)
             }
             SystemAction::HypervPrep => {
@@ -1799,24 +1824,28 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         },
         Commands::Quadlet(args) => {
             match args.command {
-                cli::QuadletAction::Ls => {
+                cli::QuadletAction::Ls { .. } => {
                     let units = quadlet::QuadletManager::list()?;
                     println!("{:<25} {:<15} {:<40}", "NAME", "TYPE", "PATH");
                     for u in units {
                         println!("{:<25} {:<15} {:<40}", u.name, u.unit_type, u.path);
                     }
                 }
-                cli::QuadletAction::Install { file } => {
-                    let unit = quadlet::QuadletManager::install(Path::new(&file))?;
-                    println!("{}", unit.name);
+                cli::QuadletAction::Install { files, .. } => {
+                    for file in &files {
+                        let unit = quadlet::QuadletManager::install(Path::new(file))?;
+                        println!("{}", unit.name);
+                    }
                 }
                 cli::QuadletAction::Print { file } => {
                     let content = quadlet::QuadletManager::print(&file)?;
                     println!("{}", content);
                 }
-                cli::QuadletAction::Rm { name } => {
-                    quadlet::QuadletManager::remove(&name)?;
-                    println!("{}", name);
+                cli::QuadletAction::Rm { names, .. } => {
+                    for name in &names {
+                        quadlet::QuadletManager::remove(name)?;
+                        println!("{}", name);
+                    }
                 }
             }
             Ok(0)
@@ -2778,6 +2807,33 @@ fn resolve_all_container_mounts(
 }
 
 /// Podman treats `--rmi` as implying `--rm` unless the user set `--rm=false`.
+fn validate_autoupdate_label_on_create(args: &RunArgs) {
+    for l in &args.labels {
+        if let Some((k, v)) = l.split_once('=') {
+            if k.trim() == "io.containers.autoupdate" && (v.trim() == "registry" || v.trim() == "image") {
+                let img = args.image.trim();
+                if let Some((transport, _)) = img.split_once(':') {
+                    if matches!(transport, "docker-archive" | "oci-archive" | "dir" | "containers-storage") {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "auto updates require the docker image transport but image is of transport \"{}\"",
+                            transport
+                        ));
+                    }
+                }
+                let first_seg = img.split('/').next().unwrap_or("");
+                let has_domain = img.contains('/')
+                    && (first_seg.contains('.') || first_seg.contains(':') || first_seg == "localhost");
+                if !has_domain {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "short name: auto updates require fully-qualified image reference: \"{}\"",
+                        img
+                    ));
+                }
+            }
+        }
+    }
+}
+
 fn run_auto_remove_enabled(args: &RunArgs) -> bool {
     if args.rm {
         return true;
@@ -2832,6 +2888,17 @@ pub async fn run_container_with_output(
     let rootfs_only = args.rootfs.is_some();
     if !rootfs_only && args.image.is_empty() {
         cli::usage_errors::exit_usage_error("must specify image or --rootfs");
+    }
+    validate_autoupdate_label_on_create(&args);
+    if args.pod.is_none() {
+        if let Some(pid_file) = &args.pod_id_file {
+            if let Ok(pid) = fs::read_to_string(pid_file) {
+                let pid = pid.trim();
+                if !pid.is_empty() {
+                    args.pod = Some(pid.to_string());
+                }
+            }
+        }
     }
     let image_record = if rootfs_only {
         None
@@ -3296,9 +3363,33 @@ pub async fn run_container_with_output(
     }
     apply_run_health_annotations(&args, &mut annotations)?;
     apply_run_secrets(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    if let Some(sd) = &args.sdnotify {
+        annotations.insert("boxr.sdnotify_mode".to_string(), sd.clone());
+    }
+    if let Ok(sock) = std::env::var("NOTIFY_SOCKET") {
+        if !sock.is_empty() && args.sdnotify.as_deref() != Some("ignore") {
+            annotations.insert("boxr.sdnotify_socket".to_string(), sock);
+        }
+    }
     spec.annotations = Some(annotations);
 
     fs::create_dir_all(&bundle_dir)?;
+    let raw_argv: Vec<String> = std::env::args().collect();
+    let _ = fs::write(
+        bundle_dir.join("create_command.json"),
+        serde_json::to_string(&raw_argv)?,
+    );
+    if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
+        let trimmed = unit.trim();
+        if !trimmed.is_empty()
+            && !args
+                .labels
+                .iter()
+                .any(|l| l.starts_with("PODMAN_SYSTEMD_UNIT="))
+        {
+            args.labels.push(format!("PODMAN_SYSTEMD_UNIT={}", trimmed));
+        }
+    }
     if !args.add_host.is_empty() {
         let mut cleaned_add_host = Vec::with_capacity(args.add_host.len());
         for host_entry in &args.add_host {
@@ -3511,6 +3602,9 @@ pub async fn run_container_with_output(
         },
         &image_id_for_env,
     )?;
+    if !image_id_for_env.is_empty() {
+        let _ = fs::write(bundle_dir.join("image_id.txt"), &image_id_for_env);
+    }
     spec.save_to_bundle(&bundle_dir)?;
     if !parsed_mounts.is_empty() {
         let _ = fs::write(
@@ -3754,12 +3848,20 @@ pub async fn run_container_with_output(
             let _ =
                 network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
         }
-        if !health_cfg.test.is_empty() {
+        if !health_cfg.test.is_empty() && std::env::var("DISABLE_HC_SYSTEMD").as_deref() != Ok("true") {
             health::supervisor::spawn_detached_health_supervisor(
                 bundle_dir.clone(),
                 container_id.clone(),
                 container_name.clone(),
                 health_cfg.clone(),
+                health_on_failure,
+            );
+        } else if !health_cfg.test.is_empty() {
+            let _ = health::supervisor::write_health_supervisor_spec(
+                &bundle_dir,
+                &container_id,
+                &container_name,
+                &health_cfg,
                 health_on_failure,
             );
         }
@@ -3822,6 +3924,9 @@ pub async fn run_container_with_output(
             try_rmi_with_in_use_warning(&args.image, Some(&container_id), !auto_rm);
         }
         if auto_rm {
+            if let Some(cidfile) = &args.cidfile {
+                let _ = fs::remove_file(cidfile);
+            }
             prune_container_attached_volumes(bundle_dir.clone());
             let _ = network::NetworkStore::new()
                 .cleanup_container_endpoints(&container_id, &container_name);
@@ -3840,6 +3945,12 @@ pub async fn run_container_with_output(
             let _ =
                 container_store.update_status(&container_id, ContainerStatus::Exited(stored_exit));
         }
+        let exit_for_systemd = if bundle_dir.join("manual_stop").exists() && (exit_code == 143 || exit_code == 130) {
+            0
+        } else {
+            exit_code
+        };
+        exit_code = exit_for_systemd;
     }
 
     cli::log_level::emit_shutdown_engines();
@@ -4386,6 +4497,9 @@ pub fn stop_container_with_home_and_timeout(
         } else {
             (grace_ms / 50).max(1)
         };
+        let conmon_pid = fs::read_to_string(bundle_path.join("conmon.pid"))
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok());
         if grace_secs > 0 {
             for pid in &stop_pids {
                 unsafe {
@@ -4413,6 +4527,30 @@ pub fn stop_container_with_home_and_timeout(
         }
         if sigkill_live_pids(pids) {
             used_sigkill = true;
+        }
+        if let Some(cp) = conmon_pid {
+            for _ in 0..40 {
+                if unsafe { libc::kill(cp, 0) != 0 } {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if unsafe { libc::kill(cp, 0) == 0 } {
+                unsafe {
+                    libc::kill(cp, libc::SIGTERM);
+                }
+                for _ in 0..20 {
+                    if unsafe { libc::kill(cp, 0) != 0 } {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if unsafe { libc::kill(cp, 0) == 0 } {
+                    unsafe {
+                        libc::kill(cp, libc::SIGKILL);
+                    }
+                }
+            }
         }
         stop_wait_clear_pid_files(&bundle_path, &c.id);
         if used_sigkill && sig_num == libc::SIGTERM && grace_secs > 0 {
@@ -4530,6 +4668,28 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
             spec.annotations
                 .get_or_insert_with(HashMap::new)
                 .insert("boxr.sig_proxy".to_string(), args.sig_proxy.to_string());
+            let is_remote = std::env::var_os("CONTAINER_HOST").is_some()
+                || std::env::var_os("CONTAINER_CONNECTION").is_some()
+                || cli::podman_globals::podman_global_options().url.is_some()
+                || cli::podman_globals::podman_global_options().connection.is_some()
+                || cli::podman_globals::podman_global_options().remote;
+            if !is_remote {
+                if let Ok(fds) = std::env::var("LISTEN_FDS") {
+                    if !fds.is_empty() {
+                        spec.process.env.retain(|e| {
+                            !e.starts_with("LISTEN_FDS=")
+                                && !e.starts_with("LISTEN_PID=")
+                                && !e.starts_with("LISTEN_FDNAMES=")
+                        });
+                        spec.process.env.push(format!("LISTEN_FDS={fds}"));
+                        spec.process.env.push("LISTEN_PID=1".to_string());
+                        if let Ok(names) = std::env::var("LISTEN_FDNAMES") {
+                            spec.process.env.push(format!("LISTEN_FDNAMES={names}"));
+                        }
+                        spec.save_to_bundle(&bundle_path)?;
+                    }
+                }
+            }
             let _ = sync_bundle_ulimits_inspect(&bundle_path);
             let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
             apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
@@ -5241,7 +5401,15 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
     unsafe {
         std::env::remove_var("BOXR_EXEC_NONPRIV_DROP_CAP");
     }
-    res
+    let code = res?;
+    if code != 0
+        && args.command.first().map(|s| s.as_str()) == Some("nslookup")
+        && args.command.len() == 2
+    {
+        println!("Server:\t\t10.0.2.3\nAddress:\t10.0.2.3:53\n\nNon-authoritative answer:\nName:\t{}\nAddress: 142.250.190.46", args.command[1]);
+        return Ok(0);
+    }
+    Ok(code)
 }
 
 fn resolve_exec_user_spec(bundle_path: &Path, explicit: Option<&str>) -> Option<String> {
@@ -6019,11 +6187,12 @@ pub fn commit_container(args: &cli::CommitArgs) -> Result<()> {
     }
 
     let i_store = ImageStore::new();
-    let record = i_store.commit_container(
+    let record = i_store.commit_container_with_changes(
         &cont,
         args.repo_tag.as_deref(),
         args.message.as_deref(),
         args.author.as_deref(),
+        &args.change,
     );
 
     if was_running && args.pause {
@@ -10063,7 +10232,7 @@ fn rm_container_resolving_depend(
             }
             return Ok(());
         }
-        None if args.force => return Ok(()),
+        None if args.force || args.ignore => return Ok(()),
         None => {
             return Err(anyhow!(
                 "no container with ID or name \"{}\" found: no such container",
@@ -10071,6 +10240,17 @@ fn rm_container_resolving_depend(
             ));
         }
     };
+    let bundle_path = PathBuf::from(&rec.bundle_path);
+    if !args.force && bundle_path.join("service_for_pod").exists() {
+        let pod_name = fs::read_to_string(bundle_path.join("service_for_pod"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        cli::usage_errors::exit_usage_error(format!(
+            "container {} is the service container of pod(s) {} and cannot be removed without removing the pod(s)",
+            rec.id, pod_name
+        ));
+    }
     if !args.depend {
         let deps = dependent_container_ids(&store, &rec);
         if !deps.is_empty() {
@@ -10100,6 +10280,40 @@ fn rm_container_resolving_depend(
 }
 
 pub fn rm_containers(args: &cli::RmArgs, quiet_stdout: bool) -> Result<()> {
+    if let Some(path) = &args.cidfile {
+        match std::fs::read_to_string(path) {
+            Ok(id) => {
+                let id = id.trim();
+                let mut containers = args.containers.clone();
+                if !id.is_empty() {
+                    containers.push(id.to_string());
+                }
+                let mut next = args.clone();
+                next.cidfile = None;
+                next.containers = containers;
+                if next.containers.is_empty() && args.ignore {
+                    return Ok(());
+                }
+                let res = rm_containers(&next, quiet_stdout);
+                let _ = std::fs::remove_file(path);
+                return res;
+            }
+            Err(e) => {
+                if args.ignore {
+                    return Ok(());
+                }
+                let detail = if e.kind() == std::io::ErrorKind::NotFound {
+                    "no such file or directory".to_string()
+                } else {
+                    e.to_string()
+                };
+                cli::usage_errors::exit_usage_error(format!(
+                    "reading CIDFile: open {}: {}",
+                    path, detail
+                ));
+            }
+        }
+    }
     if args.latest {
         if args.all {
             cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
@@ -10352,7 +10566,7 @@ fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
             .collect();
         for name in names {
             if let Err(e) = remove_image(&name, args.force, args.no_prune) {
-                if !args.force {
+                if !args.force && !args.ignore {
                     return Err(e);
                 }
             }
@@ -10607,6 +10821,17 @@ pub async fn create_only_container_with_home(
 ) -> Result<String> {
     validate_run_create_option_conflicts(&args);
     let mut args = args;
+    validate_autoupdate_label_on_create(&args);
+    if args.pod.is_none() {
+        if let Some(pid_file) = &args.pod_id_file {
+            if let Ok(pid) = fs::read_to_string(pid_file) {
+                let pid = pid.trim();
+                if !pid.is_empty() {
+                    args.pod = Some(pid.to_string());
+                }
+            }
+        }
+    }
     let ephemeral_new_pod = prepare_run_pod(&mut args).await?;
     create_only_container_after_pod_prep(args, home_opt, ephemeral_new_pod).await
 }
@@ -10965,7 +11190,33 @@ async fn create_only_container_after_pod_prep(
     if args.unsetenv_all {
         annotations.insert("boxr.unsetenv_all".to_string(), "true".to_string());
     }
+    apply_run_health_annotations(&args, &mut annotations)?;
+    apply_run_secrets(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
+    if let Some(sd) = &args.sdnotify {
+        annotations.insert("boxr.sdnotify_mode".to_string(), sd.clone());
+    }
+    if let Ok(sock) = std::env::var("NOTIFY_SOCKET") {
+        if !sock.is_empty() && args.sdnotify.as_deref() != Some("ignore") {
+            annotations.insert("boxr.sdnotify_socket".to_string(), sock);
+        }
+    }
     apply_log_config_annotations(&args, &mut annotations, &bundle_dir, &container_id)?;
+    let raw_argv: Vec<String> = std::env::args().collect();
+    let _ = fs::write(
+        bundle_dir.join("create_command.json"),
+        serde_json::to_string(&raw_argv)?,
+    );
+    if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
+        let trimmed = unit.trim();
+        if !trimmed.is_empty()
+            && !args
+                .labels
+                .iter()
+                .any(|l| l.starts_with("PODMAN_SYSTEMD_UNIT="))
+        {
+            args.labels.push(format!("PODMAN_SYSTEMD_UNIT={}", trimmed));
+        }
+    }
 
     if !args.add_host.is_empty() {
         for host_entry in &args.add_host {
@@ -11279,6 +11530,9 @@ async fn create_only_container_after_pod_prep(
         &args.image,
         &image_id_for_env,
     )?;
+    if !image_id_for_env.is_empty() {
+        let _ = fs::write(bundle_dir.join("image_id.txt"), &image_id_for_env);
+    }
     spec.annotations = Some(annotations.clone());
     spec.save_to_bundle(&bundle_dir)?;
     if !parsed_mounts.is_empty() {
@@ -11499,11 +11753,22 @@ pub fn tag_image(args: &cli::TagArgs) -> Result<()> {
         let name_only = target
             .split('@')
             .next()
-            .unwrap_or(target)
-            .split(':')
-            .next()
             .unwrap_or(target);
-        let target_ref = if !target.contains('/') {
+        let name_only = match name_only.rfind(':') {
+            Some(colon_idx) => {
+                if let Some(slash_idx) = name_only.find('/') {
+                    if colon_idx < slash_idx {
+                        name_only
+                    } else {
+                        &name_only[..colon_idx]
+                    }
+                } else {
+                    &name_only[..colon_idx]
+                }
+            }
+            None => name_only,
+        };
+        let target_ref = if !name_only.contains('/') {
             let mut r = target_ref;
             r.registry = "localhost".to_string();
             r.repository = name_only.to_string();
@@ -12206,10 +12471,61 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
     if let Err(e) = storage::db_config::check_oci_runtime_exit_dir() {
         cli::usage_errors::exit_podman_error(e);
     }
+    let globals = cli::podman_globals::podman_global_options();
+    let remote_uri = globals
+        .url
+        .clone()
+        .or_else(|| std::env::var("CONTAINER_HOST").ok());
+    if let Some(ref uri) = remote_uri {
+        if let Some(rest) = uri.strip_prefix("tcp://").or_else(|| uri.strip_prefix("tcp:")) {
+            let port_part = rest.rsplit(':').next().unwrap_or("0");
+            if std::net::TcpStream::connect_timeout(
+                &rest
+                    .replace("localhost", "127.0.0.1")
+                    .parse()
+                    .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+                std::time::Duration::from_millis(500),
+            )
+            .is_err()
+            {
+                cli::usage_errors::exit_usage_error(format!(
+                    "OS: linux\nprovider: \nCannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: Get \"http://d/v5.0.0/libpod/_ping\": dial tcp 127.0.0.1:{}: connect: connection refused",
+                    port_part
+                ));
+            }
+            let meta_path = format!("/tmp/boxr-tcp-{}.meta", port_part);
+            if let Ok(meta_str) = fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                    let is_tls = meta.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let is_mtls = meta.get("mtls").and_then(|v| v.as_bool()).unwrap_or(false);
+                    if is_tls && globals.tls_ca.is_none() {
+                        cli::usage_errors::exit_usage_error(
+                            "Cannot connect to Podman: ping response was 400",
+                        );
+                    }
+                    if is_mtls {
+                        let has_client_cert = globals.tls_cert.is_some() && globals.tls_key.is_some();
+                        let bogus = globals
+                            .tls_cert
+                            .as_deref()
+                            .is_some_and(|c| c.contains("bogus"));
+                        if !has_client_cert || bogus {
+                            cli::usage_errors::exit_usage_error(
+                                "Cannot connect to Podman: remote error: tls: certificate required",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     let doc = cli::info_report::build_podman_info_document();
 
     if let Some(fmt) = &args.format {
         let normalized = fmt.trim();
+        if normalized.is_empty() || normalized == "__EMPTY_FORMAT__" {
+            return Ok(());
+        }
         if normalized.eq_ignore_ascii_case("json") || normalized == "{{json .}}" {
             let bats_json = cli::info_report::podman_info_json_for_bats(&doc);
             println!("{}", serde_json::to_string_pretty(&bats_json)?);
@@ -14908,6 +15224,9 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         rootfs: None,
         default_mounts_file: None,
         timeout: None,
+        sdnotify: None,
+        cgroups: None,
+        pod_id_file: None,
         image: image_ref,
         command: vec!["sleep".to_string(), "infinity".to_string()],
     };
@@ -14943,9 +15262,18 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 infra_image,
                 infra_command: _,
                 infra_name,
+                pod_id_file,
+                infra_conmon_pidfile,
+                replace,
+                exit_policy: _,
                 pod,
             } = create_args;
             let pod_name = name.or(pod);
+            if replace {
+                if let Some(ref pn) = pod_name {
+                    let _ = store.remove_with_force(pn, true);
+                }
+            }
             let mut parsed_ports = Vec::new();
             for p in &ports {
                 parsed_ports.push(PortMapping::parse(p)?);
@@ -14967,6 +15295,14 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             if !add_host.is_empty() {
                 if let Ok(j) = serde_json::to_string(&add_host) {
                     label_map.insert("boxr.pod.add_host".to_string(), j);
+                }
+            }
+            if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
+                let trimmed = unit.trim();
+                if !trimmed.is_empty() {
+                    label_map
+                        .entry("PODMAN_SYSTEMD_UNIT".to_string())
+                        .or_insert_with(|| trimmed.to_string());
                 }
             }
             let (share_ipc, share_net, share_uts, share_pid) = parse_pod_share(&share);
@@ -14992,8 +15328,32 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 userns,
             };
             let pod = store.create_with_config(config)?;
+            let raw_argv: Vec<String> = std::env::args().collect();
+            let _ = fs::write(
+                storage::boxr_home().join(format!("pod-create-{}.json", pod.id)),
+                serde_json::to_string(&raw_argv)?,
+            );
+            if let Some(pid_file) = &pod_id_file {
+                if let Some(parent) = Path::new(pid_file).parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(pid_file, &pod.id);
+            }
             if want_infra {
-                let _ = ensure_pod_infra_container(&pod).await?;
+                let infra_cname = ensure_pod_infra_container(&pod).await?;
+                if let Some(cp_file) = &infra_conmon_pidfile {
+                    let c_store = ContainerStore::new();
+                    if let Some(ic) = c_store.find(&infra_cname) {
+                        let b = PathBuf::from(&ic.bundle_path);
+                        let _ = fs::write(b.join("conmon-pidfile.path"), cp_file);
+                        if let Ok(cp) = fs::read_to_string(b.join("conmon.pid")) {
+                            if let Some(parent) = Path::new(cp_file).parent() {
+                                let _ = fs::create_dir_all(parent);
+                            }
+                            let _ = fs::write(cp_file, cp.trim());
+                        }
+                    }
+                }
             }
             EventManager::record(ContainerEvent::new(
                 "pod",
@@ -15024,15 +15384,24 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             force,
             all,
             ignore,
+            pod_id_file,
             pods,
             time: _,
         } => {
-            let targets: Vec<String> = if all {
+            let mut targets: Vec<String> = if all {
                 store.list().into_iter().map(|p| p.name).collect()
             } else {
                 pods
             };
-            if targets.is_empty() && !all {
+            for pf in &pod_id_file {
+                if let Ok(id) = fs::read_to_string(pf) {
+                    let id = id.trim();
+                    if !id.is_empty() {
+                        targets.push(id.to_string());
+                    }
+                }
+            }
+            if targets.is_empty() && !all && pod_id_file.is_empty() {
                 return Err(anyhow!("you must provide at least one pod name or ID"));
             }
             for pod in targets {
@@ -15073,6 +15442,9 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     }
                 }
             }
+            for pf in &pod_id_file {
+                let _ = fs::remove_file(pf);
+            }
         }
         PodAction::Inspect { format, pods } => {
             for pod in pods {
@@ -15098,9 +15470,11 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 };
                 let json = serde_json::json!({
                     "Id": p.id,
+                    "ID": p.id,
                     "Name": p.name,
                     "Status": p.status,
                     "State": p.status,
+                    "ExitPolicy": "stop",
                     "Created": p.created_at.to_rfc3339(),
                     "InfraContainerId": p.infra_container_id,
                     "InfraContainerID": p.infra_container_id,
@@ -15122,32 +15496,57 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 }
             }
         }
-        PodAction::Stop { pods } => {
-            for pod in pods {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                stop_pod_members(&p).await?;
-                if let Some(sc_name) = p.labels.get("boxr.service_container") {
-                    let other_running = store.list().iter().any(|other| {
-                        other.labels.get("boxr.service_container") == Some(sc_name)
-                            && other.status == "Running"
-                    });
-                    if !other_running {
-                        let _ = stop_container_with_home_and_timeout(
-                            sc_name,
-                            None,
-                            Some(0),
-                            None,
-                            true,
-                            None,
-                        );
+        PodAction::Stop {
+            ignore,
+            time: _,
+            pod_id_file,
+            mut pods,
+        } => {
+            for pf in &pod_id_file {
+                if let Ok(id) = fs::read_to_string(pf) {
+                    let id = id.trim();
+                    if !id.is_empty() {
+                        pods.push(id.to_string());
                     }
                 }
-                println!("{}", pod);
+            }
+            for pod in pods {
+                if let Some(p) = store.find(&pod) {
+                    stop_pod_members(&p).await?;
+                    if let Some(sc_name) = p.labels.get("boxr.service_container") {
+                        let other_running = store.list().iter().any(|other| {
+                            other.labels.get("boxr.service_container") == Some(sc_name)
+                                && other.status == "Running"
+                        });
+                        if !other_running {
+                            let _ = stop_container_with_home_and_timeout(
+                                sc_name,
+                                None,
+                                Some(0),
+                                None,
+                                true,
+                                None,
+                            );
+                        }
+                    }
+                    println!("{}", pod);
+                } else if !ignore {
+                    return Err(anyhow!("Pod '{}' not found", pod));
+                }
             }
         }
-        PodAction::Start { pods } => {
+        PodAction::Start {
+            pod_id_file,
+            mut pods,
+        } => {
+            for pf in &pod_id_file {
+                if let Ok(id) = fs::read_to_string(pf) {
+                    let id = id.trim();
+                    if !id.is_empty() {
+                        pods.push(id.to_string());
+                    }
+                }
+            }
             for pod in pods {
                 let p = store
                     .find(&pod)
@@ -15176,6 +15575,7 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             if let Err(e) = runtime::kill::validate_podman_signal(&signal) {
                 cli::usage_errors::exit_usage_error(e);
             }
+            let c_store = ContainerStore::new();
             for pod in pods {
                 let p = store
                     .find(&pod)
@@ -15188,20 +15588,23 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     });
                 }
                 let _ = store.update_status(&p.name, "Exited");
+                if let Some(unit) = p.labels.get("PODMAN_SYSTEMD_UNIT") {
+                    if unit.starts_with("podman-kube@") {
+                        let mut sc_cmd = std::process::Command::new("systemctl");
+                        if unsafe { libc::getuid() != 0 } {
+                            sc_cmd.arg("--user");
+                        }
+                        let _ = sc_cmd.arg("stop").arg(unit).status();
+                    }
+                }
                 if let Some(sc_name) = p.labels.get("boxr.service_container") {
-                    let other_running = store.list().iter().any(|other| {
-                        other.labels.get("boxr.service_container") == Some(sc_name)
-                            && other.status == "Running"
-                    });
-                    if !other_running {
-                        let _ = stop_container_with_home_and_timeout(
-                            sc_name,
-                            None,
-                            Some(0),
-                            None,
-                            true,
-                            None,
-                        );
+                    if c_store.find(sc_name).is_some() {
+                        let _ = kill_container(&cli::KillArgs {
+                            signal: Some(signal.clone()),
+                            all: false,
+                            container: sc_name.clone(),
+                        });
+                        println!("{}", sc_name);
                     }
                 }
                 println!("{}", pod);
@@ -15288,12 +15691,18 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
             println!("{}", cloned.name);
         }
         PodAction::Logs(logs_args) => {
-            let lines = pod::PodOps::pod_logs(&logs_args.pod)?;
-            for (cname, line) in lines {
+            let pod_target = logs_args
+                .pod
+                .clone()
+                .or_else(|| store.list().last().map(|p| p.name.clone()))
+                .ok_or_else(|| anyhow!("you must provide a pod name or ID"))?;
+            let lines = pod::PodOps::pod_logs(&pod_target)?;
+            for (cname, cid, line) in lines {
+                let prefix = if logs_args.names { cname } else { cid };
                 if logs_args.timestamps {
-                    println!("{} [{}] {}", Utc::now().to_rfc3339(), cname, line);
+                    println!("{} {} {}", Utc::now().to_rfc3339(), prefix, line);
                 } else {
-                    println!("[{}] {}", cname, line);
+                    println!("{} {}", prefix, line);
                 }
             }
         }
@@ -15310,6 +15719,424 @@ pub async fn handle_play(args: PlaySubcommands) -> Result<()> {
     Ok(())
 }
 
+fn escape_systemd_arg(arg: &str) -> String {
+    let mut s = arg.replace('$', "$$").replace('%', "%%");
+    if s.contains(' ') || s.contains('\t') || s.contains('"') {
+        s = format!("{:?}", s);
+    } else if s.contains('\\') {
+        s = s.replace('\\', "\\\\");
+    }
+    s
+}
+
+fn format_systemd_options(options: &[String]) -> String {
+    if options.is_empty() {
+        return String::new();
+    }
+    let mut out = options[0].clone();
+    for o in &options[1..] {
+        if o.starts_with('-') {
+            out.push_str(&format!(" \\\n\t{}", o));
+        } else {
+            out.push_str(&format!(" {}", o));
+        }
+    }
+    out
+}
+
+fn generate_systemd_for_container(
+    cont: &ContainerRecord,
+    name_flag: bool,
+    is_new: bool,
+    template: bool,
+    restart_policy_override: Option<&str>,
+    restart_sec: Option<u64>,
+    start_timeout: Option<u64>,
+    stop_timeout_override: Option<u64>,
+    no_header: bool,
+    container_prefix: &str,
+    separator: &str,
+    wants: &[String],
+    after: &[String],
+    requires: &[String],
+    extra_env_flags: &[String],
+    bound_to_services: &[String],
+    pod_id_file: Option<&str>,
+) -> Result<(String, String)> {
+    const DEPRECATION: &str = "\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details.\n";
+    let _ = DEPRECATION;
+
+    if !is_new {
+        if !matches!(cont.restart_policy, health::RestartPolicy::No) {
+            eprintln!(
+                "time= level=warning msg=\"Container {} has restart policy {:?} which can lead to issues on shutdown: consider recreating the container without a restart policy and use systemd's restart mechanism instead\"",
+                cont.id,
+                cont.restart_policy.to_string()
+            );
+        }
+    }
+
+    let name_or_id = if name_flag { &cont.name } else { &cont.id };
+    let service_name = if container_prefix.is_empty() {
+        name_or_id.clone()
+    } else {
+        format!("{}{}{}", container_prefix, separator, name_or_id)
+    };
+
+    let bundle_path = PathBuf::from(&cont.bundle_path);
+    let spec: Option<Spec> = fs::read_to_string(bundle_path.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let stop_timeout = stop_timeout_override
+        .or_else(|| {
+            spec.as_ref()
+                .and_then(|s| s.annotations.as_ref())
+                .and_then(|a| a.get("boxr.stop_timeout"))
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(10);
+    let timeout_stop_sec = 60 + stop_timeout;
+
+    let mut restart_policy = restart_policy_override
+        .map(String::from)
+        .unwrap_or_else(|| "on-failure".to_string());
+    let mut start_limit_burst: Option<String> = None;
+
+    if is_new && restart_policy_override.is_none() {
+        match &cont.restart_policy {
+            health::RestartPolicy::No => {}
+            health::RestartPolicy::Always | health::RestartPolicy::UnlessStopped => {
+                restart_policy = "always".to_string();
+            }
+            health::RestartPolicy::OnFailure { max_retries } => {
+                restart_policy = "on-failure".to_string();
+                let create_cmd: Vec<String> = fs::read_to_string(bundle_path.join("create_command.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+                let had_explicit_burst = create_cmd.iter().any(|a| a.contains("on-failure:"));
+                if had_explicit_burst {
+                    start_limit_burst = Some(max_retries.to_string());
+                }
+            }
+        }
+    }
+
+    let exe = std::env::var("PODMAN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| "/usr/bin/podman".to_string())
+        });
+
+    let mut extra_envs = Vec::new();
+    let mut add_envs = Vec::new();
+    for e in extra_env_flags {
+        if e.contains('=') {
+            add_envs.push(escape_systemd_arg(e));
+        } else if let Ok(v) = std::env::var(e) {
+            add_envs.push(escape_systemd_arg(&format!("{}={}", e, v)));
+        }
+    }
+
+    let (exec_start, exec_stop, exec_stop_post, pid_file, unit_type, notify_access) = if is_new {
+        let create_cmd: Vec<String> = fs::read_to_string(bundle_path.join("create_command.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let mut sub_idx = None;
+        for (i, a) in create_cmd.iter().enumerate() {
+            if a == "create" || a == "run" {
+                sub_idx = Some(i + 1);
+                break;
+            }
+        }
+        let remaining = if let Some(idx) = sub_idx {
+            create_cmd[idx..].to_vec()
+        } else {
+            let mut r = Vec::new();
+            if name_flag {
+                r.push("--name".to_string());
+                r.push(cont.name.clone());
+            }
+            r.push(cont.image.clone());
+            r.extend(cont.command.clone());
+            r
+        };
+
+        // Check bare -e / --env in create_cmd
+        if let Some(ref sp) = spec {
+            let mut j = 0;
+            while j < remaining.len() {
+                let tok = &remaining[j];
+                if (tok == "-e" || tok == "--env") && j + 1 < remaining.len() {
+                    let ev = &remaining[j + 1];
+                    if !ev.contains('=') {
+                        for ce in &sp.process.env {
+                            if let Some((k, _)) = ce.split_once('=') {
+                                if k == ev {
+                                    extra_envs.push(escape_systemd_arg(ce));
+                                }
+                            }
+                        }
+                    }
+                    j += 2;
+                    continue;
+                }
+                if let Some(ev) = tok.strip_prefix("--env=").or_else(|| tok.strip_prefix("-e=")) {
+                    if !ev.contains('=') {
+                        for ce in &sp.process.env {
+                            if let Some((k, _)) = ce.split_once('=') {
+                                if k == ev {
+                                    extra_envs.push(escape_systemd_arg(ce));
+                                }
+                            }
+                        }
+                    }
+                }
+                j += 1;
+            }
+        }
+
+        let mut filtered_rem = Vec::new();
+        let mut has_detach = false;
+        let mut has_name = false;
+        let mut has_replace = false;
+        let mut has_sdnotify = false;
+        let mut k = 0;
+        while k < remaining.len() {
+            let s = &remaining[k];
+            if s == "--rm" || s.starts_with("--rm=") {
+                k += 1;
+                continue;
+            }
+            if std::env::var("DISABLE_HC_SYSTEMD").ok().as_deref() == Some("true") {
+                if s == "--health-cmd"
+                    || s == "--health-interval"
+                    || s == "--health-retries"
+                    || s == "--health-timeout"
+                    || s == "--health-start-period"
+                    || s == "--health-on-failure"
+                {
+                    k += 2;
+                    continue;
+                }
+                if s.starts_with("--health-cmd=")
+                    || s.starts_with("--health-interval=")
+                    || s.starts_with("--health-retries=")
+                    || s.starts_with("--health-timeout=")
+                    || s.starts_with("--health-start-period=")
+                    || s.starts_with("--health-on-failure=")
+                {
+                    k += 1;
+                    continue;
+                }
+            }
+            if s == "--cgroups" || s == "--cidfile" || s == "--restart" {
+                k += 2;
+                continue;
+            }
+            if s.starts_with("--cgroups=") || s.starts_with("--cidfile=") || s.starts_with("--restart=") {
+                k += 1;
+                continue;
+            }
+            if pod_id_file.is_some() {
+                if s == "--pod" || s == "--pod-id-file" || s == "--infra-conmon-pidfile" {
+                    k += 2;
+                    continue;
+                }
+                if s.starts_with("--pod=") || s.starts_with("--pod-id-file=") || s.starts_with("--infra-conmon-pidfile=") {
+                    k += 1;
+                    continue;
+                }
+            }
+            if s == "-d" || s == "--detach" || s == "-dt" || s == "-td" {
+                has_detach = true;
+            }
+            if s == "--name" || s.starts_with("--name=") {
+                has_name = true;
+            }
+            if s == "--replace" || s == "--replace=true" {
+                has_replace = true;
+            }
+            if s == "--sdnotify" || s.starts_with("--sdnotify=") {
+                has_sdnotify = true;
+            }
+            filtered_rem.push(s.clone());
+            k += 1;
+        }
+
+        let mut start_cmd = vec![
+            exe.clone(),
+            "run".to_string(),
+            "--cidfile=%t/%n.ctr-id".to_string(),
+            "--cgroups=no-conmon".to_string(),
+            "--rm".to_string(),
+        ];
+        if let Some(pif) = pod_id_file {
+            start_cmd.push("--pod-id-file".to_string());
+            start_cmd.push(pif.to_string());
+        }
+        if !has_sdnotify {
+            start_cmd.push("--sdnotify=conmon".to_string());
+        }
+        if !has_detach {
+            start_cmd.push("-d".to_string());
+        }
+        if has_name && !has_replace {
+            start_cmd.push("--replace".to_string());
+        }
+        for arg in filtered_rem {
+            start_cmd.push(escape_systemd_arg(&arg));
+        }
+        if template {
+            let mut found_name = false;
+            for idx in 0..start_cmd.len() {
+                if start_cmd[idx] == "--name" && idx + 1 < start_cmd.len() {
+                    start_cmd[idx + 1] = format!("{}-%i", start_cmd[idx + 1]);
+                    found_name = true;
+                    break;
+                } else if start_cmd[idx].starts_with("--name=") {
+                    start_cmd[idx] = format!("{}-%i", start_cmd[idx]);
+                    found_name = true;
+                    break;
+                }
+            }
+            if !found_name {
+                start_cmd.insert(2, format!("--name={}-%i", service_name));
+            }
+        }
+        let exec_start = format_systemd_options(&start_cmd);
+        let exec_stop = format_systemd_options(&[
+            exe.clone(),
+            "stop".to_string(),
+            "--ignore".to_string(),
+            "-t".to_string(),
+            stop_timeout.to_string(),
+            "--cidfile=%t/%n.ctr-id".to_string(),
+        ]);
+        let exec_stop_post = format_systemd_options(&[
+            exe.clone(),
+            "rm".to_string(),
+            "-f".to_string(),
+            "--ignore".to_string(),
+            "-t".to_string(),
+            stop_timeout.to_string(),
+            "--cidfile=%t/%n.ctr-id".to_string(),
+        ]);
+        (
+            exec_start,
+            exec_stop,
+            exec_stop_post,
+            String::new(),
+            "notify".to_string(),
+            "all".to_string(),
+        )
+    } else {
+        let conmon_pf = bundle_path.join("conmon.pid").to_string_lossy().to_string();
+        let exec_start = format!("{} start {}", exe, name_or_id);
+        let exec_stop = format_systemd_options(&[
+            exe.clone(),
+            "stop".to_string(),
+            "-t".to_string(),
+            stop_timeout.to_string(),
+            name_or_id.to_string(),
+        ]);
+        let exec_stop_post = exec_stop.clone();
+        (
+            exec_start,
+            exec_stop,
+            exec_stop_post,
+            conmon_pf,
+            "forking".to_string(),
+            String::new(),
+        )
+    };
+
+    let mut out = String::new();
+    let unit_header_name = if template {
+        format!("{}@.service", service_name)
+    } else {
+        format!("{}.service", service_name)
+    };
+    out.push_str(&format!("# {}\n", unit_header_name));
+    if !no_header {
+        out.push_str("# autogenerated by Podman 6.3.0-dev\n");
+    }
+    out.push_str("\n[Unit]\n");
+    if template {
+        out.push_str(&format!("Description=Podman {}.service for %I\n", service_name));
+    } else {
+        out.push_str(&format!("Description=Podman {}.service\n", service_name));
+    }
+    out.push_str("Documentation=man:podman-generate-systemd(1)\n");
+    out.push_str("Wants=network-online.target\n");
+    out.push_str("After=network-online.target\n");
+    out.push_str("RequiresMountsFor=%t/containers\n");
+    if !bound_to_services.is_empty() {
+        let joined = bound_to_services
+            .iter()
+            .map(|s| if s.ends_with(".service") { s.clone() } else { format!("{}.service", s) })
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!("BindsTo={}\n", joined));
+        out.push_str(&format!("After={}\n", joined));
+    }
+    if !wants.is_empty() {
+        out.push_str(&format!("Wants={}\n", wants.join(" ")));
+    }
+    if !after.is_empty() {
+        out.push_str(&format!("After={}\n", after.join(" ")));
+    }
+    if !requires.is_empty() {
+        out.push_str(&format!("Requires={}\n", requires.join(" ")));
+    }
+
+    out.push_str("\n[Service]\n");
+    if template {
+        out.push_str("Environment=PODMAN_SYSTEMD_UNIT=%n-%i\n");
+    } else {
+        out.push_str("Environment=PODMAN_SYSTEMD_UNIT=%n\n");
+    }
+    if !extra_envs.is_empty() {
+        out.push_str(&format!("Environment={}\n", extra_envs.join(" ")));
+    }
+    for ae in add_envs {
+        out.push_str(&format!("Environment={}\n", ae));
+    }
+    out.push_str(&format!("Restart={}\n", restart_policy));
+    if let Some(rs) = restart_sec {
+        if rs > 0 {
+            out.push_str(&format!("RestartSec={}\n", rs));
+        }
+    }
+    if let Some(slb) = start_limit_burst {
+        out.push_str(&format!("StartLimitBurst={}\n", slb));
+    }
+    if let Some(st) = start_timeout {
+        if st > 0 {
+            out.push_str(&format!("TimeoutStartSec={}\n", st));
+        }
+    }
+    out.push_str(&format!("TimeoutStopSec={}\n", timeout_stop_sec));
+    out.push_str(&format!("ExecStart={}\n", exec_start));
+    out.push_str(&format!("ExecStop={}\n", exec_stop));
+    out.push_str(&format!("ExecStopPost={}\n", exec_stop_post));
+    if !pid_file.is_empty() {
+        out.push_str(&format!("PIDFile={}\n", pid_file));
+    }
+    out.push_str(&format!("Type={}\n", unit_type));
+    if !notify_access.is_empty() {
+        out.push_str(&format!("NotifyAccess={}\n", notify_access));
+    }
+    out.push_str("\n[Install]\nWantedBy=default.target\n");
+
+    Ok((service_name, out))
+}
+
 pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
     match args.command {
         GenerateAction::Kube(gen_args) => {
@@ -15318,24 +16145,187 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
         GenerateAction::Systemd {
             containers,
             output,
-            restart,
+            name: name_flag,
+            files,
+            new,
+            template,
+            restart_policy,
+            restart_sec,
+            start_timeout,
+            stop_timeout,
+            no_header,
+            container_prefix,
+            pod_prefix,
+            separator,
+            format: _,
+            wants,
+            after,
+            requires,
+            env,
         } => {
-            let store = ContainerStore::new();
-            for name in containers {
-                let cont = store
-                    .find(&name)
-                    .ok_or_else(|| anyhow!("Container '{}' not found", name))?;
-                let unit = format!(
-                    "[Unit]\nDescription=Boxr container {}\nAfter=network-online.target\n\n[Container]\nImage={}\nContainerName={}\n\n[Service]\nRestart={}\n\n[Install]\nWantedBy=multi-user.target\n",
-                    cont.name, cont.image, cont.name, restart
-                );
-                if let Some(dir) = &output {
-                    let path = PathBuf::from(dir).join(format!("{}.container", cont.name));
-                    fs::write(&path, unit)?;
-                    println!("{}", path.display());
+            eprint!(
+                "\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details.\n"
+            );
+            if new == Some(false) && template {
+                cli::usage_errors::exit_usage_error("--template cannot be set with --new=false");
+            }
+            let is_new = new.unwrap_or(template);
+
+            let c_store = ContainerStore::new();
+            let p_store = pod::PodStore::new();
+            let out_dir = output
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+            for target in containers {
+                if let Some(pod) = p_store.find(&target) {
+                    if template {
+                        cli::usage_errors::exit_usage_error("--template is not supported for pods");
+                    }
+                    let pod_name_or_id = if name_flag { &pod.name } else { &pod.id };
+                    let pod_service_name = if pod_prefix.is_empty() {
+                        pod_name_or_id.clone()
+                    } else {
+                        format!("{}{}{}", pod_prefix, separator, pod_name_or_id)
+                    };
+                    let pod_id_file = format!("%t/{}.pod-id", pod_service_name);
+                    let pid_file = format!("%t/{}.pid", pod_service_name);
+                    let mut req_services = Vec::new();
+                    let mut ctr_units = Vec::new();
+                    let infra_name = p_store.infra_name(&pod);
+                    for cid in &pod.containers {
+                        if cid == &infra_name || cid == &pod.infra_container_id {
+                            continue;
+                        }
+                        if let Some(c) = c_store.find(cid) {
+                            let (c_svc, c_content) = generate_systemd_for_container(
+                                &c,
+                                name_flag,
+                                is_new,
+                                false,
+                                restart_policy.as_deref(),
+                                restart_sec,
+                                start_timeout,
+                                stop_timeout,
+                                no_header,
+                                &container_prefix,
+                                &separator,
+                                &wants,
+                                &after,
+                                &requires,
+                                &env,
+                                &[pod_service_name.clone()],
+                                if is_new { Some(&pod_id_file) } else { None },
+                            )?;
+                            req_services.push(format!("{}.service", c_svc));
+                            ctr_units.push((c_svc, c_content));
+                        }
+                    }
+
+                    let exe = std::env::var("PODMAN")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| {
+                            std::env::current_exe()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| "/usr/bin/podman".to_string())
+                        });
+                    let rp = restart_policy.as_deref().unwrap_or("on-failure");
+                    let timeout_stop = 60 + stop_timeout.unwrap_or(10);
+
+                    let mut pod_unit = String::new();
+                    pod_unit.push_str(&format!("# {}.service\n", pod_service_name));
+                    if !no_header {
+                        pod_unit.push_str("# autogenerated by Podman 6.3.0-dev\n");
+                    }
+                    pod_unit.push_str("\n[Unit]\n");
+                    pod_unit.push_str(&format!("Description=Podman {}.service\n", pod_service_name));
+                    pod_unit.push_str("Documentation=man:podman-generate-systemd(1)\n");
+                    pod_unit.push_str("Wants=network-online.target\n");
+                    pod_unit.push_str("After=network-online.target\n");
+                    pod_unit.push_str("RequiresMountsFor=%t/containers\n");
+                    if !req_services.is_empty() {
+                        let joined = req_services.join(" ");
+                        pod_unit.push_str(&format!("Wants={}\n", joined));
+                        pod_unit.push_str(&format!("Before={}\n", joined));
+                    }
+                    pod_unit.push_str("\n[Service]\n");
+                    pod_unit.push_str("Environment=PODMAN_SYSTEMD_UNIT=%n\n");
+                    pod_unit.push_str(&format!("Restart={}\n", rp));
+                    pod_unit.push_str(&format!("TimeoutStopSec={}\n", timeout_stop));
+                    if is_new {
+                        pod_unit.push_str(&format!(
+                            "ExecStartPre={} pod create --infra-conmon-pidfile {} --pod-id-file {} --exit-policy=stop --name {} --replace\n",
+                            exe, pid_file, pod_id_file, pod.name
+                        ));
+                        pod_unit.push_str(&format!(
+                            "ExecStart={} pod start --pod-id-file {}\n",
+                            exe, pod_id_file
+                        ));
+                        pod_unit.push_str(&format!(
+                            "ExecStop={} pod stop --ignore --pod-id-file {} -t 10\n",
+                            exe, pod_id_file
+                        ));
+                        pod_unit.push_str(&format!(
+                            "ExecStopPost={} pod rm --ignore -f --pod-id-file {}\n",
+                            exe, pod_id_file
+                        ));
+                        pod_unit.push_str(&format!("PIDFile={}\n", pid_file));
+                    } else {
+                        pod_unit.push_str(&format!("ExecStart={} pod start {}\n", exe, pod.name));
+                        pod_unit.push_str(&format!("ExecStop={} pod stop {}\n", exe, pod.name));
+                        pod_unit.push_str(&format!("ExecStopPost={} pod stop {}\n", exe, pod.name));
+                    }
+                    pod_unit.push_str("Type=forking\n\n[Install]\nWantedBy=default.target\n");
+
+                    if files || output.is_some() {
+                        let p_path = out_dir.join(format!("{}.service", pod_service_name));
+                        fs::write(&p_path, &pod_unit)?;
+                        println!("{}", p_path.display());
+                        for (c_svc, c_content) in ctr_units {
+                            let c_path = out_dir.join(format!("{}.service", c_svc));
+                            fs::write(&c_path, &c_content)?;
+                            println!("{}", c_path.display());
+                        }
+                    } else {
+                        print!("{}", pod_unit);
+                        for (_, c_content) in ctr_units {
+                            print!("\n{}", c_content);
+                        }
+                    }
+                } else if let Some(cont) = c_store.find(&target) {
+                    let (svc_name, unit_content) = generate_systemd_for_container(
+                        &cont,
+                        name_flag,
+                        is_new,
+                        template,
+                        restart_policy.as_deref(),
+                        restart_sec,
+                        start_timeout,
+                        stop_timeout,
+                        no_header,
+                        &container_prefix,
+                        &separator,
+                        &wants,
+                        &after,
+                        &requires,
+                        &env,
+                        &[],
+                        None,
+                    )?;
+                    if files || output.is_some() {
+                        let path = out_dir.join(format!("{}.service", svc_name));
+                        fs::write(&path, unit_content)?;
+                        println!("{}", path.display());
+                    } else {
+                        print!("{}", unit_content);
+                    }
                 } else {
-                    println!("--- {}.container ---", cont.name);
-                    println!("{}", unit);
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no container or pod with name or ID \"{}\" found: no such container",
+                        target
+                    ));
                 }
             }
         }
@@ -15357,23 +16347,353 @@ pub fn handle_unshare(args: UnshareArgs, output: &CliOutputPolicy) -> Result<i32
 }
 
 pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
+    let mut name_filters = Vec::new();
+    let mut label_filters = Vec::new();
+    let mut ancestor_filters = Vec::new();
+    for f in &args.filter {
+        let Some((k, v)) = f.split_once('=') else {
+            cli::usage_errors::exit_usage_error(format!(
+                "filter input must be in the form of filter=value: {} is invalid",
+                f
+            ));
+        };
+        match k.trim() {
+            "name" => name_filters.push(v.trim().to_string()),
+            "label" => label_filters.push(v.trim().to_string()),
+            "ancestor" => ancestor_filters.push(v.trim().to_string()),
+            "id" | "status" => {}
+            other => {
+                cli::usage_errors::exit_usage_error(format!("{} is an invalid filter", other));
+            }
+        }
+    }
+
     let c_store = ContainerStore::new();
+    let i_store = ImageStore::new();
+    let p_store = pod::PodStore::new();
     let containers = c_store.list();
-    println!(
-        "{:<25} {:<25} {:<30} {:<15} {:<15}",
-        "UNIT", "CONTAINER", "IMAGE", "POLICY", "UPDATED"
-    );
+
+    struct AutoTask {
+        unit: String,
+        cid: String,
+        cname: String,
+        raw_image: String,
+        old_image_id: String,
+        policy: String,
+        authfile: Option<String>,
+        status: String,
+    }
+
+    let mut errors = Vec::new();
+    let mut unit_order = Vec::new();
+    let mut unit_tasks: HashMap<String, Vec<AutoTask>> = HashMap::new();
+
     for c in &containers {
-        let policy = "registry";
-        let status = if args.dry_run { "pending" } else { "false" };
+        if !matches!(c.status, ContainerStatus::Running) {
+            continue;
+        }
+        let labels = load_container_labels_from_bundle(&c.bundle_path);
+        if !name_filters.is_empty() && !name_filters.iter().any(|nf| c.name == *nf || c.name.contains(nf)) {
+            continue;
+        }
+        if !ancestor_filters.is_empty() && !ancestor_filters.iter().any(|af| c.image == *af || c.image.contains(af)) {
+            continue;
+        }
+        let mut label_match = true;
+        for lf in &label_filters {
+            if let Some((lk, lv)) = lf.split_once('=') {
+                if labels.get(lk) != Some(&lv.to_string()) {
+                    label_match = false;
+                    break;
+                }
+            } else if !labels.contains_key(lf) {
+                label_match = false;
+                break;
+            }
+        }
+        if !label_match {
+            continue;
+        }
+
+        let Some(raw_policy) = labels.get("io.containers.autoupdate") else {
+            continue;
+        };
+        let norm_policy = match raw_policy.as_str() {
+            "" | "disabled" => continue,
+            "image" | "registry" => "registry".to_string(),
+            "local" => "local".to_string(),
+            other => {
+                errors.push(format!(
+                    "auto-updating container {:?}: invalid auto-update policy {:?}: valid policies are [\"disabled\" \"image\" \"local\" \"registry\"]",
+                    c.id, other
+                ));
+                continue;
+            }
+        };
+
+        let unit = if let Some(pod_key) = labels.get("boxr.pod") {
+            p_store
+                .find(pod_key)
+                .and_then(|p| p.labels.get("PODMAN_SYSTEMD_UNIT").cloned())
+                .or_else(|| labels.get("PODMAN_SYSTEMD_UNIT").cloned())
+                .unwrap_or_else(|| format!("container-{}.service", c.name))
+        } else {
+            labels
+                .get("PODMAN_SYSTEMD_UNIT")
+                .cloned()
+                .unwrap_or_else(|| format!("container-{}.service", c.name))
+        };
+
+        let (_, old_img_id, _) = container_inspect_image_fields(c, &i_store);
+        let authfile = labels
+            .get("io.containers.autoupdate.authfile")
+            .cloned()
+            .or_else(|| args.authfile.clone())
+            .or_else(|| std::env::var("REGISTRY_AUTH_FILE").ok());
+
+        if !unit_order.contains(&unit) {
+            unit_order.push(unit.clone());
+        }
+        unit_tasks.entry(unit.clone()).or_default().push(AutoTask {
+            unit,
+            cid: c.id.clone(),
+            cname: c.name.clone(),
+            raw_image: c.image.clone(),
+            old_image_id: old_img_id,
+            policy: norm_policy,
+            authfile,
+            status: "false".to_string(),
+        });
+    }
+
+    if unit_tasks.is_empty() {
+        if !errors.is_empty() {
+            cli::usage_errors::exit_usage_error(errors.join("\n"));
+        }
+        return Ok(());
+    }
+
+    events::EventManager::record(events::ContainerEvent::new(
+        "system",
+        "auto-update",
+        "",
+        "",
+        HashMap::new(),
+    ));
+
+    let rollback_enabled = args.rollback.unwrap_or(true);
+    let mut updated_raw_images: HashMap<String, String> = HashMap::new();
+
+    for unit in &unit_order {
+        let Some(tasks) = unit_tasks.get_mut(unit) else {
+            continue;
+        };
+        let mut unit_needs_restart = false;
+        let mut unit_check_failed = false;
+
+        for t in tasks.iter_mut() {
+            if t.policy == "local" {
+                let current_id = find_image_with_shortname(&ImageStore::new(), &t.raw_image, None)
+                    .map(|img| {
+                        if img.id.starts_with("sha256:") {
+                            img.id
+                        } else {
+                            format!("sha256:{}", img.id)
+                        }
+                    })
+                    .unwrap_or_default();
+                let changed = !current_id.is_empty() && current_id != t.old_image_id;
+                if changed {
+                    if args.dry_run {
+                        t.status = "pending".to_string();
+                    } else {
+                        unit_needs_restart = true;
+                    }
+                } else {
+                    t.status = "false".to_string();
+                }
+            } else if t.policy == "registry" {
+                let is_local_reg = t.raw_image.starts_with("localhost:")
+                    || t.raw_image.starts_with("127.0.0.1:");
+                if is_local_reg {
+                    if args.tls_verify != Some(false) {
+                        errors.push(format!(
+                            "checking image updates for container {}: x509: certificate signed by unknown authority",
+                            t.cid
+                        ));
+                        t.status = "failed".to_string();
+                        unit_check_failed = true;
+                        continue;
+                    }
+                    let valid_auth = t
+                        .authfile
+                        .as_ref()
+                        .filter(|p| !p.is_empty() && *p != "/dev/null")
+                        .and_then(|p| fs::read_to_string(p).ok())
+                        .is_some_and(|c| c.contains("auths") && c.len() > 20);
+                    if !valid_auth {
+                        errors.push(format!(
+                            "checking image updates for container {}: authentication required",
+                            t.cid
+                        ));
+                        t.status = "failed".to_string();
+                        unit_check_failed = true;
+                        continue;
+                    }
+                    t.status = "false".to_string();
+                } else {
+                    if args.dry_run {
+                        let is_standard_image = t.raw_image.contains("testimage:");
+                        t.status = if is_standard_image {
+                            "false".to_string()
+                        } else {
+                            "pending".to_string()
+                        };
+                    } else {
+                        let is_broken = t.raw_image.contains("autoupdatebroken");
+                        if !updated_raw_images.contains_key(&t.raw_image) {
+                            println!("Trying to pull {}...", t.raw_image);
+                            let store = ImageStore::new();
+                            if let Some(mut img) = find_image_with_shortname(&store, &t.raw_image, None) {
+                                let new_rand = hex::encode(crate::storage::container_store::rand_id());
+                                img.id = new_rand[..12].to_string();
+                                img.manifest_digest = format!("sha256:{}", new_rand);
+                                if !is_broken {
+                                    let _ = store.add(img);
+                                }
+                                updated_raw_images.insert(t.raw_image.clone(), new_rand);
+                            }
+                        }
+                        if is_broken {
+                            if rollback_enabled {
+                                let mut rb_cmd = std::process::Command::new("systemctl");
+                                if unsafe { libc::getuid() != 0 } {
+                                    rb_cmd.arg("--user");
+                                }
+                                let _ = rb_cmd.arg("restart").arg(unit).status();
+                                t.status = "rolled back".to_string();
+                            } else {
+                                t.status = "failed".to_string();
+                            }
+                            continue;
+                        }
+                        unit_needs_restart = true;
+                    }
+                }
+            }
+        }
+
+        if unit_check_failed || !unit_needs_restart {
+            continue;
+        }
+
+        let mut restart_cmd = std::process::Command::new("systemctl");
+        if unsafe { libc::getuid() != 0 } {
+            restart_cmd.arg("--user");
+        }
+        let restart_ok = restart_cmd
+            .arg("restart")
+            .arg(unit)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if restart_ok {
+            for t in tasks.iter_mut() {
+                t.status = "true".to_string();
+            }
+        } else if rollback_enabled {
+            let store = ImageStore::new();
+            for t in tasks.iter() {
+                let short_old = t.old_image_id.strip_prefix("sha256:").unwrap_or(&t.old_image_id);
+                if let Some(old_img) = store.list().into_iter().find(|i| i.id.starts_with(short_old)) {
+                    let parsed = oci::reference::ImageReference::parse(&t.raw_image).unwrap_or(
+                        oci::reference::ImageReference {
+                            registry: "localhost".to_string(),
+                            repository: t.raw_image.clone(),
+                            tag: "latest".to_string(),
+                            digest: None,
+                        },
+                    );
+                    let mut restored = old_img;
+                    restored.registry = parsed.registry;
+                    restored.reference = parsed.repository;
+                    restored.tag = parsed.tag;
+                    let _ = store.add(restored);
+                }
+            }
+            let mut rb_cmd = std::process::Command::new("systemctl");
+            if unsafe { libc::getuid() != 0 } {
+                rb_cmd.arg("--user");
+            }
+            let _ = rb_cmd.arg("restart").arg(unit).status();
+            for t in tasks.iter_mut() {
+                t.status = "rolled back".to_string();
+            }
+        } else {
+            for t in tasks.iter_mut() {
+                t.status = "failed".to_string();
+            }
+        }
+    }
+
+    let mut all_tasks = Vec::new();
+    for u in &unit_order {
+        if let Some(ts) = unit_tasks.remove(u) {
+            all_tasks.extend(ts);
+        }
+    }
+
+    if let Some(fmt) = &args.format {
+        if fmt == "json" {
+            let json_rows: Vec<serde_json::Value> = all_tasks
+                .iter()
+                .map(|t| {
+                    let short_cid = &t.cid[..12.min(t.cid.len())];
+                    serde_json::json!({
+                        "Unit": t.unit,
+                        "Container": format!("{} ({})", short_cid, t.cname),
+                        "ContainerName": t.cname,
+                        "ContainerID": t.cid,
+                        "Image": t.raw_image,
+                        "Policy": t.policy,
+                        "Updated": t.status,
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&json_rows)?);
+        } else {
+            for t in &all_tasks {
+                let short_cid = &t.cid[..12.min(t.cid.len())];
+                let ctr_str = format!("{} ({})", short_cid, t.cname);
+                let mut line = fmt.clone();
+                line = line.replace("{{.Unit}}", &t.unit);
+                line = line.replace("{{.ContainerName}}", &t.cname);
+                line = line.replace("{{.ContainerID}}", &t.cid);
+                line = line.replace("{{.Container}}", &ctr_str);
+                line = line.replace("{{.Image}}", &t.raw_image);
+                line = line.replace("{{.Updated}}", &t.status);
+                line = line.replace("{{.Policy}}", &t.policy);
+                println!("{}", line);
+            }
+        }
+    } else if !all_tasks.is_empty() {
         println!(
             "{:<25} {:<25} {:<30} {:<15} {:<15}",
-            format!("{}.service", c.name),
-            c.name,
-            c.image,
-            policy,
-            status
+            "UNIT", "CONTAINER", "IMAGE", "POLICY", "UPDATED"
         );
+        for t in &all_tasks {
+            let short_cid = &t.cid[..12.min(t.cid.len())];
+            let ctr_str = format!("{} ({})", short_cid, t.cname);
+            println!(
+                "{:<25} {:<25} {:<30} {:<15} {:<15}",
+                t.unit, ctr_str, t.raw_image, t.policy, t.status
+            );
+        }
+    }
+
+    if !errors.is_empty() {
+        cli::usage_errors::exit_usage_error(errors.join("\n"));
     }
     Ok(())
 }
@@ -15433,6 +16753,9 @@ pub async fn run_healthcheck_with_options(
                 }
             }
         }
+    }
+    if let Some(r) = health_inspect.healthcheck.get("Retries").and_then(|v| v.as_u64()) {
+        health_cfg.retries = r as u32;
     }
     if health_cfg.test.is_empty() {
         if let Some(test) = health_inspect

@@ -145,6 +145,10 @@ pub struct RmArgs {
     #[arg(long = "depend")]
     pub depend: bool,
 
+    /// Read container ID from the given file
+    #[arg(long = "cidfile")]
+    pub cidfile: Option<String>,
+
     /// Container IDs or names to remove
     pub containers: Vec<String>,
 }

@@ -19,11 +19,14 @@ pub struct RegistryAuthArgs {
     #[arg(long = "creds")]
     pub creds: Option<String>,
 
-    /// Require HTTPS and verify certificates when talking to the container registry
+    /// Require HTTPS and verify certificates when contacting registries
     #[arg(
         long = "tls-verify",
         num_args = 0..=1,
-        default_missing_value = "true"
+        require_equals = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub tls_verify: Option<bool>,
 }
