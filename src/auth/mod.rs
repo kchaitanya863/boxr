@@ -81,6 +81,11 @@ pub struct CredentialStore {
 
 impl CredentialStore {
     pub fn new() -> Self {
+        if let Some(authfile) = crate::oci::registry_options::registry_options_snapshot().authfile {
+            return Self {
+                config_file: authfile,
+            };
+        }
         let home = boxr_home();
         Self {
             config_file: home.join("config.json"),
@@ -96,6 +101,9 @@ impl CredentialStore {
     }
 
     fn save(&self, config: &AuthConfig) -> Result<()> {
+        if let Some(parent) = self.config_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         let content = serde_json::to_string_pretty(config)?;
         let rand_suffix = hex::encode(crate::storage::container_store::rand_id());
         let temp_file = self
@@ -306,7 +314,8 @@ impl RegistryPusher {
         let reference = if let Some(dest) = destination {
             ImageReference::parse(dest)?
         } else {
-            ImageReference::parse(&format!("{}:{}", image.reference, image.tag))?
+            ImageReference::parse(image_query)
+                .or_else(|_| ImageReference::parse(&image.qualified_name()))?
         };
         let creds = crate::oci::registry_options::registry_options_snapshot()
             .inline_creds

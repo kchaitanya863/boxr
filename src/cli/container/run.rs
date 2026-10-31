@@ -579,7 +579,12 @@ impl RunArgs {
         if crate::cli::READ_ONLY_EXPLICIT_FALSE.get() == Some(&true) {
             return false;
         }
-        self.read_only
+        if self.read_only {
+            return true;
+        }
+        crate::containers_conf_toml_value("read_only")
+            .map(|v| v == "true")
+            .unwrap_or(false)
     }
 
     /// When unset, Podman defaults read-only tmpfs mounts to match read-only rootfs.

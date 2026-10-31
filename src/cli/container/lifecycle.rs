@@ -191,6 +191,14 @@ pub struct WaitArgs {
     #[arg(long = "ignore")]
     pub ignore: bool,
 
+    /// Condition to wait on (e.g. running, stopped, exited)
+    #[arg(long = "condition")]
+    pub condition: Vec<String>,
+
+    /// Time interval to wait before polling for completion
+    #[arg(short = 'i', long = "interval")]
+    pub interval: Option<String>,
+
     /// Containers to wait on
     #[arg(required = true)]
     pub containers: Vec<String>,

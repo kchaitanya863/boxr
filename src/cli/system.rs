@@ -402,13 +402,7 @@ pub struct PlaySubcommands {
 #[derive(Subcommand, Debug)]
 pub enum PlayAction {
     /// Play a pod from a Kubernetes YAML file
-    Kube {
-        /// Path to Kubernetes YAML file
-        file: String,
-        /// Tear down resources from the YAML file
-        #[arg(long = "down")]
-        down: bool,
-    },
+    Kube(crate::cli::kube::KubePlayArgs),
 }
 
 #[derive(Args, Debug)]
@@ -421,10 +415,7 @@ pub struct GenerateSubcommands {
 #[derive(Subcommand, Debug)]
 pub enum GenerateAction {
     /// Generate Kubernetes Pod YAML for a container or pod
-    Kube {
-        /// Container or pod to generate YAML for
-        target: String,
-    },
+    Kube(crate::cli::kube::KubeGenerateArgs),
     /// Generate systemd unit files for a container (Quadlet-compatible)
     Systemd {
         /// Container name(s) to generate units for

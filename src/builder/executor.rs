@@ -584,7 +584,7 @@ impl ImageBuilder {
                     cache_key = format!("{}_user_{}", cache_key, user);
                 }
                 Instruction::Volume(vols) => {
-                    let mut vol_map = HashMap::new();
+                    let mut vol_map = current_config.volumes.take().unwrap_or_default();
                     for v in vols {
                         vol_map.insert(v.clone(), serde_json::json!({}));
                     }
@@ -642,7 +642,7 @@ impl ImageBuilder {
             .split(':')
             .next()
             .unwrap_or(&full_tag);
-        let (registry, reference) = if !name_only.contains('/') {
+        let (registry, reference) = if !full_tag.contains('/') {
             ("localhost".to_string(), name_only.to_string())
         } else {
             (parsed_tag.registry.clone(), parsed_tag.repository.clone())

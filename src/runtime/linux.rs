@@ -706,11 +706,14 @@ fn use_conmon_shim(spec: &Spec) -> bool {
 
 fn prepare_conmon_shim(bundle_path: &Path, spec: &Spec, exe: &Path) -> Result<PathBuf> {
     let conmon = bundle_path.join("conmon");
-    fs::copy(exe, &conmon).context("copy conmon shim")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&conmon, fs::Permissions::from_mode(0o755))?;
+    let _ = fs::remove_file(&conmon);
+    if fs::hard_link(exe, &conmon).is_err() {
+        fs::copy(exe, &conmon).context("copy conmon shim")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&conmon, fs::Permissions::from_mode(0o755))?;
+        }
     }
     if let Some(pf) = conmon_pidfile_from_spec(spec) {
         fs::write(bundle_path.join("conmon-pidfile.path"), pf)?;
@@ -816,9 +819,16 @@ fn wait_for_detached_conmon_start(bundle_path: &Path, supervisor: &mut Child) ->
     let expect_auto_cleanup =
         crate::bundle_auto_remove(bundle_path) || crate::bundle_auto_remove_image(bundle_path);
     let wait_start = Instant::now();
+    let mut conmon_started_at: Option<Instant> = None;
     while wait_start.elapsed() < Duration::from_secs(30) {
         if bundle_path.join("conmon.pid").exists() {
-            return Ok(());
+            let started = *conmon_started_at.get_or_insert_with(Instant::now);
+            if bundle_path.join("container.pid").exists()
+                || bundle_path.join("boxr-exitcode").exists()
+                || started.elapsed() >= Duration::from_millis(1500)
+            {
+                return Ok(());
+            }
         }
         if expect_auto_cleanup {
             if !bundle_path.exists() {
@@ -957,6 +967,13 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                 child.wait()?
             };
             let exit_code = status.code().unwrap_or(1);
+            let still_current_conmon = fs::read_to_string(bundle_path.join("conmon.pid"))
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                == Some(conmon_pid);
+            if !still_current_conmon {
+                return Ok(exit_code);
+            }
             let _ = fs::write(bundle_path.join("boxr-exitcode"), exit_code.to_string());
             if container_id.is_empty()
                 || !crate::detached_container_process_exited(&container_id, bundle_path, exit_code)
@@ -1114,14 +1131,21 @@ pub fn is_bundle_container_alive(bundle_path: &Path) -> bool {
         }
         true
     };
+    if bundle_path.join("boxr-exitcode").exists() {
+        return false;
+    }
     if let Ok(s) = fs::read_to_string(bundle_path.join("container.pid")) {
         if let Ok(p) = s.trim().parse::<i32>() {
-            return check_pid(p);
+            if check_pid(p) {
+                return true;
+            }
         }
     }
     if let Ok(s) = fs::read_to_string(bundle_path.join("vm.pid")) {
         if let Ok(p) = s.trim().parse::<i32>() {
-            return check_pid(p);
+            if check_pid(p) {
+                return true;
+            }
         }
     }
     false
@@ -1182,7 +1206,16 @@ pub fn execute_bundle(
             {
                 use std::os::unix::process::CommandExt;
                 cmd.process_group(0);
+                unsafe {
+                    cmd.pre_exec(|| {
+                        close_fds_except(&[]);
+                        Ok(())
+                    });
+                }
             }
+            let _ = fs::remove_file(bundle_path.join("conmon.pid"));
+            let _ = fs::remove_file(bundle_path.join("vm.pid"));
+            let _ = fs::remove_file(bundle_path.join("container.pid"));
             let mut supervisor = cmd.spawn().context("spawn conmon supervisor")?;
             wait_for_detached_conmon_start(bundle_path, &mut supervisor)?;
             return Ok(0);
@@ -1234,6 +1267,7 @@ pub fn execute_bundle(
             cmd.process_group(0);
         }
 
+        let _ = fs::remove_file(bundle_path.join("container.pid"));
         let mut child = cmd
             .spawn()
             .context("Failed to spawn container trampoline process")?;
@@ -1241,6 +1275,17 @@ pub fn execute_bundle(
         let child_pid = child.id() as i32;
         let _ = fs::write(bundle_path.join("vm.pid"), child_pid.to_string());
         let _ = fs::write(bundle_path.join("pid"), child_pid.to_string());
+        for _ in 0..100 {
+            if bundle_path.join("container.pid").exists()
+                || bundle_path.join("boxr-exitcode").exists()
+            {
+                break;
+            }
+            if let Ok(Some(_)) = child.try_wait() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
         let container_id = bundle_path
             .file_name()
             .and_then(|s| s.to_str())
@@ -1455,6 +1500,14 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
     }) {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&abs_rootfs, fs::Permissions::from_mode(0o777));
+        let mut cur_anc = abs_rootfs.parent();
+        while let Some(p) = cur_anc {
+            if p == Path::new("/") || p == Path::new("/tmp") {
+                break;
+            }
+            let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o755));
+            cur_anc = p.parent();
+        }
         for sub in ["etc", "dev", "proc", "sys", "run", "tmp", "var/tmp"] {
             let p = abs_rootfs.join(sub);
             let _ = fs::create_dir_all(&p);
@@ -2116,14 +2169,27 @@ fn resolve_container_pid(bundle_path: &Path) -> Option<i32> {
 }
 
 fn wait_for_live_container_pid(bundle_path: &Path) -> Result<i32> {
+    use std::os::unix::fs::MetadataExt;
+    let host_root = fs::metadata("/").ok();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last_pid = None;
     while std::time::Instant::now() < deadline {
         if let Some(p) = resolve_container_pid(bundle_path) {
             if unsafe { libc::kill(p, 0) == 0 } {
-                return Ok(p);
+                last_pid = Some(p);
+                let pivoted = match (&host_root, fs::metadata(format!("/proc/{p}/root"))) {
+                    (Some(hr), Ok(cr)) => hr.dev() != cr.dev() || hr.ino() != cr.ino(),
+                    _ => true,
+                };
+                if pivoted {
+                    return Ok(p);
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    if let Some(p) = last_pid {
+        return Ok(p);
     }
     Err(anyhow!("Container is not running"))
 }
@@ -4337,6 +4403,18 @@ fn run_container_child(
 
     if !preserve_fds.is_empty() {
         close_fds_except(&preserve_fds);
+    }
+
+    if let Some(umask_str) = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.umask"))
+    {
+        if let Ok(mask) = u32::from_str_radix(umask_str.trim(), 8) {
+            unsafe {
+                libc::umask(mask as libc::mode_t);
+            }
+        }
     }
 
     // OCI runtime: reset all signals to SIG_DFL and unblock signal mask before execvp

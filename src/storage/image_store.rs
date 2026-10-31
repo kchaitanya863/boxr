@@ -285,12 +285,19 @@ impl ImageStore {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             // Remove previous entry with same registry, reference, tag, architecture, and os if present
+            fn norm_arch(a: &str) -> &str {
+                match a {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    other => other,
+                }
+            }
             data.images.retain(|img| {
                 !(img.registry == record.registry
                     && img.reference == record.reference
                     && img.tag == record.tag
-                    && img.config.architecture == record.config.architecture
-                    && img.config.os == record.config.os)
+                    && norm_arch(&img.config.architecture) == norm_arch(&record.config.architecture)
+                    && img.config.os.eq_ignore_ascii_case(&record.config.os))
             });
             data.images.push(record);
             self.save_unlocked(&data)?;

@@ -310,12 +310,32 @@ impl PodStore {
                 self.save_unlocked(&data)?;
 
                 for cid in &removed.containers {
-                    let _ = crate::remove_container(cid, force);
+                    if c_store.find(cid).is_some() {
+                        if force {
+                            let _ = crate::stop_container_with_home_and_timeout(
+                                cid,
+                                None,
+                                Some(0),
+                                None,
+                                true,
+                                None,
+                            );
+                        }
+                        let _ = crate::remove_container(cid, force);
+                    }
                 }
                 if let Some(infra) = c_store
                     .find(&infra_name)
                     .or_else(|| c_store.find(&removed.infra_container_id))
                 {
+                    let _ = crate::stop_container_with_home_and_timeout(
+                        &infra.id,
+                        None,
+                        Some(0),
+                        None,
+                        true,
+                        None,
+                    );
                     let _ = crate::remove_container(&infra.id, true);
                 }
                 Ok(removed)

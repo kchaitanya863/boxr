@@ -5,11 +5,15 @@ use std::sync::Mutex;
 pub struct RegistryOptions {
     pub cert_dir: Option<PathBuf>,
     pub inline_creds: Option<(String, String)>,
+    pub tls_verify: Option<bool>,
+    pub authfile: Option<PathBuf>,
 }
 
 static REGISTRY_OPTIONS: Mutex<RegistryOptions> = Mutex::new(RegistryOptions {
     cert_dir: None,
     inline_creds: None,
+    tls_verify: None,
+    authfile: None,
 });
 
 pub fn registry_options_snapshot() -> RegistryOptions {
@@ -50,6 +54,8 @@ pub fn registry_options_from_cli(cert_dir: Option<&str>, creds: Option<&str>) ->
     RegistryOptions {
         cert_dir: cert_dir.map(PathBuf::from),
         inline_creds,
+        tls_verify: None,
+        authfile: None,
     }
 }
 

@@ -14,6 +14,7 @@ pub struct PodmanGlobalOptions {
     pub storage_opts: Vec<String>,
     pub events_backend: Option<String>,
     pub cgroup_manager: Option<String>,
+    pub debug: bool,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -69,6 +70,7 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
     while i < argv.len() {
         let a = argv[i].as_str();
         if a == "--debug" || a == "-D" {
+            opts.debug = true;
             i += 1;
             continue;
         }

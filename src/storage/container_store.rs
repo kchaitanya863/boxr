@@ -183,7 +183,7 @@ impl ContainerStore {
             {
                 // SIGKILL during `podman stop` (separate process) must not be downgraded.
                 if matches!(c.status, ContainerStatus::Exited(137))
-                    && !matches!(status, ContainerStatus::Exited(137))
+                    && matches!(status, ContainerStatus::Exited(code) if code != 137)
                 {
                     return Ok(());
                 }

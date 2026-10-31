@@ -105,10 +105,10 @@ fn authfile_exit_125(global: Option<&str>, local: Option<&str>) -> Result<()> {
 }
 
 fn registry_auth_scope(auth: &cli::image::RegistryAuthArgs) -> RegistryOptionsGuard {
-    RegistryOptionsGuard::install(registry_options_from_cli(
-        auth.cert_dir.as_deref(),
-        auth.creds.as_deref(),
-    ))
+    let mut opts = registry_options_from_cli(auth.cert_dir.as_deref(), auth.creds.as_deref());
+    opts.tls_verify = auth.tls_verify;
+    opts.authfile = auth.authfile.as_ref().map(PathBuf::from);
+    RegistryOptionsGuard::install(opts)
 }
 
 /// Podman global `--noout` / `--out` behavior for container ID emission.
@@ -621,7 +621,9 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
     ensure_directories()?;
     let global_auth = cli.authfile.as_deref();
     let output_policy = CliOutputPolicy::from_cli(&cli);
-    authfile_exit_125(global_auth, None)?;
+    if !matches!(cli.command, Commands::Login(_)) {
+        authfile_exit_125(global_auth, None)?;
+    }
     let runtime_flags = cli.runtime_flag;
     let command = cli.command;
 
@@ -805,8 +807,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await?;
             Ok(0)
         }
-        Commands::Login(args) => {
-            authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+        Commands::Login(mut args) => {
+            if args.registry_auth.authfile.is_none() {
+                args.registry_auth.authfile = global_auth.map(String::from);
+            }
+            let _reg = registry_auth_scope(&args.registry_auth);
             let server = args.server.as_deref().unwrap_or("docker.io");
             let username = args.username.unwrap_or_else(|| {
                 eprint!("Username: ");
@@ -1588,22 +1593,14 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Kube(args) => {
             match args.command {
-                cli::KubeAction::Play { file, down } => {
-                    if down {
-                        kube::KubeManager::play_kube_down(Path::new(&file))?;
-                    } else {
-                        kube::KubeManager::play_kube(Path::new(&file)).await?;
-                    }
+                cli::KubeAction::Play(play_args) | cli::KubeAction::Apply(play_args) => {
+                    kube::KubeManager::play_kube_with_args(&play_args).await?;
                 }
-                cli::KubeAction::Down { file } => {
-                    kube::KubeManager::play_kube_down(Path::new(&file))?;
+                cli::KubeAction::Down(down_args) => {
+                    kube::KubeManager::play_kube_down_str(&down_args.file)?;
                 }
-                cli::KubeAction::Generate { target } => {
-                    let yaml = kube::KubeManager::generate_kube(&target)?;
-                    println!("{}", yaml);
-                }
-                cli::KubeAction::Apply { file } => {
-                    kube::KubeManager::play_kube(Path::new(&file)).await?;
+                cli::KubeAction::Generate(gen_args) => {
+                    kube::KubeManager::generate_kube_with_args(&gen_args)?;
                 }
             }
             Ok(0)
@@ -2555,7 +2552,11 @@ pub async fn run_container_with_output(
             serde_json::to_string(&args.group_add)?,
         );
     }
-    if let Some(umask_str) = &args.umask {
+    let effective_umask = args
+        .umask
+        .clone()
+        .or_else(|| containers_conf_toml_value("umask"));
+    if let Some(umask_str) = &effective_umask {
         let u = if let Some(stripped) = umask_str.strip_prefix("0o") {
             u32::from_str_radix(stripped, 8).unwrap_or(0o022)
         } else if umask_str.starts_with('0') && umask_str.len() > 1 {
@@ -2565,6 +2566,19 @@ pub async fn run_container_with_output(
         };
         spec.process.umask = Some(u);
         annotations.insert("boxr.umask".to_string(), umask_str.clone());
+    }
+    if let Some(u) = args
+        .user
+        .as_ref()
+        .or_else(|| image_cfg.and_then(|c| c.user.as_ref()).filter(|s| !s.is_empty()))
+    {
+        annotations.insert("boxr.user".to_string(), u.clone());
+    }
+    if !args.security_opt.is_empty() {
+        annotations.insert(
+            "boxr.security_opt".to_string(),
+            serde_json::to_string(&args.security_opt)?,
+        );
     }
     if let Some(domain) = &args.domainname {
         spec.domainname = Some(domain.clone());
@@ -3569,6 +3583,16 @@ fn stop_wait_clear_pid_files(bundle_path: &std::path::Path, container_id: &str) 
         }
     }
     let _ = wait_for_container_stopped(bundle_path, std::time::Duration::from_secs(30));
+    if let Ok(cpid_str) = std::fs::read_to_string(bundle_path.join("conmon.pid")) {
+        if let Ok(cpid) = cpid_str.trim().parse::<i32>() {
+            if cpid > 1 {
+                unsafe {
+                    let _ = libc::kill(cpid, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(bundle_path.join("conmon.pid"));
     let _ = std::fs::remove_file(bundle_path.join("vm.pid"));
     let _ = std::fs::remove_file(bundle_path.join("container.pid"));
     let _ = std::fs::remove_file(bundle_path.join("forwarder.pid"));
@@ -3710,28 +3734,30 @@ pub fn stop_container_with_home_and_timeout(
         } else {
             (grace_ms / 50).max(1)
         };
-        for pid in &stop_pids {
-            unsafe {
-                libc::kill(*pid, sig_num);
-                let _ = libc::kill(-*pid, sig_num);
-            }
-        }
-        for _i in 0..iters {
-            if !any_pid_alive(&stop_pids) {
-                break;
-            }
-            if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
-                if let Ok(init_pid) = pid_str.trim().parse::<i32>() {
-                    if init_pid > 0 && unsafe { libc::kill(init_pid, 0) != 0 } {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        break;
-                    }
+        if grace_secs > 0 {
+            for pid in &stop_pids {
+                unsafe {
+                    libc::kill(*pid, sig_num);
+                    let _ = libc::kill(-*pid, sig_num);
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        if sig_num == libc::SIGTERM {
-            logging::wait_k8s_log_quiescent(&bundle_path);
+            for _i in 0..iters {
+                if !any_pid_alive(&stop_pids) {
+                    break;
+                }
+                if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
+                    if let Ok(init_pid) = pid_str.trim().parse::<i32>() {
+                        if init_pid > 0 && unsafe { libc::kill(init_pid, 0) != 0 } {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if sig_num == libc::SIGTERM {
+                logging::wait_k8s_log_quiescent(&bundle_path);
+            }
         }
         if sigkill_live_pids(pids) {
             used_sigkill = true;
@@ -3773,8 +3799,10 @@ pub fn stop_container_with_home_and_timeout(
         }
         return Err(e);
     }
-    let _ = guardrails::ProcessReaper::reap_stale_containers();
-    logging::wait_k8s_log_quiescent(&bundle_path);
+    if !(quiet && grace_secs == 0) {
+        let _ = guardrails::ProcessReaper::reap_stale_containers();
+        logging::wait_k8s_log_quiescent(&bundle_path);
+    }
     if !quiet {
         println!("{}", output_label.unwrap_or(container));
     }
@@ -4009,8 +4037,52 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
                 return Err(e);
             }
         }
+        sync_pod_and_service_container_after_stop(&lookup);
     }
     Ok(())
+}
+
+fn sync_pod_and_service_container_after_stop(stopped_query: &str) {
+    let c_store = ContainerStore::new();
+    let p_store = pod::PodStore::new();
+    let stopped_cont = c_store.find(stopped_query);
+    let mut affected_pods = Vec::new();
+    for p in p_store.list() {
+        if p.containers.iter().any(|cid| {
+            cid == stopped_query
+                || stopped_cont
+                    .as_ref()
+                    .is_some_and(|c| cid == &c.id || cid == &c.name)
+        }) {
+            affected_pods.push(p);
+        }
+    }
+    for p in affected_pods {
+        let any_running = p.containers.iter().any(|cid| {
+            c_store
+                .find(cid)
+                .is_some_and(|c| matches!(c.status, ContainerStatus::Running))
+        });
+        if !any_running {
+            let _ = p_store.update_status(&p.name, "Exited");
+            if let Some(sc_name) = p.labels.get("boxr.service_container") {
+                let other_running = p_store.list().iter().any(|other| {
+                    other.labels.get("boxr.service_container") == Some(sc_name)
+                        && other.status == "Running"
+                });
+                if !other_running {
+                    let _ = stop_container_with_home_and_timeout(
+                        sc_name,
+                        None,
+                        Some(0),
+                        None,
+                        true,
+                        None,
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn apply_pod_namespaces_to_spec(spec: &mut Spec, pod: &pod::PodRecord) -> Result<()> {
@@ -4032,10 +4104,34 @@ fn apply_pod_namespaces_to_spec(spec: &mut Spec, pod: &pod::PodRecord) -> Result
     Ok(())
 }
 
-fn prepare_spec_for_pod_start(_spec: &mut Spec) -> Result<()> {
-    // Trampoline reads config.json from disk; pod namespace sharing for `run --pod` is
-    // applied when the bundle is first created. Rewriting ipc/uts/net paths here breaks
-    // parity with that on-disk spec (e.g. `container clone` + `container start`).
+fn prepare_spec_for_pod_start(spec: &mut Spec, bundle_path: &Path) -> Result<()> {
+    // Only rewrite pod namespace paths if the bundle belongs to a pod AND an existing
+    // /proc/<pid>/ns/* path in spec.linux.namespaces is stale (e.g. after `pod restart`).
+    let pod_id = spec
+        .annotations
+        .as_ref()
+        .filter(|a| !a.contains_key("boxr.pod.infra"))
+        .and_then(|a| a.get("boxr.pod"))
+        .cloned();
+    if let Some(pid) = pod_id {
+        let has_stale_ns = spec
+            .linux
+            .as_ref()
+            .map(|l| {
+                l.namespaces.iter().any(|ns| {
+                    ns.path
+                        .as_deref()
+                        .is_some_and(|p| p.starts_with("/proc/") && !Path::new(p).exists())
+                })
+            })
+            .unwrap_or(false);
+        if has_stale_ns {
+            if let Some(pod) = pod::PodStore::new().find(&pid) {
+                apply_pod_namespaces_to_spec(spec, &pod)?;
+                spec.save_to_bundle(bundle_path)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -4085,7 +4181,7 @@ pub async fn start_container_with_home(
     let content = fs::read_to_string(&config_file)?;
     let mut spec: Spec = serde_json::from_str(&content)?;
     if prepare_pod {
-        prepare_spec_for_pod_start(&mut spec)?;
+        prepare_spec_for_pod_start(&mut spec, &bundle_path)?;
     }
 
     let rootfs = bundle_path.join("rootfs");
@@ -4102,6 +4198,8 @@ pub async fn start_container_with_home(
 
     let _ = sync_bundle_ulimits_inspect(&bundle_path);
     let _ = fs::remove_file(bundle_path.join("manual_stop"));
+    let _ = fs::remove_file(bundle_path.join("boxr-exitcode"));
+    let _ = fs::remove_file(bundle_path.join("stopped_by_user"));
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
     apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
     store.update_status(&rec.id, ContainerStatus::Running)?;
@@ -4606,10 +4704,33 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .and_then(|s| s.annotations.clone())
                     .unwrap_or_default();
 
-                let config_user = spec
-                    .as_ref()
-                    .map(|s| format!("{}:{}", s.process.user.uid, s.process.user.gid))
+                let config_user = annotations
+                    .get("boxr.user")
+                    .cloned()
+                    .or_else(|| {
+                        spec.as_ref()
+                            .map(|s| format!("{}:{}", s.process.user.uid, s.process.user.gid))
+                    })
                     .unwrap_or_default();
+                let is_service = annotations
+                    .get("boxr.is_service")
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
+                let stop_timeout = annotations
+                    .get("boxr.stop_timeout")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(10);
+                let config_umask = annotations
+                    .get("boxr.umask")
+                    .cloned()
+                    .unwrap_or_else(|| "0022".to_string());
+                let mut user_annotations_map = serde_json::Map::new();
+                for (k, v) in &annotations {
+                    if !k.starts_with("boxr.") {
+                        user_annotations_map
+                            .insert(k.clone(), serde_json::Value::String(v.clone()));
+                    }
+                }
                 let config_workdir = spec
                     .as_ref()
                     .map(|s| s.process.cwd.clone())
@@ -4736,6 +4857,13 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             .unwrap_or_default()
                     };
 
+                let health_state_str = match &c.health_status {
+                    health::HealthStatus::Starting => "starting",
+                    health::HealthStatus::Healthy => "healthy",
+                    health::HealthStatus::Unhealthy => "unhealthy",
+                    health::HealthStatus::None => "",
+                };
+
                 let mut docker_compat_inspect = serde_json::json!({
                     "Id": c.id,
                     "OCIRuntime": oci_runtime,
@@ -4759,17 +4887,26 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "StartedAt": c.created_at.to_rfc3339(),
                         "FinishedAt": c.created_at.to_rfc3339(),
                         "StoppedByUser": PathBuf::from(&c.bundle_path).join("stopped_by_user").exists(),
+                        "Health": {
+                            "Status": health_state_str,
+                            "FailingStreak": 0,
+                            "Log": []
+                        },
                     },
                     "Image": image_id,
                     "ImageName": image_name,
                     "ImageDigest": image_digest,
                     "Name": c.name.clone(),
+                    "IsService": is_service,
                     "RestartCount": c.restart_count,
                     "Pod": annotations.get("boxr.pod").cloned().unwrap_or_default(),
                     "SizeRw": size_bytes,
                     "Config": {
                         "Image": c.image,
                         "Labels": labels_map,
+                        "Annotations": user_annotations_map,
+                        "StopTimeout": stop_timeout,
+                        "Umask": config_umask,
                         "ExposedPorts": exposed_map,
                         "User": config_user,
                         "WorkingDir": config_workdir,
@@ -5252,9 +5389,39 @@ pub fn rename_container(args: &cli::RenameArgs) -> Result<()> {
 }
 
 pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
+    let want_running = args
+        .condition
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case("running"));
     let mut last_code = 0;
     for container in &args.containers {
         let c_store = ContainerStore::new();
+        if want_running {
+            let Some(cont) = c_store.find(container) else {
+                cli::usage_errors::exit_usage_error(format!(
+                    "no container with name or ID {:?} found: no such container",
+                    container
+                ));
+            };
+            let running = matches!(cont.status, ContainerStatus::Running) && {
+                #[cfg(target_os = "linux")]
+                {
+                    runtime::linux::is_bundle_container_alive(Path::new(&cont.bundle_path))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    true
+                }
+            };
+            if running {
+                println!("0");
+                continue;
+            }
+            cli::usage_errors::exit_usage_error(format!(
+                "container {} is not running",
+                container
+            ));
+        }
         loop {
             let cont = match c_store.find(container) {
                 Some(c) => c,
@@ -5857,7 +6024,7 @@ fn parse_engine_volume_plugin_keys(content: &str) -> Vec<String> {
     keys
 }
 
-fn containers_conf_toml_value(key: &str) -> Option<String> {
+pub(crate) fn containers_conf_toml_value(key: &str) -> Option<String> {
     let content = containers_conf_content()?;
     for line in content.lines() {
         let line = line.trim();
@@ -6568,6 +6735,14 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
             args.log_opt.push(format!("max-size={}", raw));
         }
     }
+    if !args.annotations.iter().any(|a| a.starts_with("boxr.umask=")) {
+        if let Some(umask) = containers_conf_toml_value("umask") {
+            let clean = umask.trim().trim_matches('"').trim_matches('\'');
+            if !clean.is_empty() {
+                args.annotations.push(format!("boxr.umask={}", clean));
+            }
+        }
+    }
 }
 
 fn effective_image_volume_mode(args: &RunArgs) -> Option<String> {
@@ -6690,7 +6865,7 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
     }
 
     let primary_tag = args.tags.first().cloned();
-    let record = builder
+    let mut record = builder
         .build(builder::BuildOptions {
             context_dir,
             dockerfile_path,
@@ -6705,11 +6880,21 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
         })
         .await?;
 
+    let store = ImageStore::new();
+    if !args.unsetenv.is_empty() {
+        if let Some(cfg) = &mut record.config.config {
+            if let Some(envs) = &mut cfg.env {
+                for u in &args.unsetenv {
+                    envs.retain(|e| e != u && !e.starts_with(&format!("{}=", u)));
+                }
+            }
+        }
+        store.add(record.clone())?;
+    }
+
     if args.quiet {
         println!("{}", record.id);
     }
-
-    let store = ImageStore::new();
     for extra_tag in args.tags.iter().skip(1) {
         // Normalize so qualified spellings store canonical registry/repo/tag.
         let parsed = crate::oci::reference::ImageReference::parse(extra_tag).unwrap_or(
@@ -7019,6 +7204,8 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                 }
                 let _ = wait_container(&cli::WaitArgs {
                     ignore: false,
+                    condition: Vec::new(),
+                    interval: None,
                     containers: vec![c.name.clone()],
                 })?;
             }
@@ -7583,7 +7770,31 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 println!("{}", id_display);
                 continue;
             }
-            if args.format.is_some() {
+            if args.filter.iter().any(|f| {
+                f.split_once('=')
+                    .map(|(k, v)| {
+                        k.trim() == "status" && !v.trim().eq_ignore_ascii_case("storage")
+                    })
+                    .unwrap_or(false)
+            }) {
+                continue;
+            }
+            if let Some(fmt) = &args.format {
+                let id_display = if args.no_trunc {
+                    ext.id.clone()
+                } else {
+                    ext.id[..12.min(ext.id.len())].to_string()
+                };
+                let created_display = format_created_from_unix(ext.created_unix);
+                let out = fmt
+                    .replace("{{.ID}}", &id_display)
+                    .replace("{{.Image}}", &ext.image)
+                    .replace("{{.Command}}", "buildah")
+                    .replace("{{.Created}}", &created_display)
+                    .replace("{{.Status}}", "Storage")
+                    .replace("{{.State}}", "Storage")
+                    .replace("{{.Names}}", &ext.name);
+                println!("{}", out);
                 continue;
             }
             let id_display = if args.no_trunc {
@@ -8034,6 +8245,24 @@ fn remove_container_opts_inner(
         }
     };
 
+    let c_annotations = load_container_labels_from_bundle(&c.bundle_path);
+    if c_annotations.get("boxr.is_service").map(|s| s.as_str()) == Some("true") {
+        if let Some(pods_csv) = c_annotations.get("boxr.service_pods") {
+            let p_store = pod::PodStore::new();
+            let active_pods: Vec<&str> = pods_csv
+                .split(',')
+                .filter(|pname| !pname.is_empty() && p_store.find(pname).is_some())
+                .collect();
+            if !active_pods.is_empty() {
+                cli::usage_errors::exit_usage_error(format!(
+                    "container {} is the service container of pod(s) {} and cannot be removed without removing the pod(s)",
+                    c.id,
+                    active_pods.join(",")
+                ));
+            }
+        }
+    }
+
     let is_active = matches!(
         c.status,
         ContainerStatus::Running | ContainerStatus::Paused | ContainerStatus::Stopping
@@ -8135,7 +8364,11 @@ fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
         );
     }
     for img in &args.images {
-        remove_image(img, args.force, args.no_prune)?;
+        if let Err(e) = remove_image(img, args.force, args.no_prune) {
+            if !args.ignore && !args.force {
+                return Err(e);
+            }
+        }
     }
     Ok(())
 }
@@ -8614,7 +8847,11 @@ async fn create_only_container_after_pod_prep(
             serde_json::to_string(&args.group_add)?,
         );
     }
-    if let Some(umask_str) = &args.umask {
+    let effective_umask = args
+        .umask
+        .clone()
+        .or_else(|| containers_conf_toml_value("umask"));
+    if let Some(umask_str) = &effective_umask {
         let u = if let Some(stripped) = umask_str.strip_prefix("0o") {
             u32::from_str_radix(stripped, 8).unwrap_or(0o022)
         } else if umask_str.starts_with('0') && umask_str.len() > 1 {
@@ -8624,6 +8861,22 @@ async fn create_only_container_after_pod_prep(
         };
         spec.process.umask = Some(u);
         annotations.insert("boxr.umask".to_string(), umask_str.clone());
+    }
+    if let Some(u) = args.user.as_ref().or_else(|| {
+        image_record
+            .config
+            .config
+            .as_ref()
+            .and_then(|c| c.user.as_ref())
+            .filter(|s| !s.is_empty())
+    }) {
+        annotations.insert("boxr.user".to_string(), u.clone());
+    }
+    if !args.security_opt.is_empty() {
+        annotations.insert(
+            "boxr.security_opt".to_string(),
+            serde_json::to_string(&args.security_opt)?,
+        );
     }
     if let Some(domain) = &args.domainname {
         spec.domainname = Some(domain.clone());
@@ -9048,6 +9301,13 @@ async fn create_only_container_after_pod_prep(
     };
 
     add_container_record(&container_store, record, &ephemeral_new_pod)?;
+    if let Some(pod_name) = &args.pod {
+        let pod_store = match home_opt {
+            Some(h) => pod::PodStore::with_home(h.to_path_buf()),
+            None => pod::PodStore::new(),
+        };
+        let _ = pod_store.add_container_to_pod(pod_name, &container_id);
+    }
 
     let mut event_attrs = HashMap::new();
     event_attrs.insert("image".to_string(), args.image.clone());
@@ -9186,7 +9446,7 @@ pub fn tag_image(args: &cli::TagArgs) -> Result<()> {
             .split(':')
             .next()
             .unwrap_or(target);
-        let target_ref = if !name_only.contains('/') {
+        let target_ref = if !target.contains('/') {
             let mut r = target_ref;
             r.registry = "localhost".to_string();
             r.repository = name_only.to_string();
@@ -10215,9 +10475,7 @@ fn apply_namespace_to_linux(
 
 async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
     let store = pod::PodStore::new();
-    let infra = store.infra_name(pod);
     let _ = ensure_pod_infra_container(pod).await?;
-    let _ = start_container(&infra).await;
     for cid in &pod.containers {
         let _ = start_container(cid).await;
     }
@@ -10228,10 +10486,10 @@ async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
 async fn stop_pod_members(pod: &pod::PodRecord) -> Result<()> {
     let store = pod::PodStore::new();
     for cid in &pod.containers {
-        let _ = stop_container(cid, None);
+        let _ = stop_container_with_home_and_timeout(cid, None, Some(0), None, true, None);
     }
     let infra = store.infra_name(pod);
-    let _ = stop_container(&infra, None);
+    let _ = stop_container_with_home_and_timeout(&infra, None, Some(0), None, true, None);
     store.update_status(&pod.name, "Exited")?;
     Ok(())
 }
@@ -11587,12 +11845,18 @@ fn format_template_value(v: &serde_json::Value) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => String::new(),
-        serde_json::Value::Object(map) if map.is_empty() => "map[]".to_string(),
+        serde_json::Value::Object(map) => {
+            let mut pairs: Vec<String> = map
+                .iter()
+                .map(|(k, val)| format!("{}:{}", k, format_template_value(val)))
+                .collect();
+            pairs.sort();
+            format!("map[{}]", pairs.join(" "))
+        }
         serde_json::Value::Array(arr) => {
             let inner: Vec<String> = arr.iter().map(format_template_value).collect();
             format!("[{}]", inner.join(" "))
         }
-        other => other.to_string(),
     }
 }
 
@@ -11758,7 +12022,7 @@ pub fn handle_secret(args: cli::SecretSubcommands) -> Result<()> {
                 "CreatedAt": record.created_at.to_rfc3339(),
                 "Labels": record.labels,
                 "Driver": record.driver,
-                "Spec": { "Name": record.name }
+                "Spec": { "Name": record.name, "Labels": record.labels }
             });
             if let Some(fmt) = &format {
                 println!("{}", evaluate_simple_template(fmt, &json));
@@ -12135,9 +12399,10 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
     let image_ref = if let Some(i) = image_store
         .find(POD_INFRA_IMAGE)
         .or_else(|| image_store.find("alpine"))
+        .or_else(|| image_store.list().into_iter().next())
     {
         if i.registry.is_empty() || i.registry == "docker.io" {
-            format!("alpine:{}", i.tag)
+            format!("{}:{}", i.reference, i.tag)
         } else {
             format!("{}/{}:{}", i.registry, i.reference, i.tag)
         }
@@ -12145,6 +12410,13 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         pull_image_with_platform(POD_INFRA_IMAGE, None).await?;
         POD_INFRA_IMAGE.to_string()
     };
+
+    let mut infra_annotations = Vec::new();
+    let mut infra_userns = Vec::new();
+    if let Some(u) = &pod.userns {
+        infra_annotations.push(format!("io.podman.annotations.userns={}", u));
+        infra_userns.push(u.clone());
+    }
 
     let infra_args = cli::RunArgs {
         registry_auth: Default::default(),
@@ -12181,7 +12453,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         cpus: None,
         pids_limit: None,
         rootless: true,
-        restart: "always".to_string(),
+        restart: "no".to_string(),
         health_cmd: None,
         secret: Vec::new(),
         health_startup_cmd: None,
@@ -12194,7 +12466,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         health_log_destination: None,
         platform: None,
         privileged: false,
-        network: "bridge".to_string(),
+        network: pod.network.clone().unwrap_or_else(|| "bridge".to_string()),
         disable_content_trust: false,
         gpus: None,
         entrypoint: None,
@@ -12226,14 +12498,14 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         sysctl: Vec::new(),
         stop_timeout: None,
         stop_signal: None,
-        annotations: Vec::new(),
+        annotations: infra_annotations,
         ulimits: Vec::new(),
         hooks_dir: None,
         conmon_syslog: false,
         ipc: None,
         pid: None,
         uts: None,
-        userns: Vec::new(),
+        userns: infra_userns,
         uidmap: Vec::new(),
         gidmap: Vec::new(),
         cgroupns: None,
@@ -12403,11 +12675,30 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 return Err(anyhow!("you must provide at least one pod name or ID"));
             }
             for pod in targets {
+                let sc_opt = store
+                    .find(&pod)
+                    .and_then(|p| p.labels.get("boxr.service_container").cloned());
                 if let Err(e) = store.remove_with_force(&pod, force) {
-                    if !ignore {
+                    if !ignore && !force {
                         return Err(e);
                     }
                 } else {
+                    if let Some(sc_name) = sc_opt {
+                        let still_used = store.list().iter().any(|other| {
+                            other.labels.get("boxr.service_container") == Some(&sc_name)
+                        });
+                        if !still_used {
+                            let _ = stop_container_with_home_and_timeout(
+                                &sc_name,
+                                None,
+                                Some(0),
+                                None,
+                                true,
+                                None,
+                            );
+                            let _ = remove_container_opts_inner(&sc_name, true, false, false);
+                        }
+                    }
                     EventManager::record(ContainerEvent::new(
                         "pod",
                         "remove",
@@ -12424,12 +12715,35 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                 let p = store
                     .find(&pod)
                     .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
+                let host_net = p.network.as_deref() == Some("host");
+                let port_bindings_str = if p.ports.is_empty() {
+                    "map[]".to_string()
+                } else {
+                    let entries: Vec<String> = p
+                        .ports
+                        .iter()
+                        .map(|pm| {
+                            let hip = pm.host_ip.as_deref().unwrap_or("0.0.0.0");
+                            format!(
+                                "{}/{}:[{{{} {}}}]",
+                                pm.container_port, pm.protocol, hip, pm.host_port
+                            )
+                        })
+                        .collect();
+                    format!("map[{}]", entries.join(" "))
+                };
                 let json = serde_json::json!({
                     "Id": p.id,
                     "Name": p.name,
                     "Status": p.status,
+                    "State": p.status,
                     "Created": p.created_at.to_rfc3339(),
                     "InfraContainerId": p.infra_container_id,
+                    "InfraContainerID": p.infra_container_id,
+                    "InfraConfig": {
+                        "HostNetwork": host_net,
+                        "PortBindings": port_bindings_str,
+                    },
                     "Containers": p.containers,
                     "Labels": p.labels,
                     "ShareIpc": p.share_ipc,
@@ -12438,7 +12752,7 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     "SharePid": p.share_pid,
                 });
                 if let Some(fmt) = &format {
-                    println!("{}", evaluate_simple_template(fmt, &json));
+                    println!("{}", apply_inspect_format_template(fmt, &json));
                 } else {
                     println!("{}", serde_json::to_string_pretty(&json)?);
                 }
@@ -12450,6 +12764,22 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     .find(&pod)
                     .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
                 stop_pod_members(&p).await?;
+                if let Some(sc_name) = p.labels.get("boxr.service_container") {
+                    let other_running = store.list().iter().any(|other| {
+                        other.labels.get("boxr.service_container") == Some(sc_name)
+                            && other.status == "Running"
+                    });
+                    if !other_running {
+                        let _ = stop_container_with_home_and_timeout(
+                            sc_name,
+                            None,
+                            Some(0),
+                            None,
+                            true,
+                            None,
+                        );
+                    }
+                }
                 println!("{}", pod);
             }
         }
@@ -12459,6 +12789,9 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     .find(&pod)
                     .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
                 start_pod_members(&p).await?;
+                if let Some(sc_name) = p.labels.get("boxr.service_container") {
+                    let _ = start_container(sc_name).await;
+                }
                 println!("{}", pod);
             }
         }
@@ -12469,6 +12802,9 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                     .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
                 stop_pod_members(&p).await?;
                 start_pod_members(&p).await?;
+                if let Some(sc_name) = p.labels.get("boxr.service_container") {
+                    let _ = start_container(sc_name).await;
+                }
                 println!("{}", pod);
             }
         }
@@ -12486,6 +12822,23 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
                         all: false,
                         container: cid,
                     });
+                }
+                let _ = store.update_status(&p.name, "Exited");
+                if let Some(sc_name) = p.labels.get("boxr.service_container") {
+                    let other_running = store.list().iter().any(|other| {
+                        other.labels.get("boxr.service_container") == Some(sc_name)
+                            && other.status == "Running"
+                    });
+                    if !other_running {
+                        let _ = stop_container_with_home_and_timeout(
+                            sc_name,
+                            None,
+                            Some(0),
+                            None,
+                            true,
+                            None,
+                        );
+                    }
                 }
                 println!("{}", pod);
             }
@@ -12579,12 +12932,8 @@ pub async fn handle_pod(args: PodSubcommands) -> Result<()> {
 
 pub async fn handle_play(args: PlaySubcommands) -> Result<()> {
     match args.command {
-        PlayAction::Kube { file, down } => {
-            if down {
-                kube::KubeManager::play_kube_down(Path::new(&file))?;
-            } else {
-                kube::KubeManager::play_kube(Path::new(&file)).await?;
-            }
+        PlayAction::Kube(play_args) => {
+            kube::KubeManager::play_kube_with_args(&play_args).await?;
         }
     }
     Ok(())
@@ -12592,9 +12941,8 @@ pub async fn handle_play(args: PlaySubcommands) -> Result<()> {
 
 pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
     match args.command {
-        GenerateAction::Kube { target } => {
-            let yaml = kube::KubeManager::generate_kube(&target)?;
-            println!("{}", yaml);
+        GenerateAction::Kube(gen_args) => {
+            kube::KubeManager::generate_kube_with_args(&gen_args)?;
         }
         GenerateAction::Systemd {
             containers,
@@ -12674,6 +13022,18 @@ pub async fn run_healthcheck(container: &str) -> Result<i32> {
 
     let bundle_path = PathBuf::from(&cont.bundle_path);
     let annotations = load_container_labels_from_bundle(&cont.bundle_path);
+    if let (Some(delay_s), Some(started_ms)) = (
+        annotations
+            .get("boxr.health_initial_delay_secs")
+            .and_then(|v| v.parse::<i64>().ok()),
+        annotations
+            .get("boxr.started_unix_ms")
+            .and_then(|v| v.parse::<i64>().ok()),
+    ) {
+        if delay_s > 0 && Utc::now().timestamp_millis() < started_ms + delay_s * 1000 {
+            return Ok(1);
+        }
+    }
     let health_inspect = container_inspect_health_config(&bundle_path, &annotations);
     let mut health_cfg = health::HealthConfig::default();
     if let Some(test) = health_inspect

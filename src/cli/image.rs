@@ -18,6 +18,14 @@ pub struct RegistryAuthArgs {
     /// Username:password for registry operations
     #[arg(long = "creds")]
     pub creds: Option<String>,
+
+    /// Require HTTPS and verify certificates when talking to the container registry
+    #[arg(
+        long = "tls-verify",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub tls_verify: Option<bool>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -211,6 +219,9 @@ pub struct BuildArgs {
 
     #[arg(long = "ssh")]
     pub ssh: Vec<String>,
+
+    #[arg(long = "unsetenv")]
+    pub unsetenv: Vec<String>,
 
     #[arg(default_value = ".")]
     pub path: String,
@@ -593,6 +604,10 @@ pub struct RmiArgs {
     /// Force removal of the image
     #[arg(short = 'f', long = "force")]
     pub force: bool,
+
+    /// Ignore errors if a specified image does not exist
+    #[arg(short = 'i', long = "ignore")]
+    pub ignore: bool,
 
     /// Do not delete untagged parents
     #[arg(long = "no-prune")]
