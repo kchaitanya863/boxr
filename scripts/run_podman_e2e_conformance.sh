@@ -52,7 +52,7 @@ export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
 
 cd "$SRC_DIR"
-if [[ ! -f "$SRC_DIR/.install.ginkgo" ]]; then
+if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; then
   echo "Installing ginkgo (first run)..."
   make -C "$SRC_DIR" .install.ginkgo
 fi
@@ -67,6 +67,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%%#*}"
   line="$(echo "$line" | xargs)"
   [[ -z "$line" ]] && continue
+  if [[ -n "${PODMAN_E2E_PATTERN:-}" ]] && [[ "$line" != *"$PODMAN_E2E_PATTERN"* ]]; then
+    continue
+  fi
   echo "======== e2e FOCUS_FILE=$line ========"
   focus_pat="$line"
   if [[ "$focus_pat" != /* ]]; then

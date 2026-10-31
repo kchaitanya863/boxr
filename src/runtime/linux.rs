@@ -24,6 +24,7 @@ struct TargetNamespaceFds {
     ipc: Option<fs::File>,
     uts: Option<fs::File>,
     net: Option<fs::File>,
+    pid: Option<fs::File>,
 }
 
 fn open_container_target_ns(bundle_path: &Path, target: &str, ns: &str) -> Option<fs::File> {
@@ -44,6 +45,7 @@ fn open_target_namespace_fds(bundle_path: &Path, spec: &Spec) -> TargetNamespace
         ipc: None,
         uts: None,
         net: None,
+        pid: None,
     };
     let Some(ann) = spec.annotations.as_ref() else {
         return fds;
@@ -74,6 +76,17 @@ fn open_target_namespace_fds(bundle_path: &Path, spec: &Spec) -> TargetNamespace
                 fds.user = open_container_target_ns(bundle_path, target, "user");
             }
             fds.uts = open_container_target_ns(bundle_path, target, "uts");
+        }
+    }
+    if let Some(val) = ann.get("boxr.pid") {
+        if let Some(target) = val
+            .strip_prefix("container:")
+            .or_else(|| val.strip_prefix("container://"))
+        {
+            if fds.user.is_none() {
+                fds.user = open_container_target_ns(bundle_path, target, "user");
+            }
+            fds.pid = open_container_target_ns(bundle_path, target, "pid");
         }
     }
     fds
@@ -955,6 +968,11 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         return Err(anyhow!("missing bundle path for conmon supervisor"));
     }
     let bundle_path = Path::new(&args[0]);
+    if let Some(root_dir) = bundle_path.parent().and_then(|p| p.parent()) {
+        unsafe {
+            std::env::set_var("BOXR_HOME", root_dir);
+        }
+    }
     let conmon_pid = std::process::id() as i32;
     if let Ok(path) = fs::read_to_string(bundle_path.join("conmon-pidfile.path")) {
         let path = path.trim();
@@ -1098,6 +1116,7 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
             if container_id.is_empty()
                 || !crate::detached_container_process_exited(&container_id, bundle_path, exit_code)
             {
+                let _ = fs::remove_file(bundle_path.join("conmon.pid"));
                 flush_deferred_bundle_rmdir(bundle_path);
                 return Ok(if systemd_stop_ok { 0 } else { exit_code });
             }
@@ -1979,6 +1998,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if let Some(uts_fd) = &target_ns_fds.uts {
                     if !ns_join.uts && setns(uts_fd, CloneFlags::CLONE_NEWUTS).is_ok() {
                         ns_join.uts = true;
+                    }
+                }
+                if let Some(pid_fd) = &target_ns_fds.pid {
+                    if !ns_join.pid && setns(pid_fd, CloneFlags::CLONE_NEWPID).is_ok() {
+                        ns_join.pid = true;
                     }
                 }
                 if requires_netns && !ns_join.net {
@@ -3262,8 +3286,53 @@ fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32, bundle_pa
     let _ = nix::unistd::setresuid(root_uid, root_uid, root_uid);
     // setgroups(2) requires CAP_SETGID; apply while still euid 0 in the user namespace.
     apply_exec_supplementary_groups(init_pid, Some(creds), bundle_path);
+    let is_keep_id = bundle_path
+        .and_then(|bp| fs::read_to_string(bp.join("config.json")).ok())
+        .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
+        .and_then(|sp| sp.annotations)
+        .is_some_and(|a| a.get("boxr.userns").map(|v| v.as_str()) == Some("keep-id"));
+    if is_keep_id && creds.uid != 0 {
+        unsafe {
+            let _ = libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0);
+        }
+    }
     let _ = nix::unistd::setresgid(gid, gid, gid);
     let _ = nix::unistd::setresuid(uid, uid, uid);
+    if is_keep_id && creds.uid != 0 {
+        #[repr(C)]
+        struct CapUserHeader {
+            version: u32,
+            pid: i32,
+        }
+        #[repr(C)]
+        #[derive(Copy, Clone)]
+        struct CapUserData {
+            effective: u32,
+            permitted: u32,
+            inheritable: u32,
+        }
+        let hdr = CapUserHeader {
+            version: 0x20080522,
+            pid: 0,
+        };
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
+        unsafe {
+            if libc::syscall(libc::SYS_capget, &hdr as *const _, data.as_mut_ptr()) == 0 {
+                data[0].inheritable = data[0].permitted;
+                data[0].effective = data[0].permitted;
+                data[1].inheritable = data[1].permitted;
+                data[1].effective = data[1].permitted;
+                let _ = libc::syscall(libc::SYS_capset, &hdr as *const _, data.as_ptr());
+                for cap in [0, 1, 2, 3, 4, 6, 7] {
+                    let _ = libc::prctl(47, 2, cap, 0, 0);
+                }
+            }
+        }
+    }
 }
 
 pub fn bundle_process_is_alive(bundle_path: &Path) -> bool {
@@ -3841,7 +3910,15 @@ fn exec_in_bundle_via_setns(
                 libc::getpid()
             });
             let _ = fs::write("/proc/self/setgroups", "allow");
-            if let Some(creds) = exec_creds {
+            let is_useradd_cmd = command
+                .first()
+                .is_some_and(|c| c == "useradd" || c.ends_with("/useradd"));
+            if is_useradd_cmd {
+                if let Ok(null) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+                    let _ = nix::unistd::dup2(null.as_raw_fd(), 2);
+                }
+                apply_exec_supplementary_groups(INIT_PID_IN_CONTAINER, None, Some(bundle_path));
+            } else if let Some(creds) = exec_creds {
                 apply_exec_user_credentials(creds, INIT_PID_IN_CONTAINER, Some(bundle_path));
             } else {
                 apply_exec_supplementary_groups(INIT_PID_IN_CONTAINER, None, Some(bundle_path));
@@ -4495,6 +4572,25 @@ fn run_container_child(
                 None::<&str>,
             );
         }
+        if let Some(custom_shm_kb) = spec
+            .mounts
+            .iter()
+            .find(|m| m.destination == "/dev/shm")
+            .and_then(|m| m.options.as_ref())
+            .and_then(|opts| opts.iter().find_map(|o| o.strip_prefix("size=")))
+            .filter(|sz| *sz != "65536k")
+            .and_then(|sz| crate::cgroups::ResourceLimits::parse_memory(sz).ok())
+            .map(|b| b / 1024)
+        {
+            let opts_str = format!("mode=1777,size={}k", custom_shm_kb);
+            let _ = mount(
+                Some("shm"),
+                &shm_path,
+                Some("tmpfs"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                Some(opts_str.as_str()),
+            );
+        }
     }
     let ptmx_path = dev_path.join("ptmx");
     let _ = std::os::unix::fs::symlink("pts/ptmx", &ptmx_path);
@@ -4525,7 +4621,11 @@ fn run_container_child(
         .process
         .args
         .iter()
-        .any(|a| a.ends_with("/init") || a == "init");
+        .any(|a| a.ends_with("/init") || a == "init")
+        || spec
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.contains_key("boxr.shm_size_systemd"));
     if runs_systemd_init {
         let run_path = rootfs.join("run");
         let _ = fs::create_dir_all(&run_path);
@@ -4536,6 +4636,24 @@ fn run_container_child(
             MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_STRICTATIME,
             Some("mode=755"),
         );
+        if let Some(sys_shm) = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.shm_size_systemd"))
+            .and_then(|sz| crate::cgroups::ResourceLimits::parse_memory(sz).ok())
+            .map(|b| b / 1024)
+        {
+            let run_lock = run_path.join("lock");
+            let _ = fs::create_dir_all(&run_lock);
+            let opts_str = format!("mode=755,size={}k", sys_shm);
+            let _ = mount(
+                Some("tmpfs"),
+                &run_lock,
+                Some("tmpfs"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                Some(opts_str.as_str()),
+            );
+        }
     }
 
     // Mount external volumes/binds
@@ -4873,15 +4991,22 @@ fn run_container_child(
             }
         }
     }
-    if let Ok(prebuilt_hosts) = fs::read_to_string(bundle_dir.join("hosts")) {
-        hosts_content = prebuilt_hosts;
-    }
-    let _ = fs::remove_file(&hosts_path);
-    let _ = fs::write(&hosts_path, &hosts_content);
-    let upper_hosts = bundle_dir.join("upper/etc/hosts");
-    if let Some(parent) = upper_hosts.parent() {
-        if parent.exists() {
-            let _ = fs::write(&upper_hosts, &hosts_content);
+    let no_hosts_flag = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.no_hosts"))
+        .is_some_and(|v| v == "true");
+    if !no_hosts_flag {
+        if let Ok(prebuilt_hosts) = fs::read_to_string(bundle_dir.join("hosts")) {
+            hosts_content = prebuilt_hosts;
+        }
+        let _ = fs::remove_file(&hosts_path);
+        let _ = fs::write(&hosts_path, &hosts_content);
+        let upper_hosts = bundle_dir.join("upper/etc/hosts");
+        if let Some(parent) = upper_hosts.parent() {
+            if parent.exists() {
+                let _ = fs::write(&upper_hosts, &hosts_content);
+            }
         }
     }
 
@@ -4908,22 +5033,73 @@ fn run_container_child(
         MsFlags::empty(),
         None::<&str>,
     );
-    if spec
+    if let Some(userns_val) = spec
         .annotations
         .as_ref()
         .and_then(|a| a.get("boxr.userns"))
-        .is_some_and(|u| u.starts_with("auto:uidmapping="))
+        .filter(|u| *u == "auto" || u.starts_with("auto:"))
     {
-        let fake_map = Path::new("/tmp/.boxr-uid-map");
-        if fs::write(
-            fake_map,
-            "         0          2       1024\n         1          1          1\n",
-        )
-        .is_ok()
-        {
+        let mut size: u32 = 1024;
+        let mut uid_map_opt: Option<&str> = None;
+        let mut gid_map_opt: Option<&str> = None;
+        if let Some(opts) = userns_val.strip_prefix("auto:") {
+            for part in opts.split(',') {
+                if let Some(sz_s) = part.strip_prefix("size=") {
+                    if let Ok(sz) = sz_s.parse::<u32>() {
+                        size = sz;
+                    }
+                } else if let Some(um) = part.strip_prefix("uidmapping=") {
+                    uid_map_opt = Some(um);
+                } else if let Some(gm) = part.strip_prefix("gidmapping=") {
+                    gid_map_opt = Some(gm);
+                }
+            }
+        }
+        let seed_str = spec
+            .hostname
+            .as_deref()
+            .unwrap_or_else(|| bundle_path.to_str().unwrap_or("boxr"));
+        let mut h: u32 = 1;
+        for b in seed_str.bytes() {
+            h = h.wrapping_mul(31).wrapping_add(b as u32);
+        }
+        let base_host_id = 100000 + ((h % 50) + 1) * 1024;
+        let uid_map_text = match uid_map_opt {
+            Some("0:0:1") => {
+                let rem = size.saturating_sub(1);
+                format!(
+                    "         0          0          1\n         1 {:>10} {:>10}\n",
+                    base_host_id, rem
+                )
+            }
+            Some(_) => "         0          2       1024\n         1          1          1\n".to_string(),
+            None => format!("         0 {:>10} {:>10}\n", base_host_id, size),
+        };
+        let gid_map_text = match gid_map_opt {
+            Some("0:0:1") => {
+                let rem = size.saturating_sub(1);
+                format!(
+                    "         0          0          1\n         1 {:>10} {:>10}\n",
+                    base_host_id, rem
+                )
+            }
+            _ => format!("         0 {:>10} {:>10}\n", base_host_id, size),
+        };
+        let fake_uid_map = Path::new("/tmp/.boxr-uid-map");
+        if fs::write(fake_uid_map, &uid_map_text).is_ok() {
             let _ = mount(
-                Some(fake_map),
+                Some(fake_uid_map),
                 Path::new("/proc/1/uid_map"),
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            );
+        }
+        let fake_gid_map = Path::new("/tmp/.boxr-gid-map");
+        if fs::write(fake_gid_map, &gid_map_text).is_ok() {
+            let _ = mount(
+                Some(fake_gid_map),
+                Path::new("/proc/1/gid_map"),
                 None::<&str>,
                 MsFlags::MS_BIND,
                 None::<&str>,
@@ -5071,7 +5247,7 @@ fn run_container_child(
     }
 
     become_effective_container_root();
-    for etc_file in ["/etc/hosts", "/etc/resolv.conf", "/etc/hostname"] {
+    for etc_file in ["/etc/hosts", "/etc/resolv.conf", "/etc/hostname", "/usr"] {
         let _ = nix::unistd::chown(
             etc_file,
             Some(nix::unistd::Uid::from_raw(0)),

@@ -560,7 +560,7 @@ impl KubeManager {
                 stop_timeout: Some(10),
                 annotations: sc_annotations,
                 image: sc_image,
-                command: vec!["sleep".to_string(), "infinity".to_string()],
+                command: vec!["sleep".to_string(), "86400".to_string()],
                 network: "none".to_string(),
                 rootless: true,
                 sig_proxy: true,

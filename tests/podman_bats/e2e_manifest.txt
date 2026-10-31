@@ -24,5 +24,10 @@ generate_spec_test.go
 generate_kube_test.go
 system_connection_test.go
 system_df_test.go
+pod_create_test.go
+pod_rm_test.go
+pod_pause_test.go
+pod_top_test.go
+port_test.go
 
 

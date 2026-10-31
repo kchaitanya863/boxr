@@ -77,6 +77,7 @@ impl VolumeStore {
     pub fn with_home(home: PathBuf) -> Self {
         let volumes_dir = crate::storage::db_config::effective_volume_path();
         let _ = fs::create_dir_all(&volumes_dir);
+        crate::storage::db_config::ensure_sqlite_db(&home);
         Self {
             index_file: home.join("volumes.json"),
             volumes_dir,

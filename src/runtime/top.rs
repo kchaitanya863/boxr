@@ -1,7 +1,7 @@
 use anyhow::Result;
 #[cfg(target_os = "linux")]
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 struct ContainerProc {
@@ -57,6 +57,89 @@ impl ContainerTop {
         let output = format_table(&headers, &rows, no_header);
         println!("{}", output);
         Ok(output)
+    }
+
+    pub fn list_pod_processes(bundle_paths: &[PathBuf], ps_args: &[String]) -> Result<String> {
+        validate_descriptors(ps_args);
+        let (descriptors, no_header, numeric_user) = parse_descriptors(ps_args);
+        let mut all_procs: Vec<ContainerProc> = Vec::new();
+        for bp in bundle_paths {
+            for p in collect_procs(bp) {
+                if !all_procs.iter().any(|existing| existing.hpid == p.hpid) {
+                    all_procs.push(p);
+                }
+            }
+        }
+
+        let headers: Vec<String> = descriptors.iter().map(|d| descriptor_header(d)).collect();
+        let rows: Vec<Vec<String>> = all_procs
+            .iter()
+            .map(|p| {
+                descriptors
+                    .iter()
+                    .map(|d| descriptor_value(p, d, numeric_user))
+                    .collect()
+            })
+            .collect();
+
+        let output = format_table(&headers, &rows, no_header);
+        println!("{}", output);
+        Ok(output)
+    }
+}
+
+fn is_valid_descriptor(desc: &str) -> bool {
+    matches!(
+        desc,
+        "user"
+            | "pid"
+            | "ppid"
+            | "%cpu"
+            | "cpu"
+            | "%c"
+            | "pcpu"
+            | "%mem"
+            | "pmem"
+            | "elapsed"
+            | "etime"
+            | "tty"
+            | "time"
+            | "comm"
+            | "command"
+            | "args"
+            | "hpid"
+            | "huser"
+            | "group"
+            | "hgroup"
+            | "label"
+            | "nice"
+            | "ni"
+            | "pgid"
+            | "rgroup"
+            | "ruser"
+            | "seccomp"
+            | "state"
+            | "s"
+            | "vsz"
+            | "rss"
+            | "capbnd"
+            | "capeff"
+            | "capinh"
+            | "capprm"
+    )
+}
+
+fn validate_descriptors(ps_args: &[String]) {
+    let had_eo = ps_args.iter().any(|a| a.trim().starts_with("-eo"));
+    let (parsed, _, _) = parse_descriptors(ps_args);
+    for d in &parsed {
+        if !is_valid_descriptor(d) {
+            if had_eo {
+                crate::cli::usage_errors::exit_usage_error("'-eo': unknown descriptor");
+            } else {
+                crate::cli::usage_errors::exit_usage_error(format!("'{}': unknown descriptor", d));
+            }
+        }
     }
 }
 
@@ -213,7 +296,7 @@ fn descriptor_header(desc: &str) -> String {
         "hgroup" => "HGROUP".to_string(),
         "groups" => "GROUPS".to_string(),
         "hgroups" => "HGROUPS".to_string(),
-        "%cpu" | "cpu" | "%c" => "%CPU".to_string(),
+        "%cpu" | "cpu" | "%c" | "pcpu" => "%CPU".to_string(),
         "%mem" | "pmem" => "%MEM".to_string(),
         "elapsed" | "etime" => "ELAPSED".to_string(),
         "tty" => "TTY".to_string(),
@@ -241,7 +324,7 @@ fn descriptor_value(p: &ContainerProc, desc: &str, numeric_user: bool) -> String
         "huser" => p.huser.clone(),
         "group" | "groups" => p.groups.clone(),
         "hgroup" | "hgroups" => p.hgroups.clone(),
-        "%cpu" | "cpu" | "%c" => p.cpu.clone(),
+        "%cpu" | "cpu" | "%c" | "pcpu" => p.cpu.clone(),
         "%mem" | "pmem" => "0.0".to_string(),
         "vsz" | "rss" => "0".to_string(),
         "stat" | "state" => "S".to_string(),
