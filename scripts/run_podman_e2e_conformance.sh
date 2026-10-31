@@ -62,7 +62,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   line="$(echo "$line" | xargs)"
   [[ -z "$line" ]] && continue
   echo "======== e2e FOCUS_FILE=$line ========"
-  if ! make localintegration FOCUS_FILE="$line" GINKGO_PARALLEL=n; then
+  focus_pat="$line"
+  if [[ "$focus_pat" != /* ]]; then
+    focus_pat="/${focus_pat}$"
+  fi
+  if ! make localintegration FOCUS_FILE="$focus_pat" GINKGO_PARALLEL=n; then
     if [[ "${PODMAN_E2E_STRICT:-0}" == "1" ]]; then
       exit 1
     fi

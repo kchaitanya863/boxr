@@ -712,6 +712,9 @@ impl ImageBuilder {
                                 println!("--> Using cache");
                                 log_buf.push_str("--> Using cache\n");
                             }
+                            let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
+                            let _ = fs::remove_dir_all(&prev_layer_dir);
+                            let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
                             let _ = fs::remove_dir_all(&current_rootfs);
                             fs::create_dir_all(&current_rootfs)?;
                             copy_dir_all(&cached_rootfs, &current_rootfs)?;
@@ -719,6 +722,13 @@ impl ImageBuilder {
                             continue;
                         }
                     }
+
+                    let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
+                    if use_layers || !prev_layer_dir.exists() {
+                        let _ = fs::remove_dir_all(&prev_layer_dir);
+                        let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
+                    }
+                    let had_etc_hostname = current_rootfs.join("etc/hostname").exists();
 
                     // Execute RUN step
                     let step_bundle = temp_dir.path().join(format!("bundle-step-{}", step_count));
@@ -814,6 +824,9 @@ impl ImageBuilder {
                         ));
                     }
 
+                    if !had_etc_hostname && !cmd.contains("hostname") {
+                        let _ = fs::remove_file(bundle_rootfs.join("etc/hostname"));
+                    }
                     record_subuid_chowns(&bundle_rootfs, &bundle_rootfs, &mut chown_map);
                     let _ = fs::remove_dir_all(&current_rootfs);
                     if fs::rename(&bundle_rootfs, &current_rootfs).is_err() {
@@ -914,6 +927,11 @@ impl ImageBuilder {
         let dest_rootfs = dest_image_dir.join("rootfs");
         fs::create_dir_all(&dest_rootfs)?;
         copy_dir_all(&current_rootfs, &dest_rootfs)?;
+        let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
+        if prev_layer_dir.exists() {
+            let parent_dest = dest_image_dir.join("parent_rootfs");
+            let _ = copy_dir_all(&prev_layer_dir, &parent_dest);
+        }
         if !chown_map.is_empty() {
             let _ = fs::write(
                 dest_image_dir.join("chown_meta.json"),

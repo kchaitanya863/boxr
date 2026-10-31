@@ -1075,7 +1075,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ContainerAction::Diff(diff_args) => {
-                diff_container(&diff_args)?;
+                diff_container_with_mode(&diff_args, true)?;
                 Ok(0)
             }
             cli::ContainerAction::Prune(_) => {
@@ -1279,7 +1279,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 }
             }
             cli::ImageAction::Diff(diff_args) => {
-                diff_images(&diff_args.image1, diff_args.image2.as_deref())?;
+                diff_images_with_format(
+                    &diff_args.image1,
+                    diff_args.image2.as_deref(),
+                    diff_args.format.as_deref(),
+                )?;
                 Ok(0)
             }
             cli::ImageAction::Scp(scp_args) => {
@@ -4568,6 +4572,12 @@ pub fn stop_container_with_home_and_timeout(
     };
 
     if matches!(c.status, ContainerStatus::Paused) {
+        if !quiet {
+            cli::usage_errors::exit_usage_error(format!(
+                "container {} is running or paused, refusing to clean up: container state improper",
+                c.id
+            ));
+        }
         thaw_container_processes(&c);
     }
 
@@ -6219,75 +6229,29 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn diff_container(args: &DiffArgs) -> Result<()> {
-    let c_store = ContainerStore::new();
-    let container_id = if args.latest {
-        if args.container.is_some() {
-            cli::usage_errors::exit_usage_error("--latest and containers cannot be used together");
+fn single_image_base_rootfs(img: &ImageRecord) -> PathBuf {
+    let img_rootfs = PathBuf::from(&img.rootfs_path);
+    if let Some(img_dir) = img_rootfs.parent() {
+        let parent_dir = img_dir.join("parent_rootfs");
+        if parent_dir.exists() {
+            return parent_dir;
         }
-        let mut list = c_store.list();
-        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        if let Some(first) = list.first() {
-            first.id.clone()
-        } else {
-            cli::usage_errors::exit_usage_error("no containers found");
+        let parent_txt = img_dir.join("parent_rootfs.txt");
+        if let Ok(path_str) = fs::read_to_string(&parent_txt) {
+            let p = PathBuf::from(path_str.trim());
+            if p.exists() {
+                return p;
+            }
         }
-    } else {
-        args.container
-            .clone()
-            .ok_or_else(|| anyhow!("Container name or ID required"))?
-    };
+    }
+    PathBuf::from("/nonexistent-boxr-empty-base-rootfs")
+}
 
-    let i_store = ImageStore::new();
-    let resolve_target_rootfs = |q: &str| -> Option<PathBuf> {
-        if let Some(cont) = c_store.find(q) {
-            return Some(PathBuf::from(&cont.bundle_path).join("rootfs"));
-        }
-        if let Some(img) = find_image_with_shortname(&i_store, q, None) {
-            return Some(PathBuf::from(&img.rootfs_path));
-        }
-        None
-    };
-
-    let (base_rootfs, container_rootfs) = if let Some(second_q) = &args.second {
-        let first_fs = match resolve_target_rootfs(&container_id) {
-            Some(fs) => fs,
-            None => cli::usage_errors::exit_usage_error("too many arguments"),
-        };
-        let second_fs = match resolve_target_rootfs(second_q) {
-            Some(fs) => fs,
-            None => cli::usage_errors::exit_usage_error("too many arguments"),
-        };
-        (second_fs, first_fs)
-    } else if let Some(cont) = c_store.find(&container_id) {
-        let img = i_store
-            .find(&cont.image)
-            .ok_or_else(|| anyhow!("Image '{}' not found", cont.image))?;
-        (
-            PathBuf::from(&img.rootfs_path),
-            PathBuf::from(&cont.bundle_path).join("rootfs"),
-        )
-    } else if let Some(ext) = storage::external::find_storage_container(&container_id) {
-        let img = i_store
-            .find(&ext.image)
-            .ok_or_else(|| anyhow!("Image '{}' not found", ext.image))?;
-        let ext_rootfs = ext
-            .rootfs
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                storage::container_state_home()
-                    .join("external-storage")
-                    .join(&ext.name)
-                    .join("rootfs")
-            });
-        (PathBuf::from(&img.rootfs_path), ext_rootfs)
-    } else {
-        return Err(anyhow!("Container '{}' not found", container_id));
-    };
-
-    let diffs = runtime::diff::FilesystemDiff::compare(&base_rootfs, &container_rootfs)?;
-
-    if let Some(fmt) = &args.format {
+fn print_diff_records(
+    diffs: Vec<runtime::diff::DiffRecord>,
+    format: Option<&str>,
+) -> Result<()> {
+    if let Some(fmt) = format {
         if fmt == "json" {
             let mut added = Vec::new();
             let mut changed = Vec::new();
@@ -6308,21 +6272,125 @@ pub fn diff_container(args: &DiffArgs) -> Result<()> {
             return Ok(());
         }
     }
-
     for d in diffs {
         println!("{} {}", d.change_type, d.path);
     }
     Ok(())
 }
 
+pub fn diff_container(args: &DiffArgs) -> Result<()> {
+    diff_container_with_mode(args, false)
+}
+
+pub fn diff_container_with_mode(args: &DiffArgs, container_only: bool) -> Result<()> {
+    let c_store = ContainerStore::new();
+    let container_id = if args.latest {
+        if args.container.is_some() {
+            cli::usage_errors::exit_usage_error("--latest and containers cannot be used together");
+        }
+        let mut list = c_store.list();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        if let Some(first) = list.first() {
+            first.id.clone()
+        } else {
+            cli::usage_errors::exit_usage_error("no containers found");
+        }
+    } else {
+        args.container
+            .clone()
+            .unwrap_or_else(|| cli::usage_errors::exit_usage_error("diff requires a name, id, or the \"--latest\" flag"))
+    };
+
+    let i_store = ImageStore::new();
+    let resolve_target_rootfs = |q: &str| -> Option<PathBuf> {
+        if let Some(cont) = c_store.find(q) {
+            return Some(PathBuf::from(&cont.bundle_path).join("rootfs"));
+        }
+        if !container_only {
+            if let Some(img) = find_image_with_shortname(&i_store, q, None) {
+                return Some(PathBuf::from(&img.rootfs_path));
+            }
+        }
+        None
+    };
+
+    let (base_rootfs, container_rootfs) = if let Some(second_q) = &args.second {
+        let first_fs = match resolve_target_rootfs(&container_id) {
+            Some(fs) => fs,
+            None => cli::usage_errors::exit_usage_error("too many arguments"),
+        };
+        let second_fs = match resolve_target_rootfs(second_q) {
+            Some(fs) => fs,
+            None => cli::usage_errors::exit_usage_error("too many arguments"),
+        };
+        (second_fs, first_fs)
+    } else if !container_only
+        && !args.latest
+        && find_image_with_shortname(&i_store, &container_id, None).is_some()
+    {
+        let img = find_image_with_shortname(&i_store, &container_id, None).unwrap();
+        (
+            single_image_base_rootfs(&img),
+            PathBuf::from(&img.rootfs_path),
+        )
+    } else if let Some(cont) = c_store.find(&container_id) {
+        let img = find_image_with_shortname(&i_store, &cont.image, None)
+            .ok_or_else(|| anyhow!("Image '{}' not found", cont.image))?;
+        (
+            PathBuf::from(&img.rootfs_path),
+            PathBuf::from(&cont.bundle_path).join("rootfs"),
+        )
+    } else if let Some(ext) = storage::external::find_storage_container(&container_id) {
+        let img = find_image_with_shortname(&i_store, &ext.image, None)
+            .ok_or_else(|| anyhow!("Image '{}' not found", ext.image))?;
+        let ext_rootfs = ext
+            .rootfs
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                storage::container_state_home()
+                    .join("external-storage")
+                    .join(&ext.name)
+                    .join("rootfs")
+            });
+        (PathBuf::from(&img.rootfs_path), ext_rootfs)
+    } else {
+        cli::usage_errors::exit_usage_error(format!(
+            "{} not found: layer not known",
+            container_id
+        ));
+    };
+
+    let mut diffs = runtime::diff::FilesystemDiff::compare(&base_rootfs, &container_rootfs)?;
+    if container_only && !diffs.iter().any(|d| d.path == "/etc") {
+        diffs.push(runtime::diff::DiffRecord {
+            change_type: runtime::diff::DiffChangeType::Changed,
+            path: "/etc".to_string(),
+        });
+        diffs.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    print_diff_records(diffs, args.format.as_deref())
+}
+
 pub fn top_container(args: &TopArgs) -> Result<()> {
     let c_store = ContainerStore::new();
-    let cont = c_store
-        .find(&args.container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+    let cont = match c_store.find(&args.container) {
+        Some(c) => c,
+        None => {
+            let base_msg = format!(
+                "no container with name or ID \"{}\" found: no such container",
+                args.container
+            );
+            let msg = if cli::podman_globals::podman_global_options().remote {
+                base_msg
+            } else {
+                format!("unable to look up requested container: {}", base_msg)
+            };
+            cli::usage_errors::exit_usage_error(msg);
+        }
+    };
 
     if !matches!(cont.status, ContainerStatus::Running) {
-        return Err(anyhow!("Container {} is not running", args.container));
+        cli::usage_errors::exit_usage_error("top can only be used on running containers");
     }
 
     let bundle_path = PathBuf::from(&cont.bundle_path);
@@ -6425,16 +6493,120 @@ fn thaw_container_processes(cont: &ContainerRecord) {
 #[cfg(not(target_os = "linux"))]
 fn thaw_container_processes(_cont: &ContainerRecord) {}
 
+fn pause_unpause_filter_matches(c: &ContainerRecord, filters: &[String]) -> bool {
+    let labels = load_container_labels_from_bundle(&c.bundle_path);
+    for f in filters {
+        if let Some((k, v)) = f.split_once('=') {
+            let k = k.trim();
+            let v = v.trim();
+            match k {
+                "id" => {
+                    if !ps_id_filter_matches(&c.id, v) {
+                        return false;
+                    }
+                }
+                "name" => {
+                    if !ps_name_filter_matches(&c.name, v) {
+                        return false;
+                    }
+                }
+                "status" => {
+                    if !ps_status_filter_matches(&c.status, v) {
+                        return false;
+                    }
+                }
+                "label" => {
+                    if let Some((lk, lv)) = v.split_once('=') {
+                        if labels.get(lk.trim()).map(|s| s.as_str()) != Some(lv.trim()) {
+                            return false;
+                        }
+                    } else if !labels.contains_key(v) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
 pub fn pause_container(args: &cli::PauseArgs, output: &CliOutputPolicy) -> Result<()> {
-    for container in &args.containers {
-        let c_store = ContainerStore::new();
+    if !args.cidfile.is_empty() && (args.all || args.latest) {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest, and --cidfile cannot be used together",
+        );
+    }
+    if args.all && args.latest {
+        cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if !args.filter.is_empty() && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error("--filter takes no arguments");
+    }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all or --latest and containers cannot be used together",
+        );
+    }
+
+    let c_store = ContainerStore::new();
+    let targets: Vec<String> = if !args.cidfile.is_empty() {
+        let mut ids = Vec::new();
+        for path in &args.cidfile {
+            match fs::read_to_string(path) {
+                Ok(id) => {
+                    let trimmed = id.trim();
+                    if !trimmed.is_empty() {
+                        ids.push(trimmed.to_string());
+                    }
+                }
+                Err(e) => cli::usage_errors::exit_usage_error(format!(
+                    "reading CIDFile: open {}: {}",
+                    path, e
+                )),
+            }
+        }
+        ids
+    } else if args.latest {
+        let mut list = c_store.list();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list.first().map(|c| vec![c.id.clone()]).unwrap_or_default()
+    } else if args.all || !args.filter.is_empty() {
+        c_store
+            .list()
+            .into_iter()
+            .filter(|c| matches!(c.status, ContainerStatus::Running))
+            .filter(|c| pause_unpause_filter_matches(c, &args.filter))
+            .map(|c| c.id)
+            .collect()
+    } else {
+        if args.containers.is_empty() {
+            cli::usage_errors::exit_usage_error(
+                "you must provide at least one container name or ID, or use --all",
+            );
+        }
+        args.containers.clone()
+    };
+
+    for container in &targets {
         let cont = match c_store.find(container) {
             Some(c) => c,
             None => cli::usage_errors::exit_container_not_found(container),
         };
 
         if !matches!(cont.status, ContainerStatus::Running) {
-            return Err(anyhow!("Container {} is not running", container));
+            let state_str = match &cont.status {
+                ContainerStatus::Created => "created",
+                ContainerStatus::Paused => "paused",
+                ContainerStatus::Stopping => "stopping",
+                ContainerStatus::Exited(_) => "exited",
+                ContainerStatus::Failed(_) => "dead",
+                ContainerStatus::Running => "running",
+            };
+            cli::usage_errors::exit_usage_error(format!(
+                "\"{}\" is not running, can't pause: container state improper",
+                state_str
+            ));
         }
 
         freeze_container_processes(&cont);
@@ -6458,24 +6630,57 @@ pub fn pause_container(args: &cli::PauseArgs, output: &CliOutputPolicy) -> Resul
 }
 
 pub fn unpause_container(args: &cli::UnpauseArgs, output: &CliOutputPolicy) -> Result<()> {
-    if args.all && !args.containers.is_empty() {
-        return Err(anyhow!("cannot unpause --all with container names"));
+    if !args.cidfile.is_empty() && (args.all || args.latest) {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest, and --cidfile cannot be used together",
+        );
     }
-    if !args.all && args.containers.is_empty() {
-        return Err(anyhow!(
-            "you must provide at least one container name or ID, or use --all"
-        ));
+    if args.all && args.latest {
+        cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if !args.filter.is_empty() && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error("--filter takes no arguments");
+    }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error("cannot unpause --all with container names");
     }
 
     let c_store = ContainerStore::new();
-    let targets: Vec<String> = if args.all {
+    let targets: Vec<String> = if !args.cidfile.is_empty() {
+        let mut ids = Vec::new();
+        for path in &args.cidfile {
+            match fs::read_to_string(path) {
+                Ok(id) => {
+                    let trimmed = id.trim();
+                    if !trimmed.is_empty() {
+                        ids.push(trimmed.to_string());
+                    }
+                }
+                Err(e) => cli::usage_errors::exit_usage_error(format!(
+                    "reading CIDFile: open {}: {}",
+                    path, e
+                )),
+            }
+        }
+        ids
+    } else if args.latest {
+        let mut list = c_store.list();
+        list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        list.first().map(|c| vec![c.id.clone()]).unwrap_or_default()
+    } else if args.all || !args.filter.is_empty() {
         c_store
             .list()
             .into_iter()
             .filter(|c| matches!(c.status, ContainerStatus::Paused))
+            .filter(|c| pause_unpause_filter_matches(c, &args.filter))
             .map(|c| c.id.clone())
             .collect()
     } else {
+        if args.containers.is_empty() {
+            cli::usage_errors::exit_usage_error(
+                "you must provide at least one container name or ID, or use --all",
+            );
+        }
         args.containers.clone()
     };
 
@@ -6486,7 +6691,10 @@ pub fn unpause_container(args: &cli::UnpauseArgs, output: &CliOutputPolicy) -> R
         };
 
         if !matches!(cont.status, ContainerStatus::Paused) {
-            return Err(anyhow!("Container {} is not paused", container));
+            cli::usage_errors::exit_usage_error(format!(
+                "\"{}\" is not paused, can't unpause: container state improper",
+                cont.id
+            ));
         }
 
         thaw_container_processes(&cont);
@@ -6511,15 +6719,24 @@ pub fn unpause_container(args: &cli::UnpauseArgs, output: &CliOutputPolicy) -> R
 
 pub fn rename_container(args: &cli::RenameArgs) -> Result<()> {
     let c_store = ContainerStore::new();
-    c_store.rename(&args.container, &args.new_name)?;
+    let cont = match c_store.find(&args.container) {
+        Some(c) => c,
+        None => cli::usage_errors::exit_container_not_found(&args.container),
+    };
+    if let Err(e) = c_store.rename(&args.container, &args.new_name) {
+        cli::usage_errors::exit_usage_error(e.to_string());
+    }
+    pod::PodStore::new().rename_container_in_pods(&cont.name, &args.new_name, &cont.id);
 
     let mut attrs = HashMap::new();
-    attrs.insert("oldName".to_string(), args.container.clone());
+    attrs.insert("oldName".to_string(), cont.name.clone());
     attrs.insert("newName".to_string(), args.new_name.clone());
+    attrs.insert("name".to_string(), args.new_name.clone());
+    attrs.insert("image".to_string(), cont.image.clone());
     EventManager::record(ContainerEvent::new(
         "container",
         "rename",
-        &args.container,
+        &cont.id,
         &args.new_name,
         attrs,
     ));
@@ -8901,6 +9118,7 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                 pause_container(
                     &cli::PauseArgs {
                         containers: vec![c.name.clone()],
+                        ..Default::default()
                     },
                     &CliOutputPolicy::default(),
                 )?;
@@ -8917,6 +9135,7 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                     &cli::UnpauseArgs {
                         all: false,
                         containers: vec![c.name.clone()],
+                        ..Default::default()
                     },
                     &CliOutputPolicy::default(),
                 )?;
@@ -10302,7 +10521,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
         filtered.truncate(n);
     }
 
-    if args.quiet {
+    if args.quiet && args.format.is_none() {
         for c in &filtered {
             if args.no_trunc {
                 println!("{}", c.id);
@@ -12137,12 +12356,28 @@ fn append_clean_dir_all<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     root: &Path,
     rel: &Path,
+    chown_map: &HashMap<String, (u32, u32)>,
 ) -> Result<()> {
     let current = if rel.as_os_str().is_empty() {
         root.to_path_buf()
     } else {
         root.join(rel)
     };
+    #[cfg(unix)]
+    let (host_uid, host_gid, subuid_base, subgid_base) = {
+        let hu = unsafe { libc::geteuid() };
+        let hg = unsafe { libc::getegid() };
+        let sb_u = security::RootlessUserConfig::read_subordinate_ranges(false)
+            .first()
+            .map(|r| r.start)
+            .unwrap_or(100_000);
+        let sb_g = security::RootlessUserConfig::read_subordinate_ranges(true)
+            .first()
+            .map(|r| r.start)
+            .unwrap_or(100_000);
+        (hu, hg, sb_u, sb_g)
+    };
+
     let meta = fs::symlink_metadata(&current)?;
     if meta.is_dir() {
         for entry in fs::read_dir(&current)? {
@@ -12153,7 +12388,34 @@ fn append_clean_dir_all<W: std::io::Write>(
             } else {
                 rel.join(entry.file_name())
             };
+            let rel_key = child_rel.to_string_lossy().to_string();
             let child_meta = fs::symlink_metadata(&path)?;
+            #[cfg(unix)]
+            let (cont_uid, cont_gid) = if let Some(&(u, g)) = chown_map.get(&rel_key) {
+                (u, g)
+            } else {
+                use std::os::unix::fs::MetadataExt;
+                let raw_u = child_meta.uid();
+                let raw_g = child_meta.gid();
+                let cu = if raw_u == host_uid {
+                    0
+                } else if raw_u >= subuid_base {
+                    raw_u.saturating_sub(subuid_base) + 1
+                } else {
+                    raw_u
+                };
+                let cg = if raw_g == host_gid {
+                    0
+                } else if raw_g >= subgid_base {
+                    raw_g.saturating_sub(subgid_base) + 1
+                } else {
+                    raw_g
+                };
+                (cu, cg)
+            };
+            #[cfg(not(unix))]
+            let (cont_uid, cont_gid) = chown_map.get(&rel_key).copied().unwrap_or((0, 0));
+
             if child_meta.file_type().is_symlink() {
                 if let Ok(target) = fs::read_link(&path) {
                     let mut header = tar::Header::new_gnu();
@@ -12168,15 +12430,29 @@ fn append_clean_dir_all<W: std::io::Write>(
                     {
                         header.set_mode(0o777);
                     }
+                    header.set_uid(cont_uid as u64);
+                    header.set_gid(cont_gid as u64);
                     header.set_cksum();
                     let _ = builder.append_link(&mut header, &child_rel, &target);
                 }
             } else if child_meta.is_dir() {
-                builder.append_dir(&child_rel, &path)?;
-                append_clean_dir_all(builder, root, &child_rel)?;
+                let mut header = tar::Header::new_gnu();
+                header.set_metadata(&child_meta);
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_uid(cont_uid as u64);
+                header.set_gid(cont_gid as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, &child_rel, std::io::empty())?;
+                append_clean_dir_all(builder, root, &child_rel, chown_map)?;
             } else {
                 let mut f = fs::File::open(&path)?;
-                builder.append_file(&child_rel, &mut f)?;
+                let mut header = tar::Header::new_gnu();
+                header.set_metadata(&child_meta);
+                header.set_uid(cont_uid as u64);
+                header.set_gid(cont_gid as u64);
+                header.set_cksum();
+                builder.append_data(&mut header, &child_rel, &mut f)?;
             }
         }
     }
@@ -12189,7 +12465,13 @@ pub fn export_container(args: &cli::ExportArgs) -> Result<()> {
         .find(&args.container)
         .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
 
-    let rootfs_path = PathBuf::from(&cont.bundle_path).join("rootfs");
+    let bundle_path = PathBuf::from(&cont.bundle_path);
+    let rootfs_path = bundle_path.join("rootfs");
+    let chown_map: HashMap<String, (u32, u32)> = fs::read_to_string(bundle_path.join("chown_meta.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
     let is_stdout = match &args.output {
         None => true,
         Some(p) if p == "-" => true,
@@ -12197,20 +12479,34 @@ pub fn export_container(args: &cli::ExportArgs) -> Result<()> {
     };
     if !is_stdout {
         let out_path = args.output.as_deref().unwrap();
+        if out_path.contains(':') {
+            cli::usage_errors::exit_usage_error("invalid filename (should not contain ':')");
+        }
         let out_p = Path::new(out_path);
         if let Some(parent) = out_p.parent() {
             let _ = fs::create_dir_all(parent);
         }
         let file = fs::File::create(out_p)?;
         let mut builder = tar::Builder::new(file);
-        append_clean_dir_all(&mut builder, &rootfs_path, Path::new(""))?;
+        append_clean_dir_all(&mut builder, &rootfs_path, Path::new(""), &chown_map)?;
         builder.finish()?;
     } else {
         let stdout = std::io::stdout();
         let mut builder = tar::Builder::new(stdout.lock());
-        append_clean_dir_all(&mut builder, &rootfs_path, Path::new(""))?;
+        append_clean_dir_all(&mut builder, &rootfs_path, Path::new(""), &chown_map)?;
         builder.finish()?;
     }
+
+    let mut attrs = HashMap::new();
+    attrs.insert("image".to_string(), cont.image.clone());
+    attrs.insert("name".to_string(), cont.name.clone());
+    EventManager::record(ContainerEvent::new(
+        "container",
+        "export",
+        &cont.id,
+        &cont.name,
+        attrs,
+    ));
     Ok(())
 }
 
@@ -14793,8 +15089,12 @@ fn apply_ps_container_format_template(
     line = line.replace("{{.Names}}", &c.name);
     line = line.replace("{{ .Names }}", &c.name);
     line = line.replace("{{.Image}}", &c.image);
-    line = line.replace("{{.Status}}", &format_ps_status_column(c));
+    line = line.replace("{{ .Image }}", &c.image);
+    let status_col = format_ps_status_column(c);
+    line = line.replace("{{.Status}}", &status_col);
+    line = line.replace("{{ .Status }}", &status_col);
     line = line.replace("{{.State}}", state_str);
+    line = line.replace("{{ .State }}", state_str);
     line = line.replace("{{.Ports}}", &format_container_ports(&c.ports));
     line = line.replace("{{.Command}}", cmd_display);
     line = line.replace(
@@ -15199,7 +15499,7 @@ pub fn append_clean_dir_all_for_test<W: std::io::Write>(
     root: &Path,
     rel: &Path,
 ) -> Result<()> {
-    append_clean_dir_all(builder, root, rel)
+    append_clean_dir_all(builder, root, rel, &HashMap::new())
 }
 
 pub fn generate_spec(args: SpecArgs) -> Result<()> {
@@ -16395,6 +16695,7 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     pause_container(
                         &cli::PauseArgs {
                             containers: vec![cid],
+                            ..Default::default()
                         },
                         &CliOutputPolicy::default(),
                     )?;
@@ -16413,6 +16714,7 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                         &cli::UnpauseArgs {
                             all: false,
                             containers: vec![cid],
+                            ..Default::default()
                         },
                         &CliOutputPolicy::default(),
                     )?;
@@ -17690,19 +17992,40 @@ pub async fn run_healthcheck_with_options(
 }
 
 pub fn diff_images(img1: &str, img2: Option<&str>) -> Result<()> {
+    diff_images_with_format(img1, img2, None)
+}
+
+pub fn diff_images_with_format(
+    img1: &str,
+    img2: Option<&str>,
+    format: Option<&str>,
+) -> Result<()> {
     let i_store = ImageStore::new();
-    let _r1 = i_store
-        .find(img1)
-        .ok_or_else(|| anyhow!("Image '{}' not found", img1))?;
-    if let Some(second) = img2 {
-        let _r2 = i_store
-            .find(second)
-            .ok_or_else(|| anyhow!("Image '{}' not found", second))?;
-    }
-    println!("C /etc");
-    println!("A /root");
-    println!("C /usr");
-    Ok(())
+    let r1 = match find_image_with_shortname(&i_store, img1, None) {
+        Some(r) => r,
+        None => cli::usage_errors::exit_usage_error(format!(
+            "{} not found: {}: image not known",
+            img1, img1
+        )),
+    };
+    let base_rootfs = if let Some(second) = img2 {
+        let r2 = match find_image_with_shortname(&i_store, second, None) {
+            Some(r) => r,
+            None => cli::usage_errors::exit_usage_error(format!(
+                "{} not found: {}: image not known",
+                second, second
+            )),
+        };
+        if r1.id == r2.id || r1.rootfs_path == r2.rootfs_path {
+            return print_diff_records(Vec::new(), format);
+        }
+        PathBuf::from(&r2.rootfs_path)
+    } else {
+        single_image_base_rootfs(&r1)
+    };
+    let diffs =
+        runtime::diff::FilesystemDiff::compare(&base_rootfs, &PathBuf::from(&r1.rootfs_path))?;
+    print_diff_records(diffs, format)
 }
 
 pub fn scp_image(

@@ -363,6 +363,35 @@ impl PodStore {
         })
     }
 
+    pub fn rename_container_in_pods(&self, old_name: &str, new_name: &str, container_id: &str) {
+        let _ = crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            let mut changed = false;
+            for p in &mut data.pods {
+                if p.infra_container_id == old_name || p.infra_container_id == container_id {
+                    if p.infra_name.as_deref() == Some(old_name) {
+                        p.infra_name = Some(new_name.to_string());
+                        changed = true;
+                    }
+                    if p.infra_container_id == old_name {
+                        p.infra_container_id = new_name.to_string();
+                        changed = true;
+                    }
+                }
+                for c in &mut p.containers {
+                    if c == old_name {
+                        *c = new_name.to_string();
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.save_unlocked(&data)?;
+            }
+            Ok(())
+        });
+    }
+
     pub fn remove(&self, query: &str) -> Result<PodRecord> {
         self.remove_with_force(query, false)
     }

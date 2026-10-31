@@ -5,3 +5,8 @@ volume_rename_test.go
 container_clone_test.go
 unshare_test.go
 import_test.go
+rename_test.go
+export_test.go
+diff_test.go
+pause_test.go
+top_test.go

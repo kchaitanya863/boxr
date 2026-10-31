@@ -471,6 +471,12 @@ impl ImageStore {
             &container_rootfs,
             &dest_rootfs,
         )?;
+        if let Some(base_img) = self.find(&container.image) {
+            let _ = fs::write(
+                dest_image_dir.join("parent_rootfs.txt"),
+                &base_img.rootfs_path,
+            );
+        }
 
         let _ = fs::remove_file(dest_rootfs.join("boxr-run.sh"));
         let _ = fs::remove_file(dest_rootfs.join("boxr-exitcode"));
