@@ -112,7 +112,7 @@ pub fn parse_health_on_failure(input: &str) -> Result<HealthOnFailureAction> {
 
 pub fn parse_restart_policy(input: &str) -> Result<RestartPolicy> {
     let input = input.trim().to_lowercase();
-    if input == "no" || input == "none" || input.is_empty() {
+    if input == "no" || input == "none" || input == "never" || input.is_empty() {
         Ok(RestartPolicy::No)
     } else if input == "always" {
         Ok(RestartPolicy::Always)

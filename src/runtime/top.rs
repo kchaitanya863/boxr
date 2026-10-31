@@ -6,8 +6,10 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 struct ContainerProc {
     pid: u32,
+    hpid: u32,
     ppid: u32,
     user: String,
+    huser: String,
     comm: String,
     command: String,
     cpu: String,
@@ -103,8 +105,10 @@ fn descriptor_header(desc: &str) -> String {
 fn descriptor_value(p: &ContainerProc, desc: &str) -> String {
     match desc {
         "pid" => p.pid.to_string(),
+        "hpid" => p.hpid.to_string(),
         "ppid" => p.ppid.to_string(),
         "user" => p.user.clone(),
+        "huser" => p.huser.clone(),
         "%cpu" | "cpu" => p.cpu.clone(),
         "elapsed" | "etime" => p.elapsed.clone(),
         "tty" => p.tty.clone(),
@@ -221,7 +225,7 @@ fn collect_procs(bundle_path: &Path) -> Vec<ContainerProc> {
             .trim()
             .to_string();
         let command = if cmdline.is_empty() {
-            comm.clone()
+            format!("[{}]", comm)
         } else {
             cmdline
         };
@@ -244,8 +248,10 @@ fn collect_procs(bundle_path: &Path) -> Vec<ContainerProc> {
         let user = map_uid_to_user(*host_uid, &uid_map);
         procs.push(ContainerProc {
             pid: *nspid,
+            hpid: *host_pid as u32,
             ppid,
             user,
+            huser: host_uid.to_string(),
             comm: comm.clone(),
             command: command.clone(),
             cpu: "0.000".to_string(),
@@ -323,8 +329,10 @@ fn parse_status_fields(content: &str) -> (u32, i32, u32) {
 fn collect_procs(_bundle_path: &Path) -> Vec<ContainerProc> {
     vec![ContainerProc {
         pid: 1,
+        hpid: 1,
         ppid: 0,
         user: "root".to_string(),
+        huser: "0".to_string(),
         comm: "top".to_string(),
         command: "top".to_string(),
         cpu: "0.000".to_string(),

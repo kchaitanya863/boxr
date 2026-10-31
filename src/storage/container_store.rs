@@ -183,7 +183,7 @@ impl ContainerStore {
             {
                 // SIGKILL during `podman stop` (separate process) must not be downgraded.
                 if matches!(c.status, ContainerStatus::Exited(137))
-                    && !matches!(status, ContainerStatus::Exited(137))
+                    && matches!(status, ContainerStatus::Exited(code) if code != 137)
                 {
                     return Ok(());
                 }
@@ -368,7 +368,18 @@ impl ContainerStore {
                     if bundle_conmon_is_current_process(&bundle) {
                         let _ = fs::write(bundle.join("deferred-bundle-rm"), "1");
                     } else {
-                        let _ = fs::remove_dir_all(bundle);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = fs::set_permissions(
+                                bundle.join("rootfs"),
+                                fs::Permissions::from_mode(0o755),
+                            );
+                        }
+                        if fs::remove_dir_all(&bundle).is_err() {
+                            make_tree_writable(&bundle);
+                            let _ = fs::remove_dir_all(&bundle);
+                        }
                     }
                 }
 
@@ -378,6 +389,28 @@ impl ContainerStore {
             }
         })
     }
+}
+
+pub(crate) fn make_tree_writable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            if meta.is_dir() {
+                let mode = meta.permissions().mode();
+                if (mode & 0o700) != 0o700 {
+                    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700));
+                }
+                if let Ok(entries) = fs::read_dir(path) {
+                    for entry in entries.flatten() {
+                        make_tree_writable(&entry.path());
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 #[cfg(unix)]

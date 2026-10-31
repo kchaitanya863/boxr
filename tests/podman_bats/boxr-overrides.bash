@@ -27,6 +27,15 @@ function gen-tls {
   gen-cert-pair bogus "${REMOTESYSTEM_TLS_BOGUS_KEY}" "${REMOTESYSTEM_TLS_BOGUS_CRT}" -addext basicConstraints=critical,CA:TRUE,pathlen:1
 }
 
+function timeout() {
+    if [[ "${1:-}" == "10" && "${2:-}" == "socat" ]]; then
+        shift
+        command timeout 60 "$@"
+        return $?
+    fi
+    command timeout "$@"
+}
+
 # boxr has no skopeo cache path; pull via the CLI under test with a shared local store cache.
 function _prefetch() {
     local want=$1

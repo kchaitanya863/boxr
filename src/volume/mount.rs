@@ -150,6 +150,7 @@ pub fn parse_mount_flag(
     let mut mount_type = "bind".to_string();
     let mut source = String::new();
     let mut target = String::new();
+    let mut subpath: Option<String> = None;
     let mut ro = false;
     let mut noexec = false;
     let mut noswap = false;
@@ -160,6 +161,7 @@ pub fn parse_mount_flag(
                 "type" => mount_type = v.trim().to_string(),
                 "source" | "src" => source = v.trim().to_string(),
                 "target" | "destination" | "dst" => target = v.trim().to_string(),
+                "subpath" => subpath = Some(v.trim().to_string()),
                 "readonly" | "ro" => ro = v.trim() != "false",
                 "rw" => ro = v.trim() == "false",
                 _ => {}
@@ -246,8 +248,12 @@ pub fn parse_mount_flag(
                 let vol = vol_store.create(Some(&source), None)?;
                 (vol.mountpoint, Some(vol.name))
             };
+            let mut final_src = PathBuf::from(src_path);
+            if let Some(sp) = &subpath {
+                final_src = final_src.join(sp.trim_start_matches('/'));
+            }
             Ok(vec![MountSpec {
-                source: PathBuf::from(src_path),
+                source: final_src,
                 destination: target,
                 read_only: ro,
                 noexec,

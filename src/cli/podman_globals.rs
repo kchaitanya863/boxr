@@ -12,6 +12,9 @@ pub struct PodmanGlobalOptions {
     pub volumepath: Option<PathBuf>,
     pub storage_driver: Option<String>,
     pub storage_opts: Vec<String>,
+    pub events_backend: Option<String>,
+    pub cgroup_manager: Option<String>,
+    pub debug: bool,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -67,6 +70,7 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
     while i < argv.len() {
         let a = argv[i].as_str();
         if a == "--debug" || a == "-D" {
+            opts.debug = true;
             i += 1;
             continue;
         }
@@ -138,6 +142,30 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
         if a == "--storage-opt" {
             if i + 1 < argv.len() {
                 opts.storage_opts.push(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--events-backend=") {
+            opts.events_backend = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--events-backend" {
+            if i + 1 < argv.len() {
+                opts.events_backend = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--cgroup-manager=") {
+            opts.cgroup_manager = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--cgroup-manager" {
+            if i + 1 < argv.len() {
+                opts.cgroup_manager = Some(argv[i + 1].clone());
                 i += 2;
                 continue;
             }

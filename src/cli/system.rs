@@ -35,33 +35,44 @@ pub struct StatsArgs {
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct EventsArgs {
     /// Show all events created since timestamp
-    #[arg(long = "since")]
+    #[arg(long = "since", allow_hyphen_values = true)]
     pub since: Option<String>,
 
-    #[arg(long = "until")]
+    #[arg(long = "until", allow_hyphen_values = true)]
     pub until: Option<String>,
 
     #[arg(short = 'f', long = "filter")]
-    pub filter: Option<String>,
+    pub filter: Vec<String>,
 
     #[arg(long = "format")]
     pub format: Option<String>,
 
     #[arg(
         long = "stream",
+        default_value_t = true,
         num_args = 0..=1,
         default_missing_value = "true",
+        require_equals = true,
         action = clap::ArgAction::Set,
         value_parser = clap::builder::BoolishValueParser::new()
     )]
-    pub stream: Option<bool>,
+    pub stream: bool,
 
     #[arg(long = "events-backend")]
     pub events_backend: Option<String>,
+
+    #[arg(
+        long = "no-trunc",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub no_trunc: bool,
 }
 
 #[derive(Args, Debug)]
@@ -290,6 +301,9 @@ pub struct PodCreateArgs {
     /// Network mode for the pod
     #[arg(long = "network")]
     pub network: Option<String>,
+    /// User namespace mode for the pod
+    #[arg(long = "userns")]
+    pub userns: Option<String>,
     /// Share namespaces: ipc, net, uts, pid (comma-separated)
     #[arg(
         long = "share",
@@ -404,13 +418,7 @@ pub struct PlaySubcommands {
 #[derive(Subcommand, Debug)]
 pub enum PlayAction {
     /// Play a pod from a Kubernetes YAML file
-    Kube {
-        /// Path to Kubernetes YAML file
-        file: String,
-        /// Tear down resources from the YAML file
-        #[arg(long = "down")]
-        down: bool,
-    },
+    Kube(crate::cli::kube::KubePlayArgs),
 }
 
 #[derive(Args, Debug)]
@@ -423,10 +431,7 @@ pub struct GenerateSubcommands {
 #[derive(Subcommand, Debug)]
 pub enum GenerateAction {
     /// Generate Kubernetes Pod YAML for a container or pod
-    Kube {
-        /// Container or pod to generate YAML for
-        target: String,
-    },
+    Kube(crate::cli::kube::KubeGenerateArgs),
     /// Generate systemd unit files for a container (Quadlet-compatible)
     Systemd {
         /// Container name(s) to generate units for

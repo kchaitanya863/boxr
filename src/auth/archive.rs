@@ -174,6 +174,15 @@ impl ArchiveManager {
             } else {
                 Self::pack_docker_archive(&records, &by_id, &mut builder)?;
             }
+            if let Some(first) = records.first() {
+                crate::events::EventManager::record(crate::events::ContainerEvent::new(
+                    "image",
+                    "save",
+                    &format!("sha256:{}", first.id),
+                    &path.to_string_lossy(),
+                    std::collections::HashMap::new(),
+                ));
+            }
             if !quiet {
                 for rec in &records {
                     println!("Exported image {} to {:?}", rec.display_reference(), path);

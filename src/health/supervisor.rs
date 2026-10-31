@@ -26,7 +26,7 @@ pub fn write_health_supervisor_spec(
     health_cfg: &HealthConfig,
     on_failure: HealthOnFailureAction,
 ) -> Result<()> {
-    if health_cfg.test.is_empty() || on_failure == HealthOnFailureAction::None {
+    if health_cfg.test.is_empty() {
         return Ok(());
     }
     let spec = HealthSupervisorSpec {
@@ -46,7 +46,7 @@ pub fn spawn_detached_health_supervisor(
     health_cfg: HealthConfig,
     on_failure: HealthOnFailureAction,
 ) {
-    if health_cfg.test.is_empty() || on_failure == HealthOnFailureAction::None {
+    if health_cfg.test.is_empty() {
         return;
     }
     if write_health_supervisor_spec(
@@ -90,6 +90,21 @@ pub fn run_internal_health_supervisor(bundle_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn read_bundle_initial_delay_secs(bundle_path: &Path) -> u64 {
+    let config = bundle_path.join("config.json");
+    let Some(content) = std::fs::read_to_string(config).ok() else {
+        return 0;
+    };
+    let Some(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content).ok() else {
+        return 0;
+    };
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.health_initial_delay_secs"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn run_supervisor_loop(
     bundle_path: &Path,
     container_id: &str,
@@ -98,6 +113,10 @@ fn run_supervisor_loop(
     on_failure: HealthOnFailureAction,
 ) {
     let mut result = HealthCheckResult::default();
+    let initial_delay = read_bundle_initial_delay_secs(bundle_path);
+    if initial_delay > 0 {
+        std::thread::sleep(Duration::from_secs(initial_delay));
+    }
     let started = Instant::now();
     let interval = Duration::from_secs(health_cfg.interval_secs.max(1));
     loop {

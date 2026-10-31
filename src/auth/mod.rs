@@ -309,6 +309,10 @@ impl RegistryPusher {
             use sha2::{Digest, Sha256};
             let dest_path = Path::new(dir_dest);
             fs::create_dir_all(dest_path)?;
+            fs::write(
+                dest_path.join("version"),
+                "Directory Transport Version: 1.1\n",
+            )?;
             let mut tar_bytes = Vec::new();
             {
                 let mut builder = tar::Builder::new(&mut tar_bytes);
@@ -325,7 +329,19 @@ impl RegistryPusher {
                 fs_type: "layers".to_string(),
                 diff_ids: vec![format!("sha256:{}", layer_hex)],
             });
+            let config_bytes = serde_json::to_vec_pretty(&image.config)?;
+            fs::write(dest_path.join("manifest.json"), &config_bytes)?;
+            let full_id = image.full_hex_id();
             let _ = store.add(image);
+            if let Some(dest) = destination {
+                crate::events::EventManager::record(crate::events::ContainerEvent::new(
+                    "image",
+                    "push",
+                    &format!("sha256:{}", full_id),
+                    dest,
+                    HashMap::new(),
+                ));
+            }
             return Ok(());
         }
 
@@ -356,6 +372,17 @@ impl RegistryPusher {
         let digest = client.push_image(&image, &reference).await?;
         println!("Digest: {}", digest);
         println!("Successfully pushed {}:{}", image.reference, image.tag);
+
+        let dest_label = destination
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}:{}", image.reference, image.tag));
+        crate::events::EventManager::record(crate::events::ContainerEvent::new(
+            "image",
+            "push",
+            &format!("sha256:{}", image.id),
+            &dest_label,
+            HashMap::new(),
+        ));
 
         Ok(())
     }

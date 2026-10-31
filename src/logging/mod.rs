@@ -25,11 +25,33 @@ pub fn append_k8s_log_chunk(path: &Path, stream: &str, data: &[u8]) -> Result<()
     Ok(())
 }
 
+pub fn format_tty_crlf(chunk: &[u8], prev_was_cr: &mut bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chunk.len() + 8);
+    for &b in chunk {
+        if b == b'\n' && !*prev_was_cr {
+            out.push(b'\r');
+        }
+        out.push(b);
+        *prev_was_cr = b == b'\r';
+    }
+    out
+}
+
 pub fn tee_k8s_stream<R: Read>(
     mut reader: R,
     log_path: std::path::PathBuf,
     stream: &'static str,
     attach: bool,
+) {
+    tee_k8s_stream_with_tty(reader, log_path, stream, attach, false);
+}
+
+pub fn tee_k8s_stream_with_tty<R: Read>(
+    mut reader: R,
+    log_path: std::path::PathBuf,
+    stream: &'static str,
+    attach: bool,
+    tty: bool,
 ) {
     let mut buf = [0u8; 8192];
     let mut attach_out: Box<dyn Write + Send> = if attach {
@@ -41,13 +63,19 @@ pub fn tee_k8s_stream<R: Read>(
     } else {
         Box::new(std::io::sink())
     };
+    let mut prev_cr = false;
     while let Ok(n) = reader.read(&mut buf) {
         if n == 0 {
             break;
         }
         let chunk = &buf[..n];
         let _ = append_k8s_log_chunk(&log_path, stream, chunk);
-        let _ = attach_out.write_all(chunk);
+        if tty && stream == "stdout" {
+            let formatted = format_tty_crlf(chunk, &mut prev_cr);
+            let _ = attach_out.write_all(&formatted);
+        } else {
+            let _ = attach_out.write_all(chunk);
+        }
         let _ = attach_out.flush();
     }
 }

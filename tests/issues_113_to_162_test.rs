@@ -160,6 +160,7 @@ fn default_run_args(image: &str) -> RunArgs {
         cpuset_cpus: None,
         memory_swap: None,
         memory_reservation: None,
+        cgroup_conf: Vec::new(),
         dns_search: Vec::new(),
         dns_option: Vec::new(),
         expose: Vec::new(),

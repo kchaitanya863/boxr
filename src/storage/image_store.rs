@@ -317,12 +317,19 @@ impl ImageStore {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
             // Remove previous entry with same registry, reference, tag, architecture, and os if present
+            fn norm_arch(a: &str) -> &str {
+                match a {
+                    "x86_64" => "amd64",
+                    "aarch64" => "arm64",
+                    other => other,
+                }
+            }
             data.images.retain(|img| {
                 !(img.registry == record.registry
                     && img.reference == record.reference
                     && img.tag == record.tag
-                    && img.config.architecture == record.config.architecture
-                    && img.config.os == record.config.os)
+                    && norm_arch(&img.config.architecture) == norm_arch(&record.config.architecture)
+                    && img.config.os.eq_ignore_ascii_case(&record.config.os))
             });
             data.images.push(record);
             self.save_unlocked(&data)?;
@@ -366,7 +373,10 @@ impl ImageStore {
                             use std::os::unix::fs::PermissionsExt;
                             let _ = fs::set_permissions(&rootfs, fs::Permissions::from_mode(0o755));
                         }
-                        let _ = fs::remove_dir_all(&rootfs);
+                        if fs::remove_dir_all(&rootfs).is_err() {
+                            crate::storage::container_store::make_tree_writable(&rootfs);
+                            let _ = fs::remove_dir_all(&rootfs);
+                        }
                     }
                     if let Some(parent) = rootfs.parent() {
                         let root_dir = self.index_file.parent().unwrap_or(Path::new("."));
@@ -377,7 +387,10 @@ impl ImageStore {
                                 let _ =
                                     fs::set_permissions(parent, fs::Permissions::from_mode(0o755));
                             }
-                            let _ = fs::remove_dir_all(parent);
+                            if fs::remove_dir_all(parent).is_err() {
+                                crate::storage::container_store::make_tree_writable(parent);
+                                let _ = fs::remove_dir_all(parent);
+                            }
                         }
                     }
                 }
@@ -448,31 +461,38 @@ impl ImageStore {
             let _ = fs::set_permissions(&dest_rootfs, fs::Permissions::from_mode(0o755));
         }
 
-        let full_tag = repo_tag.unwrap_or_else(|| &container.name);
-        let parsed_ref = ImageReference::parse(full_tag).unwrap_or(ImageReference {
-            registry: ImageReference::DEFAULT_REGISTRY.to_string(),
-            repository: full_tag.to_string(),
-            tag: ImageReference::DEFAULT_TAG.to_string(),
-            digest: None,
-        });
-        let name_only = full_tag
-            .split('@')
-            .next()
-            .unwrap_or(full_tag)
-            .split(':')
-            .next()
-            .unwrap_or(full_tag);
-        let (repo, tag, reg) = if !full_tag.contains('/') {
-            (
-                name_only.to_string(),
-                parsed_ref.tag.clone(),
-                "localhost".to_string(),
-            )
+        let (repo, tag, reg) = if let Some(full_tag) = repo_tag {
+            let parsed_ref = ImageReference::parse(full_tag).unwrap_or(ImageReference {
+                registry: ImageReference::DEFAULT_REGISTRY.to_string(),
+                repository: full_tag.to_string(),
+                tag: ImageReference::DEFAULT_TAG.to_string(),
+                digest: None,
+            });
+            let name_only = full_tag
+                .split('@')
+                .next()
+                .unwrap_or(full_tag)
+                .split(':')
+                .next()
+                .unwrap_or(full_tag);
+            if !full_tag.contains('/') {
+                (
+                    name_only.to_string(),
+                    parsed_ref.tag.clone(),
+                    "localhost".to_string(),
+                )
+            } else {
+                (
+                    parsed_ref.repository.clone(),
+                    parsed_ref.tag.clone(),
+                    parsed_ref.registry.clone(),
+                )
+            }
         } else {
             (
-                parsed_ref.repository.clone(),
-                parsed_ref.tag.clone(),
-                parsed_ref.registry.clone(),
+                "<none>".to_string(),
+                "<none>".to_string(),
+                ImageReference::DEFAULT_REGISTRY.to_string(),
             )
         };
 

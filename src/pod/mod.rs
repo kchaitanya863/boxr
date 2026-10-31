@@ -32,6 +32,8 @@ pub struct PodConfig {
     #[serde(default = "default_true")]
     pub infra: bool,
     pub network: Option<String>,
+    #[serde(default)]
+    pub userns: Option<String>,
 }
 
 fn default_share_ipc() -> bool {
@@ -63,6 +65,7 @@ impl Default for PodConfig {
             share_pid: false,
             infra: true,
             network: None,
+            userns: None,
         }
     }
 }
@@ -96,6 +99,8 @@ pub struct PodRecord {
     pub share_pid: bool,
     #[serde(default)]
     pub network: Option<String>,
+    #[serde(default)]
+    pub userns: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -226,6 +231,7 @@ impl PodStore {
                 share_uts: config.share_uts,
                 share_pid: config.share_pid,
                 network: config.network,
+                userns: config.userns,
             };
 
             data.pods.push(pod.clone());
@@ -284,17 +290,18 @@ impl PodStore {
                             }
                         }
                     }
-                    if pod.status == "Running" {
-                        if let Some(infra) = c_store
-                            .find(&infra_name)
-                            .or_else(|| c_store.find(&pod.infra_container_id))
+                    if let Some(infra) = c_store
+                        .find(&infra_name)
+                        .or_else(|| c_store.find(&pod.infra_container_id))
+                    {
+                        if pod.containers.is_empty()
+                            && pod.status == "Running"
+                            && matches!(infra.status, ContainerStatus::Running)
                         {
-                            if matches!(infra.status, ContainerStatus::Running) {
-                                return Err(anyhow!(
-                                    "conflict: cannot remove running pod {}. Stop the pod or use force",
-                                    pod.name
-                                ));
-                            }
+                            return Err(anyhow!(
+                                "conflict: cannot remove running pod {}. Stop the pod or use force",
+                                pod.name
+                            ));
                         }
                     }
                 }
@@ -303,12 +310,32 @@ impl PodStore {
                 self.save_unlocked(&data)?;
 
                 for cid in &removed.containers {
-                    let _ = crate::remove_container_quiet(cid, force, false);
+                    if c_store.find(cid).is_some() {
+                        if force {
+                            let _ = crate::stop_container_with_home_and_timeout(
+                                cid,
+                                None,
+                                Some(0),
+                                None,
+                                true,
+                                None,
+                            );
+                        }
+                        let _ = crate::remove_container_quiet(cid, force, false);
+                    }
                 }
                 if let Some(infra) = c_store
                     .find(&infra_name)
                     .or_else(|| c_store.find(&removed.infra_container_id))
                 {
+                    let _ = crate::stop_container_with_home_and_timeout(
+                        &infra.id,
+                        None,
+                        Some(0),
+                        None,
+                        true,
+                        None,
+                    );
                     let _ = crate::remove_container_quiet(&infra.id, true, false);
                 }
                 Ok(removed)
@@ -457,10 +484,32 @@ pub fn container_pid_namespace_path(cont: &ContainerRecord, ns: &str) -> Result<
     Ok(format!("/proc/{}/ns/{}", pid, ns))
 }
 
+fn missing_namespace_path_error(ns_type: &str, ns_path: &str) -> anyhow::Error {
+    match ns_type {
+        "network" | "net" => anyhow!(
+            "network namespace cannot be found: stat {}: no such file or directory",
+            ns_path
+        ),
+        "uts" => anyhow!(
+            "cannot find specified ut namespace path: stat {}: no such file or directory",
+            ns_path
+        ),
+        "cgroup" | "cgroupns" => anyhow!(
+            "cannot find specified cgroup namespace path: stat {}: no such file or directory",
+            ns_path
+        ),
+        other => anyhow!(
+            "cannot find specified {} namespace path: stat {}: no such file or directory",
+            other,
+            ns_path
+        ),
+    }
+}
+
 /// Parse `container:<name>` or return the value as a namespace path.
 pub fn resolve_namespace_spec(spec: &str, ns_type: &str) -> Result<Option<String>> {
     let trimmed = spec.trim();
-    if trimmed.is_empty() || trimmed == "private" {
+    if trimmed.is_empty() || trimmed == "private" || trimmed == "shareable" || trimmed == "none" {
         return Ok(None);
     }
     if trimmed == "host" {
@@ -472,7 +521,16 @@ pub fn resolve_namespace_spec(spec: &str, ns_type: &str) -> Result<Option<String
     {
         return Ok(Some(container_namespace_path(target, ns_type)?));
     }
+    if let Some(ns_path) = trimmed.strip_prefix("ns:") {
+        if !Path::new(ns_path).exists() {
+            return Err(missing_namespace_path_error(ns_type, ns_path));
+        }
+        return Ok(Some(ns_path.to_string()));
+    }
     if trimmed.starts_with('/') {
+        if !Path::new(trimmed).exists() {
+            return Err(missing_namespace_path_error(ns_type, trimmed));
+        }
         return Ok(Some(trimmed.to_string()));
     }
     Ok(None)
@@ -505,6 +563,11 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
     }
     if args.cpus.is_none() {
         args.cpus = pod.cpus.clone();
+    }
+    if args.userns.is_empty() {
+        if let Some(u) = &pod.userns {
+            args.userns.push(u.clone());
+        }
     }
     for (k, v) in &pod.labels {
         args.labels.push(format!("{}={}", k, v));

@@ -13,8 +13,10 @@ pub struct ResourceLimits {
     pub cpu_period_us: Option<u64>,
     pub cpu_shares: Option<u64>,
     pub cpuset_cpus: Option<String>,
+    pub cpuset_mems: Option<String>,
     pub memory_swappiness: Option<u64>,
     pub pids_max: Option<i64>,
+    pub cgroup_conf: Vec<String>,
 }
 
 impl ResourceLimits {
@@ -104,15 +106,44 @@ impl CgroupV2Manager {
     /// Locate or initialize the rootless / system cgroups v2 hierarchy for a container
     pub fn new(container_id: &str) -> Result<Self> {
         let base_cgroup = Self::detect_cgroup_root();
-        let container_cgroup = base_cgroup.join("boxr").join(container_id);
+        let boxr_cgroup = base_cgroup.join("boxr");
+        let container_cgroup = boxr_cgroup.join(container_id);
 
         if base_cgroup.exists() {
+            let _ = fs::create_dir_all(&boxr_cgroup);
+            for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                let _ = fs::write(base_cgroup.join("cgroup.subtree_control"), ctl);
+                let _ = fs::write(boxr_cgroup.join("cgroup.subtree_control"), ctl);
+            }
             let _ = fs::create_dir_all(&container_cgroup);
         }
 
         Ok(Self {
             cgroup_path: container_cgroup,
         })
+    }
+
+    pub fn was_oom_killed(container_id: &str) -> bool {
+        let base_cgroup = Self::detect_cgroup_root();
+        let events_file = base_cgroup
+            .join("boxr")
+            .join(container_id)
+            .join("memory.events");
+        if let Ok(content) = fs::read_to_string(events_file) {
+            for line in content.lines() {
+                if let Some(rest) = line
+                    .strip_prefix("oom_kill ")
+                    .or_else(|| line.strip_prefix("oom "))
+                {
+                    if let Ok(n) = rest.trim().parse::<u64>() {
+                        if n > 0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn detect_cgroup_root() -> PathBuf {
@@ -156,14 +187,24 @@ impl CgroupV2Manager {
 
         // Apply memory limits (cgroups v2 and v1)
         if let Some(mem) = limits.memory_max_bytes {
-            if mem == 0 {
-                return Ok(());
+            if mem > 0 {
+                let _ = fs::write(self.cgroup_path.join("memory.max"), mem.to_string());
+                let _ = fs::write(
+                    self.cgroup_path.join("memory.limit_in_bytes"),
+                    mem.to_string(),
+                );
             }
-            let _ = fs::write(self.cgroup_path.join("memory.max"), mem.to_string());
-            let _ = fs::write(
-                self.cgroup_path.join("memory.limit_in_bytes"),
-                mem.to_string(),
-            );
+        }
+
+        if let Some(swap) = limits.memory_swap_max_bytes {
+            let swap_v2 = if swap < 0 {
+                "max".to_string()
+            } else if let Some(mem) = limits.memory_max_bytes {
+                swap.saturating_sub(mem).to_string()
+            } else {
+                swap.to_string()
+            };
+            let _ = fs::write(self.cgroup_path.join("memory.swap.max"), swap_v2);
         }
 
         // Apply memory reservation (cgroups v2 memory.low)
@@ -173,6 +214,11 @@ impl CgroupV2Manager {
                 self.cgroup_path.join("memory.soft_limit_in_bytes"),
                 res.to_string(),
             );
+        }
+
+        if let Some(shares) = limits.cpu_shares {
+            let weight = (1 + ((shares.saturating_sub(2)) * 9999) / 262142).clamp(1, 10000);
+            let _ = fs::write(self.cgroup_path.join("cpu.weight"), weight.to_string());
         }
 
         // Apply CPU quota (cgroups v2 and v1)
@@ -189,6 +235,17 @@ impl CgroupV2Manager {
         // Apply cpuset cpus
         if let Some(cpus) = &limits.cpuset_cpus {
             let _ = fs::write(self.cgroup_path.join("cpuset.cpus"), cpus);
+        }
+        if let Some(mems) = &limits.cpuset_mems {
+            let _ = fs::write(self.cgroup_path.join("cpuset.mems"), mems);
+        }
+        for kv in &limits.cgroup_conf {
+            if let Some((k, v)) = kv.split_once('=') {
+                let k = k.trim();
+                if !k.is_empty() && !k.contains('/') && !k.contains("..") {
+                    let _ = fs::write(self.cgroup_path.join(k), v.trim());
+                }
+            }
         }
 
         // Apply memory swappiness

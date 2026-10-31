@@ -509,12 +509,22 @@ pub struct RunArgs {
     #[arg(long = "memory-swappiness")]
     pub memory_swappiness: Option<u64>,
 
+    /// Configure cgroup v2 values (key=value)
+    #[arg(long = "cgroup-conf")]
+    pub cgroup_conf: Vec<String>,
+
     /// Runtime to use for this container
     #[arg(long = "runtime")]
     pub runtime: Option<String>,
 
     /// Proxy received signals to the process
-    #[arg(long = "sig-proxy", default_value_t = true)]
+    #[arg(
+        long = "sig-proxy",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
     pub sig_proxy: bool,
 
     /// Storage driver options for the container
@@ -569,7 +579,12 @@ impl RunArgs {
         if crate::cli::READ_ONLY_EXPLICIT_FALSE.get() == Some(&true) {
             return false;
         }
-        self.read_only
+        if self.read_only {
+            return true;
+        }
+        crate::containers_conf_toml_value("read_only")
+            .map(|v| v == "true")
+            .unwrap_or(false)
     }
 
     /// When unset, Podman defaults read-only tmpfs mounts to match read-only rootfs.

@@ -107,6 +107,10 @@ fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
             .tls_built_in_root_certs(false)
             .danger_accept_invalid_certs(true)
             .danger_accept_invalid_hostnames(true);
+    } else if opts.tls_verify == Some(false) {
+        builder = builder
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
     } else {
         builder = builder.tls_built_in_root_certs(true);
     }
