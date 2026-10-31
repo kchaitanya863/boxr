@@ -35,21 +35,39 @@ pub struct StatsArgs {
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct EventsArgs {
     /// Show all events created since timestamp
-    #[arg(long = "since")]
+    #[arg(long = "since", allow_hyphen_values = true)]
     pub since: Option<String>,
 
-    #[arg(long = "until")]
+    #[arg(long = "until", allow_hyphen_values = true)]
     pub until: Option<String>,
 
     #[arg(short = 'f', long = "filter")]
-    pub filter: Option<String>,
+    pub filter: Vec<String>,
 
     #[arg(long = "format")]
     pub format: Option<String>,
+
+    #[arg(
+        long = "stream",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub stream: bool,
+
+    #[arg(
+        long = "no-trunc",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub no_trunc: bool,
 }
 
 #[derive(Args, Debug)]
@@ -278,6 +296,9 @@ pub struct PodCreateArgs {
     /// Network mode for the pod
     #[arg(long = "network")]
     pub network: Option<String>,
+    /// User namespace mode for the pod
+    #[arg(long = "userns")]
+    pub userns: Option<String>,
     /// Share namespaces: ipc, net, uts, pid (comma-separated)
     #[arg(
         long = "share",

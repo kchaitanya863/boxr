@@ -282,6 +282,27 @@ impl RegistryPusher {
             .find(image_query)
             .ok_or_else(|| anyhow!("Image '{}' not found locally", image_query))?;
 
+        if let Some(dest) = destination {
+            if let Some(dir_path) = dest.strip_prefix("dir:") {
+                let target_dir = Path::new(dir_path);
+                fs::create_dir_all(target_dir)?;
+                fs::write(
+                    target_dir.join("version"),
+                    "Directory Transport Version: 1.1\n",
+                )?;
+                let config_bytes = serde_json::to_vec_pretty(&image.config)?;
+                fs::write(target_dir.join("manifest.json"), &config_bytes)?;
+                crate::events::EventManager::record(crate::events::ContainerEvent::new(
+                    "image",
+                    "push",
+                    &format!("sha256:{}", image.id),
+                    dest,
+                    HashMap::new(),
+                ));
+                return Ok(());
+            }
+        }
+
         let reference = if let Some(dest) = destination {
             ImageReference::parse(dest)?
         } else {
@@ -306,6 +327,17 @@ impl RegistryPusher {
         let digest = client.push_image(&image, &reference).await?;
         println!("Digest: {}", digest);
         println!("Successfully pushed {}:{}", image.reference, image.tag);
+
+        let dest_label = destination
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}:{}", image.reference, image.tag));
+        crate::events::EventManager::record(crate::events::ContainerEvent::new(
+            "image",
+            "push",
+            &format!("sha256:{}", image.id),
+            &dest_label,
+            HashMap::new(),
+        ));
 
         Ok(())
     }

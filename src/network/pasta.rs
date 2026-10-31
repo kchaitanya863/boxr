@@ -57,9 +57,12 @@ impl NetworkMode {
                 return Self::Container(target.to_string());
             }
         }
+        if trimmed.starts_with("ns:") {
+            return Self::Host;
+        }
         match trimmed.to_lowercase().as_str() {
             "pasta" => Self::Pasta,
-            "usernet" | "native" | "slirp" => Self::UserNet,
+            "usernet" | "native" | "slirp" | "private" => Self::UserNet,
             "host" => Self::Host,
             "none" => Self::None,
             "bridge" => Self::Bridge,

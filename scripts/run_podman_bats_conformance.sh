@@ -68,10 +68,7 @@ apply_boxr_patches() {
   head="$(git -C "$SRC_DIR" rev-parse HEAD 2>/dev/null || echo none)"
   local overrides_id
   overrides_id="$(sha256sum "$OVERRIDES" | awk '{print $1}')"
-  if grep -q 'BOXR_BATS_OVERRIDES' "$helpers" 2>/dev/null && [[ -f "$stamp" ]] && [[ "$(cat "$stamp")" == "${head}:${overrides_id}" ]]; then
-    return 0
-  fi
-  # Re-apply overrides on each upstream bump (strip previous block first).
+  # Always re-apply overrides since apply_vendored_upstream overwrites helpers.bash.
   if grep -q 'BOXR_BATS_OVERRIDES' "$helpers" 2>/dev/null; then
     sed -i '/^# BOXR_BATS_OVERRIDES$/,$d' "$helpers"
   fi

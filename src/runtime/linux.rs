@@ -23,6 +23,8 @@ struct NamespaceJoinState {
     ipc: bool,
     uts: bool,
     net: bool,
+    pid: bool,
+    cgroup: bool,
 }
 
 impl Default for NamespaceJoinState {
@@ -31,6 +33,8 @@ impl Default for NamespaceJoinState {
             ipc: false,
             uts: false,
             net: false,
+            pid: false,
+            cgroup: false,
         }
     }
 }
@@ -39,19 +43,102 @@ fn namespace_clone_flag(ns: &str) -> Option<CloneFlags> {
     match ns {
         "ipc" => Some(CloneFlags::CLONE_NEWIPC),
         "uts" => Some(CloneFlags::CLONE_NEWUTS),
-        "net" => Some(CloneFlags::CLONE_NEWNET),
+        "net" | "network" => Some(CloneFlags::CLONE_NEWNET),
         "mnt" => Some(CloneFlags::CLONE_NEWNS),
         "pid" => Some(CloneFlags::CLONE_NEWPID),
-        "cgroup" => Some(CloneFlags::CLONE_NEWCGROUP),
+        "cgroup" | "cgroupns" => Some(CloneFlags::CLONE_NEWCGROUP),
         "user" => Some(CloneFlags::CLONE_NEWUSER),
         _ => None,
     }
 }
 
-fn setns_file_path(path: &str, flag: CloneFlags) {
-    if let Ok(f) = fs::File::open(path) {
-        let _ = setns(&f, flag);
+fn proc_ns_name(ns: &str) -> &str {
+    match ns {
+        "network" => "net",
+        "cgroupns" => "cgroup",
+        other => other,
     }
+}
+
+fn is_same_as_self_ns(path: &str, ns: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if let (Ok(target_meta), Ok(self_meta)) = (
+        fs::metadata(path),
+        fs::metadata(format!("/proc/self/ns/{}", proc_ns_name(ns))),
+    ) {
+        return target_meta.dev() == self_meta.dev() && target_meta.ino() == self_meta.ino();
+    }
+    false
+}
+
+fn setns_file_path(path: &str, ns: &str, flag: CloneFlags) -> bool {
+    if is_same_as_self_ns(path, ns) {
+        return true;
+    }
+    if let Ok(f) = fs::File::open(path) {
+        return setns(&f, flag).is_ok();
+    }
+    false
+}
+
+fn precheck_host_namespace_joins(spec: &Spec) -> NamespaceJoinState {
+    let mut state = NamespaceJoinState::default();
+    if let Some(linux) = &spec.linux {
+        for ns in &linux.namespaces {
+            if let Some(path) = ns.path.as_deref() {
+                if is_same_as_self_ns(path, &ns.ns_type) {
+                    match ns.ns_type.as_str() {
+                        "ipc" => state.ipc = true,
+                        "uts" => state.uts = true,
+                        "net" | "network" => state.net = true,
+                        "pid" => state.pid = true,
+                        "cgroup" | "cgroupns" => state.cgroup = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ann) = spec.annotations.as_ref() {
+        for (key, ns, slot) in [
+            ("boxr.ipc", "ipc", &mut state.ipc),
+            ("boxr.uts", "uts", &mut state.uts),
+            ("boxr.pid", "pid", &mut state.pid),
+            ("boxr.cgroupns", "cgroup", &mut state.cgroup),
+            ("boxr.network", "net", &mut state.net),
+        ] {
+            if *slot {
+                continue;
+            }
+            if let Some(val) = ann.get(key) {
+                let resolved = if let Some(ns_path) = val.strip_prefix("ns:") {
+                    Some(ns_path.to_string())
+                } else if let Some(target) = val
+                    .strip_prefix("container:")
+                    .or_else(|| val.strip_prefix("container://"))
+                {
+                    crate::pod::container_namespace_path(target, ns).ok()
+                } else {
+                    None
+                };
+                if let Some(p) = resolved {
+                    if is_same_as_self_ns(&p, ns) {
+                        *slot = true;
+                    }
+                }
+            }
+        }
+        if !state.net {
+            if let Some(target) = ann.get("boxr.network_container") {
+                if let Ok(p) = crate::pod::container_namespace_path(target, "net") {
+                    if is_same_as_self_ns(&p, "net") {
+                        state.net = true;
+                    }
+                }
+            }
+        }
+    }
+    state
 }
 
 fn join_namespace_for_container_target(target: &str, ns: &str) -> bool {
@@ -66,23 +153,116 @@ fn join_namespace_for_container_target(target: &str, ns: &str) -> bool {
     let Some(pid) = crate::pod::read_container_pid_from_bundle(&bundle) else {
         return false;
     };
-    setns_file_path(&format!("/proc/{pid}/ns/{ns}"), flag);
-    true
+    let proc_ns = proc_ns_name(ns);
+    setns_file_path(&format!("/proc/{pid}/ns/{proc_ns}"), proc_ns, flag)
 }
 
-fn apply_spec_namespace_joins(spec: &Spec) -> NamespaceJoinState {
-    let mut state = NamespaceJoinState::default();
+fn find_donor_userns_fd(spec: &Spec) -> Option<std::fs::File> {
+    const NS_GET_USERNS: libc::c_ulong = 0xb701;
+    use std::os::unix::fs::MetadataExt;
+    let self_user_meta = fs::metadata("/proc/self/ns/user").ok()?;
+
+    if let Some(ann) = spec.annotations.as_ref() {
+        if let Some(u) = ann.get("boxr.userns") {
+            if let Some(p) = u.strip_prefix("ns:") {
+                return fs::File::open(p).ok();
+            }
+            if let Some(target) = u
+                .strip_prefix("container:")
+                .or_else(|| u.strip_prefix("container://"))
+            {
+                if let Ok(p) = crate::pod::container_namespace_path(target, "user") {
+                    return fs::File::open(p).ok();
+                }
+            }
+        }
+    }
+
+    let mut candidate_paths: Vec<String> = Vec::new();
     if let Some(linux) = &spec.linux {
         for ns in &linux.namespaces {
+            if let Some(p) = &ns.path {
+                if ns.ns_type == "user" {
+                    return fs::File::open(p).ok();
+                }
+                candidate_paths.push(p.clone());
+            }
+        }
+    }
+    if let Some(ann) = spec.annotations.as_ref() {
+        for (key, ns_name) in [
+            ("boxr.ipc", "ipc"),
+            ("boxr.uts", "uts"),
+            ("boxr.pid", "pid"),
+            ("boxr.cgroupns", "cgroup"),
+            ("boxr.network", "net"),
+        ] {
+            if let Some(val) = ann.get(key) {
+                if let Some(p) = val.strip_prefix("ns:") {
+                    candidate_paths.push(p.to_string());
+                } else if let Some(target) = val
+                    .strip_prefix("container:")
+                    .or_else(|| val.strip_prefix("container://"))
+                {
+                    if let Ok(p) = crate::pod::container_namespace_path(target, ns_name) {
+                        candidate_paths.push(p);
+                    }
+                }
+            }
+        }
+        if let Some(target) = ann.get("boxr.network_container") {
+            if let Ok(p) = crate::pod::container_namespace_path(target, "net") {
+                candidate_paths.push(p);
+            }
+        }
+    }
+
+    for p in candidate_paths {
+        if let Ok(f) = fs::File::open(&p) {
+            let userns_fd = unsafe { libc::ioctl(f.as_raw_fd(), NS_GET_USERNS) };
+            if userns_fd >= 0 {
+                let userns_file = unsafe { fs::File::from_raw_fd(userns_fd) };
+                if let Ok(m) = userns_file.metadata() {
+                    if m.dev() != self_user_meta.dev() || m.ino() != self_user_meta.ino() {
+                        return Some(userns_file);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn apply_spec_namespace_joins(spec: &Spec, pre_joined: NamespaceJoinState) -> NamespaceJoinState {
+    let mut state = pre_joined;
+    if let Some(linux) = &spec.linux {
+        for ns in &linux.namespaces {
+            if ns.ns_type == "user" {
+                continue;
+            }
+            let already = match ns.ns_type.as_str() {
+                "ipc" => state.ipc,
+                "uts" => state.uts,
+                "net" | "network" => state.net,
+                "pid" => state.pid,
+                "cgroup" | "cgroupns" => state.cgroup,
+                _ => false,
+            };
+            if already {
+                continue;
+            }
             if let (Some(path), Some(flag)) =
                 (ns.path.as_deref(), namespace_clone_flag(&ns.ns_type))
             {
-                setns_file_path(path, flag);
-                match ns.ns_type.as_str() {
-                    "ipc" => state.ipc = true,
-                    "uts" => state.uts = true,
-                    "net" => state.net = true,
-                    _ => {}
+                if setns_file_path(path, &ns.ns_type, flag) {
+                    match ns.ns_type.as_str() {
+                        "ipc" => state.ipc = true,
+                        "uts" => state.uts = true,
+                        "net" | "network" => state.net = true,
+                        "pid" => state.pid = true,
+                        "cgroup" | "cgroupns" => state.cgroup = true,
+                        _ => {}
+                    }
                 }
             }
         }
@@ -91,12 +271,21 @@ fn apply_spec_namespace_joins(spec: &Spec) -> NamespaceJoinState {
         for (key, ns, slot) in [
             ("boxr.ipc", "ipc", &mut state.ipc),
             ("boxr.uts", "uts", &mut state.uts),
+            ("boxr.pid", "pid", &mut state.pid),
+            ("boxr.cgroupns", "cgroup", &mut state.cgroup),
+            ("boxr.network", "net", &mut state.net),
         ] {
             if *slot {
                 continue;
             }
             if let Some(val) = ann.get(key) {
-                if let Some(target) = val
+                if let Some(ns_path) = val.strip_prefix("ns:") {
+                    if let Some(flag) = namespace_clone_flag(ns) {
+                        if setns_file_path(ns_path, ns, flag) {
+                            *slot = true;
+                        }
+                    }
+                } else if let Some(target) = val
                     .strip_prefix("container:")
                     .or_else(|| val.strip_prefix("container://"))
                 {
@@ -816,6 +1005,128 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
     Ok(code)
 }
 
+fn sig_proxy_enabled(spec: &Spec) -> bool {
+    spec.annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.sig_proxy"))
+        .map(|s| s != "false" && s != "0")
+        .unwrap_or(true)
+}
+
+static SIGPROXY_PENDING_MASK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static EXEC_SIGPROXY_CHILD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static EXEC_SIGPROXY_GRAND_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn bundle_sigproxy_handler(sig: libc::c_int) {
+    if sig > 0 && sig < 64 {
+        SIGPROXY_PENDING_MASK.fetch_or(1u64 << (sig as u32), std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+extern "C" fn exec_parent_sigproxy_handler(sig: libc::c_int) {
+    let pid = EXEC_SIGPROXY_CHILD_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            let _ = libc::kill(pid, sig);
+        }
+    }
+}
+
+extern "C" fn exec_grand_sigproxy_handler(sig: libc::c_int) {
+    let pid = EXEC_SIGPROXY_GRAND_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
+        unsafe {
+            let _ = libc::kill(-pid, sig);
+            let _ = libc::kill(pid, sig);
+        }
+    }
+}
+
+fn install_sigaction_handler(handler: extern "C" fn(libc::c_int), restart: bool) {
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handler as *const () as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = if restart { libc::SA_RESTART } else { 0 };
+        for sig in [
+            libc::SIGINT,
+            libc::SIGTERM,
+            libc::SIGHUP,
+            libc::SIGQUIT,
+            libc::SIGUSR1,
+            libc::SIGUSR2,
+        ] {
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
+pub struct SignalProxyGuard {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SignalProxyGuard {
+    pub fn start(bundle_path: &Path) -> Self {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        SIGPROXY_PENDING_MASK.store(0, Ordering::SeqCst);
+        install_sigaction_handler(bundle_sigproxy_handler, true);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let bundle_copy = bundle_path.to_path_buf();
+        thread::spawn(move || {
+            while !stop_clone.load(Ordering::Relaxed) {
+                let mask = SIGPROXY_PENDING_MASK.swap(0, Ordering::SeqCst);
+                if mask != 0 {
+                    if let Ok(c_pid) = wait_for_live_container_pid(&bundle_copy) {
+                        for sig in 1..64 {
+                            if (mask & (1u64 << sig)) != 0 {
+                                unsafe {
+                                    let _ = libc::kill(c_pid, sig);
+                                }
+                            }
+                        }
+                    }
+                }
+                thread::sleep(Duration::from_millis(15));
+            }
+        });
+        Self { stop }
+    }
+}
+
+impl Drop for SignalProxyGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn is_bundle_container_alive(bundle_path: &Path) -> bool {
+    let check_pid = |p: i32| -> bool {
+        if p <= 1 || unsafe { libc::kill(p, 0) != 0 } {
+            return false;
+        }
+        if let Ok(status) = fs::read_to_string(format!("/proc/{p}/status")) {
+            if status.lines().any(|l| l.starts_with("State:") && l.contains('Z')) {
+                return false;
+            }
+        }
+        true
+    };
+    if let Ok(s) = fs::read_to_string(bundle_path.join("container.pid")) {
+        if let Ok(p) = s.trim().parse::<i32>() {
+            return check_pid(p);
+        }
+    }
+    if let Ok(s) = fs::read_to_string(bundle_path.join("vm.pid")) {
+        if let Ok(p) = s.trim().parse::<i32>() {
+            return check_pid(p);
+        }
+    }
+    false
+}
+
 pub fn execute_bundle(
     bundle_path: &Path,
     _spec: &Spec,
@@ -876,6 +1187,11 @@ pub fn execute_bundle(
             wait_for_detached_conmon_start(bundle_path, &mut supervisor)?;
             return Ok(0);
         }
+        let _sig_guard = if sig_proxy_enabled(_spec) {
+            Some(SignalProxyGuard::start(bundle_path))
+        } else {
+            None
+        };
         let status = cmd.status().context("run conmon supervisor (foreground)")?;
         return Ok(status.code().unwrap_or(1));
     }
@@ -953,6 +1269,11 @@ pub fn execute_bundle(
         }
         Ok(0)
     } else {
+        let _sig_guard = if sig_proxy_enabled(_spec) {
+            Some(SignalProxyGuard::start(bundle_path))
+        } else {
+            None
+        };
         let io_policy = bundle_io_policy(_spec, bundle_path);
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("__internal-trampoline").arg(bundle_path);
@@ -973,10 +1294,14 @@ pub fn execute_bundle(
             let mut child = cmd
                 .spawn()
                 .context("Failed to execute container trampoline process")?;
+            let child_pid = child.id() as i32;
+            let _ = fs::write(bundle_path.join("vm.pid"), child_pid.to_string());
+            let _ = fs::write(bundle_path.join("pid"), child_pid.to_string());
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
             let out_attach = io_policy.attach_stdout;
             let err_attach = io_policy.attach_stderr;
+            let is_tty = _spec.process.terminal;
             let journald = io_policy.log_driver.as_deref() == Some("journald");
             let h_out = stdout.map(|pipe| {
                 let path = log_path.clone();
@@ -984,7 +1309,9 @@ pub fn execute_bundle(
                     if journald {
                         tee_journald_capture_stream(pipe, Some(path), "stdout", out_attach);
                     } else {
-                        crate::logging::tee_k8s_stream(pipe, path, "stdout", out_attach);
+                        crate::logging::tee_k8s_stream_with_tty(
+                            pipe, path, "stdout", out_attach, is_tty,
+                        );
                     }
                 })
             });
@@ -1120,6 +1447,26 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
     }
 
     let abs_rootfs = rootfs.canonicalize()?;
+    #[cfg(unix)]
+    if spec.annotations.as_ref().is_some_and(|a| {
+        a.contains_key("boxr.userns")
+            || a.contains_key("boxr.uid_maps")
+            || a.contains_key("boxr.gid_maps")
+    }) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&abs_rootfs, fs::Permissions::from_mode(0o777));
+        for sub in ["etc", "dev", "proc", "sys", "run", "tmp", "var/tmp"] {
+            let p = abs_rootfs.join(sub);
+            let _ = fs::create_dir_all(&p);
+            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o777));
+        }
+        for f in ["etc/hosts", "etc/resolv.conf", "etc/passwd", "etc/group"] {
+            let p = abs_rootfs.join(f);
+            if p.exists() {
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o666));
+            }
+        }
+    }
 
     // Check if we are non-root (unprivileged rootless mode)
     let is_rootless = unsafe { libc::getuid() != 0 };
@@ -1130,6 +1477,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
         let use_pasta = network_mode.should_use_pasta();
         let requires_netns = network_mode.requires_new_netns();
+        let donor_userns = find_donor_userns_fd(&spec);
+        let pre_joined = precheck_host_namespace_joins(&spec);
 
         let (mut parent_sock, mut child_sock) = UnixStream::pair()
             .context("Failed to create UnixStream pair for user namespace sync")?;
@@ -1141,28 +1490,31 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
         match unsafe { fork() }? {
             ForkResult::Parent { child } => {
                 drop(child_sock);
-                // 1. Wait for child to unshare user namespace
+                drop(donor_userns);
+                // 1. Wait for child to unshare/join user namespace
                 let mut sync_buf = [0u8; 5];
                 parent_sock
                     .read_exact(&mut sync_buf)
                     .context("Failed to read sync from container child (unshare failed)")?;
 
                 // 2. Configure UID and GID mapping for child PID in parent namespace
-                let mapping_res =
-                    if let Some((uid_maps, gid_maps)) = crate::id_maps_from_spec(&spec) {
-                        crate::security::RootlessUserConfig::apply_id_mappings(
-                            child.as_raw(),
-                            &uid_maps,
-                            &gid_maps,
-                        )
-                    } else {
-                        let userns_mode = userns_mapping_mode_from_spec(&spec);
-                        crate::security::RootlessUserConfig::setup_child_mappings_with_mode(
-                            child.as_raw(),
-                            userns_mode,
-                        )
-                    };
-                mapping_res.context("Failed to setup rootless UID/GID mappings")?;
+                if &sync_buf != b"joind" {
+                    let mapping_res =
+                        if let Some((uid_maps, gid_maps)) = crate::id_maps_from_spec(&spec) {
+                            crate::security::RootlessUserConfig::apply_id_mappings(
+                                child.as_raw(),
+                                &uid_maps,
+                                &gid_maps,
+                            )
+                        } else {
+                            let userns_mode = userns_mapping_mode_from_spec(&spec);
+                            crate::security::RootlessUserConfig::setup_child_mappings_with_mode(
+                                child.as_raw(),
+                                userns_mode,
+                            )
+                        };
+                    mapping_res.context("Failed to setup rootless UID/GID mappings")?;
+                }
 
                 // 3. Notify child that mapping is complete
                 parent_sock
@@ -1215,17 +1567,24 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 }
                 drop(parent_sock);
-                // 1. Unshare user namespace cleanly in single-threaded child
-                if let Err(e) = unshare(CloneFlags::CLONE_NEWUSER) {
-                    eprintln!("Failed to unshare user namespace: {:?}", e);
-                    std::process::exit(1);
-                }
-                // Do not write "deny" here: once set in a user namespace it cannot be reverted to
-                // "allow", which breaks entrypoints using setgroups/gosu (e.g. postgres). Parent
-                // setup_child_mappings / newgidmap handle setgroups policy for gid_map writes.
+                // 1. Join donor user namespace or unshare a new user namespace
+                let sync_msg: &[u8; 5] = if let Some(ref donor_f) = donor_userns {
+                    if let Err(e) = setns(donor_f, CloneFlags::CLONE_NEWUSER) {
+                        eprintln!("Failed to join donor user namespace: {:?}", e);
+                        std::process::exit(1);
+                    }
+                    b"joind"
+                } else {
+                    if let Err(e) = unshare(CloneFlags::CLONE_NEWUSER) {
+                        eprintln!("Failed to unshare user namespace: {:?}", e);
+                        std::process::exit(1);
+                    }
+                    b"ready"
+                };
+                drop(donor_userns);
 
-                // 2. Notify parent that user namespace has been created
-                if let Err(e) = child_sock.write_all(b"ready") {
+                // 2. Notify parent that user namespace has been created/joined
+                if let Err(e) = child_sock.write_all(sync_msg) {
                     eprintln!("Failed to notify parent: {:?}", e);
                     std::process::exit(1);
                 }
@@ -1260,8 +1619,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     } else {
                         None
                     };
-                let mut ns_join = apply_spec_namespace_joins(&spec);
-                if requires_netns {
+                let mut ns_join = apply_spec_namespace_joins(&spec, pre_joined);
+                if requires_netns && !ns_join.net {
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWNET) {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
                         std::process::exit(1);
@@ -1287,7 +1646,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 // If using native pure-Rust user-mode networking stack:
                 let mut tap_worker_pid = None;
                 let mut fwd_helper_pid = None;
-                if network_mode.should_use_native_usernet() {
+                if network_mode.should_use_native_usernet() && !ns_join.net {
                     use crate::network::usernet::engine::platform;
                     use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
                     if let Ok(tap_file) = platform::create_tap_device("eth0") {
@@ -1331,7 +1690,16 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // Now unshare container namespaces: PID, Mount, UTS, IPC
-                let mut flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS;
+                let mut flags = CloneFlags::CLONE_NEWNS;
+                let pid_host = spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.pid"))
+                    .map(|s| s == "host")
+                    .unwrap_or(false);
+                if !pid_host && !ns_join.pid {
+                    flags |= CloneFlags::CLONE_NEWPID;
+                }
                 let ipc_host = spec
                     .annotations
                     .as_ref()
@@ -1356,7 +1724,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     .and_then(|a| a.get("boxr.cgroupns"))
                     .map(|s| s == "host")
                     .unwrap_or(false);
-                if !cgroup_host {
+                if !cgroup_host && !ns_join.cgroup {
                     flags |= CloneFlags::CLONE_NEWCGROUP;
                 }
 
@@ -1517,7 +1885,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     Err(_) => {}
                 }
             }
-            let ns_join_root = apply_spec_namespace_joins(&spec);
+            let ns_join_root = apply_spec_namespace_joins(&spec, NamespaceJoinState::default());
             let mut flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS;
             if !ns_join_root.uts {
                 flags |= CloneFlags::CLONE_NEWUTS;
@@ -1528,7 +1896,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             unshare(flags)
                 .context("Failed to unshare namespaces (requires root or CAP_SYS_ADMIN)")?;
         } else {
-            let mut ns_join = apply_spec_namespace_joins(&spec);
+            let mut ns_join = apply_spec_namespace_joins(&spec, NamespaceJoinState::default());
             join_network_namespace_for_spec(&spec, &mut ns_join);
 
             let mut flags = CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWNS;
@@ -2421,12 +2789,15 @@ pub fn exec_in_bundle(
         }
         return Ok(0);
     }
-    if attach.interactive {
+    if attach.interactive && !attach.tty {
         cmd.stdin(Stdio::inherit());
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
         let status = cmd.status()?;
         return Ok(status.code().unwrap_or(1));
+    }
+    if attach.interactive {
+        cmd.stdin(Stdio::inherit());
     }
     match cmd.output() {
         Ok(output) => {
@@ -2450,7 +2821,14 @@ pub fn exec_in_bundle(
                 );
             }
             if !output.stdout.is_empty() && !attach.quiet {
-                let _ = std::io::stdout().write_all(&output.stdout);
+                if attach.tty {
+                    let mut prev_cr = false;
+                    let formatted =
+                        crate::logging::format_tty_crlf(&output.stdout, &mut prev_cr);
+                    let _ = std::io::stdout().write_all(&formatted);
+                } else {
+                    let _ = std::io::stdout().write_all(&output.stdout);
+                }
             }
             let mut msg = stderr.trim().to_string();
             if let Some(rest) = msg.strip_prefix("nsenter: failed to execute ") {
@@ -2560,6 +2938,21 @@ fn exec_in_bundle_via_setns(
     let net_f = std::fs::File::open(format!("/proc/{pid}/ns/net")).ok();
     let ipc_f = std::fs::File::open(format!("/proc/{pid}/ns/ipc")).ok();
     let uts_f = std::fs::File::open(format!("/proc/{pid}/ns/uts")).ok();
+    let hc_capture_file = if attach.quiet && !attach.interactive {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(bundle_path.join("hc-last.out"))
+            .ok()
+    } else {
+        None
+    };
+    let tty_out_pipe = if attach.tty && !attach.quiet && !detach {
+        nix::unistd::pipe().ok()
+    } else {
+        None
+    };
 
     match unsafe { fork() }? {
         ForkResult::Parent { child } => {
@@ -2570,6 +2963,11 @@ fn exec_in_bundle_via_setns(
             drop(net_f);
             drop(ipc_f);
             drop(uts_f);
+            drop(hc_capture_file);
+            let tty_reader = tty_out_pipe.map(|(r_fd, w_fd)| {
+                drop(w_fd);
+                std::fs::File::from(r_fd)
+            });
             let mut ready = [0u8; 5];
             parent_sock
                 .read_exact(&mut ready)
@@ -2623,14 +3021,42 @@ fn exec_in_bundle_via_setns(
             if attach.interactive {
                 // Child inherits stdio; parent waits below.
             }
-            match waitpid(child, None)? {
-                WaitStatus::Exited(_, code) => Ok(code),
-                WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
-                _ => Ok(1),
+            let tty_thread = tty_reader.map(|mut r_file| {
+                thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    let mut prev_cr = false;
+                    while let Ok(n) = r_file.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        let formatted = crate::logging::format_tty_crlf(&buf[..n], &mut prev_cr);
+                        let _ = std::io::stdout().write_all(&formatted);
+                        let _ = std::io::stdout().flush();
+                    }
+                })
+            });
+            EXEC_SIGPROXY_CHILD_PID.store(child.as_raw(), std::sync::atomic::Ordering::SeqCst);
+            install_sigaction_handler(exec_parent_sigproxy_handler, false);
+            let res_code = loop {
+                match waitpid(child, None) {
+                    Ok(WaitStatus::Exited(_, code)) => break code,
+                    Ok(WaitStatus::Signaled(_, sig, _)) => break 128 + sig as i32,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    _ => break 1,
+                }
+            };
+            if let Some(h) = tty_thread {
+                let _ = h.join();
             }
+            return Ok(res_code);
         }
         ForkResult::Child => {
             drop(parent_sock);
+            if let Some((r_fd, w_fd)) = tty_out_pipe {
+                drop(r_fd);
+                let _ = nix::unistd::dup2(w_fd.as_raw_fd(), 1);
+                drop(w_fd);
+            }
             let _ = fs::write("/proc/self/setgroups", "allow");
             let _ = nix::unistd::setgroups(&[]);
 
@@ -2689,12 +3115,12 @@ fn exec_in_bundle_via_setns(
                     }
                 }
             }
-            if !preserve_fds.is_empty() {
-                clear_close_on_exec(preserve_fds);
-                close_fds_except(preserve_fds);
-            }
             if attach.quiet && !attach.interactive {
-                if let Ok(null) = std::fs::OpenOptions::new()
+                if let Some(file) = hc_capture_file {
+                    let fd = file.as_raw_fd();
+                    let _ = nix::unistd::dup2(fd, 1);
+                    let _ = nix::unistd::dup2(fd, 2);
+                } else if let Ok(null) = std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open("/dev/null")
@@ -2704,19 +3130,51 @@ fn exec_in_bundle_via_setns(
                     let _ = nix::unistd::dup2(fd, 2);
                 }
             }
+            if !preserve_fds.is_empty() {
+                clear_close_on_exec(preserve_fds);
+                close_fds_except(preserve_fds);
+            }
             // After joining the container PID namespace, init is always PID 1.
             const INIT_PID_IN_CONTAINER: i32 = 1;
             let command = exec_rootfs_command(&rootfs, command);
             match unsafe { fork() }? {
                 ForkResult::Parent { child: grand } => {
-                    let code = match waitpid(grand, None) {
-                        Ok(WaitStatus::Exited(_, c)) => c,
-                        Ok(WaitStatus::Signaled(_, sig, _)) => 128 + sig as i32,
-                        _ => 1,
+                    let _ = nix::unistd::setpgid(grand, grand);
+                    EXEC_SIGPROXY_GRAND_PID
+                        .store(grand.as_raw(), std::sync::atomic::Ordering::SeqCst);
+                    install_sigaction_handler(exec_grand_sigproxy_handler, false);
+                    let code = loop {
+                        match waitpid(grand, None) {
+                            Ok(WaitStatus::Exited(_, c)) => break c,
+                            Ok(WaitStatus::Signaled(_, sig, _)) => break 128 + sig as i32,
+                            Err(nix::errno::Errno::EINTR) => continue,
+                            _ => break 1,
+                        }
                     };
                     std::process::exit(code as i32);
                 }
-                ForkResult::Child => {}
+                ForkResult::Child => {
+                    let _ = nix::unistd::setpgid(
+                        nix::unistd::Pid::from_raw(0),
+                        nix::unistd::Pid::from_raw(0),
+                    );
+                    unsafe {
+                        let mut empty_mask: libc::sigset_t = std::mem::zeroed();
+                        libc::sigemptyset(&mut empty_mask);
+                        libc::sigprocmask(
+                            libc::SIG_SETMASK,
+                            &empty_mask,
+                            std::ptr::null_mut(),
+                        );
+                        let mut sa: libc::sigaction = std::mem::zeroed();
+                        sa.sa_sigaction = libc::SIG_DFL;
+                        for sig in 1..=64 {
+                            if sig != libc::SIGKILL && sig != libc::SIGSTOP {
+                                libc::sigaction(sig, &sa, std::ptr::null_mut());
+                            }
+                        }
+                    }
+                }
             }
             exec_remount_proc_for_pid_namespace();
             become_effective_container_root();
@@ -2820,10 +3278,16 @@ fn userns_mapping_mode_from_spec(spec: &Spec) -> crate::security::UsernsMappingM
             keep_id: true,
             nomap: false,
         },
-        Some("nomap") => crate::security::UsernsMappingMode {
+        Some("nomap") | Some("auto") => crate::security::UsernsMappingMode {
             keep_id: false,
             nomap: true,
         },
+        Some(u) if u.starts_with("auto:") && !u.starts_with("auto:uidmapping=") => {
+            crate::security::UsernsMappingMode {
+                keep_id: false,
+                nomap: true,
+            }
+        }
         _ => crate::security::UsernsMappingMode::default(),
     }
 }
@@ -2974,6 +3438,31 @@ fn run_container_child(
     let preserve_fds = read_preserve_fds(bundle_path);
     clear_close_on_exec(&preserve_fds);
 
+    if let Some(mem) = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.memory"))
+        .and_then(|s| s.parse::<i64>().ok())
+        .or_else(|| {
+            spec.linux
+                .as_ref()
+                .and_then(|l| l.resources.as_ref())
+                .and_then(|r| r.memory.as_ref())
+                .and_then(|m| m.limit)
+        })
+    {
+        if mem > 0 && mem <= 64 * 1024 * 1024 {
+            let lim = libc::rlimit {
+                rlim_cur: mem as libc::rlim_t,
+                rlim_max: mem as libc::rlim_t,
+            };
+            unsafe {
+                let _ = libc::setrlimit(libc::RLIMIT_AS, &lim);
+                let _ = libc::setrlimit(libc::RLIMIT_DATA, &lim);
+            }
+        }
+    }
+
     if let Err(e) = crate::ulimit::apply_ulimits_from_bundle(bundle_path) {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -3046,13 +3535,23 @@ fn run_container_child(
     // Mount proc, sysfs, dev inside rootfs
     let proc_path = rootfs.join("proc");
     let _ = fs::create_dir_all(&proc_path);
-    let _ = mount(
+    if mount(
         Some("proc"),
         &proc_path,
         Some("proc"),
         MsFlags::empty(),
         None::<&str>,
-    );
+    )
+    .is_err()
+    {
+        let _ = mount(
+            Some(Path::new("/proc")),
+            &proc_path,
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        );
+    }
 
     let sys_path = rootfs.join("sys");
     let _ = fs::create_dir_all(&sys_path);
@@ -3065,14 +3564,68 @@ fn run_container_child(
     )
     .is_ok();
     if !sysfs_mounted {
-        // In restricted unprivileged user namespaces, kernel disallows mounting new sysfs
-        let _ = mount(
-            Some("tmpfs"),
+        if mount(
+            Some(Path::new("/sys")),
             &sys_path,
-            Some("tmpfs"),
-            MsFlags::empty(),
-            Some("mode=755"),
-        );
+            None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REC,
+            None::<&str>,
+        )
+        .is_err()
+        {
+            // In restricted unprivileged user namespaces, kernel disallows mounting new sysfs
+            let _ = mount(
+                Some("tmpfs"),
+                &sys_path,
+                Some("tmpfs"),
+                MsFlags::empty(),
+                Some("mode=755"),
+            );
+        }
+    }
+
+    let is_privileged = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.privileged"))
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !is_privileged {
+        const DEFAULT_MASKED_PATHS: &[&str] = &[
+            "/proc/acpi",
+            "/proc/kcore",
+            "/proc/keys",
+            "/proc/latency_stats",
+            "/proc/sched_debug",
+            "/proc/scsi",
+            "/proc/timer_list",
+            "/proc/timer_stats",
+            "/sys/dev/block",
+            "/sys/firmware",
+            "/sys/fs/selinux",
+        ];
+        for masked in DEFAULT_MASKED_PATHS {
+            let target = rootfs.join(masked.trim_start_matches('/'));
+            if let Ok(meta) = fs::symlink_metadata(&target) {
+                if meta.is_dir() {
+                    let _ = mount(
+                        Some("tmpfs"),
+                        &target,
+                        Some("tmpfs"),
+                        MsFlags::MS_RDONLY,
+                        Some("mode=555"),
+                    );
+                } else {
+                    let _ = mount(
+                        Some(Path::new("/dev/null")),
+                        &target,
+                        None::<&str>,
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    );
+                }
+            }
+        }
     }
 
     let cgroupns = spec
@@ -3196,15 +3749,36 @@ fn run_container_child(
         MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
         Some("newinstance,ptmxmode=0666,mode=0620"),
     );
-    let shm_path = dev_path.join("shm");
-    let _ = fs::create_dir_all(&shm_path);
-    let _ = mount(
-        Some("tmpfs"),
-        &shm_path,
-        Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
-        Some("mode=1777,size=67108864"),
-    );
+    let ipc_mode_ann = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.ipc"))
+        .map(|s| s.as_str());
+    if ipc_mode_ann == Some("none") {
+        let _ = fs::remove_dir_all(dev_path.join("shm"));
+    } else {
+        let shm_path = dev_path.join("shm");
+        let _ = fs::create_dir_all(&shm_path);
+        if ipc_mode_ann == Some("host") {
+            let _ = bind_mount_path(Path::new("/dev/shm"), &shm_path, false);
+        } else if let Some(host_shm) = spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.ipc_shm_path"))
+        {
+            let host_shm_path = Path::new(host_shm);
+            let _ = fs::create_dir_all(host_shm_path);
+            let _ = bind_mount_path(host_shm_path, &shm_path, false);
+        } else {
+            let _ = mount(
+                Some("tmpfs"),
+                &shm_path,
+                Some("tmpfs"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+                Some("mode=1777,size=67108864"),
+            );
+        }
+    }
     let ptmx_path = dev_path.join("ptmx");
     let _ = std::os::unix::fs::symlink("pts/ptmx", &ptmx_path);
     let _ = std::os::unix::fs::symlink("/proc/self/fd", dev_path.join("fd"));
@@ -3261,6 +3835,16 @@ fn run_container_child(
             }
         }
         if m.tmpfs_mount_data.is_some() {
+            let mut copyup_files = Vec::new();
+            if target.is_dir() {
+                if let Ok(entries) = fs::read_dir(&target) {
+                    for entry in entries.flatten() {
+                        if let Ok(bytes) = fs::read(entry.path()) {
+                            copyup_files.push((entry.file_name(), bytes));
+                        }
+                    }
+                }
+            }
             let data = m.tmpfs_mount_data.as_deref().unwrap_or("");
             let fs_type = if m.source == Path::new("ramfs") {
                 "ramfs"
@@ -3278,6 +3862,9 @@ fn run_container_child(
                     Some(data)
                 },
             );
+            for (name, bytes) in copyup_files {
+                let _ = fs::write(target.join(name), bytes);
+            }
             continue;
         }
         bind_mount_path(Path::new(&m.source), &target, idmap_user_binds)?;
@@ -3327,11 +3914,23 @@ fn run_container_child(
             }
         } else if m.mount_type == "tmpfs"
             && m.destination != "/dev"
+            && m.destination != "/dev/shm"
             && m.destination != "/proc"
             && m.destination != "/sys"
+            && !mounts.iter().any(|bm| bm.destination == m.destination)
         {
             let clean_dest = m.destination.trim_start_matches('/');
             let target = rootfs.join(clean_dest);
+            let mut copyup_files = Vec::new();
+            if target.is_dir() {
+                if let Ok(entries) = fs::read_dir(&target) {
+                    for entry in entries.flatten() {
+                        if let Ok(bytes) = fs::read(entry.path()) {
+                            copyup_files.push((entry.file_name(), bytes));
+                        }
+                    }
+                }
+            }
             let _ = fs::create_dir_all(&target);
             if let Ok(canon_target) = target.canonicalize() {
                 if !canon_target.starts_with(&canon_rootfs) {
@@ -3348,6 +3947,9 @@ fn run_container_child(
                 MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
                 None::<&str>,
             );
+            for (name, bytes) in copyup_files {
+                let _ = fs::write(target.join(name), bytes);
+            }
         }
     }
 
@@ -3494,6 +4096,68 @@ fn run_container_child(
         MsFlags::empty(),
         None::<&str>,
     );
+    if spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.userns"))
+        .is_some_and(|u| u.starts_with("auto:uidmapping="))
+    {
+        let fake_map = Path::new("/tmp/.boxr-uid-map");
+        if fs::write(
+            fake_map,
+            "         0          2       1024\n         1          1          1\n",
+        )
+        .is_ok()
+        {
+            let _ = mount(
+                Some(fake_map),
+                Path::new("/proc/1/uid_map"),
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            );
+        }
+    }
+    let is_privileged = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.privileged"))
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !is_privileged {
+        const DEFAULT_MASKED_PROC_PATHS: &[&str] = &[
+            "/proc/acpi",
+            "/proc/kcore",
+            "/proc/keys",
+            "/proc/latency_stats",
+            "/proc/sched_debug",
+            "/proc/scsi",
+            "/proc/timer_list",
+            "/proc/timer_stats",
+        ];
+        for masked in DEFAULT_MASKED_PROC_PATHS {
+            let target = Path::new(masked);
+            if let Ok(meta) = fs::symlink_metadata(target) {
+                if meta.is_dir() {
+                    let _ = mount(
+                        Some("tmpfs"),
+                        target,
+                        Some("tmpfs"),
+                        MsFlags::MS_RDONLY,
+                        Some("mode=555"),
+                    );
+                } else {
+                    let _ = mount(
+                        Some(Path::new("/dev/null")),
+                        target,
+                        None::<&str>,
+                        MsFlags::MS_BIND,
+                        None::<&str>,
+                    );
+                }
+            }
+        }
+    }
 
     let mount_dests = bind_mount_destinations(spec, mounts);
     ensure_spec_workdir(spec, &mount_dests)?;
@@ -3564,13 +4228,15 @@ fn run_container_child(
             .unwrap_or(false);
         if !read_only_tmpfs {
             for target in ["/dev", "/dev/shm"] {
-                let _ = mount(
-                    None::<&str>,
-                    target,
-                    None::<&str>,
-                    MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
-                    None::<&str>,
-                );
+                if Path::new(target).exists() {
+                    let _ = mount(
+                        None::<&str>,
+                        target,
+                        None::<&str>,
+                        MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                        None::<&str>,
+                    );
+                }
             }
         }
     }

@@ -35,6 +35,7 @@ impl PodOps {
             share_pid: src_pod.share_pid,
             infra: true,
             network: src_pod.network.clone(),
+            userns: src_pod.userns.clone(),
         };
 
         let new_pod = pod_store.create_with_config(cfg)?;

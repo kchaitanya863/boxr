@@ -323,12 +323,23 @@ impl ImageStore {
                 if !is_shared {
                     let rootfs = PathBuf::from(&removed.rootfs_path);
                     if rootfs.exists() {
-                        let _ = fs::remove_dir_all(&rootfs);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = fs::set_permissions(&rootfs, fs::Permissions::from_mode(0o755));
+                        }
+                        if fs::remove_dir_all(&rootfs).is_err() {
+                            crate::storage::container_store::make_tree_writable(&rootfs);
+                            let _ = fs::remove_dir_all(&rootfs);
+                        }
                     }
                     if let Some(parent) = rootfs.parent() {
                         let root_dir = self.index_file.parent().unwrap_or(Path::new("."));
                         if parent.exists() && parent != root_dir {
-                            let _ = fs::remove_dir_all(parent);
+                            if fs::remove_dir_all(parent).is_err() {
+                                crate::storage::container_store::make_tree_writable(parent);
+                                let _ = fs::remove_dir_all(parent);
+                            }
                         }
                     }
                 }
@@ -392,20 +403,25 @@ impl ImageStore {
             let _ = fs::set_permissions(&dest_rootfs, fs::Permissions::from_mode(0o755));
         }
 
-        let full_tag = repo_tag.unwrap_or_else(|| &container.name);
-        // Normalize through ImageReference so qualified spellings
-        // (e.g. docker.io/library/foo:bar) store canonical registry/repo/tag.
-        let parsed_ref = ImageReference::parse(full_tag).unwrap_or(ImageReference {
-            registry: ImageReference::DEFAULT_REGISTRY.to_string(),
-            repository: full_tag.to_string(),
-            tag: ImageReference::DEFAULT_TAG.to_string(),
-            digest: None,
-        });
-        let (repo, tag, reg) = (
-            parsed_ref.repository.clone(),
-            parsed_ref.tag.clone(),
-            parsed_ref.registry.clone(),
-        );
+        let (repo, tag, reg) = if let Some(rt) = repo_tag {
+            let parsed_ref = ImageReference::parse(rt).unwrap_or(ImageReference {
+                registry: ImageReference::DEFAULT_REGISTRY.to_string(),
+                repository: rt.to_string(),
+                tag: ImageReference::DEFAULT_TAG.to_string(),
+                digest: None,
+            });
+            (
+                parsed_ref.repository,
+                parsed_ref.tag,
+                parsed_ref.registry,
+            )
+        } else {
+            (
+                "<none>".to_string(),
+                "<none>".to_string(),
+                ImageReference::DEFAULT_REGISTRY.to_string(),
+            )
+        };
 
         let mut base_config = self
             .find(&container.image)

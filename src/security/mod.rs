@@ -237,29 +237,35 @@ using single-ID mapping only (images requiring chown/--user may fail)"
 
     #[cfg(target_os = "linux")]
     fn keep_id_uid_mappings(host_id: u32, sub_ranges: &[SubordinateRange]) -> Vec<IdMapping> {
-        let max_id: u32 = sub_ranges.iter().map(|r| r.count).sum();
         let mut maps = Vec::new();
-        // Match Podman `getRootlessKeepIDMapping` (pkg/util/utils.go).
-        if !sub_ranges.is_empty() && host_id != 0 {
-            let size = host_id.min(max_id);
-            if size > 0 {
+        if let Some(r) = sub_ranges.first() {
+            if host_id > 0 {
+                let first_size = host_id.min(r.count);
+                if first_size > 0 {
+                    maps.push(IdMapping {
+                        container_id: 0,
+                        host_id: r.start,
+                        size: first_size,
+                    });
+                }
+            }
+            maps.push(IdMapping {
+                container_id: host_id,
+                host_id,
+                size: 1,
+            });
+            if r.count > host_id {
                 maps.push(IdMapping {
-                    container_id: 0,
-                    host_id: 1,
-                    size,
+                    container_id: host_id + 1,
+                    host_id: r.start + host_id,
+                    size: r.count - host_id,
                 });
             }
-        }
-        maps.push(IdMapping {
-            container_id: host_id,
-            host_id: 0,
-            size: 1,
-        });
-        if max_id > host_id {
+        } else {
             maps.push(IdMapping {
-                container_id: host_id + 1,
-                host_id: host_id + 1,
-                size: max_id - host_id,
+                container_id: host_id,
+                host_id,
+                size: 1,
             });
         }
         maps
@@ -270,7 +276,7 @@ using single-ID mapping only (images requiring chown/--user may fail)"
         if let Some(r) = sub {
             vec![IdMapping {
                 container_id: 0,
-                host_id: 1,
+                host_id: r.start,
                 size: r.count,
             }]
         } else {
@@ -361,29 +367,29 @@ using single-ID mapping only (images requiring chown/--user may fail)"
             None
         }
 
-        if container_to_host(uid_maps, 0) == Some(host_uid) {
-            return (uid_maps.to_vec(), gid_maps.to_vec(), false);
-        }
-        if container_to_host(uid_maps, SETUP_ID) == Some(host_uid) {
-            return (uid_maps.to_vec(), gid_maps.to_vec(), true);
-        }
-        if container_to_host(uid_maps, SETUP_ID).is_some() {
+        let uid_has_host = container_to_host(uid_maps, 0) == Some(host_uid);
+        let gid_has_host = container_to_host(gid_maps, 0) == Some(host_gid);
+        if uid_has_host && gid_has_host {
             return (uid_maps.to_vec(), gid_maps.to_vec(), false);
         }
 
         let mut u = uid_maps.to_vec();
-        u.push(IdMapping {
-            container_id: SETUP_ID,
-            host_id: host_uid,
-            size: 1,
-        });
+        if !uid_has_host && container_to_host(&u, SETUP_ID).is_none() {
+            u.push(IdMapping {
+                container_id: SETUP_ID,
+                host_id: host_uid,
+                size: 1,
+            });
+        }
         let mut g = gid_maps.to_vec();
-        g.push(IdMapping {
-            container_id: SETUP_ID,
-            host_id: host_gid,
-            size: 1,
-        });
-        (u, g, true)
+        if !gid_has_host && container_to_host(&g, SETUP_ID).is_none() {
+            g.push(IdMapping {
+                container_id: SETUP_ID,
+                host_id: host_gid,
+                size: 1,
+            });
+        }
+        (u, g, !uid_has_host)
     }
 
     #[cfg(not(unix))]

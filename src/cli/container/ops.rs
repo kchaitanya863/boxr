@@ -9,7 +9,13 @@ pub struct InspectArgs {
     pub format: Option<String>,
 
     /// Display total file sizes if the type is container
-    #[arg(short = 's', long = "size")]
+    #[arg(
+        short = 's',
+        long = "size",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
     pub size: bool,
 
     /// Return JSON for specified type (container|image)
@@ -182,8 +188,23 @@ pub struct CommitArgs {
     pub author: Option<String>,
 
     /// Pause container during commit
-    #[arg(short = 'p', long = "pause", default_value_t = true)]
+    #[arg(
+        short = 'p',
+        long = "pause",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
     pub pause: bool,
+
+    /// Suppress output
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    /// Format of the committed image manifest (oci or docker)
+    #[arg(short = 'f', long = "format")]
+    pub format: Option<String>,
 
     /// Container to commit
     pub container: String,
@@ -191,7 +212,7 @@ pub struct CommitArgs {
     /// Repository and optional tag (e.g., "my-image:v1")
     pub repo_tag: Option<String>,
 
-    #[arg(long = "change")]
+    #[arg(short = 'c', long = "change")]
     pub change: Vec<String>,
 }
 
@@ -214,8 +235,24 @@ pub struct CpArgs {
     /// Destination path (e.g. "./dest" or "my-container:/app/dest")
     pub dest: String,
 
-    #[arg(long = "archive")]
+    #[arg(
+        short = 'a',
+        long = "archive",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
     pub archive: bool,
+
+    #[arg(
+        long = "overwrite",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub overwrite: bool,
 
     #[arg(long = "follow-link")]
     pub follow_link: bool,
@@ -276,12 +313,75 @@ pub struct UpdateArgs {
     pub cpu_rt_runtime: Option<i64>,
 
     /// Maximum number of PIDs
-    #[arg(long = "pids-limit")]
+    #[arg(long = "pids-limit", allow_hyphen_values = true)]
     pub pids_limit: Option<i64>,
 
     /// Restart policy to apply when a container exits
     #[arg(long = "restart")]
     pub restart: Option<String>,
+
+    #[arg(long = "blkio-weight-device")]
+    pub blkio_weight_device: Vec<String>,
+
+    #[arg(long = "device-read-bps")]
+    pub device_read_bps: Vec<String>,
+
+    #[arg(long = "device-write-bps")]
+    pub device_write_bps: Vec<String>,
+
+    #[arg(long = "device-read-iops")]
+    pub device_read_iops: Vec<String>,
+
+    #[arg(long = "device-write-iops")]
+    pub device_write_iops: Vec<String>,
+
+    #[arg(long = "ulimit", allow_hyphen_values = true)]
+    pub ulimit: Vec<String>,
+
+    #[arg(long = "no-healthcheck")]
+    pub no_healthcheck: bool,
+
+    #[arg(long = "health-cmd")]
+    pub health_cmd: Option<String>,
+
+    #[arg(long = "health-interval")]
+    pub health_interval: Option<String>,
+
+    #[arg(long = "health-retries")]
+    pub health_retries: Option<u32>,
+
+    #[arg(long = "health-timeout")]
+    pub health_timeout: Option<String>,
+
+    #[arg(long = "health-start-period")]
+    pub health_start_period: Option<String>,
+
+    #[arg(long = "health-on-failure")]
+    pub health_on_failure: Option<String>,
+
+    #[arg(long = "health-log-destination")]
+    pub health_log_destination: Option<String>,
+
+    #[arg(long = "health-max-log-count")]
+    pub health_max_log_count: Option<u32>,
+
+    #[arg(long = "health-max-log-size")]
+    pub health_max_log_size: Option<u32>,
+
+    #[arg(long = "health-startup-cmd")]
+    pub health_startup_cmd: Option<String>,
+
+    #[arg(long = "health-startup-interval")]
+    pub health_startup_interval: Option<String>,
+
+    #[arg(long = "health-startup-retries")]
+    pub health_startup_retries: Option<u32>,
+
+    #[arg(long = "health-startup-success")]
+    pub health_startup_success: Option<u32>,
+
+    #[arg(long = "health-startup-timeout")]
+    pub health_startup_timeout: Option<String>,
 
     /// Container to update
     pub container: String,

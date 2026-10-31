@@ -257,6 +257,15 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
+        if a == "-i=false" || a == "--interactive=false" {
+            i += 1;
+            continue;
+        }
+        if a == "-i=true" || a == "--interactive=true" {
+            out.push("-i".to_string());
+            i += 1;
+            continue;
+        }
         if podman_globals::should_strip_global_flag_at(&argv, i, subcommand_idx) {
             let skip = podman_globals::global_flag_skip_width(a).unwrap_or(1);
             i += skip;

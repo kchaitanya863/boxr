@@ -39,6 +39,16 @@ pub struct StartArgs {
     #[arg(short = 'a', long = "attach")]
     pub attach: bool,
 
+    /// Proxy received signals to the process
+    #[arg(
+        long = "sig-proxy",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub sig_proxy: bool,
+
     /// Attach container's STDIN
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
@@ -192,6 +202,24 @@ pub struct AttachArgs {
     /// Do not attach STDIN
     #[arg(long = "no-stdin")]
     pub no_stdin: bool,
+
+    /// Proxy received signals to the process
+    #[arg(
+        long = "sig-proxy",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true
+    )]
+    pub sig_proxy: bool,
+
+    /// Override the key sequence for detaching a container
+    #[arg(long = "detach-keys")]
+    pub detach_keys: Option<String>,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Container to attach to
     pub container: String,

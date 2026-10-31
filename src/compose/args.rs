@@ -213,6 +213,7 @@ impl ComposeProject {
             device_write_iops: Vec::new(),
             link_local_ip: Vec::new(),
             memory_swappiness: None,
+            cgroup_conf: Vec::new(),
             runtime: None,
             sig_proxy: true,
             storage_opt: Vec::new(),

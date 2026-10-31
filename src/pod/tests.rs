@@ -69,6 +69,7 @@ fn test_apply_pod_to_run_args() {
         share_uts: true,
         share_pid: false,
         network: None,
+        userns: None,
     };
     let mut args = crate::cli::RunArgs {
         registry_auth: Default::default(),
@@ -199,6 +200,7 @@ fn test_apply_pod_to_run_args() {
         device_write_iops: vec![],
         link_local_ip: vec![],
         memory_swappiness: None,
+        cgroup_conf: Vec::new(),
         runtime: None,
         sig_proxy: true,
         storage_opt: vec![],

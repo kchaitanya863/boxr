@@ -27,6 +27,18 @@ pub struct PullArgs {
     #[arg(long = "platform")]
     pub platform: Option<String>,
 
+    /// Number of times to retry in case of failure when performing pull
+    #[arg(long = "retry")]
+    pub retry: Option<u32>,
+
+    /// Delay between retries in case of pull failures
+    #[arg(long = "retry-delay")]
+    pub retry_delay: Option<String>,
+
+    /// Suppress output information when pulling images
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
 
