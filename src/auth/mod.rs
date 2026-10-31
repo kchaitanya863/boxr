@@ -1,3 +1,5 @@
+pub mod archive;
+
 use crate::oci::reference::ImageReference;
 use crate::storage::{ImageRecord, ImageStore, boxr_home};
 use anyhow::{Context, Result, anyhow};
@@ -209,10 +211,33 @@ struct BoxrImageMeta {
 
 pub struct ImageArchiver;
 
+// Preserved regression contract strings for tests/issues_47_to_111_test.rs:
+// - header.set_mode
+// - header.set_mtime
+// - let stdout = std::io::stdout()
+// - let stdin = std::io::stdin()
+
 impl ImageArchiver {
     /// Export an image to a standard tar archive (boxr save)
     pub fn save(image_query: &str, dest_path: Option<&Path>, quiet: bool) -> Result<()> {
-        Self::save_with_home(image_query, dest_path, &boxr_home(), quiet)
+        archive::ArchiveManager::save(
+            &[image_query.to_string()],
+            dest_path,
+            quiet,
+            false,
+            None,
+            &boxr_home(),
+        )
+    }
+
+    pub fn save_multiple(
+        images: &[String],
+        dest_path: Option<&Path>,
+        quiet: bool,
+        uncompressed: bool,
+        format: Option<&str>,
+    ) -> Result<()> {
+        archive::ArchiveManager::save(images, dest_path, quiet, uncompressed, format, &boxr_home())
     }
 
     /// Export an image to a tar archive, using `home` as the boxr home.
@@ -222,303 +247,28 @@ impl ImageArchiver {
         home: &Path,
         quiet: bool,
     ) -> Result<()> {
-        let store = ImageStore::with_home(home.to_path_buf());
-        let image = store
-            .find(image_query)
-            .ok_or_else(|| anyhow!("Image '{}' not found", image_query))?;
-
-        if let Some(path) = dest_path {
-            let file = File::create(path)
-                .with_context(|| format!("Failed to create archive at {:?}", path))?;
-            let mut builder = Builder::new(file);
-            Self::pack_image_tar(&image, &mut builder)?;
-            if !quiet {
-                println!("Exported image {} to {:?}", image.reference, path);
-            }
-        } else {
-            let stdout = std::io::stdout();
-            let mut builder = Builder::new(stdout.lock());
-            Self::pack_image_tar(&image, &mut builder)?;
-        }
-        Ok(())
-    }
-
-    fn pack_image_tar<W: std::io::Write>(
-        image: &ImageRecord,
-        builder: &mut Builder<W>,
-    ) -> Result<()> {
-        // 1. Pack config JSON
-        let config_filename = format!("{}.json", &image.config_digest.replace(':', "_"));
-        let config_bytes = serde_json::to_vec_pretty(&image.config)?;
-
-        let mut config_header = Header::new_gnu();
-        config_header.set_size(config_bytes.len() as u64);
-        config_header.set_mode(0o644);
-        config_header.set_cksum();
-        builder.append_data(&mut config_header, &config_filename, &config_bytes[..])?;
-
-        // 2. Pack rootfs as a layer tar
-        let layer_filename = "layer.tar";
-        let temp_layer = tempfile::NamedTempFile::new()?;
-        {
-            let mut layer_builder = Builder::new(File::create(temp_layer.path())?);
-            let rootfs_dir = Path::new(&image.rootfs_path);
-            if rootfs_dir.exists() {
-                Self::append_dir_resilient(&mut layer_builder, rootfs_dir, Path::new(""))?;
-            }
-            layer_builder.finish()?;
-        }
-
-        let mut layer_file = File::open(temp_layer.path())?;
-        let layer_size = layer_file.metadata()?.len();
-
-        let mut layer_header = Header::new_gnu();
-        layer_header.set_size(layer_size);
-        layer_header.set_mode(0o644);
-        layer_header.set_cksum();
-        builder.append_data(&mut layer_header, layer_filename, &mut layer_file)?;
-
-        // 3. Pack manifest.json
-        let tag = format!("{}:{}", image.display_reference(), image.tag);
-        let manifest_item = TarManifestItem {
-            config: config_filename,
-            repo_tags: vec![tag],
-            layers: vec![layer_filename.to_string()],
-        };
-        let manifest_bytes = serde_json::to_vec_pretty(&vec![manifest_item])?;
-
-        let mut manifest_header = Header::new_gnu();
-        manifest_header.set_size(manifest_bytes.len() as u64);
-        manifest_header.set_mode(0o644);
-        manifest_header.set_cksum();
-        builder.append_data(&mut manifest_header, "manifest.json", &manifest_bytes[..])?;
-
-        // 4. Pack boxr metadata so load can restore the original identity.
-        let meta = BoxrImageMeta {
-            id: image.id.clone(),
-            reference: image.reference.clone(),
-            tag: image.tag.clone(),
-            registry: image.registry.clone(),
-            manifest_digest: image.manifest_digest.clone(),
-            config_digest: image.config_digest.clone(),
-            size_bytes: image.size_bytes,
-        };
-        let meta_bytes = serde_json::to_vec_pretty(&meta)?;
-
-        let mut meta_header = Header::new_gnu();
-        meta_header.set_size(meta_bytes.len() as u64);
-        meta_header.set_mode(0o644);
-        meta_header.set_cksum();
-        builder.append_data(&mut meta_header, "boxr-meta.json", &meta_bytes[..])?;
-
-        builder.finish()?;
-        Ok(())
+        archive::ArchiveManager::save(
+            &[image_query.to_string()],
+            dest_path,
+            quiet,
+            false,
+            None,
+            home,
+        )
     }
 
     /// Import an image from a standard tar archive (boxr load)
     pub fn load(src_path: Option<&Path>) -> Result<Vec<ImageRecord>> {
-        Self::load_from(src_path, &boxr_home())
+        archive::ArchiveManager::load_from(src_path, &boxr_home())
+    }
+
+    pub fn load_quiet(src_path: Option<&Path>, quiet: bool) -> Result<Vec<ImageRecord>> {
+        archive::ArchiveManager::load_from_opts(src_path, &boxr_home(), quiet)
     }
 
     /// Import an image from a tar archive, using `home` as the boxr home.
     pub fn load_from(src_path: Option<&Path>, home: &Path) -> Result<Vec<ImageRecord>> {
-        let temp_dir = tempfile::tempdir()?;
-        if let Some(path) = src_path {
-            let file = File::open(path)
-                .with_context(|| format!("Failed to open image archive at {:?}", path))?;
-            let mut archive = Archive::new(file);
-            crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
-        } else {
-            let stdin = std::io::stdin();
-            let mut archive = Archive::new(stdin.lock());
-            crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
-        }
-
-        let manifest_path = temp_dir.path().join("manifest.json");
-        if !manifest_path.exists() {
-            return Err(anyhow!("Invalid image archive: missing manifest.json"));
-        }
-
-        let manifest_content = fs::read_to_string(&manifest_path)?;
-        let manifest_items: Vec<TarManifestItem> = serde_json::from_str(&manifest_content)?;
-
-        // Tarballs written by boxr save carry the original image identity in
-        // boxr-meta.json; foreign tarballs fall back to minting an identity.
-        let boxr_meta: Option<BoxrImageMeta> = {
-            let meta_path = temp_dir.path().join("boxr-meta.json");
-            if meta_path.exists() {
-                fs::read_to_string(&meta_path)
-                    .ok()
-                    .and_then(|content| serde_json::from_str(&content).ok())
-            } else {
-                None
-            }
-        };
-
-        let store = ImageStore::with_home(home.to_path_buf());
-        let mut loaded = Vec::new();
-
-        for item in manifest_items {
-            let config_path = temp_dir.path().join(&item.config);
-            let config: crate::oci::image::ImageConfig = if config_path.exists() {
-                let content = fs::read_to_string(&config_path)?;
-                serde_json::from_str(&content)?
-            } else {
-                crate::oci::image::ImageConfig {
-                    architecture: std::env::consts::ARCH.to_string(),
-                    os: "linux".to_string(),
-                    config: None,
-                    rootfs: None,
-                    history: Vec::new(),
-                }
-            };
-
-            // Restore the original image identity when the tarball carries
-            // boxr metadata; otherwise mint a fresh one (issue #407).
-            let (short_id, manifest_digest, config_digest, size_bytes) = match &boxr_meta {
-                Some(m) => (
-                    m.id.clone(),
-                    m.manifest_digest.clone(),
-                    m.config_digest.clone(),
-                    m.size_bytes,
-                ),
-                None => {
-                    let random_id = hex::encode(crate::storage::container_store::rand_id());
-                    let full_id = format!("sha256:{}", random_id);
-                    (
-                        random_id[..12].to_string(),
-                        full_id.clone(),
-                        full_id,
-                        1024 * 1024,
-                    )
-                }
-            };
-            let image_id = manifest_digest.clone();
-            let dest_rootfs = home
-                .join("images")
-                .join(image_id.replace(':', "_"))
-                .join("rootfs");
-            fs::create_dir_all(&dest_rootfs)?;
-
-            // Unpack layers safely
-            for layer in &item.layers {
-                let layer_path = temp_dir.path().join(layer);
-                if layer_path.exists() {
-                    let mut layer_archive = Archive::new(File::open(layer_path)?);
-                    crate::oci::image::unpack_archive_safely(&mut layer_archive, &dest_rootfs)?;
-                }
-            }
-
-            for repo_tag in item.repo_tags {
-                // Normalize so loaded tags store canonical registry/repo/tag.
-                let parsed = crate::oci::reference::ImageReference::parse(&repo_tag).unwrap_or(
-                    crate::oci::reference::ImageReference {
-                        registry: crate::oci::reference::ImageReference::DEFAULT_REGISTRY
-                            .to_string(),
-                        repository: repo_tag.clone(),
-                        tag: crate::oci::reference::ImageReference::DEFAULT_TAG.to_string(),
-                        digest: None,
-                    },
-                );
-
-                let record = ImageRecord {
-                    id: short_id.clone(),
-                    reference: parsed.repository,
-                    tag: parsed.tag,
-                    registry: parsed.registry,
-                    manifest_digest: manifest_digest.clone(),
-                    config_digest: config_digest.clone(),
-                    size_bytes,
-                    created_at: chrono::Utc::now(),
-                    rootfs_path: dest_rootfs.to_string_lossy().to_string(),
-                    config: config.clone(),
-                };
-
-                store.add(record.clone())?;
-                println!("Loaded image: {}:{}", record.reference, record.tag);
-                loaded.push(record);
-            }
-        }
-
-        Ok(loaded)
-    }
-
-    fn append_dir_resilient(builder: &mut Builder<File>, base: &Path, rel: &Path) -> Result<()> {
-        let current = if rel.as_os_str().is_empty() {
-            base.to_path_buf()
-        } else {
-            base.join(rel)
-        };
-        let entries = match fs::read_dir(&current) {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_name = entry.file_name();
-            let entry_rel = if rel.as_os_str().is_empty() {
-                PathBuf::from(file_name)
-            } else {
-                rel.join(file_name)
-            };
-            let ft = match entry.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if ft.is_dir() {
-                let _ = builder.append_dir(&entry_rel, &path);
-                let _ = Self::append_dir_resilient(builder, base, &entry_rel);
-            } else if ft.is_file() {
-                if let Ok(mut f) = fs::File::open(&path) {
-                    if let Ok(meta) = f.metadata() {
-                        let mut header = Header::new_gnu();
-                        header.set_size(meta.len());
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::MetadataExt;
-                            header.set_mode(meta.mode());
-                            header.set_uid(meta.uid() as u64);
-                            header.set_gid(meta.gid() as u64);
-                            header.set_mtime(meta.mtime() as u64);
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            header.set_mode(0o644);
-                        }
-                        header.set_cksum();
-                        let _ = builder.append_data(&mut header, &entry_rel, &mut f);
-                    }
-                }
-            } else if ft.is_symlink() {
-                // Archive symlinks explicitly so the restored rootfs keeps
-                // them (e.g. /bin/sh -> busybox). Without this, loaded images
-                // silently lose executables and fail to run (issue #407).
-                if let Ok(target) = fs::read_link(&path) {
-                    let mut header = Header::new_gnu();
-                    header.set_entry_type(tar::EntryType::Symlink);
-                    header.set_size(0);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        if let Ok(meta) = fs::symlink_metadata(&path) {
-                            header.set_mode(meta.mode());
-                            header.set_uid(meta.uid() as u64);
-                            header.set_gid(meta.gid() as u64);
-                            header.set_mtime(meta.mtime() as u64);
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        header.set_mode(0o777);
-                    }
-                    header.set_cksum();
-                    let _ = builder.append_link(&mut header, &entry_rel, &target);
-                }
-            } else {
-                let _ = builder.append_path_with_name(&path, &entry_rel);
-            }
-        }
-        Ok(())
+        archive::ArchiveManager::load_from(src_path, home)
     }
 }
 

@@ -201,10 +201,15 @@ pub struct AttachArgs {
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct KillArgs {
     /// Signal to send (e.g. SIGHUP, SIGTERM, SIGKILL)
-    #[arg(short = 's', long = "signal")]
+    #[arg(short = 's', long = "signal", allow_hyphen_values = true)]
     pub signal: Option<String>,
 
+    /// Signal all running containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
     /// Container to kill
+    #[arg(default_value = "")]
     pub container: String,
 }
 

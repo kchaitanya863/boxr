@@ -92,6 +92,7 @@ impl ComposeProject {
             rm: false,
             rmi: false,
             name: Some(container_name.to_string()),
+            replace: false,
             env: env_vec,
             unsetenv: Vec::new(),
             unsetenv_all: false,

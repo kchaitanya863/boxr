@@ -33,7 +33,9 @@ impl ImageRecord {
     /// unless it is the default Docker Hub registry, e.g. "library/alpine"
     /// for Docker Hub but "ghcr.io/org/repo" elsewhere.
     pub fn display_reference(&self) -> String {
-        if self.registry == ImageReference::DEFAULT_REGISTRY {
+        if self.reference == "<none>" || self.registry.is_empty() {
+            self.reference.clone()
+        } else if self.registry == ImageReference::DEFAULT_REGISTRY {
             self.reference.clone()
         } else {
             format!("{}/{}", self.registry, self.reference)
@@ -42,7 +44,11 @@ impl ImageRecord {
 
     /// Fully qualified "registry/repository:tag" string, usable as a query.
     pub fn qualified_name(&self) -> String {
-        format!("{}/{}:{}", self.registry, self.reference, self.tag)
+        if self.reference == "<none>" || self.registry.is_empty() {
+            format!("{}:{}", self.reference, self.tag)
+        } else {
+            format!("{}/{}:{}", self.registry, self.reference, self.tag)
+        }
     }
 }
 
@@ -70,6 +76,21 @@ fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     }
     if let Some(hex) = query.strip_prefix("sha256:") {
         return img.manifest_digest == query || img.id.starts_with(hex);
+    }
+    if query == "<none>:<none>" || query == "/<none>:<none>" || query == "<none>" {
+        return img.reference == "<none>";
+    }
+    if query == &img.qualified_name()
+        || (query == &img.display_reference() && img.tag == ImageReference::DEFAULT_TAG)
+    {
+        return true;
+    }
+    if img.registry == "localhost" {
+        if query == format!("{}:{}", img.reference, img.tag)
+            || (query == img.reference && img.tag == ImageReference::DEFAULT_TAG)
+        {
+            return true;
+        }
     }
     match ImageReference::parse(query) {
         Ok(r) => {

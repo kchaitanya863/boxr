@@ -133,6 +133,7 @@ fn default_run_args(image: &str) -> RunArgs {
         tty: false,
         detach: false,
         rm: false,
+        replace: false,
         rmi: false,
         name: None,
         env: Vec::new(),
@@ -307,6 +308,7 @@ fn test_issue_164_images_accepts_invalid_filter_keys_without_returning_an_error(
         return;
     }
     let args = ImagesArgs {
+        image: None,
         quiet: false,
         all: false,
         digests: false,

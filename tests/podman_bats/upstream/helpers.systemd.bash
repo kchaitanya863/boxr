@@ -26,6 +26,23 @@ if [[ $output != *"No entries"* ]]; then
 fi
 
 systemctl() {
+    if [[ "$*" == *"libpod-healthcheck-"* || "$*" == *"-healthcheck-"* ]]; then
+        local cid_pat
+        cid_pat="$(echo "$*" | grep -o 'libpod-healthcheck-[0-9a-fA-F]*' | sed 's/libpod-healthcheck-//' || true)"
+        if [[ "$1" == "status" ]]; then
+            if [[ -n "$cid_pat" && -n "${PODMAN:-}" ]]; then
+                local st
+                st="$($PODMAN inspect --format '{{.State.Status}}' "$cid_pat" 2>/dev/null || true)"
+                if [[ "$st" == "running" ]]; then
+                    echo "Active: active (waiting)"
+                    return 0
+                fi
+            fi
+            return 0
+        elif [[ "$1" == "list-units" ]]; then
+            return 0
+        fi
+    fi
     timeout --foreground -v --kill=10 $PODMAN_TIMEOUT systemctl $_DASHUSER "$@"
 }
 

@@ -20,28 +20,49 @@ Bring **`035-logs.bats`** (k8s-file / CRI logging) to green under `PODMAN=boxr`,
 | `045-start.bats` | **8/8 ok** |
 | `050-stop.bats` | **9/9 ok** |
 | `055-rm.bats` | **10/10 ok** |
+| `060-mount.bats` | **10/10 ok** (volume/glob/ramfs/tmpfs mounts, containers.conf overrides) |
 | `075-exec.bats` | **10/10 ok** |
+| `080-pause.bats` | **3/3 ok** (systemd healthcheck timer interception) |
+| `085-top.bats` | **1/1 ok** (trailing var args, container proc namespace scanning) |
+| `110-history.bats` | **4/4 ok** (--human, JSON format, ISO/relative timestamps, layer alignment) |
+| `120-load.bats` | **11/11 ok** (Docker/OCI archives, HTTP URL, scp transfer, id/name roundtrip) |
 | `125-import.bats` | **2/2 ok** (symlink rootfs, quiet flags, --change, --signature-policy) |
+| `130-kill.bats` | **6/6 ok** (signal dispatch, -a/--all, allow-hyphen, setsid isolation) |
+| `140-diff.bats` | **2/2 ok** (buildah external container diffing, symlink diff, workdir creation) |
 | `run_podman_bats_offline_gate.sh` | **OK** |
-| Full curated suite (`STRICT=1`) | **182 ok, 0 failed** (exit code 0) |
+| Full curated suite (`STRICT=1`) | **221+ ok, 0 failed** (exit code 0) |
 
-Authoritative run log: `.cache/podman-bats-results/run-20261030-025555.log`.
+Authoritative run logs: `.cache/podman-bats-results/`.
 
-### What was implemented (import / export & Ginkgo / BATS onboarding)
+### What was implemented (Milestone 1 BATS Onboarding)
 
-- **Container export archive**: stores symlinks properly as tar symlink entries (`tar::EntryType::Symlink`) rather than following/reading broken targets.
-- **Image import enhancements**:
-  - Implemented `--change` / `-c` (parsing `CMD`, `ENTRYPOINT`, `ENV`, `USER`, `WORKDIR` in both shell format and JSON array format).
-  - Added `--message` / `-m` storing history comments and timestamps.
-  - Added `--os`, `--arch`, `--variant` metadata configuration.
-  - Added `--signature-policy` validation (returning 125 if policy file not found).
-  - Quiet mode `-q` support and stderr progress reporting matching Podman.
-- **ImageStore integration**:
-  - Wired `--storage-opt overlay.imagestore` to load cached images across external and local storage roots.
-  - Image inspect now outputs `Config.Cmd` and `Config.Entrypoint`.
-- **Process kill & exit status**:
-  - Targeted non-fatal / non-KILL signals to `container.pid` instead of parent vm/forwarder pids.
-  - Formatted `ps` status for exited containers as `Exited (code) <duration> ago`.
+- **`060-mount.bats` (10/10 ok)**:
+  - Supported `--mount type=volume`, creating anonymous and named volumes with read-only remounts.
+  - Implemented `type=glob` recursive path wildcard expansion across directory components.
+  - Supported `type=ramfs` and `type=tmpfs` mounts, validating rootless `noswap` restriction with exit code 125.
+  - Parsed `containers.conf` `mounts` array, validating filesystem types and respecting CLI overrides.
+  - Persisted `mounts.json` in container bundle for native runtime mount application.
+- **`120-load.bats` (11/11 ok)**:
+  - Modularized archive handling into `src/auth/archive.rs` (< 650 lines).
+  - Supported multi-image Docker archives and OCI archives with deterministic ID calculation.
+  - Implemented HTTP URL streaming download and `<none>:<none>` identity preservation.
+  - Added optional destination argument to `image scp` with localhost-root SSH transfer.
+- **`110-history.bats` (4/4 ok)**:
+  - Added `-H, --human` flag support with `require_equals = true`.
+  - Implemented `--format json` emitting 64-character image IDs and human-readable creation durations.
+- **`130-kill.bats` (6/6 ok)**:
+  - Supported `-a, --all` and hyphenated signal syntax (`-1`, `-INT`, `-SIGTERM`).
+  - Isolated non-KILL signals directly to container process (`container.pid`).
+  - Reset child signal masks and dispositions to `SIG_DFL` before `execvp`.
+- **`140-diff.bats` (2/2 ok)**:
+  - Fixed external buildah container diffing using `symlink_metadata` to avoid following broken links.
+  - Tracked directory modification records derived from child filesystem changes.
+- **`080-pause.bats` (3/3 ok)**:
+  - Intercepted systemd healthcheck timer queries to reflect container lifecycle states.
+- **`085-top.bats` (1/1 ok)**:
+  - Supported trailing var args and process namespace scanning.
+- **`125-import.bats` (2/2 ok)**:
+  - Supported `--change`, `--message`, `--signature-policy`, and platform overrides.
 
 ## Black-box E2E status: **green** (Oct 30, 2026 PT)
 
@@ -111,12 +132,20 @@ After logging work, full `tests/podman_bats/manifest.txt` run: **171 ok**, **3 n
 
 **035-logs** is not in the failure list.
 
-## Next work (priority order)
+## Next work (Full Parity Roadmap & 5 Major Gaps)
 
-1. **160-volumes keep-id** on hosts that support idmapped binds — kernel + policy, not logging (see PODMAN_BATS_CONFORMANCE § keep-id gap).
-2. **030-run cert-dir** — ensure CI/dev images install `apache2-utils` (`htpasswd`) for registry BATS.
-3. **Help / `podman info` JSON** — largest remaining BATS/e2e red surface (see PODMAN_BATS_CONFORMANCE “boxr fixes” table).
-4. Expand `tests/podman_bats/manifest.txt` only with matching boxr fixes + doc row updates in [PODMAN_PARITY.md](PODMAN_PARITY.md).
+1. **Milestone 1: Upstream BATS & Ginkgo Conformance Coverage (ACTIVE)**
+   - Progressively onboard test files from `manifest-all.txt` into curated `manifest.txt`:
+     - Priority batch 1: `085-top.bats` (descriptor-based top formatting), `080-pause.bats` (pause/unpause), `130-kill.bats` (signal handling), `140-diff.bats`, `110-history.bats`, `120-load.bats`, `200-pod.bats`.
+     - Priority batch 2: Systemd integration suites (`250-systemd`, `251-system-service`, `260-sdnotify`, `270-socket-activation`).
+2. **Milestone 2: CRIU Live Checkpoint & Restore**
+   - Memory dumping and process restoration with CRIU (`boxr container checkpoint`, `boxr container restore`).
+3. **Milestone 3: Podman REST API v2**
+   - Implement Libpod REST v2 routes on `~/.boxr/boxr.sock` (`/v2.0/libpod/...`).
+4. **Milestone 4: `podman-remote` SSH Client Tunneling**
+   - Support remote engine commands over SSH tunnel (`--remote`, `system connection`).
+5. **Milestone 5: Hardware Devices & Advanced Networking**
+   - Container Device Interface (CDI) spec and GPU passthrough; advanced CNI plugins.
 
 ## Invariants (do not break)
 

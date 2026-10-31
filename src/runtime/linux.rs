@@ -336,21 +336,17 @@ fn wait_grandchild_with_optional_timeout(
     }
 }
 
-fn ensure_spec_workdir(spec: &Spec, mount_dests: &[String]) -> Result<()> {
+fn ensure_spec_workdir(spec: &Spec, _mount_dests: &[String]) -> Result<()> {
     if spec.process.cwd.is_empty() {
         return Ok(());
     }
     let cwd_norm = spec.process.cwd.trim_end_matches('/');
-    let cwd_path = Path::new(cwd_norm);
-    if cwd_path.is_dir() {
+    if cwd_norm.is_empty() {
         return Ok(());
     }
-    let covered = mount_dests.iter().any(|d| {
-        let d = d.trim_end_matches('/');
-        d == cwd_norm || d.starts_with(&format!("{}/", cwd_norm))
-    });
-    if covered {
-        fs::create_dir_all(cwd_path)?;
+    let cwd_path = Path::new(cwd_norm);
+    if !cwd_path.is_dir() {
+        let _ = fs::create_dir_all(cwd_path);
     }
     Ok(())
 }
@@ -2972,6 +2968,9 @@ fn run_container_child(
     spec: &Spec,
     mounts: &[MountSpec],
 ) -> Result<()> {
+    unsafe {
+        libc::setsid();
+    }
     let preserve_fds = read_preserve_fds(bundle_path);
     clear_close_on_exec(&preserve_fds);
 
@@ -3263,10 +3262,15 @@ fn run_container_child(
         }
         if m.tmpfs_mount_data.is_some() {
             let data = m.tmpfs_mount_data.as_deref().unwrap_or("");
+            let fs_type = if m.source == Path::new("ramfs") {
+                "ramfs"
+            } else {
+                "tmpfs"
+            };
             let _ = mount(
-                Some("tmpfs"),
+                Some(fs_type),
                 &target,
-                Some("tmpfs"),
+                Some(fs_type),
                 MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
                 if data.is_empty() {
                     None::<&str>
@@ -3667,6 +3671,21 @@ fn run_container_child(
 
     if !preserve_fds.is_empty() {
         close_fds_except(&preserve_fds);
+    }
+
+    // OCI runtime: reset all signals to SIG_DFL and unblock signal mask before execvp
+    unsafe {
+        let mut empty_mask: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut empty_mask);
+        libc::sigprocmask(libc::SIG_SETMASK, &empty_mask, std::ptr::null_mut());
+
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = libc::SIG_DFL;
+        for sig in 1..=64 {
+            if sig != libc::SIGKILL && sig != libc::SIGSTOP {
+                libc::sigaction(sig, &sa, std::ptr::null_mut());
+            }
+        }
     }
 
     // Execute container binary

@@ -76,6 +76,7 @@ fn test_apply_pod_to_run_args() {
         tty: false,
         detach: true,
         rm: false,
+        replace: false,
         rmi: false,
         name: Some("worker".to_string()),
         env: vec![],

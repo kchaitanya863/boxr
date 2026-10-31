@@ -483,6 +483,7 @@ pub enum Commands {
     Diff(DiffArgs),
 
     /// Display the running processes of a container
+    #[command(trailing_var_arg = true)]
     Top(TopArgs),
 
     /// Create a new image from a container's changes

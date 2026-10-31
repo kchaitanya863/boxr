@@ -102,6 +102,7 @@ fn default_run_args(image: &str) -> RunArgs {
         tty: false,
         detach: false,
         rm: false,
+        replace: false,
         rmi: false,
         name: None,
         env: Vec::new(),
