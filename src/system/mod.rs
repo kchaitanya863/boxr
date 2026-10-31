@@ -86,10 +86,31 @@ impl SystemManager {
 
         // 3. Volumes
         let total_volumes = volumes.len();
+        let mut active_volumes = 0usize;
         let mut total_volume_size = 0u64;
+        let mut reclaimable_volume_size = 0u64;
+        let mut used_volume_names = HashSet::new();
+        for c in &containers {
+            let bp = PathBuf::from(&c.bundle_path);
+            if let Ok(raw) = fs::read_to_string(bp.join("mounts.json")) {
+                if let Ok(mounts) = serde_json::from_str::<Vec<crate::volume::MountSpec>>(&raw) {
+                    for m in mounts {
+                        if let Some(vn) = m.volume_name {
+                            used_volume_names.insert(vn);
+                        }
+                    }
+                }
+            }
+        }
         for v in &volumes {
             let path = std::path::PathBuf::from(&v.mountpoint);
-            total_volume_size += dir_size(&path);
+            let sz = dir_size(&path);
+            total_volume_size += sz;
+            if used_volume_names.contains(&v.name) {
+                active_volumes += 1;
+            } else {
+                reclaimable_volume_size += sz;
+            }
         }
 
         // 4. Build Cache
@@ -123,9 +144,9 @@ impl SystemManager {
             DiskUsageRow {
                 item_type: "Local Volumes".to_string(),
                 total: total_volumes,
-                active: total_volumes, // active tracking
+                active: active_volumes,
                 size_bytes: total_volume_size,
-                reclaimable_bytes: 0,
+                reclaimable_bytes: reclaimable_volume_size,
             },
             DiskUsageRow {
                 item_type: "Build Cache".to_string(),
@@ -142,6 +163,11 @@ impl SystemManager {
     }
 
     pub fn print_df_with_opts(args: &crate::cli::SystemDfArgs) -> Result<()> {
+        if args.verbose && args.format.is_some() {
+            crate::cli::usage_errors::exit_usage_error(
+                "cannot combine --format and --verbose flags",
+            );
+        }
         if args.verbose {
             return Self::print_df_verbose();
         }

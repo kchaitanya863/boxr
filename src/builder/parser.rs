@@ -27,6 +27,7 @@ pub enum Instruction {
     Cmd(Vec<String>),
     Entrypoint(Vec<String>),
     Expose(u16),
+    ExposeRaw(String),
     Label {
         key: String,
         value: String,
@@ -170,13 +171,28 @@ impl DockerfileParser {
             }
             "EXPOSE" => {
                 let parts = parse_words(rest);
-                let port: u16 = parts
-                    .first()
-                    .and_then(|p| p.split('/').next())
-                    .ok_or_else(|| anyhow!("Invalid EXPOSE port"))?
-                    .parse()
-                    .map_err(|_| anyhow!("Invalid EXPOSE port number"))?;
-                Ok(vec![Instruction::Expose(port)])
+                if parts.is_empty() {
+                    return Err(anyhow!("Invalid EXPOSE port"));
+                }
+                let mut insts = Vec::new();
+                for raw in parts {
+                    let (port_part, proto_part) = match raw.split_once('/') {
+                        Some((p, proto)) => (p, Some(proto.to_lowercase())),
+                        None => (raw.as_str(), None),
+                    };
+                    if proto_part.is_none() || proto_part.as_deref() == Some("tcp") {
+                        if let Ok(port) = port_part.parse::<u16>() {
+                            insts.push(Instruction::Expose(port));
+                            continue;
+                        }
+                    }
+                    let spec = match proto_part {
+                        Some(proto) => format!("{}/{}", port_part, proto),
+                        None => format!("{}/tcp", port_part),
+                    };
+                    insts.push(Instruction::ExposeRaw(spec));
+                }
+                Ok(insts)
             }
             "LABEL" => {
                 let pairs = parse_key_value_pairs(rest);

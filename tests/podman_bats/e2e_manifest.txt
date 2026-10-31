@@ -5,3 +5,8 @@ volume_rename_test.go
 container_clone_test.go
 unshare_test.go
 import_test.go
+generate_spec_test.go
+generate_kube_test.go
+system_connection_test.go
+system_df_test.go
+

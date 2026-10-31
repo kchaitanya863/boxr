@@ -65,6 +65,40 @@ pub struct KubePodSpec {
     pub restart_policy: Option<String>,
     #[serde(rename = "hostNetwork", default, skip_serializing_if = "Option::is_none")]
     pub host_network: Option<bool>,
+    #[serde(rename = "hostUsers", default, skip_serializing_if = "Option::is_none")]
+    pub host_users: Option<bool>,
+    #[serde(rename = "shareProcessNamespace", default, skip_serializing_if = "Option::is_none")]
+    pub share_process_namespace: Option<bool>,
+    #[serde(rename = "terminationGracePeriodSeconds", default, skip_serializing_if = "Option::is_none")]
+    pub termination_grace_period_seconds: Option<i64>,
+    #[serde(rename = "hostAliases", default, skip_serializing_if = "Option::is_none")]
+    pub host_aliases: Option<Vec<KubeHostAlias>>,
+    #[serde(rename = "dnsConfig", default, skip_serializing_if = "Option::is_none")]
+    pub dns_config: Option<KubeDnsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeHostAlias {
+    pub ip: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostnames: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeDnsConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nameservers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub searches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<KubeDnsOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeDnsOption {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 fn deserialize_opt_string_vec<'de, D>(deserializer: D) -> std::result::Result<Option<Vec<String>>, D::Error>
@@ -122,6 +156,8 @@ pub struct KubeSecurityContext {
     pub read_only_root_filesystem: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privileged: Option<bool>,
+    #[serde(rename = "runAsNonRoot", default, skip_serializing_if = "Option::is_none")]
+    pub run_as_non_root: Option<bool>,
     #[serde(rename = "runAsUser", default, skip_serializing_if = "Option::is_none")]
     pub run_as_user: Option<u32>,
     #[serde(rename = "runAsGroup", default, skip_serializing_if = "Option::is_none")]
@@ -138,7 +174,7 @@ pub struct KubeSecurityContext {
 pub struct KubeSeLinuxOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "type", default, alias = "filetype", skip_serializing_if = "Option::is_none")]
     pub filetype: Option<String>,
 }
 
@@ -147,6 +183,8 @@ pub struct KubeVolumeMount {
     pub name: String,
     #[serde(rename = "mountPath")]
     pub mount_path: String,
+    #[serde(rename = "subPath", default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
     #[serde(rename = "readOnly", default, skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
 }
@@ -192,6 +230,8 @@ pub struct KubeProbe {
     pub exec: Option<KubeExecAction>,
     #[serde(rename = "initialDelaySeconds", default, skip_serializing_if = "Option::is_none")]
     pub initial_delay_seconds: Option<u64>,
+    #[serde(rename = "timeoutSeconds", default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     #[serde(rename = "failureThreshold", default, skip_serializing_if = "Option::is_none")]
     pub failure_threshold: Option<u32>,
     #[serde(rename = "periodSeconds", default, skip_serializing_if = "Option::is_none")]
@@ -748,6 +788,7 @@ impl KubeManager {
                             volumes: None,
                             restart_policy: None,
                             host_network: None,
+                            ..Default::default()
                         },
                         status: None,
                     };
@@ -930,7 +971,7 @@ impl KubeManager {
                         Some(existing) => existing,
                         None => v_store.create(Some(&pvc.claim_name), None)?,
                     };
-                    volume_sources.insert(v.name.clone(), (vol.mountpoint, false));
+                    volume_sources.insert(v.name.clone(), (vol.name, false));
                 } else if let Some(img_vol) = &v.image {
                     let policy = img_vol
                         .pull_policy
@@ -976,7 +1017,7 @@ impl KubeManager {
             share_ipc: true,
             share_net: true,
             share_uts: true,
-            share_pid: false,
+            share_pid: pod_yaml.spec.share_process_namespace.unwrap_or(false),
             infra: true,
             network: pod_network.clone(),
             userns: pod_userns.clone(),
@@ -1179,12 +1220,22 @@ impl KubeManager {
                         .next()
                         .unwrap_or(&vm.mount_path);
                     if let Some((src_path, force_ro)) = volume_sources.get(&vm.name) {
-                        let is_ro = *force_ro || vm.read_only.unwrap_or(false);
-                        if is_ro {
-                            volumes_vec.push(format!("{}:{}:ro", src_path, clean_dest));
-                        } else {
-                            volumes_vec.push(format!("{}:{}", src_path, clean_dest));
+                    let is_ro = *force_ro || vm.read_only.unwrap_or(false);
+                    if let Some(sub) = &vm.sub_path {
+                        if !sub.is_empty() {
+                            let ro_part = if is_ro { ",readonly" } else { "" };
+                            volumes_vec.push(format!(
+                                "type=volume,source={},target={},volume-subpath={}{}",
+                                src_path, clean_dest, sub, ro_part
+                            ));
+                            continue;
                         }
+                    }
+                    if is_ro {
+                        volumes_vec.push(format!("{}:{}:ro", src_path, clean_dest));
+                    } else {
+                        volumes_vec.push(format!("{}:{}", src_path, clean_dest));
+                    }
                     }
                 }
             }
@@ -1282,6 +1333,25 @@ impl KubeManager {
                 tmpfs_vec.push("/tmp:rw,nosuid,nodev,mode=1777".to_string());
             }
 
+            let mut ulimits_vec = Vec::new();
+            if let Some(ul_str) = pod_annotations.get("io.podman.annotations.ulimit") {
+                for u in ul_str.split(',') {
+                    let u = u.trim();
+                    if !u.is_empty() {
+                        ulimits_vec.push(u.to_string());
+                    }
+                }
+            }
+
+            let mut user_spec = None;
+            if let Some(sc) = &c_spec.security_context {
+                if let (Some(u), Some(g)) = (sc.run_as_user, sc.run_as_group) {
+                    user_spec = Some(format!("{}:{}", u, g));
+                } else if let Some(u) = sc.run_as_user {
+                    user_spec = Some(u.to_string());
+                }
+            }
+
             let run_args = RunArgs {
                 registry_auth: crate::cli::RegistryAuthArgs {
                     authfile: args.authfile.clone(),
@@ -1301,6 +1371,8 @@ impl KubeManager {
                 tmpfs: tmpfs_vec,
                 labels: labels_vec,
                 annotations: annotations_vec,
+                ulimits: ulimits_vec,
+                user: user_spec,
                 rootless: true,
                 restart: "no".to_string(),
                 health_cmd,
@@ -1468,8 +1540,133 @@ impl KubeManager {
 
         let c_store = ContainerStore::new();
         let p_store = PodStore::new();
+        let v_store = crate::volume::VolumeStore::new();
+        let i_store = crate::storage::ImageStore::new();
 
-        let (pod_name, app_label, pod_opt, containers, pod_ports) = if let Some(pod) = p_store.find(target) {
+        let effective_type = args
+            .kind_type
+            .clone()
+            .or_else(kube_generate_type_from_containers_conf)
+            .unwrap_or_else(|| "pod".to_string())
+            .to_lowercase();
+
+        if args.replicas.is_some() && effective_type != "deployment" {
+            crate::cli::usage_errors::exit_usage_error(
+                "--replicas can only be set when --type is set to deployment",
+            );
+        }
+
+        // Check if target is a named volume first (if not a pod or container)
+        if p_store.find(target).is_none() && c_store.find(target).is_none() {
+            if let Some(vol) = v_store.find(target) {
+                let creation_ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+                let mut vol_annotations = serde_json::Map::new();
+                if let Some(dev) = vol.options.get("device") {
+                    vol_annotations.insert(
+                        "volume.podman.io/device".to_string(),
+                        serde_json::Value::String(dev.clone()),
+                    );
+                }
+                if let Some(ty) = vol.options.get("type") {
+                    vol_annotations.insert(
+                        "volume.podman.io/type".to_string(),
+                        serde_json::Value::String(ty.clone()),
+                    );
+                }
+                if let Some(opts) = vol.options.get("o") {
+                    vol_annotations.insert(
+                        "volume.podman.io/mount-options".to_string(),
+                        serde_json::Value::String(opts.clone()),
+                    );
+                }
+                let mut metadata = serde_json::Map::new();
+                metadata.insert(
+                    "creationTimestamp".to_string(),
+                    serde_json::Value::String(creation_ts.clone()),
+                );
+                if !vol.labels.is_empty() {
+                    let mut lmap = serde_json::Map::new();
+                    for (k, v) in &vol.labels {
+                        lmap.insert(k.clone(), serde_json::Value::String(v.clone()));
+                    }
+                    metadata.insert("labels".to_string(), serde_json::Value::Object(lmap));
+                }
+                if !vol_annotations.is_empty() {
+                    metadata.insert(
+                        "annotations".to_string(),
+                        serde_json::Value::Object(vol_annotations),
+                    );
+                }
+                metadata.insert(
+                    "name".to_string(),
+                    serde_json::Value::String(vol.name.clone()),
+                );
+                let pvc_doc = serde_json::json!({
+                    "apiVersion": "v1",
+                    "kind": "PersistentVolumeClaim",
+                    "metadata": metadata,
+                    "spec": {
+                        "accessModes": ["ReadWriteOnce"],
+                        "resources": {
+                            "requests": {
+                                "storage": "1Gi"
+                            }
+                        }
+                    },
+                    "status": {}
+                });
+                let mut yaml_str = serde_yaml::to_string(&pvc_doc)?;
+                yaml_str = yaml_str.replace(
+                    &format!("creationTimestamp: {}", creation_ts),
+                    &format!("creationTimestamp: \"{}\"", creation_ts),
+                );
+                if let Some(out_file) = &args.filename {
+                    if let Some(parent) = Path::new(out_file).parent() {
+                        if !parent.as_os_str().is_empty() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                    }
+                    fs::write(out_file, &yaml_str)?;
+                }
+                return Ok(yaml_str);
+            }
+            crate::cli::usage_errors::exit_usage_error(format!(
+                "name or ID \"{}\" not found",
+                target
+            ));
+        }
+
+        // Check if multiple container targets are passed to merge into a single Pod
+        let all_containers = args.targets.len() > 1
+            && args
+                .targets
+                .iter()
+                .all(|t| p_store.find(t).is_none() && c_store.find(t).is_some());
+
+        let (pod_name, app_label, pod_opt, containers, pod_ports) = if all_containers {
+            let mut conts = Vec::new();
+            for t in &args.targets {
+                let c = c_store.find(t).unwrap();
+                let cfg_path = Path::new(&c.bundle_path).join("config.json");
+                if let Ok(raw) = fs::read_to_string(&cfg_path) {
+                    if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&raw) {
+                        if let Some(ann) = &spec.annotations {
+                            if let Some(pod_id) = ann.get("boxr.pod") {
+                                if !pod_id.is_empty() {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "container {} is associated with pod {}: use generate on the pod itself",
+                                        c.id, pod_id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                conts.push(c);
+            }
+            let pname = format!("{}-pod", conts[0].name.replace('_', ""));
+            (pname.clone(), pname, None, conts, Vec::new())
+        } else if let Some(pod) = p_store.find(target) {
             let infra_name = p_store.infra_name(&pod);
             let mut conts = Vec::new();
             for cid in &pod.containers {
@@ -1492,7 +1689,10 @@ impl KubeManager {
                     if let Ok(raw) = fs::read_to_string(&cfg_path) {
                         if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&raw) {
                             if let Some(ann) = &spec.annotations {
-                                if ann.get("boxr.pod").is_some_and(|p| p == &pod.id || p == &pod.name) {
+                                if ann
+                                    .get("boxr.pod")
+                                    .is_some_and(|p| p == &pod.id || p == &pod.name)
+                                {
                                     conts.push(c);
                                 }
                             }
@@ -1506,49 +1706,126 @@ impl KubeManager {
                     pod.id
                 ));
             }
-            let pname = pod.name.clone();
+            let pname = pod.name.replace('_', "");
             let pports = pod.ports.clone();
             (pname.clone(), pname, Some(pod), conts, pports)
         } else if let Some(c) = c_store.find(target) {
-            let pname = format!("{}-pod", c.name);
+            let cfg_path = Path::new(&c.bundle_path).join("config.json");
+            if let Ok(raw) = fs::read_to_string(&cfg_path) {
+                if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&raw) {
+                    if let Some(ann) = &spec.annotations {
+                        if let Some(pod_id) = ann.get("boxr.pod") {
+                            if !pod_id.is_empty() {
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "container {} is associated with pod {}: use generate on the pod itself",
+                                    c.id, pod_id
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            let pname = format!("{}-pod", c.name.replace('_', ""));
             (pname.clone(), pname, None, vec![c], Vec::new())
         } else {
-            return Err(anyhow!("No such container or pod: '{}'", target));
+            crate::cli::usage_errors::exit_usage_error(format!(
+                "name or ID \"{}\" not found",
+                target
+            ));
         };
 
         let mut kube_containers = Vec::new();
+        let mut kube_init_containers = Vec::new();
         let mut kube_volumes: Vec<KubeVolume> = Vec::new();
         let mut seen_vol_names = std::collections::HashSet::new();
+        let mut metadata_annotations = HashMap::new();
+        let mut dns_nameservers = Vec::new();
+        let mut dns_searches = Vec::new();
+        let mut dns_options: Vec<KubeDnsOption> = Vec::new();
+        let mut host_aliases: Vec<KubeHostAlias> = Vec::new();
+        let mut pod_hostname: Option<String> = None;
+        let mut pod_termination_grace: Option<i64> = None;
+        let mut pod_host_network = false;
+        let mut pod_host_users: Option<bool> = None;
+        let mut pod_share_pid: Option<bool> = None;
+        let mut pod_restart_policy: Option<String> = None;
+        let mut service_ports: Vec<serde_json::Value> = Vec::new();
 
-        for (idx, c) in containers.iter().enumerate() {
-            let mut ports = Vec::new();
-            for p in &c.ports {
-                ports.push(KubeContainerPort {
-                    container_port: p.container_port,
-                    host_port: if p.host_port > 0 { Some(p.host_port) } else { None },
-                    host_ip: p.host_ip.clone(),
-                    protocol: if p.protocol.eq_ignore_ascii_case("tcp") || p.protocol.is_empty() {
-                        None
-                    } else {
-                        Some(p.protocol.to_uppercase())
-                    },
-                });
+        if let Some(p) = &pod_opt {
+            if let Some(u) = &p.userns {
+                metadata_annotations.insert("io.podman.annotations.userns".to_string(), u.clone());
+                if u.starts_with("auto") {
+                    pod_host_users = Some(false);
+                }
             }
-            if idx == 0 && ports.is_empty() && !pod_ports.is_empty() {
-                for p in &pod_ports {
-                    ports.push(KubeContainerPort {
-                        container_port: p.container_port,
-                        host_port: if p.host_port > 0 { Some(p.host_port) } else { None },
-                        host_ip: p.host_ip.clone(),
-                        protocol: if p.protocol.eq_ignore_ascii_case("tcp") || p.protocol.is_empty() {
-                            None
-                        } else {
-                            Some(p.protocol.to_uppercase())
-                        },
+            if let Some(inm) = &p.infra_name {
+                if !inm.trim().is_empty() {
+                    metadata_annotations.insert(
+                        "io.podman.annotations.infra.name".to_string(),
+                        inm.trim().to_string(),
+                    );
+                }
+            }
+            if p.network.as_deref() == Some("host") {
+                pod_host_network = true;
+            }
+            if p.share_pid {
+                pod_share_pid = Some(true);
+            }
+            let sandbox_id = if p.infra && !p.infra_container_id.is_empty() {
+                p.infra_container_id.clone()
+            } else {
+                p.id.clone()
+            };
+            for c in &containers {
+                let cname_clean = c.name.replace('_', "");
+                metadata_annotations.insert(
+                    format!("io.kubernetes.cri-o.SandboxID/{}", cname_clean),
+                    sandbox_id.clone(),
+                );
+            }
+            for ns in &p.dns {
+                if !dns_nameservers.contains(ns) {
+                    dns_nameservers.push(ns.clone());
+                }
+            }
+            for srch in &p.dns_search {
+                if !dns_searches.contains(srch) {
+                    dns_searches.push(srch.clone());
+                }
+            }
+            for opt in &p.dns_option {
+                let (name, val) = if let Some((k, v)) = opt.split_once(':') {
+                    (k.to_string(), Some(v.to_string()))
+                } else {
+                    (opt.clone(), None)
+                };
+                dns_options.push(KubeDnsOption { name, value: val });
+            }
+            for ah in &p.add_host {
+                if let Some((host, ip)) = ah.split_once(':') {
+                    let ip_trim = ip.trim().to_string();
+                    let host_trim = host.trim().to_string();
+                    host_aliases.push(KubeHostAlias {
+                        ip: ip_trim,
+                        hostnames: vec![host_trim],
                     });
                 }
             }
+            if let Some(rp) = &p.restart_policy {
+                let mapped = match rp.trim().to_lowercase().as_str() {
+                    "" => None,
+                    "always" | "unless-stopped" => Some("Always".to_string()),
+                    "on-failure" => Some("OnFailure".to_string()),
+                    s if s.starts_with("on-failure:") => Some("OnFailure".to_string()),
+                    "no" | "never" | "none" => Some("Never".to_string()),
+                    _ => None,
+                };
+                pod_restart_policy = mapped;
+            }
+        }
 
+        for (idx, c) in containers.iter().enumerate() {
             let bundle_path = PathBuf::from(&c.bundle_path);
             let spec: Option<crate::oci::runtime::Spec> =
                 fs::read_to_string(bundle_path.join("config.json"))
@@ -1566,6 +1843,282 @@ impl KubeManager {
                 .and_then(|s| s.annotations.clone())
                 .unwrap_or_default();
 
+            let init_ctr_type = annotations.get("boxr.init_ctr").map(|s| s.as_str());
+            if init_ctr_type == Some("once") {
+                if let Some(p) = &pod_opt {
+                    if p.status == "Running" || p.status == "Exited" {
+                        continue;
+                    }
+                }
+            }
+
+            let short_name = c
+                .name
+                .strip_prefix(&format!("{}-", pod_name))
+                .unwrap_or(&c.name)
+                .to_string();
+
+            if annotations.get("boxr.network").map(|s| s.as_str()) == Some("host") {
+                pod_host_network = true;
+            }
+
+            if let Ok(raw_dns) = fs::read_to_string(bundle_path.join("dns.json")) {
+                if let Ok(list) = serde_json::from_str::<Vec<String>>(&raw_dns) {
+                    for ns in list {
+                        if !dns_nameservers.contains(&ns) {
+                            dns_nameservers.push(ns);
+                        }
+                    }
+                }
+            }
+            if let Ok(raw_srch) = fs::read_to_string(bundle_path.join("dns_search.json")) {
+                if let Ok(list) = serde_json::from_str::<Vec<String>>(&raw_srch) {
+                    for s in list {
+                        if !dns_searches.contains(&s) {
+                            dns_searches.push(s);
+                        }
+                    }
+                }
+            }
+            if let Ok(raw_opt) = fs::read_to_string(bundle_path.join("dns_option.json")) {
+                if let Ok(list) = serde_json::from_str::<Vec<String>>(&raw_opt) {
+                    for opt in list {
+                        let (name, val) = if let Some((k, v)) = opt.split_once(':') {
+                            (k.to_string(), Some(v.to_string()))
+                        } else {
+                            (opt, None)
+                        };
+                        dns_options.push(KubeDnsOption { name, value: val });
+                    }
+                }
+            }
+
+            if pod_opt.is_none() {
+                if let Ok(raw_cmd) = fs::read_to_string(bundle_path.join("create_command.json")) {
+                    if let Ok(argv) = serde_json::from_str::<Vec<String>>(&raw_cmd) {
+                        let mut k = 0;
+                        while k < argv.len() {
+                            if argv[k] == "--restart" && k + 1 < argv.len() {
+                                let rp = argv[k + 1].trim().to_lowercase();
+                                pod_restart_policy = match rp.as_str() {
+                                    "" => None,
+                                    "always" | "unless-stopped" => Some("Always".to_string()),
+                                    "on-failure" => Some("OnFailure".to_string()),
+                                    s if s.starts_with("on-failure:") => Some("OnFailure".to_string()),
+                                    "no" | "never" | "none" => Some("Never".to_string()),
+                                    _ => None,
+                                };
+                                break;
+                            } else if let Some(rp) = argv[k].strip_prefix("--restart=") {
+                                let rp = rp.trim().to_lowercase();
+                                pod_restart_policy = match rp.as_str() {
+                                    "" => None,
+                                    "always" | "unless-stopped" => Some("Always".to_string()),
+                                    "on-failure" => Some("OnFailure".to_string()),
+                                    s if s.starts_with("on-failure:") => Some("OnFailure".to_string()),
+                                    "no" | "never" | "none" => Some("Never".to_string()),
+                                    _ => None,
+                                };
+                                break;
+                            }
+                            k += 1;
+                        }
+                    }
+                }
+            }
+
+            if let Some(p) = &pod_opt {
+                if !p.share_uts && pod_hostname.is_none() {
+                    if let Some(sp) = &spec {
+                        if let Some(h) = &sp.hostname {
+                            if !h.is_empty() && h != &c.name && h != &p.name && !c.id.starts_with(h) {
+                                pod_hostname = Some(h.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(st) = annotations.get("boxr.stop_timeout") {
+                if let Ok(secs) = st.parse::<i64>() {
+                    pod_termination_grace = Some(secs);
+                }
+            }
+
+            if let Ok(raw_labels) = fs::read_to_string(bundle_path.join("labels.json")) {
+                if let Ok(lbls) = serde_json::from_str::<Vec<String>>(&raw_labels) {
+                    for l in lbls {
+                        if let Some((k, v)) = l.split_once('=') {
+                            if k == "io.containers.autoupdate"
+                                || k == "io.containers.autoupdate.authfile"
+                            {
+                                metadata_annotations
+                                    .insert(format!("{}/{}", k, short_name), v.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Ok(raw_ul) = fs::read_to_string(bundle_path.join("ulimits.json")) {
+                if let Ok(uls) = serde_json::from_str::<Vec<String>>(&raw_ul) {
+                    if !uls.is_empty() {
+                        metadata_annotations.insert(
+                            "io.podman.annotations.ulimit".to_string(),
+                            uls.join(","),
+                        );
+                    }
+                }
+            }
+
+            if let Some(raw_vols) = annotations.get("boxr.raw_volumes") {
+                if let Ok(vlist) = serde_json::from_str::<Vec<String>>(raw_vols) {
+                    for v in vlist {
+                        let parts: Vec<&str> = v.split(':').collect();
+                        if parts.len() >= 3 && parts[0].starts_with('/') {
+                            let src_p = Path::new(parts[0])
+                                .canonicalize()
+                                .unwrap_or_else(|_| PathBuf::from(parts[0]));
+                            let opts = parts[2..].join(":");
+                            metadata_annotations.insert(
+                                "bind-mount-options".to_string(),
+                                format!("{}:{}", src_p.display(), opts),
+                            );
+                            metadata_annotations.insert(
+                                format!("bind-mount-options:{}", src_p.display()),
+                                opts,
+                            );
+                        }
+                    }
+                }
+            }
+
+            if args.podman_only {
+                if let Some(vf) = annotations.get("boxr.volumes_from") {
+                    metadata_annotations.insert(
+                        format!("io.podman.annotations.volumes-from/{}", short_name),
+                        vf.clone(),
+                    );
+                }
+                if annotations.get("boxr.rm").map(|s| s.as_str()) == Some("true")
+                    || bundle_path.join("auto_remove").exists()
+                {
+                    metadata_annotations.insert(
+                        format!("io.podman.annotations.autoremove/{}", short_name),
+                        "TRUE".to_string(),
+                    );
+                }
+                if annotations.get("boxr.privileged").map(|s| s.as_str()) == Some("true") {
+                    metadata_annotations.insert(
+                        format!("io.podman.annotations.privileged/{}", short_name),
+                        "TRUE".to_string(),
+                    );
+                }
+                if annotations.get("boxr.init").map(|s| s.as_str()) == Some("true") {
+                    metadata_annotations.insert(
+                        format!("io.podman.annotations.init/{}", short_name),
+                        "TRUE".to_string(),
+                    );
+                }
+                if let Some(cf) = annotations.get("boxr.cidfile") {
+                    metadata_annotations.insert(
+                        format!("io.podman.annotations.cid-file/{}", short_name),
+                        cf.clone(),
+                    );
+                }
+                if annotations.get("boxr.publish_all").map(|s| s.as_str()) == Some("true") {
+                    metadata_annotations.insert(
+                        format!("io.podman.annotations.publish-all/{}", short_name),
+                        "TRUE".to_string(),
+                    );
+                }
+                if let Some(sec_json) = annotations.get("boxr.security_opt") {
+                    if let Ok(sec_list) = serde_json::from_str::<Vec<String>>(sec_json) {
+                        for item in sec_list {
+                            if let Some(v) = item.strip_prefix("seccomp=") {
+                                metadata_annotations.insert(
+                                    format!("io.podman.annotations.seccomp/{}", short_name),
+                                    v.to_string(),
+                                );
+                            } else if let Some(v) = item.strip_prefix("apparmor=") {
+                                metadata_annotations.insert(
+                                    format!("io.podman.annotations.apparmor/{}", short_name),
+                                    v.to_string(),
+                                );
+                            } else if let Some(v) = item.strip_prefix("label=") {
+                                metadata_annotations.insert(
+                                    format!("io.podman.annotations.label/{}", short_name),
+                                    v.to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut ports = Vec::new();
+            for p in &c.ports {
+                let hp = if args.service {
+                    None
+                } else if p.host_port > 0 {
+                    Some(p.host_port)
+                } else {
+                    None
+                };
+                let proto = if p.protocol.eq_ignore_ascii_case("tcp") || p.protocol.is_empty() {
+                    None
+                } else {
+                    Some(p.protocol.to_uppercase())
+                };
+                ports.push(KubeContainerPort {
+                    container_port: p.container_port,
+                    host_port: hp,
+                    host_ip: p.host_ip.clone(),
+                    protocol: proto.clone(),
+                });
+                if args.service {
+                    let s_port = if p.host_port > 0 { p.host_port } else { p.container_port };
+                    service_ports.push(serde_json::json!({
+                        "name": p.container_port.to_string(),
+                        "port": s_port,
+                        "targetPort": p.container_port,
+                        "protocol": proto.unwrap_or_else(|| "TCP".to_string()),
+                    }));
+                }
+            }
+            if idx == 0 && ports.is_empty() && !pod_ports.is_empty() {
+                for p in &pod_ports {
+                    let hp = if args.service {
+                        None
+                    } else if p.host_port > 0 {
+                        Some(p.host_port)
+                    } else {
+                        None
+                    };
+                    let proto = if p.protocol.eq_ignore_ascii_case("tcp") || p.protocol.is_empty() {
+                        None
+                    } else {
+                        Some(p.protocol.to_uppercase())
+                    };
+                    ports.push(KubeContainerPort {
+                        container_port: p.container_port,
+                        host_port: hp,
+                        host_ip: p.host_ip.clone(),
+                        protocol: proto.clone(),
+                    });
+                    if args.service {
+                        let s_port = if p.host_port > 0 { p.host_port } else { p.container_port };
+                        service_ports.push(serde_json::json!({
+                            "name": p.container_port.to_string(),
+                            "port": s_port,
+                            "targetPort": p.container_port,
+                            "protocol": proto.unwrap_or_else(|| "TCP".to_string()),
+                        }));
+                    }
+                }
+            }
+
+            let is_privileged = annotations.get("boxr.privileged").map(|s| s.as_str()) == Some("true");
             let cap_drop: Vec<String> = annotations
                 .get("boxr.cap_drop")
                 .and_then(|v| serde_json::from_str(v).ok())
@@ -1574,7 +2127,7 @@ impl KubeManager {
                 .get("boxr.cap_add")
                 .and_then(|v| serde_json::from_str(v).ok())
                 .unwrap_or_default();
-            let capabilities_val = if !cap_drop.is_empty() || !cap_add.is_empty() {
+            let capabilities_val = if !is_privileged && (!cap_drop.is_empty() || !cap_add.is_empty()) {
                 let mut caps = serde_json::Map::new();
                 if !cap_drop.is_empty() {
                     let norm_drops: Vec<serde_json::Value> = cap_drop
@@ -1614,8 +2167,13 @@ impl KubeManager {
                             proc_mount = Some("Unmasked".to_string());
                         } else if let Some(l) = item.strip_prefix("label=level:") {
                             level = Some(l.to_string());
-                        } else if let Some(ft) = item.strip_prefix("label=filetype:") {
+                        } else if let Some(ft) = item
+                            .strip_prefix("label=filetype:")
+                            .or_else(|| item.strip_prefix("label=type:"))
+                        {
                             filetype = Some(ft.to_string());
+                        } else if item == "label=disable" {
+                            filetype = Some("spc_t".to_string());
                         }
                     }
                     if level.is_some() || filetype.is_some() {
@@ -1624,16 +2182,77 @@ impl KubeManager {
                 }
             }
 
+            let img_rec = i_store.find(&c.image);
+            let img_user = img_rec
+                .as_ref()
+                .and_then(|r| r.config.config.as_ref())
+                .and_then(|cfg| cfg.user.clone())
+                .filter(|u| !u.is_empty());
+
+            let mut run_as_user = None;
+            let mut run_as_group = None;
+            let mut run_as_non_root = None;
+            let mut user_from_image_only = false;
+            if let Some(u_str) = annotations.get("boxr.user") {
+                if let Some((u_part, g_part)) = u_str.split_once(':') {
+                    if let Ok(uid) = u_part.parse::<u32>() {
+                        run_as_user = Some(uid);
+                        if uid > 0 {
+                            run_as_non_root = Some(true);
+                        }
+                    }
+                    if let Ok(gid) = g_part.parse::<u32>() {
+                        run_as_group = Some(gid);
+                    }
+                } else if let Ok(uid) = u_str.parse::<u32>() {
+                    run_as_user = Some(uid);
+                    if uid > 0 {
+                        run_as_non_root = Some(true);
+                    }
+                } else {
+                    user_from_image_only = true;
+                }
+            } else if let Some(ref iu) = img_user {
+                user_from_image_only = true;
+                if let Ok(uid) = iu.parse::<u32>() {
+                    if uid > 0 {
+                        run_as_non_root = Some(true);
+                    }
+                }
+            }
+
+            let sec_ctx = if readonly
+                || is_privileged
+                || run_as_non_root.is_some()
+                || run_as_user.is_some()
+                || run_as_group.is_some()
+                || selinux_opts.is_some()
+                || proc_mount.is_some()
+                || capabilities_val.is_some()
+                || user_from_image_only
+            {
+                Some(KubeSecurityContext {
+                    read_only_root_filesystem: if readonly { Some(true) } else { None },
+                    privileged: if is_privileged { Some(true) } else { None },
+                    run_as_non_root,
+                    run_as_user,
+                    run_as_group,
+                    selinux_options: selinux_opts,
+                    proc_mount,
+                    capabilities: capabilities_val,
+                })
+            } else {
+                None
+            };
+
             let mut vol_mounts: Vec<KubeVolumeMount> = Vec::new();
             for m in mounts {
                 if let Some(vname) = &m.volume_name {
-                    let pvc_name = format!(
-                        "{}-pvc",
-                        sanitize_k8s_volume_name(vname)
-                    );
+                    let pvc_name = format!("{}-pvc", sanitize_k8s_volume_name(vname));
                     vol_mounts.push(KubeVolumeMount {
                         name: pvc_name.clone(),
                         mount_path: m.destination,
+                        sub_path: m.subpath.clone(),
                         read_only: if m.read_only { Some(true) } else { None },
                     });
                     if seen_vol_names.insert(pvc_name.clone()) {
@@ -1655,6 +2274,7 @@ impl KubeManager {
                     vol_mounts.push(KubeVolumeMount {
                         name: host_vol_name.clone(),
                         mount_path: m.destination,
+                        sub_path: None,
                         read_only: if m.read_only { Some(true) } else { None },
                     });
                     if seen_vol_names.insert(host_vol_name.clone()) {
@@ -1671,47 +2291,187 @@ impl KubeManager {
                 }
             }
 
-            let short_name = c
-                .name
-                .strip_prefix(&format!("{}-", pod_name))
-                .unwrap_or(&c.name)
-                .to_string();
+            // Command and Args logic
+            let img_rec = i_store.find(&c.image);
+            let img_entrypoint = img_rec
+                .as_ref()
+                .and_then(|r| r.config.config.as_ref())
+                .and_then(|cfg| cfg.entrypoint.clone())
+                .unwrap_or_default();
+            let explicit_ep = annotations.get("boxr.explicit_entrypoint");
+            let explicit_cmd: Option<Vec<String>> = annotations
+                .get("boxr.explicit_command")
+                .and_then(|s| serde_json::from_str(s).ok());
 
-            kube_containers.push(KubeContainerSpec {
+            let (kube_cmd, kube_args) = if let Some(ep_str) = explicit_ep {
+                let ep_vec = crate::parse_entrypoint_override(ep_str);
+                (
+                    if ep_vec.is_empty() { None } else { Some(ep_vec) },
+                    explicit_cmd.filter(|v| !v.is_empty()),
+                )
+            } else if !img_entrypoint.is_empty() {
+                (None, explicit_cmd.filter(|v| !v.is_empty()))
+            } else if let Some(cmd_vec) = explicit_cmd {
+                (if cmd_vec.is_empty() { None } else { Some(cmd_vec) }, None)
+            } else {
+                (None, None)
+            };
+
+            let kube_env: Option<Vec<KubeEnvVar>> = annotations
+                .get("boxr.explicit_env")
+                .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                .map(|list| {
+                    list.into_iter()
+                        .filter_map(|item| {
+                            item.split_once('=').map(|(k, v)| KubeEnvVar {
+                                name: k.to_string(),
+                                value: v.to_string(),
+                                value_from: None,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|v| !v.is_empty());
+
+            let kube_workdir = annotations
+                .get("boxr.explicit_workdir")
+                .cloned()
+                .filter(|w| !w.is_empty() && w != "/");
+
+            let mut limits_map = serde_json::Map::new();
+            if let Some(mem) = annotations.get("boxr.memory") {
+                if let Ok(bytes) = mem.parse::<i64>() {
+                    limits_map.insert("memory".to_string(), serde_json::Value::Number(bytes.into()));
+                }
+            }
+            if let Some(cpus) = annotations.get("boxr.cpus") {
+                if let Ok(val) = cpus.parse::<f64>() {
+                    let milli = (val * 1000.0).round() as i64;
+                    limits_map.insert(
+                        "cpu".to_string(),
+                        serde_json::Value::String(format!("{}m", milli)),
+                    );
+                }
+            } else if let Some(quota_str) = annotations.get("boxr.cpu_quota") {
+                if let Ok(quota) = quota_str.parse::<f64>() {
+                    let period = annotations
+                        .get("boxr.cpu_period")
+                        .and_then(|p| p.parse::<f64>().ok())
+                        .unwrap_or(100_000.0);
+                    if period > 0.0 {
+                        let milli = ((quota / period) * 1000.0).round() as i64;
+                        limits_map.insert(
+                            "cpu".to_string(),
+                            serde_json::Value::String(format!("{}m", milli)),
+                        );
+                    }
+                }
+            }
+            let resources = if !limits_map.is_empty() {
+                Some(serde_json::json!({
+                    "limits": limits_map
+                }))
+            } else {
+                None
+            };
+
+            let liveness_probe = if let Some(hcmd) = annotations.get("boxr.health_cmd") {
+                if !hcmd.is_empty() && hcmd != "none" {
+                    let exec_cmd = if let Some(rest) = hcmd.strip_prefix("CMD-SHELL ") {
+                        vec!["/bin/sh".to_string(), "-c".to_string(), rest.to_string()]
+                    } else if let Some(rest) = hcmd.strip_prefix("CMD ") {
+                        rest.split_whitespace().map(|s| s.to_string()).collect()
+                    } else {
+                        vec!["/bin/sh".to_string(), "-c".to_string(), hcmd.clone()]
+                    };
+                    let hs_val: Option<serde_json::Value> =
+                        fs::read_to_string(bundle_path.join("health-supervisor.json"))
+                            .or_else(|_| fs::read_to_string(bundle_path.join("health_supervisor.json")))
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok());
+                    let hc_obj = hs_val
+                        .as_ref()
+                        .and_then(|v| v.get("health_cfg").or_else(|| v.get("config")));
+                    let period = hc_obj
+                        .and_then(|c| c.get("interval_secs"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(30);
+                    let timeout = hc_obj
+                        .and_then(|c| c.get("timeout_secs"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(30);
+                    let retries = hc_obj
+                        .and_then(|c| c.get("retries"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(3) as u32;
+                    let start_period = hc_obj
+                        .and_then(|c| c.get("start_period_secs"))
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                    Some(KubeProbe {
+                        exec: Some(KubeExecAction { command: exec_cmd }),
+                        initial_delay_seconds: if start_period > 0 {
+                            Some(start_period)
+                        } else {
+                            None
+                        },
+                        timeout_seconds: Some(timeout),
+                        period_seconds: Some(period),
+                        failure_threshold: Some(retries),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let k_ctr = KubeContainerSpec {
                 name: short_name,
                 image: c.image.clone(),
-                command: if c.command.is_empty() {
-                    None
-                } else {
-                    Some(c.command.clone())
-                },
-                args: None,
+                command: kube_cmd,
+                args: kube_args,
                 ports: if ports.is_empty() { None } else { Some(ports) },
-                env: None,
-                resources: None,
-                working_dir: None,
-                security_context: Some(KubeSecurityContext {
-                    read_only_root_filesystem: if readonly { Some(true) } else { None },
-                    privileged: None,
-                    run_as_user: None,
-                    run_as_group: None,
-                    selinux_options: selinux_opts,
-                    proc_mount,
-                    capabilities: capabilities_val,
-                }),
+                env: kube_env,
+                resources,
+                working_dir: kube_workdir,
+                security_context: sec_ctx,
                 volume_mounts: if vol_mounts.is_empty() {
                     None
                 } else {
                     Some(vol_mounts)
                 },
-                liveness_probe: None,
-            });
+                liveness_probe,
+            };
+
+            if init_ctr_type.is_some() {
+                kube_init_containers.push(k_ctr);
+            } else {
+                kube_containers.push(k_ctr);
+            }
         }
 
-        let mut metadata_annotations = HashMap::new();
-        if let Some(p) = &pod_opt {
-            if let Some(u) = &p.userns {
-                metadata_annotations.insert("io.podman.annotations.userns".to_string(), u.clone());
+        if effective_type == "deployment" {
+            if let Some(ref rp) = pod_restart_policy {
+                if rp != "Always" {
+                    crate::cli::usage_errors::exit_usage_error(
+                        "k8s Deployments can only have restartPolicy set to Always",
+                    );
+                }
+            }
+        } else if effective_type == "daemonset" {
+            if let Some(ref rp) = pod_restart_policy {
+                if rp != "Always" {
+                    crate::cli::usage_errors::exit_usage_error(
+                        "k8s DaemonSets can only have restartPolicy set to Always",
+                    );
+                }
+            }
+        } else if effective_type == "job" {
+            if pod_restart_policy.as_deref() == Some("Always") {
+                crate::cli::usage_errors::exit_usage_error(
+                    "k8s Jobs can not have restartPolicy set to Always; only Never and OnFailure policies allowed",
+                );
             }
         }
 
@@ -1719,24 +2479,43 @@ impl KubeManager {
         labels.insert("app".to_string(), app_label.clone());
         let creation_ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-        let effective_type = args
-            .kind_type
-            .clone()
-            .or_else(kube_generate_type_from_containers_conf)
-            .unwrap_or_else(|| "pod".to_string())
-            .to_lowercase();
+        let dns_config = if !dns_nameservers.is_empty()
+            || !dns_searches.is_empty()
+            || !dns_options.is_empty()
+        {
+            Some(KubeDnsConfig {
+                nameservers: dns_nameservers,
+                searches: dns_searches,
+                options: dns_options,
+            })
+        } else {
+            None
+        };
 
         let pod_spec = KubePodSpec {
-            hostname: None,
+            hostname: pod_hostname,
             containers: kube_containers,
-            init_containers: None,
+            init_containers: if kube_init_containers.is_empty() {
+                None
+            } else {
+                Some(kube_init_containers)
+            },
             volumes: if kube_volumes.is_empty() {
                 None
             } else {
                 Some(kube_volumes)
             },
-            restart_policy: None,
-            host_network: None,
+            restart_policy: pod_restart_policy,
+            host_network: if pod_host_network { Some(true) } else { None },
+            host_users: pod_host_users,
+            share_process_namespace: pod_share_pid,
+            termination_grace_period_seconds: pod_termination_grace,
+            host_aliases: if host_aliases.is_empty() {
+                None
+            } else {
+                Some(host_aliases)
+            },
+            dns_config,
         };
 
         let mut yaml_str = match effective_type.as_str() {
@@ -1762,7 +2541,38 @@ impl KubeManager {
                                 "creationTimestamp": null,
                                 "labels": {
                                     "app": app_label,
-                                }
+                                },
+                                "name": pod_name,
+                            },
+                            "spec": pod_spec,
+                        }
+                    },
+                    "status": {}
+                });
+                serde_yaml::to_string(&doc)?
+            }
+            "daemonset" => {
+                let doc = serde_json::json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "DaemonSet",
+                    "metadata": {
+                        "creationTimestamp": creation_ts,
+                        "labels": labels,
+                        "name": format!("{}-daemonset", pod_name),
+                    },
+                    "spec": {
+                        "selector": {
+                            "matchLabels": {
+                                "app": app_label,
+                            }
+                        },
+                        "template": {
+                            "metadata": {
+                                "creationTimestamp": null,
+                                "labels": {
+                                    "app": app_label,
+                                },
+                                "name": pod_name,
                             },
                             "spec": pod_spec,
                         }
@@ -1772,6 +2582,10 @@ impl KubeManager {
                 serde_yaml::to_string(&doc)?
             }
             "job" => {
+                let mut job_pod_spec = pod_spec.clone();
+                if job_pod_spec.restart_policy.is_none() {
+                    job_pod_spec.restart_policy = Some("Never".to_string());
+                }
                 let doc = serde_json::json!({
                     "apiVersion": "batch/v1",
                     "kind": "Job",
@@ -1781,14 +2595,17 @@ impl KubeManager {
                         "name": format!("{}-job", pod_name),
                     },
                     "spec": {
+                        "completions": 1,
+                        "parallelism": 1,
                         "template": {
                             "metadata": {
                                 "creationTimestamp": null,
                                 "labels": {
                                     "app": app_label,
-                                }
+                                },
+                                "name": pod_name,
                             },
-                            "spec": pod_spec,
+                            "spec": job_pod_spec,
                         }
                     },
                     "status": {}
@@ -1800,9 +2617,9 @@ impl KubeManager {
                     api_version: "v1".to_string(),
                     kind: "Pod".to_string(),
                     metadata: KubeMetadata {
-                        name: pod_name,
+                        name: pod_name.clone(),
                         creation_timestamp: Some(creation_ts.clone()),
-                        labels,
+                        labels: labels.clone(),
                         annotations: metadata_annotations,
                     },
                     spec: pod_spec,
@@ -1811,18 +2628,71 @@ impl KubeManager {
                 serde_yaml::to_string(&pod_yaml)?
             }
         };
+
+        if args.service {
+            let svc_doc = serde_json::json!({
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {
+                    "creationTimestamp": creation_ts,
+                    "labels": labels,
+                    "name": pod_name,
+                },
+                "spec": {
+                    "ports": service_ports,
+                    "selector": {
+                        "app": app_label,
+                    },
+                    "type": "NodePort",
+                },
+                "status": {
+                    "loadBalancer": {}
+                }
+            });
+            let svc_yaml = serde_yaml::to_string(&svc_doc)?;
+            yaml_str = format!("{}---\n{}", svc_yaml, yaml_str);
+        }
+
         yaml_str = yaml_str.replace(
             &format!("creationTimestamp: {}", creation_ts),
             &format!("creationTimestamp: \"{}\"", creation_ts),
         );
 
         if let Some(out_file) = &args.filename {
+            if let Some(parent) = Path::new(out_file).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
             fs::write(out_file, &yaml_str)?;
         }
         Ok(yaml_str)
     }
 
     pub fn print_or_write_generate_kube(args: &KubeGenerateArgs) -> Result<()> {
+        let p_store = PodStore::new();
+        let c_store = ContainerStore::new();
+        let all_containers = args.targets.len() > 1
+            && args
+                .targets
+                .iter()
+                .all(|t| p_store.find(t).is_none() && c_store.find(t).is_some());
+        if all_containers {
+            let mut merged = args.clone();
+            merged.filename = None;
+            let out = Self::generate_kube_with_args(&merged)?;
+            if let Some(path) = &args.filename {
+                if let Some(parent) = Path::new(path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                }
+                fs::write(path, &out)?;
+            } else {
+                print!("{}", out);
+            }
+            return Ok(());
+        }
         let mut out = String::new();
         for (i, t) in args.targets.iter().enumerate() {
             if i > 0 {
@@ -1834,6 +2704,11 @@ impl KubeManager {
             out.push_str(&Self::generate_kube_with_args(&single)?);
         }
         if let Some(path) = &args.filename {
+            if let Some(parent) = Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
             fs::write(path, &out)?;
         } else {
             print!("{}", out);

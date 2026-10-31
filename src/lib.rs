@@ -1434,21 +1434,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             SystemAction::Connection(conn_args) => {
-                match conn_args.command {
-                    cli::SystemConnectionAction::Ls { format: _, quiet: _ } => {
-                        if !output_policy.suppress_stdout() {
-                            println!("Name        URI         Identity    Default     ReadWrite");
-                        }
-                    }
-                    cli::SystemConnectionAction::Add {
-                        name: _,
-                        uri: _,
-                        ..
-                    } => {}
-                    cli::SystemConnectionAction::Rm { name: _, all: _ } => {}
-                    cli::SystemConnectionAction::Default { name: _ } => {}
-                    cli::SystemConnectionAction::Rename { old: _, new: _ } => {}
-                }
+                handle_system_connection(conn_args, &output_policy)?;
                 Ok(0)
             }
             SystemAction::Migrate => {
@@ -1752,25 +1738,36 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 cli::FarmAction::Create { name, connections } => {
                     let record = manager.create(&name, &connections)?;
                     println!(
-                        "Farm '{}' created with {} connection(s)",
-                        record.name,
-                        record.connections.len()
+                        "Farm \"{}\" created",
+                        record.name
                     );
                 }
-                cli::FarmAction::Ls => {
+                cli::FarmAction::Ls { format } => {
                     let farms = manager.list();
-                    println!(
-                        "{:<20} {:<10} {:<12} {:<30}",
-                        "FARM", "DEFAULT", "READWRITE", "CONNECTIONS"
-                    );
-                    for f in farms {
+                    if let Some(fmt) = format {
+                        for f in farms {
+                            let conns_str = format!("[{}]", f.connections.join(" "));
+                            let mut line = fmt.clone();
+                            line = line.replace("{{.Name}}", &f.name);
+                            line = line.replace("{{.Connections}}", &conns_str);
+                            line = line.replace("{{.Default}}", &f.is_default.to_string());
+                            line = line.replace("{{.ReadWrite}}", &f.read_write.to_string());
+                            println!("{}", line);
+                        }
+                    } else {
                         println!(
                             "{:<20} {:<10} {:<12} {:<30}",
-                            f.name,
-                            f.is_default,
-                            f.read_write,
-                            f.connections.join(", ")
+                            "FARM", "DEFAULT", "READWRITE", "CONNECTIONS"
                         );
+                        for f in farms {
+                            println!(
+                                "{:<20} {:<10} {:<12} {:<30}",
+                                f.name,
+                                f.is_default,
+                                f.read_write,
+                                f.connections.join(", ")
+                            );
+                        }
                     }
                 }
                 cli::FarmAction::Rm { all, names } => {
@@ -2637,9 +2634,19 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
             return Err(anyhow!("invalid pod ID"));
         }
         let store = pod::PodStore::new();
+        let mut pod_ports = Vec::new();
+        for p in &args.ports {
+            pod_ports.extend(PortMapping::parse_all(p)?);
+        }
+        args.ports.clear();
         let pod = store.create_with_config(pod::PodConfig {
             name: Some(new_name.to_string()),
-            hostname: args.hostname.clone(),
+            ports: pod_ports,
+            hostname: args.hostname.take(),
+            dns: std::mem::take(&mut args.dns),
+            dns_search: std::mem::take(&mut args.dns_search),
+            dns_option: std::mem::take(&mut args.dns_option),
+            add_host: std::mem::take(&mut args.add_host),
             ..Default::default()
         })?;
         if let Err(e) = ensure_pod_infra_container(&pod).await {
@@ -3171,6 +3178,59 @@ pub async fn run_container_with_output(
     }
     if args.init {
         annotations.insert("boxr.init".to_string(), "true".to_string());
+    }
+    if let Some(ic) = &args.init_ctr {
+        annotations.insert("boxr.init_ctr".to_string(), ic.clone());
+    }
+    if let Some(ep) = &args.entrypoint {
+        annotations.insert("boxr.explicit_entrypoint".to_string(), ep.clone());
+    }
+    if !args.command.is_empty() {
+        annotations.insert(
+            "boxr.explicit_command".to_string(),
+            serde_json::to_string(&args.command)?,
+        );
+    }
+    if args.workdir.is_some() {
+        annotations.insert("boxr.explicit_workdir".to_string(), spec.process.cwd.clone());
+    }
+    if !args.env.is_empty() || args.env_file.is_some() {
+        let user_envs = resolve_container_env_overrides(
+            &args.env_file,
+            &args.env,
+            cli::RUN_ENV_HOST.get() == Some(&true),
+            cli::HTTP_PROXY_EXPLICIT_FALSE.get() != Some(&true),
+        )?;
+        if !user_envs.is_empty() {
+            annotations.insert(
+                "boxr.explicit_env".to_string(),
+                serde_json::to_string(&user_envs)?,
+            );
+        }
+    }
+    if let Some(p) = args.cpu_period {
+        annotations.insert("boxr.cpu_period".to_string(), p.to_string());
+    }
+    if let Some(q) = args.cpu_quota {
+        annotations.insert("boxr.cpu_quota".to_string(), q.to_string());
+    }
+    if args.rm {
+        annotations.insert("boxr.rm".to_string(), "true".to_string());
+    }
+    if args.publish_all {
+        annotations.insert("boxr.publish_all".to_string(), "true".to_string());
+    }
+    if !args.volumes_from.is_empty() {
+        annotations.insert(
+            "boxr.volumes_from".to_string(),
+            args.volumes_from.join(";"),
+        );
+    }
+    if !args.volumes.is_empty() {
+        annotations.insert(
+            "boxr.raw_volumes".to_string(),
+            serde_json::to_string(&args.volumes)?,
+        );
     }
     if let Some(m) = limits.memory_max_bytes {
         annotations.insert("boxr.memory".to_string(), m.to_string());
@@ -5947,12 +6007,35 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     health::HealthStatus::None => "",
                 };
 
+                let saved_mounts: Vec<volume::MountSpec> =
+                    fs::read_to_string(bundle_path.join("mounts.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                let mounts_json: Vec<serde_json::Value> = saved_mounts
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "Type": if m.volume_name.is_some() { "volume" } else { "bind" },
+                            "Name": m.volume_name.clone().unwrap_or_default(),
+                            "Source": m.source.to_string_lossy().to_string(),
+                            "Destination": m.destination,
+                            "Driver": if m.volume_name.is_some() { "local" } else { "" },
+                            "Mode": "",
+                            "RW": !m.read_only,
+                            "Propagation": "rprivate",
+                            "SubPath": m.subpath.clone().unwrap_or_default(),
+                        })
+                    })
+                    .collect();
+
                 let mut docker_compat_inspect = serde_json::json!({
                     "Id": c.id,
                     "OCIRuntime": oci_runtime,
                     "Created": c.created_at.to_rfc3339(),
                     "Path": c.command.first().cloned().unwrap_or_default(),
                     "Args": if c.command.len() > 1 { c.command[1..].to_vec() } else { Vec::new() },
+                    "Mounts": mounts_json,
                     "State": {
                         "Status": status_label,
                         "Running": is_running,
@@ -6110,6 +6193,12 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .as_ref()
                     .and_then(|c| c.labels.clone())
                     .unwrap_or_default();
+                let config_exposed_ports = i
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.exposed_ports.clone())
+                    .unwrap_or_default();
                 let digest = if i.manifest_digest.starts_with("sha256:") {
                     i.manifest_digest.clone()
                 } else {
@@ -6140,6 +6229,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "Entrypoint": config_entrypoint,
                         "WorkingDir": config_workdir,
                         "Labels": config_labels,
+                        "ExposedPorts": config_exposed_ports,
                     },
                     "boxr_raw": i
                 });
@@ -11352,6 +11442,70 @@ async fn create_only_container_after_pod_prep(
     if args.init {
         annotations.insert("boxr.init".to_string(), "true".to_string());
     }
+    if let Some(ic) = &args.init_ctr {
+        annotations.insert("boxr.init_ctr".to_string(), ic.clone());
+    }
+    if let Some(ep) = &args.entrypoint {
+        annotations.insert("boxr.explicit_entrypoint".to_string(), ep.clone());
+    }
+    if !args.command.is_empty() {
+        annotations.insert(
+            "boxr.explicit_command".to_string(),
+            serde_json::to_string(&args.command)?,
+        );
+    }
+    if args.workdir.is_some() {
+        annotations.insert("boxr.explicit_workdir".to_string(), spec.process.cwd.clone());
+    }
+    if !args.env.is_empty() || args.env_file.is_some() {
+        let user_envs = resolve_container_env_overrides(
+            &args.env_file,
+            &args.env,
+            cli::RUN_ENV_HOST.get() == Some(&true),
+            cli::HTTP_PROXY_EXPLICIT_FALSE.get() != Some(&true),
+        )?;
+        if !user_envs.is_empty() {
+            annotations.insert(
+                "boxr.explicit_env".to_string(),
+                serde_json::to_string(&user_envs)?,
+            );
+        }
+    }
+    if let Some(p) = args.cpu_period {
+        annotations.insert("boxr.cpu_period".to_string(), p.to_string());
+    }
+    if let Some(q) = args.cpu_quota {
+        annotations.insert("boxr.cpu_quota".to_string(), q.to_string());
+    }
+    if args.rm {
+        annotations.insert("boxr.rm".to_string(), "true".to_string());
+    }
+    if args.publish_all {
+        annotations.insert("boxr.publish_all".to_string(), "true".to_string());
+    }
+    if !args.volumes_from.is_empty() {
+        annotations.insert(
+            "boxr.volumes_from".to_string(),
+            args.volumes_from.join(";"),
+        );
+    }
+    if !args.volumes.is_empty() {
+        annotations.insert(
+            "boxr.raw_volumes".to_string(),
+            serde_json::to_string(&args.volumes)?,
+        );
+    }
+    if let Some(cidfile) = &args.cidfile {
+        annotations.insert("boxr.cidfile".to_string(), cidfile.clone());
+        fs::write(cidfile, &container_id)?;
+    }
+    if !args.ulimits.is_empty() {
+        let _ = fs::write(
+            bundle_dir.join("ulimits.json"),
+            serde_json::to_string(&args.ulimits)?,
+        );
+        let _ = ulimit::write_inspect_ulimits(&bundle_dir, &args.ulimits);
+    }
     if let Some(m) = limits.memory_max_bytes {
         annotations.insert("boxr.memory".to_string(), m.to_string());
     }
@@ -15729,9 +15883,17 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
                 }
             }
         }
-    } else if let Some(i) = image_store
-        .find(POD_INFRA_IMAGE)
-        .or_else(|| image_store.find("alpine"))
+    } else if let Some(i) = find_image_with_shortname(&image_store, "alpine", None)
+        .or_else(|| find_image_with_shortname(&image_store, POD_INFRA_IMAGE, None))
+        .or_else(|| find_image_with_shortname(&image_store, "quay.io/libpod/testimage:20241011", None))
+        .or_else(|| find_image_with_shortname(&image_store, "busybox", None))
+        .or_else(|| {
+            image_store.list().into_iter().find(|img| {
+                !img.reference.contains("k8s-pause")
+                    && !img.reference.contains("volume-plugin")
+                    && !img.reference.contains("cirros")
+            })
+        })
         .or_else(|| image_store.list().into_iter().next())
     {
         i.qualified_name()
@@ -15743,7 +15905,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
     let (entrypoint_override, infra_cmd) = if let Some(cmd_str) = &pod.infra_command {
         (Some(cmd_str.clone()), Vec::new())
     } else {
-        (None, vec!["sleep".to_string(), "infinity".to_string()])
+        (None, vec!["sleep".to_string(), "86400".to_string()])
     };
 
     let mut infra_annotations = Vec::new();
@@ -15903,6 +16065,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         pod: None,
         rootfs: None,
         default_mounts_file: None,
+        init_ctr: None,
         timeout: None,
         sdnotify: None,
         cgroups: None,
@@ -17112,8 +17275,18 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
             }
         }
         GenerateAction::Spec(spec_args) => {
-            let json = specgen::SpecgenManager::generate_spec(&spec_args.target)?;
-            println!("{}", json);
+            let clone_name = spec_args.name.unwrap_or(true);
+            let json = specgen::SpecgenManager::generate_spec_with_opts(
+                &spec_args.target,
+                spec_args.compact,
+                clone_name,
+            )?;
+            if let Some(ref path) = spec_args.filename {
+                fs::write(path, &json)?;
+                println!("{}", path);
+            } else {
+                println!("{}", json);
+            }
         }
     }
     Ok(())
@@ -18551,6 +18724,227 @@ pub fn handle_context(args: cli::ContextSubcommands) -> Result<()> {
             }
             fs::write(&ctx_file, serde_json::to_string_pretty(&data)?)?;
             println!("Successfully updated context \"{}\"", name);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct SystemConnectionRecord {
+    name: String,
+    uri: String,
+    identity: String,
+    tls_ca: String,
+    tls_cert: String,
+    tls_key: String,
+    is_default: bool,
+    read_write: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct SystemConnectionStore {
+    connections: Vec<SystemConnectionRecord>,
+}
+
+fn system_connections_file_path() -> PathBuf {
+    if let Ok(p) = std::env::var("PODMAN_CONNECTIONS_CONF") {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    storage::boxr_home().join("connections.json")
+}
+
+pub fn handle_system_connection(
+    args: cli::SystemConnectionSubcommands,
+    output_policy: &CliOutputPolicy,
+) -> Result<()> {
+    let conn_file = system_connections_file_path();
+    let mut store: SystemConnectionStore = if conn_file.exists() {
+        fs::read_to_string(&conn_file)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    } else {
+        SystemConnectionStore::default()
+    };
+
+    let save_store = |st: &SystemConnectionStore| -> Result<()> {
+        if let Some(parent) = conn_file.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(&conn_file, serde_json::to_string_pretty(st)?)?;
+        Ok(())
+    };
+
+    match args.command {
+        cli::SystemConnectionAction::Ls { format, quiet } => {
+            if output_policy.suppress_stdout() {
+                return Ok(());
+            }
+            if quiet {
+                for c in &store.connections {
+                    println!("{}", c.name);
+                }
+                return Ok(());
+            }
+            if let Some(fmt) = format {
+                if fmt == "tls" {
+                    println!(
+                        "{:<11} {:<11} {:<11} {:<11} {:<11} {:<11} {:<11} {:<9}",
+                        "Name", "URI", "Identity", "TLSCA", "TLSCert", "TLSKey", "Default", "ReadWrite"
+                    );
+                    for c in &store.connections {
+                        println!(
+                            "{:<11} {:<11} {:<11} {:<11} {:<11} {:<11} {:<11} {:<9}",
+                            c.name,
+                            c.uri,
+                            c.identity,
+                            c.tls_ca,
+                            c.tls_cert,
+                            c.tls_key,
+                            c.is_default,
+                            c.read_write
+                        );
+                    }
+                    return Ok(());
+                }
+                if fmt == "json" {
+                    let arr: Vec<_> = store
+                        .connections
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "Name": c.name,
+                                "URI": c.uri,
+                                "Identity": c.identity,
+                                "TLSCA": c.tls_ca,
+                                "TLSCert": c.tls_cert,
+                                "TLSKey": c.tls_key,
+                                "Default": c.is_default,
+                                "ReadWrite": c.read_write,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&arr)?);
+                    return Ok(());
+                }
+                for c in &store.connections {
+                    let mut line = fmt.clone();
+                    line = line.replace("{{.Name}}", &c.name);
+                    line = line.replace("{{.URI}}", &c.uri);
+                    line = line.replace("{{.Identity}}", &c.identity);
+                    line = line.replace("{{.TLSCA}}", &c.tls_ca);
+                    line = line.replace("{{.TLSCert}}", &c.tls_cert);
+                    line = line.replace("{{.TLSKey}}", &c.tls_key);
+                    line = line.replace("{{.Default}}", &c.is_default.to_string());
+                    line = line.replace("{{.ReadWrite}}", &c.read_write.to_string());
+                    println!("{}", line);
+                }
+                return Ok(());
+            }
+            println!("Name        URI         Identity    Default     ReadWrite");
+            for c in &store.connections {
+                println!(
+                    "{:<11} {:<11} {:<11} {:<11} {:<9}",
+                    c.name, c.uri, c.identity, c.is_default, c.read_write
+                );
+            }
+        }
+        cli::SystemConnectionAction::Add {
+            name,
+            uri,
+            default,
+            identity,
+            socket_path,
+            farm,
+            tls_ca,
+            tls_cert,
+            tls_key,
+        } => {
+            let raw_uri = uri.unwrap_or_else(|| "unix:///run/podman/podman.sock".to_string());
+            let final_uri = if let Some(sp) = socket_path {
+                let sp_clean = sp.trim_start_matches('/');
+                if raw_uri.starts_with("unix://") {
+                    format!("unix:///{}", sp_clean)
+                } else if raw_uri.starts_with("ssh://") {
+                    let without_scheme = &raw_uri["ssh://".len()..];
+                    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+                    format!("ssh://{}/{}", authority, sp_clean)
+                } else {
+                    raw_uri
+                }
+            } else {
+                raw_uri
+            };
+            let is_first = store.connections.is_empty();
+            let make_default = default || is_first;
+            if make_default {
+                for c in &mut store.connections {
+                    c.is_default = false;
+                }
+            }
+            let rec = SystemConnectionRecord {
+                name: name.clone(),
+                uri: final_uri,
+                identity: identity.unwrap_or_default(),
+                tls_ca: tls_ca.unwrap_or_default(),
+                tls_cert: tls_cert.unwrap_or_default(),
+                tls_key: tls_key.unwrap_or_default(),
+                is_default: make_default,
+                read_write: true,
+            };
+            if let Some(existing) = store.connections.iter_mut().find(|c| c.name == name) {
+                *existing = rec;
+            } else {
+                store.connections.push(rec);
+            }
+            save_store(&store)?;
+            if let Some(farm_name) = farm {
+                let fm = farm::FarmManager::new();
+                if fm.find(&farm_name).is_some() {
+                    let _ = fm.update(&farm_name, &[name], &[], false);
+                } else {
+                    let _ = fm.create(&farm_name, &[name]);
+                }
+            }
+        }
+        cli::SystemConnectionAction::Rm { all, name } => {
+            let fm = farm::FarmManager::new();
+            if all {
+                for c in &store.connections {
+                    let _ = fm.remove_connection_from_all_farms(&c.name);
+                }
+                store.connections.clear();
+                save_store(&store)?;
+            } else if let Some(target) = name {
+                store.connections.retain(|c| c.name != target);
+                let _ = fm.remove_connection_from_all_farms(&target);
+                save_store(&store)?;
+            }
+        }
+        cli::SystemConnectionAction::Default { name } => {
+            if !store.connections.iter().any(|c| c.name == name) {
+                cli::usage_errors::exit_usage_error(format!(
+                    "\"{}\" destination is not defined. See \"podman system connection add\" to create a connection",
+                    name
+                ));
+            }
+            for c in &mut store.connections {
+                c.is_default = c.name == name;
+            }
+            save_store(&store)?;
+        }
+        cli::SystemConnectionAction::Rename { old, new } => {
+            let Some(pos) = store.connections.iter().position(|c| c.name == old) else {
+                cli::usage_errors::exit_usage_error(format!(
+                    "\"{}\" destination is not defined. See \"podman system connection add\" to create a connection",
+                    old
+                ));
+            };
+            store.connections[pos].name = new;
+            save_store(&store)?;
         }
     }
     Ok(())

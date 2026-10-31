@@ -95,6 +95,8 @@ pub struct MountSpec {
     pub tmpfs_mount_data: Option<String>,
     #[serde(default)]
     pub volume_name: Option<String>,
+    #[serde(default)]
+    pub subpath: Option<String>,
     pub is_volume: bool,
 }
 
@@ -161,7 +163,7 @@ pub fn parse_mount_flag(
                 "type" => mount_type = v.trim().to_string(),
                 "source" | "src" => source = v.trim().to_string(),
                 "target" | "destination" | "dst" => target = v.trim().to_string(),
-                "subpath" => subpath = Some(v.trim().to_string()),
+                "subpath" | "volume-subpath" => subpath = Some(v.trim().to_string()),
                 "readonly" | "ro" => ro = v.trim() != "false",
                 "rw" => ro = v.trim() == "false",
                 _ => {}
@@ -225,6 +227,7 @@ pub fn parse_mount_flag(
                     chown_u: false,
                     tmpfs_mount_data: None,
                     volume_name: None,
+                    subpath: None,
                     is_volume: false,
                 });
             }
@@ -261,6 +264,7 @@ pub fn parse_mount_flag(
                 chown_u: false,
                 tmpfs_mount_data: None,
                 volume_name: vol_name,
+                subpath,
                 is_volume: true,
             }])
         }
@@ -285,6 +289,7 @@ pub fn parse_mount_flag(
                 chown_u: false,
                 tmpfs_mount_data: None,
                 volume_name: None,
+                subpath: None,
                 is_volume: false,
             }])
         }
@@ -300,6 +305,7 @@ pub fn parse_mount_flag(
                 chown_u: false,
                 tmpfs_mount_data: Some("mode=755".to_string()),
                 volume_name: None,
+                subpath: None,
                 is_volume: false,
             }])
         }
@@ -315,6 +321,7 @@ pub fn parse_mount_flag(
                 chown_u: false,
                 tmpfs_mount_data: Some("mode=755".to_string()),
                 volume_name: None,
+                subpath: None,
                 is_volume: false,
             }])
         }
@@ -337,6 +344,7 @@ pub fn parse_mount_flag(
                 chown_u: false,
                 tmpfs_mount_data: None,
                 volume_name: None,
+                subpath: None,
                 is_volume: false,
             }])
         }

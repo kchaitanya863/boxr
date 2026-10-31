@@ -22,7 +22,11 @@ pub enum FarmAction {
 
     /// List existing farms
     #[command(alias = "list")]
-    Ls,
+    Ls {
+        /// Format farm output using Go template
+        #[arg(long = "format")]
+        format: Option<String>,
+    },
 
     /// Remove one or more farms
     #[command(alias = "remove")]

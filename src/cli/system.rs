@@ -699,7 +699,16 @@ pub struct PodLogsArgs {
 #[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct GenerateSpecArgs {
-    /// Container name or ID to generate Specgen JSON for
+    /// Print the spec to a file instead of stdout
+    #[arg(short = 'f', long = "filename")]
+    pub filename: Option<String>,
+    /// Print the spec in compact format
+    #[arg(short = 'c', long = "compact")]
+    pub compact: bool,
+    /// Specify a new name for the generated spec
+    #[arg(short = 'n', long = "name", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::builder::BoolishValueParser::new())]
+    pub name: Option<bool>,
+    /// Container or pod name or ID to generate Specgen JSON for
     #[arg(value_name = "TARGET")]
     pub target: String,
 }
@@ -726,7 +735,7 @@ pub enum SystemConnectionAction {
         /// Destination name
         name: String,
         /// Destination URI
-        uri: String,
+        uri: Option<String>,
         /// Default connection
         #[arg(short = 'd', long = "default")]
         default: bool,
@@ -736,6 +745,9 @@ pub enum SystemConnectionAction {
         /// Path to podman socket on remote host
         #[arg(long = "socket-path")]
         socket_path: Option<String>,
+        /// Farm to add connection to
+        #[arg(long = "farm")]
+        farm: Option<String>,
         /// TLS CA cert
         #[arg(long = "tls-ca")]
         tls_ca: Option<String>,

@@ -634,15 +634,18 @@ pub fn container_namespace_path(container_query: &str, ns: &str) -> Result<Strin
 }
 
 pub fn read_container_pid_from_bundle(bundle_path: &Path) -> Option<i32> {
-    for name in ["container.pid", "vm.pid"] {
-        let pid_path = bundle_path.join(name);
-        if let Ok(raw) = fs::read_to_string(&pid_path) {
-            if let Ok(pid) = raw.trim().parse::<i32>() {
-                if pid > 0 {
-                    return Some(pid);
+    for _ in 0..40 {
+        for name in ["container.pid", "vm.pid"] {
+            let pid_path = bundle_path.join(name);
+            if let Ok(raw) = fs::read_to_string(&pid_path) {
+                if let Ok(pid) = raw.trim().parse::<i32>() {
+                    if pid > 0 {
+                        return Some(pid);
+                    }
                 }
             }
         }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
     None
 }
@@ -716,6 +719,11 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
     if pod.share_uts && args.hostname.is_some() {
         crate::cli::usage_errors::exit_usage_error(
             "invalid config provided: cannot set hostname when joining the pod UTS namespace: invalid configuration",
+        );
+    }
+    if pod.share_net && (!args.ports.is_empty() || !args.expose.is_empty() || args.publish_all) {
+        crate::cli::usage_errors::exit_usage_error(
+            "invalid config provided: published or exposed ports must be defined when the pod is created: network cannot be configured when it is shared with a pod",
         );
     }
     let has_infra = pod.infra && !infra_name.is_empty();

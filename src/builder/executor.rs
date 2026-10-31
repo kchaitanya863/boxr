@@ -847,6 +847,12 @@ impl ImageBuilder {
                     current_config.exposed_ports = Some(exposed);
                     cache_key = format!("{}_expose_{}", cache_key, port);
                 }
+                Instruction::ExposeRaw(spec) => {
+                    let mut exposed = current_config.exposed_ports.take().unwrap_or_default();
+                    exposed.insert(spec.clone(), serde_json::json!({}));
+                    current_config.exposed_ports = Some(exposed);
+                    cache_key = format!("{}_expose_{}", cache_key, spec);
+                }
                 Instruction::Label { key, value } => {
                     let k_exp = expand_build_vars(key, &arg_vars, &current_config.env);
                     let v_exp = expand_build_vars(value, &arg_vars, &current_config.env);
@@ -1135,6 +1141,7 @@ fn format_instruction_for_log(
         Instruction::Volume(v) => format!("VOLUME {:?}", v),
         Instruction::User(u) => format!("USER {}", u),
         Instruction::Expose(p) => format!("EXPOSE {}", p),
+        Instruction::ExposeRaw(s) => format!("EXPOSE {}", s),
         Instruction::StopSignal(s) => format!("STOPSIGNAL {}", s),
         Instruction::Shell(s) => format!("SHELL {:?}", s),
         Instruction::Healthcheck(_) => "HEALTHCHECK".to_string(),
