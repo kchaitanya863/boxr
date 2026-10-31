@@ -101,7 +101,7 @@ impl ResourceManager for CgroupV2Manager {
 }
 
 impl CgroupV2Manager {
-    /// Locate or initialize the rootless / system cgroups v2 hierarchy for a container
+    /// locate or initialize the rootless / system cgroups v2 hierarchy for a container or pod
     pub fn new(container_id: &str) -> Result<Self> {
         let base_cgroup = Self::detect_cgroup_root();
         let container_cgroup = base_cgroup.join("boxr").join(container_id);
@@ -113,6 +113,32 @@ impl CgroupV2Manager {
         Ok(Self {
             cgroup_path: container_cgroup,
         })
+    }
+
+    /// Return the cgroup path for an ID without creating the directory.
+    pub fn path_only(container_id: &str) -> Self {
+        let base_cgroup = Self::detect_cgroup_root();
+        let container_cgroup = base_cgroup.join("boxr").join(container_id);
+        Self {
+            cgroup_path: container_cgroup,
+        }
+    }
+
+    pub fn cgroup_path(&self) -> &std::path::Path {
+        &self.cgroup_path
+    }
+
+    pub fn relative_cgroup_path(&self) -> String {
+        let s = self.cgroup_path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix("/sys/fs/cgroup") {
+            if rest.is_empty() {
+                "/".to_string()
+            } else {
+                rest.to_string()
+            }
+        } else {
+            s.to_string()
+        }
     }
 
     fn detect_cgroup_root() -> PathBuf {

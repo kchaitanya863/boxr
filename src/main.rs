@@ -102,6 +102,9 @@ fn main() -> Result<()> {
     rt.block_on(async {
         boxr::cli::log_level::init_from_process_args();
         let raw_argv: Vec<String> = std::env::args().collect();
+        if boxr::compose::provider::try_run_external_compose_provider(&raw_argv) {
+            unreachable!();
+        }
         if boxr::cli::usage_errors::try_print_argv_help(&raw_argv) {
             unreachable!();
         }

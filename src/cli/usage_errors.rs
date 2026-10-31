@@ -79,6 +79,12 @@ fn normalize_usage_line(
     let mut u = usage.trim().to_string();
     u = u.replace("[OPTIONS]", "[options]");
     u = u.replace('<', "").replace('>', "");
+    if (sub_path == ["kube", "generate"] || sub_path == ["generate", "kube"])
+        && u.ends_with("...")
+        && u.contains("{CONTAINER...|POD...|VOLUME...}")
+    {
+        u = u.trim_end_matches("...").to_string();
+    }
     if u.starts_with("podman ") {
         // already prefixed
     } else if let Some(leaf) = sub_path.last() {

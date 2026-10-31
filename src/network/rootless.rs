@@ -300,9 +300,9 @@ impl PortForwardManager {
             #[cfg(all(unix, not(target_os = "macos")))]
             {
                 let sock_path = if p.protocol.eq_ignore_ascii_case("udp") {
-                    bundle_path.join(forward_udp_sock_name(p.container_port))
+                    forward_udp_sock_path(bundle_path, p.container_port)
                 } else {
-                    bundle_path.join(forward_sock_name(p.container_port))
+                    forward_sock_path(bundle_path, p.container_port)
                 };
                 if p.protocol.eq_ignore_ascii_case("udp") {
                     let forwarder = Arc::new(RootlessUdpPortForwarder::new(host_addr, sock_path));
@@ -360,6 +360,34 @@ pub fn forward_udp_sock_name(container_port: u16) -> String {
     format!("forward-udp-{}.sock", container_port)
 }
 
+#[cfg(unix)]
+pub fn forward_sock_path(bundle_path: &Path, container_port: u16) -> std::path::PathBuf {
+    let direct = bundle_path.join(forward_sock_name(container_port));
+    if direct.to_string_lossy().len() <= 100 {
+        return direct;
+    }
+    let cid = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("boxr");
+    let short = &cid[..12.min(cid.len())];
+    std::env::temp_dir().join(format!("bxr-fwd-{}-{}.sock", short, container_port))
+}
+
+#[cfg(unix)]
+pub fn forward_udp_sock_path(bundle_path: &Path, container_port: u16) -> std::path::PathBuf {
+    let direct = bundle_path.join(forward_udp_sock_name(container_port));
+    if direct.to_string_lossy().len() <= 100 {
+        return direct;
+    }
+    let cid = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("boxr");
+    let short = &cid[..12.min(cid.len())];
+    std::env::temp_dir().join(format!("bxr-fwdu-{}-{}.sock", short, container_port))
+}
+
 /// Runs INSIDE the container's network namespace (call after unsharing
 /// CLONE_NEWNET). For each published port, listens on a Unix socket in the
 /// bundle dir and bridges connections to the container's localhost.
@@ -375,7 +403,7 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
     let mut udp_listeners = Vec::new();
     for p in ports {
         if p.protocol.eq_ignore_ascii_case("udp") {
-            let sock_path = bundle_path.join(forward_udp_sock_name(p.container_port));
+            let sock_path = forward_udp_sock_path(bundle_path, p.container_port);
             let _ = std::fs::remove_file(&sock_path);
             match UnixListener::bind(&sock_path) {
                 Ok(l) => udp_listeners.push((p.container_port, l)),
@@ -386,7 +414,7 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                 ),
             }
         } else {
-            let sock_path = bundle_path.join(forward_sock_name(p.container_port));
+            let sock_path = forward_sock_path(bundle_path, p.container_port);
             let _ = std::fs::remove_file(&sock_path);
             match UnixListener::bind(&sock_path) {
                 Ok(l) => tcp_listeners.push((p.container_port, l)),
@@ -423,8 +451,10 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
                         (Ok(mut u2), Ok(mut t2)) => {
                             let h = std::thread::spawn(move || {
                                 let _ = std::io::copy(&mut u2, &mut t2);
+                                let _ = t2.shutdown(std::net::Shutdown::Write);
                             });
                             let _ = std::io::copy(&mut tcp, &mut unix_stream);
+                            let _ = unix_stream.shutdown(std::net::Shutdown::Write);
                             let _ = h.join();
                         }
                         _ => {}

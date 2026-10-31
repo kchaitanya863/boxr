@@ -1,7 +1,9 @@
-use crate::cli::RunArgs;
+use crate::cli::{KubeDownArgs, KubeGenerateArgs, KubePlayArgs, RunArgs};
 use crate::pod::PodStore;
 use crate::storage::ContainerStore;
+use crate::volume::MountSpec;
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -14,44 +16,73 @@ pub struct KubePodYaml {
     pub kind: String,
     pub metadata: KubeMetadata,
     pub spec: KubePodSpec,
+    #[serde(default)]
+    pub status: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubeMetadata {
     pub name: String,
-    #[serde(default)]
+    #[serde(rename = "creationTimestamp", skip_serializing_if = "Option::is_none")]
+    pub creation_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub labels: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub annotations: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubePodSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     pub containers: Vec<KubeContainerSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volumes: Option<Vec<serde_json::Value>>,
+    #[serde(rename = "restartPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<String>,
+    #[serde(rename = "hostNetwork", default, skip_serializing_if = "Option::is_none")]
+    pub host_network: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubeContainerSpec {
     pub name: String,
     pub image: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ports: Option<Vec<KubeContainerPort>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<KubeEnvVar>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<serde_json::Value>,
+    #[serde(rename = "securityContext", default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<serde_json::Value>,
+    #[serde(rename = "volumeMounts", default, skip_serializing_if = "Option::is_none")]
+    pub volume_mounts: Option<Vec<serde_json::Value>>,
+    #[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubeContainerPort {
     #[serde(rename = "containerPort")]
     pub container_port: u16,
-    #[serde(rename = "hostPort")]
+    #[serde(rename = "hostPort", skip_serializing_if = "Option::is_none")]
     pub host_port: Option<u16>,
+    #[serde(rename = "hostIP", default, skip_serializing_if = "Option::is_none")]
+    pub host_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubeEnvVar {
     pub name: String,
-    pub value: String,
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 pub struct KubeManager;
@@ -59,8 +90,30 @@ pub struct KubeManager;
 impl KubeManager {
     /// Play a Kubernetes YAML file (Pod, Deployment, Service, Volume)
     pub async fn play_kube(yaml_path: &Path) -> Result<()> {
-        let content = fs::read_to_string(yaml_path)
-            .with_context(|| format!("Failed to read Kubernetes YAML at {:?}", yaml_path))?;
+        let mut args = KubePlayArgs::default();
+        args.file = yaml_path.to_string_lossy().to_string();
+        args.start = true;
+        Self::play_kube_with_args(&args).await
+    }
+
+    pub async fn play_kube_with_args(args: &KubePlayArgs) -> Result<()> {
+        if args.down {
+            let down_args = KubeDownArgs {
+                file: args.file.clone(),
+                force: false,
+            };
+            return Self::play_kube_down_with_args(&down_args);
+        }
+        let content = if args.file == "-" {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        } else {
+            let yaml_path = Path::new(&args.file);
+            fs::read_to_string(yaml_path)
+                .with_context(|| format!("Failed to read Kubernetes YAML at {:?}", yaml_path))?
+        };
 
         for doc in serde_yaml::Deserializer::from_str(&content) {
             let val = serde_yaml::Value::deserialize(doc)?;
@@ -101,11 +154,18 @@ impl KubeManager {
                         kind: "Pod".to_string(),
                         metadata: KubeMetadata {
                             name: pod_name,
+                            creation_timestamp: None,
                             labels: HashMap::new(),
+                            annotations: HashMap::new(),
                         },
                         spec: KubePodSpec {
+                            hostname: None,
                             containers: containers.clone(),
+                            volumes: None,
+                            restart_policy: None,
+                            host_network: None,
                         },
+                        status: None,
                     };
                     Self::play_pod(pod_yaml).await?;
                 }
@@ -148,7 +208,11 @@ impl KubeManager {
                 }
             }
         }
-        let pod = pod_store.create(Some(&pod_yaml.metadata.name), pod_ports)?;
+        let mut cfg = crate::pod::PodConfig::default();
+        cfg.name = Some(pod_yaml.metadata.name.clone());
+        cfg.ports = pod_ports;
+        cfg.exit_policy = "stop".to_string();
+        let pod = pod_store.create_with_config(cfg)?;
 
         for c_spec in &pod_yaml.spec.containers {
             let container_name = format!("{}-{}", pod.name, c_spec.name);
@@ -165,7 +229,40 @@ impl KubeManager {
             let mut env_vec = Vec::new();
             if let Some(envs) = &c_spec.env {
                 for e in envs {
-                    env_vec.push(format!("{}={}", e.name, e.value));
+                    env_vec.push(format!("{}={}", e.name, e.value.clone().unwrap_or_default()));
+                }
+            }
+
+            let mut security_opt = Vec::new();
+            let mut cap_drop = Vec::new();
+            let mut cap_add = Vec::new();
+            let mut privileged = false;
+            let mut read_only = false;
+            if let Some(sc) = &c_spec.security_context {
+                if sc.get("procMount").and_then(|v| v.as_str()) == Some("Unmasked") {
+                    security_opt.push("unmask=all".to_string());
+                }
+                if sc.get("privileged").and_then(|v| v.as_bool()) == Some(true) {
+                    privileged = true;
+                }
+                if sc.get("readOnlyRootFilesystem").and_then(|v| v.as_bool()) == Some(true) {
+                    read_only = true;
+                }
+                if let Some(caps) = sc.get("capabilities") {
+                    if let Some(drops) = caps.get("drop").and_then(|v| v.as_array()) {
+                        for d in drops {
+                            if let Some(s) = d.as_str() {
+                                cap_drop.push(s.to_string());
+                            }
+                        }
+                    }
+                    if let Some(adds) = caps.get("add").and_then(|v| v.as_array()) {
+                        for a in adds {
+                            if let Some(s) = a.as_str() {
+                                cap_add.push(s.to_string());
+                            }
+                        }
+                    }
                 }
             }
 
@@ -208,7 +305,7 @@ impl KubeManager {
                 health_max_log_size: None,
                 health_log_destination: None,
                 platform: None,
-                privileged: false,
+                privileged,
                 network: "auto".to_string(),
                 disable_content_trust: false,
                 gpus: None,
@@ -222,15 +319,15 @@ impl KubeManager {
                 no_hostname: false,
                 add_host: Vec::new(),
                 shm_size: None,
-                cap_add: Vec::new(),
-                cap_drop: Vec::new(),
-                read_only: false,
+                cap_add,
+                cap_drop,
+                read_only,
                 http_proxy: false,
                 read_only_tmpfs: None,
                 init: false,
                 tmpfs: Vec::new(),
                 devices: Vec::new(),
-                security_opt: Vec::new(),
+                security_opt,
                 cpu_shares: None,
                 cpuset_cpus: None,
                 memory_swap: None,
@@ -329,8 +426,24 @@ impl KubeManager {
 
     /// Tear down resources played via `play kube`.
     pub fn play_kube_down(yaml_path: &Path) -> Result<()> {
-        let content = fs::read_to_string(yaml_path)
-            .with_context(|| format!("Failed to read Kubernetes YAML at {:?}", yaml_path))?;
+        let down_args = KubeDownArgs {
+            file: yaml_path.to_string_lossy().to_string(),
+            force: false,
+        };
+        Self::play_kube_down_with_args(&down_args)
+    }
+
+    pub fn play_kube_down_with_args(args: &KubeDownArgs) -> Result<()> {
+        let content = if args.file == "-" {
+            use std::io::Read;
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        } else {
+            let yaml_path = Path::new(&args.file);
+            fs::read_to_string(yaml_path)
+                .with_context(|| format!("Failed to read Kubernetes YAML at {:?}", yaml_path))?
+        };
 
         for doc in serde_yaml::Deserializer::from_str(&content) {
             if let Ok(val) = serde_yaml::Value::deserialize(doc) {
@@ -399,31 +512,204 @@ impl KubeManager {
 
     /// Generate a Kubernetes Pod YAML for an existing container or pod (boxr generate kube)
     pub fn generate_kube(target: &str) -> Result<String> {
+        let args = KubeGenerateArgs {
+            targets: vec![target.to_string()],
+            ..Default::default()
+        };
+        Self::generate_kube_with_args(&args)
+    }
+
+    pub fn generate_kube_with_args(args: &KubeGenerateArgs) -> Result<String> {
+        let target = args
+            .targets
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| anyhow!("must provide at least one container, pod, or volume name"))?;
+
         let c_store = ContainerStore::new();
         let p_store = PodStore::new();
 
-        let (pod_name, containers) = if let Some(pod) = p_store.find(target) {
+        let (pod_name, app_label, containers, pod_ports) = if let Some(pod) = p_store.find(target) {
+            let infra_name = p_store.infra_name(&pod);
             let mut conts = Vec::new();
             for cid in &pod.containers {
+                if cid == &infra_name || cid == &pod.infra_container_id {
+                    continue;
+                }
                 if let Some(c) = c_store.find(cid) {
+                    if c.name == infra_name || c.id == pod.infra_container_id {
+                        continue;
+                    }
                     conts.push(c);
                 }
             }
-            (pod.name, conts)
+            if conts.is_empty() {
+                // Also check if any containers have `boxr.pod` matching this pod
+                for c in c_store.list() {
+                    if c.name == infra_name || c.id == pod.infra_container_id {
+                        continue;
+                    }
+                    let cfg_path = Path::new(&c.bundle_path).join("config.json");
+                    if let Ok(raw) = fs::read_to_string(&cfg_path) {
+                        if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&raw) {
+                            if let Some(ann) = &spec.annotations {
+                                if ann.get("boxr.pod").is_some_and(|p| p == &pod.id || p == &pod.name) {
+                                    conts.push(c);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if conts.is_empty() {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "pod {} only has an infra container",
+                    pod.id
+                ));
+            }
+            (pod.name.clone(), pod.name.clone(), conts, pod.ports.clone())
         } else if let Some(c) = c_store.find(target) {
-            (c.name.clone(), vec![c])
+            let pname = format!("{}-pod", c.name);
+            (pname.clone(), pname, vec![c], Vec::new())
         } else {
             return Err(anyhow!("No such container or pod: '{}'", target));
         };
 
         let mut kube_containers = Vec::new();
-        for c in containers {
+        let mut kube_volumes: Vec<serde_json::Value> = Vec::new();
+        let mut seen_vol_names = std::collections::HashSet::new();
+
+        for (idx, c) in containers.iter().enumerate() {
             let mut ports = Vec::new();
             for p in &c.ports {
                 ports.push(KubeContainerPort {
                     container_port: p.container_port,
-                    host_port: Some(p.host_port),
+                    host_port: if p.host_port > 0 { Some(p.host_port) } else { None },
+                    host_ip: p.host_ip.clone(),
+                    protocol: if p.protocol.eq_ignore_ascii_case("tcp") || p.protocol.is_empty() {
+                        None
+                    } else {
+                        Some(p.protocol.to_uppercase())
+                    },
                 });
+            }
+            if idx == 0 && ports.is_empty() && !pod_ports.is_empty() {
+                for p in &pod_ports {
+                    ports.push(KubeContainerPort {
+                        container_port: p.container_port,
+                        host_port: if p.host_port > 0 { Some(p.host_port) } else { None },
+                        host_ip: p.host_ip.clone(),
+                        protocol: if p.protocol.eq_ignore_ascii_case("tcp") || p.protocol.is_empty() {
+                            None
+                        } else {
+                            Some(p.protocol.to_uppercase())
+                        },
+                    });
+                }
+            }
+
+            let bundle_path = Path::new(&c.bundle_path);
+            let mut annotations: HashMap<String, String> = HashMap::new();
+            if let Ok(raw_cfg) = fs::read_to_string(bundle_path.join("config.json")) {
+                if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&raw_cfg) {
+                    if let Some(ann) = spec.annotations {
+                        annotations = ann;
+                    }
+                }
+            }
+
+            // Build securityContext from cap_drop / cap_add / security_opt / privileged
+            let mut sec_ctx = serde_json::Map::new();
+            let cap_drop: Vec<String> = annotations
+                .get("boxr.cap_drop")
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_default();
+            let cap_add: Vec<String> = annotations
+                .get("boxr.cap_add")
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_default();
+            if !cap_drop.is_empty() || !cap_add.is_empty() {
+                let mut caps = serde_json::Map::new();
+                if !cap_drop.is_empty() {
+                    let norm_drops: Vec<serde_json::Value> = cap_drop
+                        .iter()
+                        .map(|d| {
+                            let u = d.to_uppercase();
+                            let s = if u.starts_with("CAP_") { u } else { format!("CAP_{}", u) };
+                            serde_json::Value::String(s)
+                        })
+                        .collect();
+                    caps.insert("drop".to_string(), serde_json::Value::Array(norm_drops));
+                }
+                if !cap_add.is_empty() {
+                    let norm_adds: Vec<serde_json::Value> = cap_add
+                        .iter()
+                        .map(|a| {
+                            let u = a.to_uppercase();
+                            let s = if u.starts_with("CAP_") { u } else { format!("CAP_{}", u) };
+                            serde_json::Value::String(s)
+                        })
+                        .collect();
+                    caps.insert("add".to_string(), serde_json::Value::Array(norm_adds));
+                }
+                sec_ctx.insert("capabilities".to_string(), serde_json::Value::Object(caps));
+            }
+
+            let security_opt: Vec<String> = annotations
+                .get("boxr.security_opt")
+                .and_then(|v| serde_json::from_str(v).ok())
+                .unwrap_or_default();
+            if security_opt.iter().any(|s| s == "unmask=all") {
+                sec_ctx.insert(
+                    "procMount".to_string(),
+                    serde_json::Value::String("Unmasked".to_string()),
+                );
+            }
+
+            // Build volumeMounts and pod volumes from mounts.json
+            let mut vol_mounts: Vec<serde_json::Value> = Vec::new();
+            if let Ok(raw_mounts) = fs::read_to_string(bundle_path.join("mounts.json")) {
+                if let Ok(mounts) = serde_json::from_str::<Vec<MountSpec>>(&raw_mounts) {
+                    for m in mounts {
+                        if let Some(vname) = &m.volume_name {
+                            let pvc_name = format!(
+                                "{}-pvc",
+                                sanitize_k8s_volume_name(vname)
+                            );
+                            vol_mounts.push(serde_json::json!({
+                                "mountPath": m.destination,
+                                "name": pvc_name,
+                            }));
+                            if seen_vol_names.insert(pvc_name.clone()) {
+                                kube_volumes.push(serde_json::json!({
+                                    "name": pvc_name,
+                                    "persistentVolumeClaim": {
+                                        "claimName": vname,
+                                    }
+                                }));
+                            }
+                        } else {
+                            let host_vol_name = format!(
+                                "{}-host-{}",
+                                sanitize_k8s_volume_name(&m.source.to_string_lossy()),
+                                kube_volumes.len()
+                            );
+                            vol_mounts.push(serde_json::json!({
+                                "mountPath": m.destination,
+                                "name": host_vol_name,
+                            }));
+                            if seen_vol_names.insert(host_vol_name.clone()) {
+                                kube_volumes.push(serde_json::json!({
+                                    "name": host_vol_name,
+                                    "hostPath": {
+                                        "path": m.source,
+                                        "type": "Directory",
+                                    }
+                                }));
+                            }
+                        }
+                    }
+                }
             }
 
             kube_containers.push(KubeContainerSpec {
@@ -434,24 +720,127 @@ impl KubeManager {
                 } else {
                     Some(c.command.clone())
                 },
+                args: None,
                 ports: if ports.is_empty() { None } else { Some(ports) },
                 env: None,
+                resources: None,
+                security_context: if sec_ctx.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::Value::Object(sec_ctx))
+                },
+                volume_mounts: if vol_mounts.is_empty() {
+                    None
+                } else {
+                    Some(vol_mounts)
+                },
+                working_dir: None,
             });
         }
 
-        let pod_yaml = KubePodYaml {
-            api_version: "v1".to_string(),
-            kind: "Pod".to_string(),
-            metadata: KubeMetadata {
-                name: pod_name,
-                labels: HashMap::new(),
+        let mut labels = HashMap::new();
+        labels.insert("app".to_string(), app_label.clone());
+        let creation_ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        let effective_type = args
+            .kind_type
+            .clone()
+            .or_else(kube_generate_type_from_containers_conf)
+            .unwrap_or_else(|| "pod".to_string())
+            .to_lowercase();
+
+        let pod_spec = KubePodSpec {
+            hostname: None,
+            containers: kube_containers,
+            volumes: if kube_volumes.is_empty() {
+                None
+            } else {
+                Some(kube_volumes)
             },
-            spec: KubePodSpec {
-                containers: kube_containers,
-            },
+            restart_policy: None,
+            host_network: None,
         };
 
-        let yaml_str = serde_yaml::to_string(&pod_yaml)?;
+        let mut yaml_str = match effective_type.as_str() {
+            "deployment" => {
+                let replicas = args.replicas.unwrap_or(1);
+                let doc = serde_json::json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
+                    "metadata": {
+                        "creationTimestamp": creation_ts,
+                        "labels": labels,
+                        "name": format!("{}-deployment", pod_name),
+                    },
+                    "spec": {
+                        "replicas": replicas,
+                        "selector": {
+                            "matchLabels": {
+                                "app": app_label,
+                            }
+                        },
+                        "template": {
+                            "metadata": {
+                                "creationTimestamp": null,
+                                "labels": {
+                                    "app": app_label,
+                                }
+                            },
+                            "spec": pod_spec,
+                        }
+                    },
+                    "status": {}
+                });
+                serde_yaml::to_string(&doc)?
+            }
+            "job" => {
+                let doc = serde_json::json!({
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "creationTimestamp": creation_ts,
+                        "labels": labels,
+                        "name": format!("{}-job", pod_name),
+                    },
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "creationTimestamp": null,
+                                "labels": {
+                                    "app": app_label,
+                                }
+                            },
+                            "spec": pod_spec,
+                        }
+                    },
+                    "status": {}
+                });
+                serde_yaml::to_string(&doc)?
+            }
+            _ => {
+                let pod_yaml = KubePodYaml {
+                    api_version: "v1".to_string(),
+                    kind: "Pod".to_string(),
+                    metadata: KubeMetadata {
+                        name: pod_name,
+                        creation_timestamp: Some(creation_ts.clone()),
+                        labels,
+                        annotations: HashMap::new(),
+                    },
+                    spec: pod_spec,
+                    status: None,
+                };
+                serde_yaml::to_string(&pod_yaml)?
+            }
+        };
+        yaml_str = yaml_str.replace(
+            &format!("creationTimestamp: {}", creation_ts),
+            &format!("creationTimestamp: \"{}\"", creation_ts),
+        );
+
+        if let Some(out_file) = &args.filename {
+            fs::write(out_file, &yaml_str)?;
+        }
         Ok(yaml_str)
     }
 
@@ -482,6 +871,60 @@ impl KubeManager {
             Ok(status.code().unwrap_or(0))
         }
     }
+}
+
+fn sanitize_k8s_volume_name(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "vol".to_string()
+    } else {
+        out
+    }
+}
+
+fn kube_generate_type_from_containers_conf() -> Option<String> {
+    for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
+        let Ok(path) = std::env::var(var) else {
+            continue;
+        };
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') || trimmed.is_empty() || trimmed.starts_with('[') {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim() == "kube_generate_type" {
+                    let val = v
+                        .split('#')
+                        .next()
+                        .unwrap_or(v)
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'');
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

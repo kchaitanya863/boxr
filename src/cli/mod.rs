@@ -242,6 +242,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
+        if a == "--infra=true" {
+            i += 1;
+            continue;
+        }
         if a == "--http-proxy=false" {
             let _ = HTTP_PROXY_EXPLICIT_FALSE.set(true);
             i += 1;
