@@ -182,6 +182,7 @@ pub fn parse_mount_flag(
         && mount_type != "glob"
         && mount_type != "image"
         && mount_type != "devpts"
+        && mount_type != "artifact"
     {
         return Err(anyhow!("invalid filesystem type \"{}\"", mount_type));
     }
@@ -255,6 +256,30 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: None,
                 volume_name: vol_name,
                 is_volume: true,
+            }])
+        }
+        "artifact" => {
+            let store = crate::artifact::ArtifactStore::new();
+            let Some(art) = store.find(&source) else {
+                let display_src = if source.contains(':') {
+                    source.clone()
+                } else {
+                    format!("{}:latest", source)
+                };
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "{}: artifact does not exist",
+                    display_src
+                ));
+            };
+            Ok(vec![MountSpec {
+                source: PathBuf::from(art.file_path),
+                destination: target,
+                read_only: true,
+                noexec,
+                chown_u: false,
+                tmpfs_mount_data: None,
+                volume_name: None,
+                is_volume: false,
             }])
         }
         "ramfs" => {

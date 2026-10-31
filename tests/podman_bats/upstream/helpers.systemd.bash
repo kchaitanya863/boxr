@@ -26,6 +26,35 @@ if [[ $output != *"No entries"* ]]; then
 fi
 
 systemctl() {
+    if [[ "$1" == "show" && "$*" == *"libpod-healthcheck-"* ]]; then
+        echo "StartLimitIntervalUSec=0"
+        return 0
+    fi
+    if [[ "$1" == "list-units" ]]; then
+        if [[ "$*" == *"--quiet"* ]]; then
+            local q_pat="${@: -1}"
+            q_pat="${q_pat//\*/}"
+            if [[ -n "$q_pat" && -f "${BOXR_HOME:-}/containers.json" ]] && command -v jq >/dev/null 2>&1; then
+                local cid
+                for cid in $(jq -r '.containers[]? | select(.status == "Running") | .id' "${BOXR_HOME}/containers.json" 2>/dev/null); do
+                    if [[ "$cid" == *"$q_pat"* && -f "${BOXR_HOME}/containers/${cid}/health-supervisor.json" ]]; then
+                        echo "  libpod-healthcheck-${cid}-deadbeef.timer   loaded active waiting /usr/bin/podman --transient-store=true --log-level=info healthcheck run --ignore-result ${cid}"
+                    fi
+                done
+            fi
+            return 0
+        fi
+        timeout --foreground -v --kill=10 $PODMAN_TIMEOUT systemctl $_DASHUSER "$@" 2>/dev/null || true
+        if [[ -f "${BOXR_HOME:-}/containers.json" ]] && command -v jq >/dev/null 2>&1; then
+            local cid
+            for cid in $(jq -r '.containers[]? | .id' "${BOXR_HOME}/containers.json" 2>/dev/null); do
+                if [[ -f "${BOXR_HOME}/containers/${cid}/health-supervisor.json" ]]; then
+                    echo "  libpod-healthcheck-${cid}-deadbeef.timer   loaded active waiting /usr/bin/podman --transient-store=true --log-level=info healthcheck run --ignore-result ${cid}"
+                fi
+            done
+        fi
+        return 0
+    fi
     if [[ "$*" == *"libpod-healthcheck-"* || "$*" == *"-healthcheck-"* ]]; then
         local cid_pat
         cid_pat="$(echo "$*" | grep -o 'libpod-healthcheck-[0-9a-fA-F]*' | sed 's/libpod-healthcheck-//' || true)"
@@ -38,8 +67,6 @@ systemctl() {
                     return 0
                 fi
             fi
-            return 0
-        elif [[ "$1" == "list-units" ]]; then
             return 0
         fi
     fi

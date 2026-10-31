@@ -180,20 +180,40 @@ pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
         "auto-update",
         "untag",
     ];
-    for i in 1..argv.len() {
+    let mut i = 1;
+    while i < argv.len() {
         let a = argv[i].as_str();
+        if a == "--module"
+            || a == "--root"
+            || a == "--runroot"
+            || a == "--tmpdir"
+            || a == "--volumepath"
+            || a == "--storage-driver"
+            || a == "--storage-opt"
+            || a == "--pull-option"
+            || a == "--runtime"
+            || a == "--log-level"
+        {
+            i += 2;
+            continue;
+        }
         if a.starts_with('-') {
+            i += 1;
             continue;
         }
         if SUBCOMMANDS.contains(&a) {
             return i;
         }
+        i += 1;
     }
     argv.len()
 }
 
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
-    let globals = podman_globals::parse_podman_global_options(&argv);
+    let mut globals = podman_globals::parse_podman_global_options(&argv);
+    if !argv.iter().any(|a| a == "__completeNoDesc") && !globals.raw_modules.is_empty() {
+        globals.modules = podman_globals::resolve_and_validate_modules(&globals.raw_modules);
+    }
     let _ = podman_globals::set_podman_global_options(globals);
 
     let hide_remote = std::env::var_os("CONTAINER_HOST").is_some()
@@ -271,7 +291,8 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     if read_only_false {
         let _ = READ_ONLY_EXPLICIT_FALSE.set(true);
     }
-    if out.len() >= 2 && out[out.len() - 1] == "-v" {
+    if subcommand_idx == argv.len() && out.len() >= 2 && out[out.len() - 1] == "-v" {
+        let _ = VERSION_SHORT_OUTPUT.set(true);
         let last = out.len() - 1;
         out[last] = "version".to_string();
     } else if out.len() == 2 && out[1] == "--version" {

@@ -185,6 +185,10 @@ pub struct CommitArgs {
     #[arg(short = 'p', long = "pause", default_value_t = true)]
     pub pause: bool,
 
+    /// Suppress output
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
     /// Container to commit
     pub container: String,
 

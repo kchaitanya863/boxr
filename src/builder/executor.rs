@@ -648,6 +648,16 @@ impl ImageBuilder {
             (parsed_tag.registry.clone(), parsed_tag.repository.clone())
         };
 
+        let base_max = self
+            .store
+            .list()
+            .iter()
+            .map(|i| i.size_bytes.max(0) as u64)
+            .max()
+            .unwrap_or(0);
+        let dir_sz = crate::system::dir_size(&dest_rootfs);
+        let computed_size = dir_sz.max(base_max).max(1024 * 1024) as i64;
+
         let record = ImageRecord {
             id: random_id[..12].to_string(),
             reference,
@@ -655,7 +665,7 @@ impl ImageBuilder {
             registry,
             manifest_digest: image_id.clone(),
             config_digest: image_id.clone(),
-            size_bytes: 1024 * 1024,
+            size_bytes: computed_size,
             created_at: Utc::now(),
             rootfs_path: dest_rootfs.to_string_lossy().to_string(),
             config: ImageConfig {

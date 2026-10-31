@@ -550,6 +550,10 @@ pub struct ImagesArgs {
     #[arg(long = "no-trunc")]
     pub no_trunc: bool,
 
+    /// Do not print column headings
+    #[arg(short = 'n', long = "noheading")]
+    pub noheading: bool,
+
     /// List multi-platform images as a tree (EXPERIMENTAL)
     #[arg(long = "tree")]
     pub tree: bool,

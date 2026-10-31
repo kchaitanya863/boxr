@@ -9,13 +9,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactLayer {
+    #[serde(rename = "mediaType")]
+    pub media_type: String,
+    pub digest: String,
+    pub size: u64,
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactRecord {
     pub name: String,
     pub digest: String,
     pub media_type: String,
     pub size_bytes: u64,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub created_rfc3339: String,
     pub file_path: String,
+    #[serde(default)]
+    pub layers: Vec<ArtifactLayer>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -77,6 +90,22 @@ impl ArtifactStore {
     }
 
     pub fn add(&self, name: &str, file: &Path, media_type: &str) -> Result<ArtifactRecord> {
+        self.add_with_options(name, file, media_type, false, true)
+    }
+
+    pub fn add_with_options(
+        &self,
+        name: &str,
+        file: &Path,
+        media_type: &str,
+        append: bool,
+        replace: bool,
+    ) -> Result<ArtifactRecord> {
+        if append && replace {
+            crate::cli::usage_errors::exit_usage_error(
+                "--append and --replace options cannot be used together",
+            );
+        }
         if !file.exists() {
             return Err(anyhow!(
                 "Artifact source file '{}' not found",
@@ -87,26 +116,79 @@ impl ArtifactStore {
         let content = fs::read(file)?;
         let mut hasher = Sha256::new();
         hasher.update(&content);
-        let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let layer_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
 
-        let target_file = self.artifacts_dir.join(&digest.replace(':', "_"));
+        let target_file = self.artifacts_dir.join(&layer_digest.replace(':', "_"));
         fs::write(&target_file, &content)?;
 
+        let new_layer = ArtifactLayer {
+            media_type: media_type.to_string(),
+            digest: layer_digest.clone(),
+            size: content.len() as u64,
+            file_path: target_file.to_string_lossy().to_string(),
+        };
+
         let mut data = self.load();
+        let existing = data.artifacts.iter().find(|a| a.name == name).cloned();
+
+        if let Some(ref ex) = existing {
+            if !append && !replace {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "{}: artifact already exists",
+                    name
+                ));
+            }
+            if append {
+                let mut updated = ex.clone();
+                if updated.layers.is_empty() {
+                    updated.layers.push(ArtifactLayer {
+                        media_type: updated.media_type.clone(),
+                        digest: updated.digest.clone(),
+                        size: updated.size_bytes,
+                        file_path: updated.file_path.clone(),
+                    });
+                }
+                updated.layers.push(new_layer);
+                updated.size_bytes += content.len() as u64;
+                let mut m_hasher = Sha256::new();
+                for l in &updated.layers {
+                    m_hasher.update(l.digest.as_bytes());
+                }
+                updated.digest = format!("sha256:{}", hex::encode(m_hasher.finalize()));
+                data.artifacts.retain(|a| a.name != name);
+                data.artifacts.push(updated.clone());
+                self.save(&data)?;
+                return Ok(updated);
+            }
+        }
+
         data.artifacts.retain(|a| a.name != name);
+        let now = Utc::now();
+        let created_rfc3339 = now.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
         let record = ArtifactRecord {
             name: name.to_string(),
-            digest,
+            digest: layer_digest,
             media_type: media_type.to_string(),
             size_bytes: content.len() as u64,
-            created_at: Utc::now(),
+            created_at: now,
+            created_rfc3339,
             file_path: target_file.to_string_lossy().to_string(),
+            layers: vec![new_layer],
         };
 
         data.artifacts.push(record.clone());
         self.save(&data)?;
         Ok(record)
+    }
+
+    pub fn remove_all(&self) -> Result<()> {
+        let data = self.load();
+        for a in &data.artifacts {
+            let _ = fs::remove_file(&a.file_path);
+        }
+        self.save(&ArtifactIndex::default())?;
+        Ok(())
     }
 
     pub fn extract(&self, query: &str, dest: &Path) -> Result<PathBuf> {

@@ -113,18 +113,31 @@ impl EventManager {
 
     /// Stream or read recorded events
     pub fn stream_events(since: Option<&str>, filter: Option<&str>) -> Result<()> {
+        let filters: Vec<String> = filter.into_iter().map(String::from).collect();
+        Self::stream_events_with_opts(since, None, &filters, None, true)
+    }
+
+    pub fn stream_events_with_opts(
+        since: Option<&str>,
+        until: Option<&str>,
+        filters: &[String],
+        format: Option<&str>,
+        stream: bool,
+    ) -> Result<()> {
         let file_path = Self::events_file();
         if !file_path.exists() {
             return Ok(());
         }
 
-        let match_filter = |event: &ContainerEvent, filt: &str| -> bool {
+        let match_one_filter = |event: &ContainerEvent, filt: &str| -> bool {
             if let Some((k, v)) = filt.split_once('=') {
                 match k.trim() {
                     "event" | "action" => event.action == v.trim(),
                     "type" => event.event_type == v.trim(),
                     "container" | "image" => {
-                        event.actor_name == v.trim() || event.actor_id.starts_with(v.trim())
+                        event.actor_name == v.trim()
+                            || event.actor_id == v.trim()
+                            || event.actor_id.starts_with(v.trim())
                     }
                     _ => event
                         .attributes
@@ -139,6 +152,20 @@ impl EventManager {
             }
         };
 
+        let parse_ts = |s: &str| -> Option<DateTime<Utc>> {
+            let norm = s.trim().replace(',', ".");
+            if let Ok(dt) = DateTime::parse_from_rfc3339(&norm) {
+                return Some(dt.with_timezone(&Utc));
+            }
+            if let Ok(secs) = norm.parse::<i64>() {
+                return DateTime::<Utc>::from_timestamp(secs, 0);
+            }
+            None
+        };
+
+        let since_dt = since.and_then(parse_ts);
+        let until_dt = until.and_then(parse_ts);
+
         let file = fs::File::open(&file_path)?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
@@ -150,6 +177,9 @@ impl EventManager {
             line.clear();
             match reader.read_line(&mut line) {
                 Ok(0) => {
+                    if !stream {
+                        break;
+                    }
                     empty_ticks += 1;
                     if is_test && empty_ticks > 1 {
                         break;
@@ -161,19 +191,40 @@ impl EventManager {
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         if let Ok(event) = serde_json::from_str::<ContainerEvent>(trimmed) {
-                            if let Some(filt) = filter {
-                                if !match_filter(&event, filt) {
+                            if !filters.iter().all(|f| match_one_filter(&event, f)) {
+                                continue;
+                            }
+                            if let Some(s_dt) = since_dt {
+                                if event.timestamp < s_dt {
                                     continue;
                                 }
                             }
-                            if let Some(s) = since {
-                                if let Ok(since_dt) = DateTime::parse_from_rfc3339(s) {
-                                    if event.timestamp < since_dt {
-                                        continue;
-                                    }
+                            if let Some(u_dt) = until_dt {
+                                if event.timestamp > u_dt {
+                                    continue;
                                 }
                             }
-                            println!("{}", event.display_line());
+                            if let Some(fmt) = format {
+                                if fmt == "json" || fmt == "{{json .}}" {
+                                    println!("{}", serde_json::to_string(&event)?);
+                                } else {
+                                    let mut out = fmt.to_string();
+                                    let hc = event
+                                        .attributes
+                                        .get("health_status")
+                                        .map(|s| s.as_str())
+                                        .unwrap_or("");
+                                    out = out.replace("{{.HealthStatus}}", hc);
+                                    out = out.replace("{{ .HealthStatus }}", hc);
+                                    out = out.replace("{{.Status}}", &event.action);
+                                    out = out.replace("{{.Type}}", &event.event_type);
+                                    out = out.replace("{{.ID}}", &event.actor_id);
+                                    out = out.replace("{{.Name}}", &event.actor_name);
+                                    println!("{}", out);
+                                }
+                            } else {
+                                println!("{}", event.display_line());
+                            }
                         }
                     }
                 }

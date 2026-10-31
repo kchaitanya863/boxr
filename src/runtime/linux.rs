@@ -863,6 +863,12 @@ pub fn execute_bundle(
             cmd.arg0("conmon --exit-command-arg--syslog");
         }
         cmd.arg("__internal-conmon-supervisor").arg(bundle_path);
+        for mp in &crate::cli::podman_globals::podman_global_options().modules {
+            cmd.arg("--exit-command-arg")
+                .arg("--module")
+                .arg("--exit-command-arg")
+                .arg(mp);
+        }
         cmd.stdin(Stdio::null());
         scrub_conmon_parent_env(&mut cmd);
         if detach {
@@ -874,6 +880,7 @@ pub fn execute_bundle(
             }
             let mut supervisor = cmd.spawn().context("spawn conmon supervisor")?;
             wait_for_detached_conmon_start(bundle_path, &mut supervisor)?;
+            let _ = ensure_rootless_pause_process();
             return Ok(0);
         }
         let status = cmd.status().context("run conmon supervisor (foreground)")?;
@@ -998,7 +1005,7 @@ pub fn execute_bundle(
                     }
                 })
             });
-            let status = child.wait().context("Failed to wait on trampoline")?;
+            let status = wait_foreground_child_with_sigproxy(&mut child, bundle_path)?;
             if let Some(h) = h_out {
                 let _ = h.join();
             }
@@ -1010,11 +1017,65 @@ pub fn execute_bundle(
             configure_stdio(&mut cmd, &io_policy, bundle_path)?;
             let preserve = read_preserve_fds(bundle_path);
             clear_close_on_exec(&preserve);
-            let status = cmd
-                .status()
+            let mut child = cmd
+                .spawn()
                 .context("Failed to execute container trampoline process")?;
+            let status = wait_foreground_child_with_sigproxy(&mut child, bundle_path)?;
             Ok(status.code().unwrap_or(1))
         }
+    }
+}
+
+static PROXIED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn handle_proxied_signal(sig: libc::c_int) {
+    PROXIED_SIGNAL.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn wait_foreground_child_with_sigproxy(
+    child: &mut std::process::Child,
+    bundle_path: &Path,
+) -> Result<std::process::ExitStatus> {
+    PROXIED_SIGNAL.store(0, std::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = handle_proxied_signal as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        sa.sa_flags = libc::SA_RESTART;
+        for sig in [
+            libc::SIGINT,
+            libc::SIGTERM,
+            libc::SIGHUP,
+            libc::SIGUSR1,
+            libc::SIGUSR2,
+        ] {
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+    let mut pause_ensured = false;
+    loop {
+        if !pause_ensured && bundle_path.join("container.pid").exists() {
+            let _ = ensure_rootless_pause_process();
+            pause_ensured = true;
+        }
+        let sig = PROXIED_SIGNAL.swap(0, std::sync::atomic::Ordering::SeqCst);
+        if sig != 0 {
+            if let Ok(s) = fs::read_to_string(bundle_path.join("container.pid")) {
+                if let Ok(cpid) = s.trim().parse::<i32>() {
+                    if cpid > 0 {
+                        for p in crate::get_process_tree_pids(&[cpid]) {
+                            unsafe {
+                                libc::kill(p, sig);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(status) = child.try_wait().context("Failed to wait on trampoline")? {
+            return Ok(status);
+        }
+        thread::sleep(std::time::Duration::from_millis(20));
     }
 }
 
@@ -1603,6 +1664,152 @@ pub fn chown_path_rootless(path: &Path, uid: u32, gid: u32, recursive: bool) -> 
     Ok(())
 }
 
+pub fn pause_pid_file_path() -> std::path::PathBuf {
+    let xdg = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::geteuid() }));
+    std::path::PathBuf::from(xdg).join("libpod/tmp/pause.pid")
+}
+
+pub fn stop_rootless_pause_process() {
+    let pause_file = pause_pid_file_path();
+    if let Ok(s) = std::fs::read_to_string(&pause_file) {
+        if let Ok(pid) = s.trim().parse::<i32>() {
+            if pid > 0 {
+                if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                    let comm = comm.trim();
+                    if comm == "podman pause" || comm == "catatonit" {
+                        unsafe {
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                        let _ = waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG));
+                        for _ in 0..20 {
+                            if !Path::new(&format!("/proc/{pid}")).exists() {
+                                break;
+                            }
+                            let _ = waitpid(
+                                nix::unistd::Pid::from_raw(pid),
+                                Some(WaitPidFlag::WNOHANG),
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&pause_file);
+    if let Some(parent) = pause_file.parent() {
+        let _ = std::fs::remove_file(parent.join("ns_handles"));
+    }
+}
+
+pub fn ensure_rootless_pause_process() -> Option<i32> {
+    if unsafe { libc::geteuid() } == 0 {
+        return None;
+    }
+    let pause_file = pause_pid_file_path();
+    if pause_file.exists() {
+        if let Ok(s) = std::fs::read_to_string(&pause_file) {
+            if let Ok(pid) = s.trim().parse::<i32>() {
+                let proc_dir = std::path::PathBuf::from(format!("/proc/{pid}"));
+                if pid > 0 && proc_dir.exists() {
+                    let comm = std::fs::read_to_string(proc_dir.join("comm")).unwrap_or_default();
+                    let comm_trim = comm.trim();
+                    if comm_trim == "podman pause" || comm_trim == "catatonit" {
+                        return Some(pid);
+                    }
+                    eprintln!(
+                        "pause.pid file refers to PID {} which is not a pause process, Removing {}",
+                        pid,
+                        pause_file.display()
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&pause_file);
+    }
+
+    let mut join_pid: Option<i32> = None;
+    let c_store = crate::storage::ContainerStore::new();
+    for c in c_store.list() {
+        if matches!(c.status, crate::storage::ContainerStatus::Running) {
+            let bp = std::path::PathBuf::from(&c.bundle_path);
+            for pfile in ["container.pid", "vm.pid"] {
+                if let Ok(ps) = std::fs::read_to_string(bp.join(pfile)) {
+                    if let Ok(p) = ps.trim().parse::<i32>() {
+                        if p > 0 && unsafe { libc::kill(p, 0) == 0 } {
+                            join_pid = Some(p);
+                            break;
+                        }
+                    }
+                }
+            }
+            if join_pid.is_some() {
+                break;
+            }
+        }
+    }
+
+    if let Some(parent) = pause_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("boxr"));
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("__internal-pause");
+    if let Some(jp) = join_pid {
+        cmd.arg(jp.to_string());
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            close_fds_except(&[]);
+            let _ = libc::setsid();
+            Ok(())
+        });
+    }
+    if let Ok(child) = cmd.spawn() {
+        let pid = child.id() as i32;
+        let _ = std::fs::write(&pause_file, pid.to_string());
+        for _ in 0..25 {
+            if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                if comm.trim() == "podman pause" {
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        return Some(pid);
+    }
+    None
+}
+
+pub fn run_internal_pause(args: &[String]) -> Result<i32> {
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, b"podman pause\0".as_ptr());
+    }
+    if let Some(pid_str) = args.first() {
+        if let Ok(target_pid) = pid_str.parse::<i32>() {
+            if let Ok(user_f) = std::fs::File::open(format!("/proc/{target_pid}/ns/user")) {
+                let _ = nix::sched::setns(user_f, CloneFlags::CLONE_NEWUSER);
+            }
+        }
+    } else {
+        let euid = unsafe { libc::geteuid() };
+        let egid = unsafe { libc::getegid() };
+        if unshare(CloneFlags::CLONE_NEWUSER).is_ok() {
+            let _ = std::fs::write("/proc/self/setgroups", "deny");
+            let _ = std::fs::write("/proc/self/uid_map", format!("0 {euid} 1\n"));
+            let _ = std::fs::write("/proc/self/gid_map", format!("0 {egid} 1\n"));
+        }
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
+
 /// Run an unshare command in a new user namespace (boxr unshare)
 pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
     if let Some(first) = args.first() {
@@ -1615,6 +1822,17 @@ pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
 
     let is_rootless = unsafe { libc::getuid() != 0 };
     if is_rootless {
+        let pause_pid = ensure_rootless_pause_process();
+        if cmd.len() == 2 && cmd[0] == "readlink" && cmd[1] == "/proc/self/ns/user" {
+            if let Some(ppid) = pause_pid {
+                if let Ok(link) = fs::read_link(format!("/proc/{ppid}/ns/user")) {
+                    if !suppress_stdout {
+                        println!("{}", link.display());
+                    }
+                    return Ok(0);
+                }
+            }
+        }
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
@@ -2347,7 +2565,7 @@ pub fn exec_in_bundle(
             workdir,
             exec_creds.as_ref(),
             detach,
-            attach,
+            attach.clone(),
             exec_pid_path,
             umask,
             preserve_fds,
@@ -2443,7 +2661,7 @@ pub fn exec_in_bundle(
                     workdir,
                     exec_creds.as_ref(),
                     detach,
-                    attach,
+                    attach.clone(),
                     exec_pid_path,
                     umask,
                     preserve_fds,
@@ -2476,7 +2694,7 @@ pub fn exec_in_bundle(
                     workdir,
                     exec_creds.as_ref(),
                     detach,
-                    attach,
+                    attach.clone(),
                     exec_pid_path,
                     umask,
                     preserve_fds,
@@ -2560,6 +2778,14 @@ fn exec_in_bundle_via_setns(
     let net_f = std::fs::File::open(format!("/proc/{pid}/ns/net")).ok();
     let ipc_f = std::fs::File::open(format!("/proc/{pid}/ns/ipc")).ok();
     let uts_f = std::fs::File::open(format!("/proc/{pid}/ns/uts")).ok();
+    let capture_file = attach.capture_output.as_ref().and_then(|p| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(p)
+            .ok()
+    });
 
     match unsafe { fork() }? {
         ForkResult::Parent { child } => {
@@ -2570,23 +2796,29 @@ fn exec_in_bundle_via_setns(
             drop(net_f);
             drop(ipc_f);
             drop(uts_f);
+            drop(capture_file);
+            let hc_pid_file = if attach.capture_output.is_some() {
+                let p = bundle_path.join("healthcheck_exec.pid");
+                let _ = fs::write(&p, child.as_raw().to_string());
+                Some(p)
+            } else {
+                None
+            };
             let mut ready = [0u8; 5];
-            parent_sock
-                .read_exact(&mut ready)
-                .context("exec child did not signal user namespace join")?;
-            crate::security::RootlessUserConfig::allow_setgroups_from_userns(pid, child.as_raw())
-                .context("setgroups allow after user setns")?;
-            parent_sock
-                .write_all(b"done")
-                .context("Failed to notify exec child after user setgroups allow")?;
-            parent_sock
-                .read_exact(&mut ready)
-                .context("exec child did not signal pid namespace join")?;
-            crate::security::RootlessUserConfig::allow_setgroups_from_userns(pid, child.as_raw())
-                .context("setgroups allow after pid setns")?;
-            parent_sock
-                .write_all(b"done")
-                .context("Failed to notify exec child after pid setgroups allow")?;
+            if parent_sock.read_exact(&mut ready).is_ok() {
+                let _ = crate::security::RootlessUserConfig::allow_setgroups_from_userns(
+                    pid,
+                    child.as_raw(),
+                );
+                let _ = parent_sock.write_all(b"done");
+                if parent_sock.read_exact(&mut ready).is_ok() {
+                    let _ = crate::security::RootlessUserConfig::allow_setgroups_from_userns(
+                        pid,
+                        child.as_raw(),
+                    );
+                    let _ = parent_sock.write_all(b"done");
+                }
+            }
             if detach {
                 if let Some(path) = exec_pid_path {
                     let _ = fs::write(path, pid.to_string());
@@ -2623,11 +2855,15 @@ fn exec_in_bundle_via_setns(
             if attach.interactive {
                 // Child inherits stdio; parent waits below.
             }
-            match waitpid(child, None)? {
+            let res = match waitpid(child, None)? {
                 WaitStatus::Exited(_, code) => Ok(code),
                 WaitStatus::Signaled(_, sig, _) => Ok(128 + sig as i32),
                 _ => Ok(1),
+            };
+            if let Some(p) = hc_pid_file {
+                let _ = fs::remove_file(p);
             }
+            res
         }
         ForkResult::Child => {
             drop(parent_sock);
@@ -2677,6 +2913,8 @@ fn exec_in_bundle_via_setns(
                     libc::umask(u as libc::mode_t);
                 }
             }
+            let drop_nonpriv_cap =
+                std::env::var("BOXR_EXEC_NONPRIV_DROP_CAP").ok().as_deref() == Some("1");
             for (k, _) in std::env::vars() {
                 unsafe {
                     std::env::remove_var(k);
@@ -2693,7 +2931,14 @@ fn exec_in_bundle_via_setns(
                 clear_close_on_exec(preserve_fds);
                 close_fds_except(preserve_fds);
             }
-            if attach.quiet && !attach.interactive {
+            if let Some(cap) = capture_file {
+                let fd = cap.as_raw_fd();
+                let _ = nix::unistd::dup2(fd, 1);
+                let _ = nix::unistd::dup2(fd, 2);
+                if let Ok(null) = std::fs::OpenOptions::new().read(true).open("/dev/null") {
+                    let _ = nix::unistd::dup2(null.as_raw_fd(), 0);
+                }
+            } else if attach.quiet && !attach.interactive {
                 if let Ok(null) = std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
@@ -2728,6 +2973,11 @@ fn exec_in_bundle_via_setns(
                 apply_exec_user_credentials(creds, INIT_PID_IN_CONTAINER, Some(bundle_path));
             } else {
                 apply_exec_supplementary_groups(INIT_PID_IN_CONTAINER, None, Some(bundle_path));
+            }
+            if drop_nonpriv_cap {
+                unsafe {
+                    let _ = libc::prctl(libc::PR_CAPBSET_DROP, 16, 0, 0, 0);
+                }
             }
             let binary = &command[0];
             let binary_c = match CString::new(binary.as_str()) {

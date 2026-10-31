@@ -115,7 +115,41 @@ fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
         };
         cmd = sub.clone();
     }
-    let help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    let mut help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    if sub_path.last() == Some(&"push") {
+        let mut comp_fmt = "gzip".to_string();
+        let mut comp_lvl: Option<String> = None;
+        for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
+            if let Ok(path) = std::env::var(var) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    for line in content.lines() {
+                        let line = line.trim();
+                        if let Some((k, v)) = line.split_once('=') {
+                            let k = k.trim();
+                            let v = v.trim().trim_matches('"').trim_matches('\'');
+                            if k == "compression_format" && !v.is_empty() {
+                                comp_fmt = v.to_string();
+                            } else if k == "compression_level" && !v.is_empty() {
+                                comp_lvl = Some(v.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        help.push_str(&format!(
+            "      --compression-format string   compression format to use (default \"{}\")\n",
+            comp_fmt
+        ));
+        if let Some(lvl) = comp_lvl {
+            help.push_str(&format!(
+                "      --compression-level int       compression level to use (default {})\n",
+                lvl
+            ));
+        } else {
+            help.push_str("      --compression-level int       compression level to use\n");
+        }
+    }
     print!("{}", filter_remote_help(&help, argv));
     std::process::exit(0);
 }
@@ -202,6 +236,17 @@ pub fn exit_on_clap_error(err: Error, argv: &[String]) -> ! {
         ErrorKind::UnknownArgument => {
             if let Some(clap::error::ContextValue::String(flag)) = err.get(ContextKind::InvalidArg)
             {
+                if flag == "--module" || flag.starts_with("--module=") {
+                    let sub = argv
+                        .get(super::podman_subcommand_index(argv))
+                        .map(|s| s.as_str())
+                        .unwrap_or("create");
+                    eprintln!(
+                        "Error: unknown flag: --module\nSee 'podman {} --help'",
+                        sub
+                    );
+                    std::process::exit(125);
+                }
                 if flag.starts_with('-') {
                     eprintln!("Error: unknown flag: {}", flag.trim_start_matches('-'));
                     std::process::exit(125);

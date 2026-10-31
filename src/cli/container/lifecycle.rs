@@ -174,15 +174,26 @@ pub struct UnpauseArgs {
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct WaitArgs {
     /// Ignore missing containers
     #[arg(long = "ignore")]
     pub ignore: bool,
 
+    /// Condition to wait on
+    #[arg(long = "condition")]
+    pub condition: Vec<String>,
+
+    /// Time interval to wait before polling for completion
+    #[arg(short = 'i', long = "interval")]
+    pub interval: Option<String>,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Containers to wait on
-    #[arg(required = true)]
     pub containers: Vec<String>,
 }
 

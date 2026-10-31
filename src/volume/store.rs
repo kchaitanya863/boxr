@@ -138,10 +138,7 @@ impl VolumeStore {
             let user_provided_name = matches!(name, Some(n) if !n.trim().is_empty());
             let vol_name = match name {
                 Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-                _ => format!(
-                    "vol-{}",
-                    &hex::encode(crate::storage::container_store::rand_id())[..8]
-                ),
+                _ => crate::new_container_id(),
             };
 
             if vol_name == "." || vol_name == ".." {

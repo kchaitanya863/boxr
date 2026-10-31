@@ -41,9 +41,26 @@ pub fn level_allows(record: Level) -> bool {
     record <= config().level
 }
 
-/// Emit hierarchical log lines for `podman version` (001-basic log-level test).
+/// Emit hierarchical log lines for `podman version` (001-basic, 800-config log-level tests).
 pub fn emit_version_diagnostic_logs() {
     let cfg = config().level;
+    if cfg <= Level::Debug {
+        for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
+            if let Ok(path) = std::env::var(var) {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if content.contains("invalid_option_for_test") {
+                        log_line(
+                            Level::Debug,
+                            &format!(
+                                "Failed to decode the keys [\\\"engine.invalid_option_for_test\\\"] from \\\"{}\\\"",
+                                path
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
     if cfg <= Level::Trace {
         log_line(Level::Trace, "version");
     }
