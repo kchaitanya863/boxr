@@ -269,6 +269,7 @@ fn default_run_args(image: &str) -> RunArgs {
         pod: None,
         rootfs: None,
         default_mounts_file: None,
+        init_ctr: None,
         timeout: None,
         tz: Vec::new(),
         image: image.to_string(),

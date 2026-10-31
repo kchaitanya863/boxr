@@ -266,6 +266,7 @@ pub async fn create_container(
         pod: None,
         rootfs: None,
         default_mounts_file: None,
+        init_ctr: None,
         timeout: None,
         image: payload.image,
         command: payload.cmd.unwrap_or_default(),

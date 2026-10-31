@@ -119,6 +119,17 @@ pub struct FarmManager {
 
 impl FarmManager {
     pub fn new() -> Self {
+        if let Ok(conf) = std::env::var("PODMAN_CONNECTIONS_CONF") {
+            let trimmed = conf.trim();
+            if !trimmed.is_empty() {
+                if let Some(parent) = std::path::Path::new(trimmed).parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                return Self {
+                    store_file: PathBuf::from(format!("{}.farms.json", trimmed)),
+                };
+            }
+        }
         Self::with_home(boxr_home())
     }
 
@@ -227,5 +238,21 @@ impl FarmManager {
         let updated = farm.clone();
         self.save(&index)?;
         Ok(updated)
+    }
+
+    pub fn remove_connection_from_all_farms(&self, conn_name: &str) -> Result<()> {
+        let mut index = self.load();
+        let mut changed = false;
+        for f in &mut index.farms {
+            let old_len = f.connections.len();
+            f.connections.retain(|c| c != conn_name);
+            if f.connections.len() != old_len {
+                changed = true;
+            }
+        }
+        if changed {
+            self.save(&index)?;
+        }
+        Ok(())
     }
 }

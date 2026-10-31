@@ -15,4 +15,14 @@ export_test.go
 diff_test.go
 pause_test.go
 top_test.go
+volume_create_test.go
+volume_ls_test.go
+volume_rm_test.go
+volume_prune_test.go
+secret_test.go
+generate_spec_test.go
+generate_kube_test.go
+system_connection_test.go
+system_df_test.go
+
 

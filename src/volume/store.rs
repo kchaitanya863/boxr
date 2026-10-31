@@ -798,6 +798,7 @@ impl VolumeStore {
                 chown_u,
                 tmpfs_mount_data,
                 volume_name: Some(record.name.clone()),
+                subpath: None,
                 is_volume: true,
             })
         }
