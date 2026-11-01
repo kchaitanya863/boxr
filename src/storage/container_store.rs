@@ -421,6 +421,9 @@ pub(crate) fn make_tree_writable(path: &Path) {
 
 #[cfg(unix)]
 fn bundle_conmon_is_current_process(bundle: &Path) -> bool {
+    if std::env::args().nth(1).as_deref() != Some("__internal-conmon-supervisor") {
+        return false;
+    }
     if let Ok(s) = fs::read_to_string(bundle.join("conmon.pid")) {
         if let Ok(cp) = s.trim().parse::<i32>() {
             return cp == unsafe { libc::getpid() };

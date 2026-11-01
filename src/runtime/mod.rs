@@ -1,5 +1,6 @@
 use std::path::Path;
 
+pub mod cdi;
 pub mod checkpoint;
 pub mod cp;
 pub mod diff;

@@ -158,7 +158,13 @@ pub struct NetworkSubcommands {
 #[derive(clap::Subcommand, Debug)]
 pub enum NetworkAction {
     Create {
-        name: String,
+        name: Option<String>,
+        /// Do not fail if the network already exists
+        #[arg(long = "ignore")]
+        ignore: bool,
+        /// Disable DNS plugin for this network
+        #[arg(long = "disable-dns")]
+        disable_dns: bool,
         /// Driver to manage the Network (default "bridge")
         #[arg(short = 'd', long = "driver", default_value = "bridge")]
         driver: String,

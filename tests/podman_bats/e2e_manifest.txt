@@ -29,5 +29,15 @@ pod_rm_test.go
 pod_pause_test.go
 pod_top_test.go
 port_test.go
-
-
+checkpoint_image_test.go
+checkpoint_test.go
+config_test.go
+containers_conf_test.go
+generate_systemd_test.go
+info_test.go
+negative_test.go
+quadlet_test.go
+system_dial_stdio_test.go
+system_reset_test.go
+systemd_activate_test.go
+systemd_test.go

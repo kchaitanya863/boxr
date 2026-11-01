@@ -965,30 +965,29 @@ impl ImageBuilder {
         }
 
         let raw_tag_opt = opts.tag.clone();
-        let full_tag = opts
-            .tag
-            .unwrap_or_else(|| format!("boxr-build:{}", &random_id[..8]));
-        // Normalize through ImageReference so the record stores canonical
-        // registry/repo/tag and stays findable by equivalent spellings.
-        let parsed_tag = crate::oci::reference::ImageReference::parse(&full_tag).unwrap_or(
-            crate::oci::reference::ImageReference {
-                registry: crate::oci::reference::ImageReference::DEFAULT_REGISTRY.to_string(),
-                repository: full_tag.clone(),
-                tag: crate::oci::reference::ImageReference::DEFAULT_TAG.to_string(),
-                digest: None,
-            },
-        );
-        let name_only = full_tag
-            .split('@')
-            .next()
-            .unwrap_or(&full_tag)
-            .split(':')
-            .next()
-            .unwrap_or(&full_tag);
-        let (registry, reference) = if !full_tag.contains('/') {
-            ("localhost".to_string(), name_only.to_string())
+        let (registry, reference, final_tag) = if let Some(ref full_tag) = opts.tag {
+            let parsed_tag = crate::oci::reference::ImageReference::parse(full_tag).unwrap_or(
+                crate::oci::reference::ImageReference {
+                    registry: crate::oci::reference::ImageReference::DEFAULT_REGISTRY.to_string(),
+                    repository: full_tag.clone(),
+                    tag: crate::oci::reference::ImageReference::DEFAULT_TAG.to_string(),
+                    digest: None,
+                },
+            );
+            let name_only = full_tag
+                .split('@')
+                .next()
+                .unwrap_or(full_tag)
+                .split(':')
+                .next()
+                .unwrap_or(full_tag);
+            if !full_tag.contains('/') {
+                ("localhost".to_string(), name_only.to_string(), parsed_tag.tag)
+            } else {
+                (parsed_tag.registry, parsed_tag.repository, parsed_tag.tag)
+            }
         } else {
-            (parsed_tag.registry.clone(), parsed_tag.repository.clone())
+            (String::new(), "<none>".to_string(), "<none>".to_string())
         };
 
         let default_arch = match std::env::consts::ARCH {
@@ -1019,7 +1018,7 @@ impl ImageBuilder {
         let record = ImageRecord {
             id: random_id[..12].to_string(),
             reference,
-            tag: parsed_tag.tag,
+            tag: final_tag,
             registry,
             manifest_digest: image_id.clone(),
             config_digest: image_id.clone(),
@@ -1035,6 +1034,30 @@ impl ImageBuilder {
             },
         };
 
+        if record.reference != "<none>" {
+            let existing = self.store.list();
+            for old in &existing {
+                if old.registry == record.registry
+                    && old.reference == record.reference
+                    && old.tag == record.tag
+                    && old.id != record.id
+                {
+                    let has_other_tag = existing.iter().any(|other| {
+                        other.id == old.id
+                            && (other.registry != old.registry
+                                || other.reference != old.reference
+                                || other.tag != old.tag)
+                    });
+                    if !has_other_tag {
+                        let mut dangling = old.clone();
+                        dangling.reference = "<none>".to_string();
+                        dangling.tag = "<none>".to_string();
+                        dangling.registry = String::new();
+                        let _ = self.store.add(dangling);
+                    }
+                }
+            }
+        }
         self.store.add(record.clone())?;
         crate::storage::container_store::make_tree_writable(temp_dir.path());
         if !opts.quiet {

@@ -232,6 +232,9 @@ pub enum SystemAction {
     /// Prepare Hyper-V virtualization prerequisites
     #[command(name = "hyperv-prep")]
     HypervPrep,
+    /// Proxy stdio to the Podman service socket
+    #[command(name = "dial-stdio")]
+    DialStdio,
 }
 
 #[derive(Args, Debug)]
@@ -635,16 +638,16 @@ pub enum GenerateAction {
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
         /// Use container/pod names instead of IDs
-        #[arg(short = 'n', long = "name")]
+        #[arg(short = 'n', long = "name", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         name: bool,
         /// Generate .service files instead of printing to stdout
-        #[arg(short = 'f', long = "files")]
+        #[arg(short = 'f', long = "files", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         files: bool,
         /// Create a new container or pod instead of starting an existing one
         #[arg(long = "new", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
         new: Option<bool>,
         /// Make it a template file and use %i and %I specifiers
-        #[arg(long = "template")]
+        #[arg(long = "template", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         template: bool,
         /// Systemd restart-policy
         #[arg(long = "restart-policy", alias = "restart")]
@@ -656,10 +659,10 @@ pub enum GenerateAction {
         #[arg(long = "start-timeout")]
         start_timeout: Option<u64>,
         /// Stop timeout override
-        #[arg(long = "stop-timeout", short = 't', visible_alias = "time")]
-        stop_timeout: Option<u64>,
+        #[arg(long = "stop-timeout", short = 't', visible_alias = "time", allow_hyphen_values = true)]
+        stop_timeout: Option<String>,
         /// Skip header generation
-        #[arg(long = "no-header")]
+        #[arg(long = "no-header", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         no_header: bool,
         /// Systemd unit name prefix for containers
         #[arg(long = "container-prefix", default_value = "container")]

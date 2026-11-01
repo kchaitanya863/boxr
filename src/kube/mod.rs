@@ -849,7 +849,7 @@ impl KubeManager {
                 let pod_yaml: KubePodYaml = serde_yaml::from_value(val)?;
                 Self::play_pod_with_args(pod_yaml, args, configmaps, service_ctr_name).await?;
             }
-            "Deployment" => {
+            "Deployment" | "Job" => {
                 let name = val["metadata"]["name"]
                     .as_str()
                     .unwrap_or("deployment")
@@ -1554,7 +1554,7 @@ impl KubeManager {
                     Self::play_pod_down(&pod_yaml.metadata.name, &pod_yaml.spec.containers)?;
                 }
             }
-            "Deployment" => {
+            "Deployment" | "Job" => {
                 let name = val["metadata"]["name"].as_str().unwrap_or("deployment");
                 let replicas = val["spec"]["replicas"].as_u64().unwrap_or(1) as usize;
                 let template_spec = &val["spec"]["template"]["spec"];

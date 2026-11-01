@@ -26,7 +26,14 @@ pub enum MachineAction {
     Stop { name: Option<String> },
     /// List virtual machines
     #[command(alias = "list")]
-    Ls,
+    Ls {
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
+        #[arg(short = 'n', long = "noheading", alias = "no-heading")]
+        noheading: bool,
+        #[arg(long = "format")]
+        format: Option<String>,
+    },
     /// Remove a virtual machine
     Rm {
         name: Option<String>,

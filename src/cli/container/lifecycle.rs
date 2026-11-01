@@ -17,7 +17,7 @@ pub struct StopArgs {
     pub all: bool,
 
     /// Ignore errors when a container cannot be stopped
-    #[arg(long = "ignore")]
+    #[arg(short = 'i', long = "ignore")]
     pub ignore: bool,
 
     /// Suppress output

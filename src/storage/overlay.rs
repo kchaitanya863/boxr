@@ -169,31 +169,48 @@ impl OverlayDriver {
                 #[cfg(unix)]
                 let mut linked = false;
                 #[cfg(unix)]
-                if let Ok(m) = &meta {
-                    use std::os::unix::fs::MetadataExt;
-                    if m.nlink() > 1 {
-                        let key = (m.dev(), m.ino());
-                        if let Some(first_to) = seen_inodes.get(&key) {
-                            let _ = fs::remove_file(&to);
-                            if fs::hard_link(first_to, &to).is_ok() {
-                                linked = true;
-                            }
-                        } else if fs::copy(&from, &to).is_ok() {
-                            seen_inodes.insert(key, to.clone());
+                {
+                    let from_str = from.to_string_lossy();
+                    let is_readonly_sys_tree = from_str.contains("/rootfs/usr/")
+                        || from_str.contains("/rootfs/lib/");
+                    if is_readonly_sys_tree {
+                        let _ = fs::remove_file(&to);
+                        if fs::hard_link(&from, &to).is_ok() {
                             linked = true;
                         }
                     }
                 }
                 #[cfg(unix)]
                 if !linked {
+                    if let Ok(m) = &meta {
+                        use std::os::unix::fs::MetadataExt;
+                        if m.nlink() > 1 {
+                            let key = (m.dev(), m.ino());
+                            if let Some(first_to) = seen_inodes.get(&key) {
+                                let _ = fs::remove_file(&to);
+                                if fs::hard_link(first_to, &to).is_ok() {
+                                    linked = true;
+                                }
+                            } else if fs::copy(&from, &to).is_ok() {
+                                seen_inodes.insert(key, to.clone());
+                                linked = true;
+                            }
+                        }
+                    }
+                }
+                #[cfg(unix)]
+                if !linked {
                     let _ = fs::copy(&from, &to);
+                    if let Ok(meta) = meta {
+                        Self::preserve_file_timestamps(&from, &to, &meta);
+                    }
                 }
                 #[cfg(not(unix))]
                 {
                     let _ = fs::copy(&from, &to);
-                }
-                if let Ok(meta) = meta {
-                    Self::preserve_file_timestamps(&from, &to, &meta);
+                    if let Ok(meta) = meta {
+                        Self::preserve_file_timestamps(&from, &to, &meta);
+                    }
                 }
             }
         }

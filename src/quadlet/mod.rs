@@ -16,9 +16,38 @@ pub struct QuadletManager;
 
 impl QuadletManager {
     pub fn quadlet_dir() -> PathBuf {
+        if let Ok(dirs) = std::env::var("QUADLET_UNIT_DIRS") {
+            if let Some(first) = dirs.split(':').find(|s| !s.is_empty()) {
+                let p = PathBuf::from(first);
+                let _ = fs::create_dir_all(&p);
+                return p;
+            }
+        }
         let dir = boxr_home().join("quadlets");
         let _ = fs::create_dir_all(&dir);
         dir
+    }
+
+    pub fn systemd_quadlet_dir() -> PathBuf {
+        if let Ok(dirs) = std::env::var("QUADLET_UNIT_DIRS") {
+            if let Some(first) = dirs.split(':').find(|s| !s.is_empty()) {
+                let p = PathBuf::from(first);
+                let _ = fs::create_dir_all(&p);
+                return p;
+            }
+        }
+        let is_rootless = cfg!(unix) && unsafe { libc::geteuid() != 0 };
+        let p = if is_rootless {
+            let cfg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                format!("{}/.config", home)
+            });
+            PathBuf::from(cfg).join("containers").join("systemd")
+        } else {
+            PathBuf::from("/etc/containers/systemd")
+        };
+        let _ = fs::create_dir_all(&p);
+        p
     }
 
     pub fn list() -> Result<Vec<QuadletUnit>> {
@@ -61,6 +90,10 @@ impl QuadletManager {
         let dir = Self::quadlet_dir();
         let dest = dir.join(fname);
         fs::copy(src, &dest)?;
+        let sys_dir = Self::systemd_quadlet_dir();
+        if sys_dir != dir {
+            let _ = fs::copy(src, sys_dir.join(fname));
+        }
 
         let ext = dest
             .extension()
@@ -77,11 +110,14 @@ impl QuadletManager {
 
     pub fn print(name_or_path: &str) -> Result<String> {
         let dir = Self::quadlet_dir();
+        let sys_dir = Self::systemd_quadlet_dir();
         let direct_path = PathBuf::from(name_or_path);
         let target = if direct_path.exists() {
             direct_path
-        } else {
+        } else if dir.join(name_or_path).exists() {
             dir.join(name_or_path)
+        } else {
+            sys_dir.join(name_or_path)
         };
 
         if !target.exists() {
@@ -94,12 +130,25 @@ impl QuadletManager {
 
     pub fn remove(name: &str) -> Result<()> {
         let dir = Self::quadlet_dir();
+        let sys_dir = Self::systemd_quadlet_dir();
         let path = dir.join(name);
+        let sys_path = sys_dir.join(name);
         if path.exists() {
-            fs::remove_file(path)?;
-            Ok(())
-        } else {
-            Err(anyhow!("Quadlet unit '{}' not found", name))
+            let _ = fs::remove_file(&path);
         }
+        if sys_path.exists() {
+            let _ = fs::remove_file(&sys_path);
+        }
+        if let Ok(entries) = fs::read_dir(&sys_dir) {
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    let sub = entry.path().join(name);
+                    if sub.exists() {
+                        let _ = fs::remove_file(sub);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

@@ -475,7 +475,7 @@ impl PodStore {
                     cid,
                     None,
                     Some(0),
-                    None,
+                    Some(&self.home),
                     true,
                     None,
                 );

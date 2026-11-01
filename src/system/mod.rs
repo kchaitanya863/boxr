@@ -454,6 +454,47 @@ impl SystemManager {
         println!("Total reclaimed space: {}", format_bytes(reclaimed));
         Ok(reclaimed)
     }
+
+    pub fn reset() -> Result<()> {
+        let home = boxr_home();
+        let c_store = ContainerStore::with_home(home.clone());
+        for c in c_store.list() {
+            let _ = crate::stop_container_with_home_and_timeout(
+                &c.id,
+                Some("SIGKILL"),
+                Some(0),
+                Some(&home),
+                true,
+                None,
+            );
+            let _ = c_store.remove(&c.id);
+        }
+
+        let p_store = crate::pod::PodStore::with_home(home.clone());
+        for p in p_store.list() {
+            let _ = p_store.remove_with_force(&p.id, true);
+        }
+
+        let v_store = VolumeStore::with_home(home.clone());
+        for v in v_store.list() {
+            let _ = v_store.remove_with_force(&v.name, true);
+        }
+
+        let n_store = NetworkStore::with_home(home.clone());
+        for n in n_store.list() {
+            if n.name != NetworkStore::DEFAULT_NETWORK && n.name != "podman" {
+                let _ = n_store.remove(&n.name);
+            }
+        }
+
+        let local_images_json = home.join("images.json");
+        if local_images_json.exists() {
+            let _ = fs::remove_file(&local_images_json);
+        }
+
+        let _ = BuildCache::prune();
+        Ok(())
+    }
 }
 
 pub fn container_df_size(bundle_path: &Path) -> u64 {

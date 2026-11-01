@@ -66,6 +66,9 @@ pub struct PullArgs {
     pub registry_auth: RegistryAuthArgs,
 
     pub image: String,
+
+    #[arg(hide = true)]
+    pub extra_images: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -112,6 +115,8 @@ pub struct PushArgs {
     pub format: Option<String>,
     #[arg(long = "compression-format", hide = true)]
     pub compression_format: Option<String>,
+    #[arg(long = "force-compression", hide = true)]
+    pub force_compression: bool,
     #[arg(short = 'q', long = "quiet", hide = true)]
     pub quiet: bool,
     /// Source image
@@ -309,6 +314,9 @@ pub struct BuildArgs {
 
     #[arg(long = "unsetenv")]
     pub unsetenv: Vec<String>,
+
+    #[arg(long = "iidfile", hide = true)]
+    pub iidfile: Option<String>,
 
     #[arg(default_value = ".")]
     pub path: String,

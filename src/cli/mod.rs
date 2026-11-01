@@ -215,6 +215,9 @@ pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
             || a == "--pull-option"
             || a == "--runtime"
             || a == "--log-level"
+            || a == "--cdi-spec-dir"
+            || a == "--url"
+            || a == "--connection"
         {
             i += 2;
             continue;
@@ -414,13 +417,13 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         if i > sub_start
             && !seen_positional_after_sub
-            && a == "--no-hosts"
+            && (a == "--no-hosts" || a == "--no-hosts=true" || a == "--no-hosts=false")
             && (is_run_or_create
                 || sub_name == "build"
                 || (sub_name == "image" && sub2_name == "build")
                 || (sub_name == "pod" && sub2_name == "create"))
         {
-            let _ = RUN_NO_HOSTS.set(true);
+            let _ = RUN_NO_HOSTS.set(a != "--no-hosts=false");
             i += 1;
             continue;
         }

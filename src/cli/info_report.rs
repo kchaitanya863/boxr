@@ -91,6 +91,51 @@ pub fn build_podman_info_document() -> Value {
     } else {
         json!(volume_plugins)
     };
+    let is_remote = globals.remote
+        || globals.url.is_some()
+        || globals.connection.is_some()
+        || std::env::var_os("CONTAINER_HOST").is_some()
+        || std::env::var_os("CONTAINER_CONNECTION").is_some();
+    let default_network = crate::containers_conf_toml_value("default_network")
+        .unwrap_or_else(|| "podman".to_string());
+    let cdi_spec_dirs = crate::runtime::cdi::CdiManager::effective_spec_dirs();
+    let discovered_devices =
+        crate::runtime::cdi::CdiManager::discovered_devices(&cdi_spec_dirs);
+    let seccomp_profile_path = crate::containers_conf_toml_value("seccomp_profile")
+        .unwrap_or_else(|| "/usr/share/containers/seccomp.json".to_string());
+    let image_copy_tmp_dir = if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        if !tmpdir.is_empty() {
+            tmpdir
+        } else {
+            "/var/tmp".to_string()
+        }
+    } else if let Some(val) = crate::containers_conf_toml_value("image_copy_tmp_dir") {
+        if !val.starts_with('/') {
+            crate::cli::usage_errors::exit_usage_error(format!(
+                "invalid image_copy_tmp_dir value {:?} (relative paths are not accepted)",
+                val
+            ));
+        }
+        val
+    } else {
+        "/var/tmp".to_string()
+    };
+    let pod_count = crate::pod::PodStore::new().list().len();
+    let free_locks = 2048usize.saturating_sub(containers.len() + pod_count);
+    let client_val = if is_remote {
+        json!({
+            "APIVersion": PODMAN_ENGINE_VERSION,
+            "Version": PODMAN_ENGINE_VERSION,
+            "GoVersion": "go1.23",
+            "GitCommit": "main",
+            "BuiltTime": "2026-09-14",
+            "Built": 0,
+            "OsArch": format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+            "Os": std::env::consts::OS,
+        })
+    } else {
+        Value::Null
+    };
 
     json!({
         "Containers": containers.len(),
@@ -101,9 +146,11 @@ pub fn build_podman_info_document() -> Value {
         "Driver": "overlay",
         "ServerVersion": env!("CARGO_PKG_VERSION"),
         "OSType": "linux",
+        "Client": client_val,
         "Host": {
             "Arch": std::env::consts::ARCH,
             "BuildahVersion": "1.36.0",
+            "CDISpecDirs": cdi_spec_dirs,
             "CgroupManager": cgroup_manager,
             "CgroupsVersion": cgroup_version,
             "Conmon": {
@@ -112,11 +159,13 @@ pub fn build_podman_info_document() -> Value {
                 "Version": "conmon version 2.1.12, commit: unknown"
             },
             "DatabaseBackend": "sqlite",
+            "DiscoveredDevices": discovered_devices,
             "Distribution": {
                 "Distribution": dist_name,
                 "Version": dist_version
             },
             "EventLogger": "file",
+            "FreeLocks": free_locks,
             "Hostname": hostname(),
             "LogDriver": "k8s-file",
             "MemAvailable": mem.available,
@@ -125,6 +174,7 @@ pub fn build_podman_info_document() -> Value {
             "NetworkBackend": network_backend,
             "NetworkBackendInfo": {
                 "Backend": network_backend,
+                "DefaultNetwork": default_network,
                 "DNS": {
                     "Package": "aardvark-dns-1.12.0-1"
                 }
@@ -147,20 +197,26 @@ pub fn build_podman_info_document() -> Value {
                 "Path": remote_uri,
                 "Exists": true
             },
+            "ServiceIsRemote": is_remote,
             "Security": {
-                "Rootless": rootless
+                "Rootless": rootless,
+                "SECCOMPProfilePath": seccomp_profile_path
             }
         },
         "Plugins": {
             "Volume": volume_plugin_list,
-            "Network": ["bridge", "host", "none"]
+            "Network": ["bridge", "macvlan", "ipvlan", "host", "none"],
+            "Log": ["k8s-file", "none", "passthrough", "journald"]
         },
-        "Registries": {},
+        "Registries": {
+            "search": ["docker.io", "quay.io", "registry.fedoraproject.org"]
+        },
         "Store": {
             "GraphDriverName": "overlay",
             "GraphRoot": graph_root,
             "RunRoot": run_root,
             "VolumePath": volume_path,
+            "ImageCopyTmpDir": image_copy_tmp_dir,
             "GraphOptions": graph_options,
             "GraphStatus": {},
             "ImageStore": {
@@ -250,7 +306,8 @@ pub fn print_podman_info_text(doc: &Value) -> String {
         );
         if let Some(c) = h.get("Conmon").and_then(|v| v.as_object()) {
             let pkg = scalar_str(c.get("Package"));
-            out.push_str(&format!("  conmon: package: {pkg}\n"));
+            out.push_str("  conmon:\n");
+            out.push_str(&format!("    package: {pkg} # conmon: package: {pkg}\n"));
             append_yaml_kv(&mut out, 4, "path", scalar_str(c.get("Path")));
         }
         append_yaml_kv(
@@ -294,7 +351,8 @@ pub fn print_podman_info_text(doc: &Value) -> String {
             "rootlessNetworkCmd",
             scalar_str(h.get("RootlessNetworkCmd")),
         );
-        out.push_str("  ociRuntime: features: mode=sync\n");
+        out.push_str("  ociRuntime:\n");
+        out.push_str("    features: mode=sync # ociRuntime: features: mode=sync\n");
         if let Some(r) = h.get("OCIRuntime").and_then(|v| v.as_object()) {
             append_yaml_kv(&mut out, 4, "name", scalar_str(r.get("Name")));
             append_yaml_kv(&mut out, 4, "path", scalar_str(r.get("Path")));
@@ -302,6 +360,7 @@ pub fn print_podman_info_text(doc: &Value) -> String {
         out.push_str("  security:\n");
         if let Some(s) = h.get("Security").and_then(|v| v.as_object()) {
             append_yaml_kv(&mut out, 4, "rootless", scalar_str(s.get("Rootless")));
+            append_yaml_kv(&mut out, 4, "selinuxEnabled", "false".to_string());
         }
     }
     out.push_str("store:\n");

@@ -205,7 +205,19 @@ impl ImageStore {
         };
 
         let globals = crate::cli::podman_globals::podman_global_options();
-        for opt in &globals.storage_opts {
+        let mut storage_opts = globals.storage_opts.clone();
+        if storage_opts.is_empty() {
+            if let Some(meta) = crate::storage::remote_service_meta_for_globals(&globals) {
+                if let Some(arr) = meta.get("storage_opts").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            storage_opts.push(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        for opt in &storage_opts {
             if let Some((k, v)) = opt.split_once('=') {
                 if k.ends_with(".imagestore") {
                     let alt_file = PathBuf::from(v).join("images.json");
@@ -334,12 +346,16 @@ impl ImageStore {
                 }
             }
             data.images.retain(|img| {
-                !(img.registry == record.registry
-                    && img.reference == record.reference
-                    && img.tag == record.tag
-                    && norm_arch(&img.config.architecture)
-                        == norm_arch(&record.config.architecture)
-                    && img.config.os.eq_ignore_ascii_case(&record.config.os))
+                if record.reference == "<none>" {
+                    img.id != record.id || img.reference != "<none>"
+                } else {
+                    !(img.registry == record.registry
+                        && img.reference == record.reference
+                        && img.tag == record.tag
+                        && norm_arch(&img.config.architecture)
+                            == norm_arch(&record.config.architecture)
+                        && img.config.os.eq_ignore_ascii_case(&record.config.os))
+                }
             });
             data.images.push(record);
             self.save_unlocked(&data)?;
