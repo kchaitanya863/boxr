@@ -16,6 +16,10 @@ pub struct StopArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
 
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Ignore errors when a container cannot be stopped
     #[arg(long = "ignore")]
     pub ignore: bool,
@@ -69,6 +73,10 @@ pub struct StartArgs {
     #[arg(long = "all")]
     pub all: bool,
 
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Filter output based on conditions provided
     #[arg(long = "filter")]
     pub filter: Vec<String>,
@@ -121,6 +129,10 @@ pub struct ExecArgs {
     /// Detached mode: run command in the background
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Give extended privileges to the command
     #[arg(long = "privileged")]

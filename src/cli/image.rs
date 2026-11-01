@@ -112,6 +112,10 @@ pub struct PushArgs {
     pub format: Option<String>,
     #[arg(long = "compression-format", hide = true)]
     pub compression_format: Option<String>,
+    #[arg(long = "encryption-key", hide = true)]
+    pub encryption_key: Vec<String>,
+    #[arg(long = "remove-signatures", hide = true)]
+    pub remove_signatures: bool,
     #[arg(short = 'q', long = "quiet", hide = true)]
     pub quiet: bool,
     /// Source image
@@ -159,6 +163,12 @@ pub struct BuildArgs {
     pub registry_auth: RegistryAuthArgs,
     #[arg(short = 't', long = "tag")]
     pub tags: Vec<String>,
+
+    #[arg(long = "manifest", hide = true)]
+    pub manifest: Option<String>,
+
+    #[arg(long = "annotation", hide = true)]
+    pub annotations: Vec<String>,
 
     #[arg(short = 'f', long = "file", default_value = "Dockerfile")]
     pub file: String,
@@ -278,6 +288,10 @@ pub struct BuildArgs {
 
     #[arg(long = "pull-never", hide = true)]
     pub pull_never: bool,
+
+    /// User namespace to use for build containers
+    #[arg(long = "userns")]
+    pub userns: Option<String>,
 
     /// Sets the configuration for network namespaces when handling RUN instructions
     #[arg(long = "network", alias = "net", hide = true)]

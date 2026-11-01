@@ -460,6 +460,12 @@ pub struct PodCreateArgs {
     /// Write the infra container's conmon PID to the file
     #[arg(long = "infra-conmon-pidfile")]
     pub infra_conmon_pidfile: Option<String>,
+    /// UID map for the user namespace
+    #[arg(long = "uidmap")]
+    pub uidmap: Vec<String>,
+    /// GID map for the user namespace
+    #[arg(long = "gidmap")]
+    pub gidmap: Vec<String>,
     /// Pod name (positional; same as --name)
     #[arg(value_name = "NAME")]
     pub pod: Option<String>,

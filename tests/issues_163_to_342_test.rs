@@ -274,6 +274,7 @@ fn default_run_args(image: &str) -> RunArgs {
         tz: Vec::new(),
         image: image.to_string(),
         command: vec!["true".to_string()],
+        ..Default::default()
     }
 }
 

@@ -39,6 +39,7 @@ pub fn spawn_host_relay(bundle_path: &Path) -> Result<i32> {
         nix::unistd::ForkResult::Parent { child } => Ok(child.as_raw()),
         nix::unistd::ForkResult::Child => {
             unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_IGN);
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
             }
             if let Err(e) = run_relay_server(listener) {

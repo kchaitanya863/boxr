@@ -447,6 +447,7 @@ pub fn execute_bundle(
                     volume_name: None,
                     subpath: None,
                     is_volume: false,
+                    ..Default::default()
                 });
             }
         } else if m.mount_type == "tmpfs"

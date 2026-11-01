@@ -147,6 +147,10 @@ pub struct Linux {
     pub seccomp: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<LinuxDevice>,
+    #[serde(rename = "maskedPaths", skip_serializing_if = "Option::is_none")]
+    pub masked_paths: Option<Vec<String>>,
+    #[serde(rename = "readonlyPaths", skip_serializing_if = "Option::is_none")]
+    pub readonly_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -343,6 +347,8 @@ impl Spec {
             cgroup_parent: None,
             seccomp: None,
             devices: Vec::new(),
+            masked_paths: None,
+            readonly_paths: None,
         };
 
         Self {
@@ -358,7 +364,7 @@ impl Spec {
                 args,
                 env,
                 cwd,
-                no_new_privileges: Some(true),
+                no_new_privileges: Some(false),
                 capabilities: None,
                 oom_score_adj: None,
                 umask: None,

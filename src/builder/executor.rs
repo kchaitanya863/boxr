@@ -94,6 +94,7 @@ impl ImageBuilder {
             .is_some_and(|v| v == "1");
         let selinux_label = opts.build_args.get("__BOXR_SELINUX_LABEL").cloned();
         let logfile_path = opts.build_args.get("__BOXR_LOGFILE").cloned();
+        let build_userns = opts.build_args.get("__BOXR_USERNS").cloned();
 
         let temp_dir = tempfile::tempdir()?;
         let mut stages: Vec<BuildStage> = Vec::new();
@@ -223,6 +224,28 @@ impl ImageBuilder {
                         };
 
                         copy_dir_all(&PathBuf::from(&base_record.rootfs_path), &current_rootfs)?;
+                        let pw_file = current_rootfs.join("etc/passwd");
+                        if let Ok(pw_text) = fs::read_to_string(&pw_file) {
+                            if pw_text.contains(":container user:") {
+                                let cleaned: Vec<&str> = pw_text
+                                    .lines()
+                                    .filter(|l| !l.contains(":container user:"))
+                                    .collect();
+                                let _ = fs::remove_file(&pw_file);
+                                let _ = fs::write(&pw_file, format!("{}\n", cleaned.join("\n")));
+                            }
+                        }
+                        let gr_file = current_rootfs.join("etc/group");
+                        if let Ok(gr_text) = fs::read_to_string(&gr_file) {
+                            if gr_text.contains(":container group:") {
+                                let cleaned: Vec<&str> = gr_text
+                                    .lines()
+                                    .filter(|l| !l.contains(":container group:"))
+                                    .collect();
+                                let _ = fs::remove_file(&gr_file);
+                                let _ = fs::write(&gr_file, format!("{}\n", cleaned.join("\n")));
+                            }
+                        }
                         if let Some(base_img_dir) = PathBuf::from(&base_record.rootfs_path).parent()
                         {
                             let base_chown = base_img_dir.join("chown_meta.json");
@@ -794,6 +817,11 @@ impl ImageBuilder {
                                     .unwrap_or(serde_json::Value::Null),
                                 );
                         }
+                    }
+                    if let Some(ref u_ns) = build_userns {
+                        spec.annotations
+                            .get_or_insert_with(HashMap::new)
+                            .insert("boxr.userns".to_string(), u_ns.clone());
                     }
                     spec.save_to_bundle(&step_bundle)?;
 

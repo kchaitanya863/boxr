@@ -24,24 +24,29 @@ pub fn run_hooks_from_bundle(bundle_path: &Path, stage: &str) -> Result<()> {
         return Ok(());
     }
     let dir = PathBuf::from(fs_read_trim(&hooks_file)?);
-    run_hooks_dir(&dir, stage)
+    run_hooks_dir_with_bundle(&dir, stage, Some(bundle_path))
 }
 
 pub fn run_hooks_dir(dir: &Path, stage: &str) -> Result<()> {
+    run_hooks_dir_with_bundle(dir, stage, None)
+}
+
+fn run_hooks_dir_with_bundle(dir: &Path, stage: &str, bundle_opt: Option<&Path>) -> Result<()> {
     if !dir.is_dir() {
         return Ok(());
     }
     for json_path in hook_settings_files(dir) {
-        run_settings_json(&json_path, stage)?;
+        run_settings_json(&json_path, stage, bundle_opt)?;
     }
     Ok(())
 }
 
-fn run_settings_json(path: &Path, stage: &str) -> Result<()> {
+fn run_settings_json(path: &Path, stage: &str, bundle_opt: Option<&Path>) -> Result<()> {
     let content = std::fs::read_to_string(path)?;
     let v: serde_json::Value = serde_json::from_str(&content)?;
     let stages = v
         .get("stages")
+        .or_else(|| v.get("stage"))
         .and_then(|s| s.as_array())
         .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -50,8 +55,10 @@ fn run_settings_json(path: &Path, stage: &str) -> Result<()> {
     }
     let hook_path = v
         .get("hook")
-        .and_then(|h| h.get("path"))
-        .and_then(|p| p.as_str())
+        .and_then(|h| {
+            h.as_str()
+                .or_else(|| h.get("path").and_then(|p| p.as_str()))
+        })
         .context("hook.path missing in hooks settings")?;
     let mut child = Command::new(hook_path)
         .stdin(Stdio::piped())
@@ -61,7 +68,28 @@ fn run_settings_json(path: &Path, stage: &str) -> Result<()> {
         .with_context(|| format!("spawn hook {}", hook_path))?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        let _ = stdin.write_all(b"{}");
+        let cid = bundle_opt
+            .and_then(|b| b.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("boxr");
+        let root_str = bundle_opt
+            .map(|b| b.join("rootfs").to_string_lossy().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let bundle_str = bundle_opt
+            .map(|b| b.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/".to_string());
+        let state_json = serde_json::json!({
+            "ociVersion": "1.0.2-dev",
+            "id": cid,
+            "pid": 1,
+            "root": root_str,
+            "bundle": bundle_str,
+            "status": "created",
+            "annotations": {
+                "io.container.manager": "libpod"
+            }
+        });
+        let _ = stdin.write_all(state_json.to_string().as_bytes());
     }
     let status = child.wait()?;
     if !status.success() {

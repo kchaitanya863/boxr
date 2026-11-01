@@ -20,6 +20,7 @@ pub struct PodmanGlobalOptions {
     pub url: Option<String>,
     pub connection: Option<String>,
     pub remote: bool,
+    pub transient_store: bool,
     pub tls_ca: Option<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
@@ -206,6 +207,16 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
         }
         if a == "--remote" || a == "-r" {
             opts.remote = true;
+            i += 1;
+            continue;
+        }
+        if a == "--transient-store" || a == "--transient-store=true" {
+            opts.transient_store = true;
+            i += 1;
+            continue;
+        }
+        if a == "--transient-store=false" {
+            opts.transient_store = false;
             i += 1;
             continue;
         }

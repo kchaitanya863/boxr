@@ -281,18 +281,11 @@ fn ensure_tty_detach_shell_stays_alive(spec: &mut Spec, args: &RunArgs) {
         return;
     }
     let argv = &spec.process.args;
-    if argv.is_empty() {
+    if argv.len() != 1 {
         return;
     }
     let bin = argv[0].rsplit('/').next().unwrap_or(&argv[0]);
     if bin != "sh" && bin != "bash" && bin != "ash" {
-        return;
-    }
-    if argv
-        .iter()
-        .skip(1)
-        .any(|a| a == "-i" || a == "-il" || a == "-li")
-    {
         return;
     }
     // Hold the container open without relying on a TTY read loop (BATS leak check).
@@ -434,6 +427,24 @@ fn add_container_record(
     }
 }
 
+fn copy_dir_deref_symlinks(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let ep = entry.path();
+        let target_meta = fs::metadata(&ep);
+        let dest_p = dst.join(entry.file_name());
+        if let Ok(m) = target_meta {
+            if m.is_dir() {
+                copy_dir_deref_symlinks(&ep, &dest_p)?;
+            } else {
+                let _ = fs::copy(&ep, &dest_p);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_default_mounts_file(args: &mut RunArgs) -> Result<()> {
     let path = match args
         .default_mounts_file
@@ -447,10 +458,24 @@ fn apply_default_mounts_file(args: &mut RunArgs) -> Result<()> {
         return Ok(());
     }
     let content = fs::read_to_string(path)?;
-    for line in content.lines() {
+    for (idx, line) in content.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
+        }
+        if let Some((src_s, dst_s)) = line.split_once(':') {
+            let src_p = Path::new(src_s.trim());
+            if src_p.is_dir() {
+                let stage = storage::boxr_home()
+                    .join("default-mounts-staging")
+                    .join(format!("m-{}-{}", std::process::id(), idx));
+                let _ = fs::remove_dir_all(&stage);
+                if copy_dir_deref_symlinks(src_p, &stage).is_ok() {
+                    args.volumes
+                        .push(format!("{}:{}", stage.display(), dst_s.trim()));
+                    continue;
+                }
+            }
         }
         args.volumes.push(line.to_string());
     }
@@ -630,7 +655,12 @@ fn append_containerenv_mount(
     };
     #[cfg(not(unix))]
     let rootless = 0;
-    let body = if privileged {
+    let has_root_mount = mounts.iter().any(|m| m.source == Path::new("/"))
+        || spec
+            .mounts
+            .iter()
+            .any(|m| m.source == "/");
+    let mut body = if privileged {
         format!(
             "engine=\"podman-{}\"\nname=\"{}\"\nid=\"{}\"\nimage=\"{}\"\nimageid=\"{}\"\nrootless={}\n",
             env!("CARGO_PKG_VERSION"),
@@ -643,6 +673,9 @@ fn append_containerenv_mount(
     } else {
         String::new()
     };
+    if has_root_mount {
+        body.push_str("graphRootMounted=1\n");
+    }
     let host_path = bundle_dir.join(".containerenv");
     fs::write(&host_path, body)?;
     spec.mounts.push(oci::runtime::Mount {
@@ -911,9 +944,16 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 global_auth,
                 args.registry_auth.tls_verify,
             );
-            if let Err(e) =
-                auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await
-            {
+            if !args.encryption_key.is_empty() {
+                unsafe {
+                    std::env::set_var("BOXR_PUSH_ENCRYPT", "1");
+                }
+            }
+            let res = auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await;
+            unsafe {
+                std::env::remove_var("BOXR_PUSH_ENCRYPT");
+            }
+            if let Err(e) = res {
                 cli::usage_errors::exit_usage_error(e.to_string());
             }
             Ok(0)
@@ -1879,7 +1919,10 @@ pub fn validate_image_record(record: &ImageRecord) -> bool {
         if let Some(manifest_path) = manifest_path.filter(|p| p.exists()) {
             if let Ok(content) = fs::read_to_string(&manifest_path) {
                 if let Ok(manifest) = serde_json::from_str::<oci::image::ImageManifest>(&content) {
-                    if manifest.layers.len() != rootfs_cfg.diff_ids.len() {
+                    if manifest.layers.len() != rootfs_cfg.diff_ids.len()
+                        && !rootfs.join("bin").exists()
+                        && !rootfs.join("usr/bin").exists()
+                    {
                         return false;
                     }
                 }
@@ -1930,20 +1973,26 @@ fn pull_user_message(msg: impl AsRef<str>) {
 }
 
 /// Podman accepts `--group-add 1,2,3` (comma-separated) and repeated flags.
-fn parse_group_add_gids(group_add: &[String]) -> Vec<u32> {
+fn parse_group_add_gids(group_add: &[String], rootfs: Option<&Path>) -> Vec<u32> {
     if group_add.iter().any(|g| g == "keep-groups") && group_add.len() > 1 {
         cli::usage_errors::exit_usage_error(
             "the '--group-add keep-groups' option is not allowed with any other --group-add options",
         );
     }
+    let group_content = rootfs
+        .and_then(|r| fs::read_to_string(r.join("etc/group")).ok())
+        .or_else(|| fs::read_to_string("/etc/group").ok())
+        .unwrap_or_default();
     let mut gids = Vec::new();
     for entry in group_add {
         for part in entry.split(',') {
             let part = part.trim();
-            if part.is_empty() {
+            if part.is_empty() || part == "keep-groups" {
                 continue;
             }
             if let Ok(gid) = part.parse::<u32>() {
+                gids.push(gid);
+            } else if let Ok(gid) = lookup_group_gid(&group_content, part) {
                 gids.push(gid);
             }
         }
@@ -2030,6 +2079,17 @@ fn find_image_with_shortname(
     if let Some(rec) = store.find_with_platform(query_clean, platform) {
         return Some(rec);
     }
+    if query.contains('/') && !query.contains('@') {
+        let first_seg = query.split('/').next().unwrap_or("");
+        if !first_seg.contains('.') && !first_seg.contains(':') && first_seg != "localhost" {
+            for prefix in ["quay.io", "localhost", "docker.io"] {
+                let candidate = format!("{}/{}", prefix, query);
+                if let Some(rec) = store.find_with_platform(&candidate, platform) {
+                    return Some(rec);
+                }
+            }
+        }
+    }
     if query.contains('/') || query.contains('@') {
         return None;
     }
@@ -2091,8 +2151,12 @@ async fn resolve_container_image(
         Some(record) if validate_image_record(&record) => {
             if pull == Some("always") {
                 eprintln!("Trying to pull {}...", image_str);
+                eprintln!("Getting image source signatures");
                 match pull_image_with_platform(image_str, target_platform).await {
-                    Ok(r) => Ok(r),
+                    Ok(r) => {
+                        eprintln!("Writing manifest to image destination");
+                        Ok(r)
+                    }
                     Err(e) => exit_run_image_error(e),
                 }
             } else {
@@ -2105,8 +2169,12 @@ async fn resolve_container_image(
             }
             _ => {
                 eprintln!("Trying to pull {}...", image_str);
+                eprintln!("Getting image source signatures");
                 match pull_image_with_platform(image_str, target_platform).await {
-                    Ok(r) => Ok(r),
+                    Ok(r) => {
+                        eprintln!("Writing manifest to image destination");
+                        Ok(r)
+                    }
                     Err(e) => exit_run_image_error(e),
                 }
             }
@@ -2549,104 +2617,476 @@ pub async fn push_image(image_str: &str) -> Result<()> {
     auth::RegistryPusher::push(image_str, None).await
 }
 
+fn normalize_cap_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.to_ascii_uppercase().starts_with("CAP_") {
+        trimmed.to_ascii_uppercase()
+    } else {
+        format!("CAP_{}", trimmed.to_ascii_uppercase())
+    }
+}
+
 fn apply_capabilities_and_security(
     spec: &mut oci::runtime::Spec,
     privileged: bool,
     cap_add: &[String],
     cap_drop: &[String],
+    effective_labels: &[String],
+    image_labels: Option<&HashMap<String, String>>,
 ) {
-    let mut cap_profile = security::CapabilityProfile::default();
+    let all_caps = security::CapabilityProfile::all_known_caps();
+    let default_caps = security::CapabilityProfile::podman_default_caps();
+    let mut allowed_caps: Vec<String>;
+    let mut explicit_added_caps: Vec<String> = Vec::new();
+
     if privileged {
-        let all_caps: Vec<String> = vec![
-            "CAP_CHOWN",
-            "CAP_DAC_OVERRIDE",
-            "CAP_DAC_READ_SEARCH",
-            "CAP_FOWNER",
-            "CAP_FSETID",
-            "CAP_KILL",
-            "CAP_SETGID",
-            "CAP_SETUID",
-            "CAP_SETPCAP",
-            "CAP_LINUX_IMMUTABLE",
-            "CAP_NET_BIND_SERVICE",
-            "CAP_NET_BROADCAST",
-            "CAP_NET_ADMIN",
-            "CAP_NET_RAW",
-            "CAP_IPC_LOCK",
-            "CAP_IPC_OWNER",
-            "CAP_SYS_MODULE",
-            "CAP_SYS_RAWIO",
-            "CAP_SYS_CHROOT",
-            "CAP_SYS_PTRACE",
-            "CAP_SYS_PACCT",
-            "CAP_SYS_ADMIN",
-            "CAP_SYS_BOOT",
-            "CAP_SYS_NICE",
-            "CAP_SYS_RESOURCE",
-            "CAP_SYS_TIME",
-            "CAP_SYS_TTY_CONFIG",
-            "CAP_MKNOD",
-            "CAP_LEASE",
-            "CAP_AUDIT_WRITE",
-            "CAP_AUDIT_CONTROL",
-            "CAP_SETFCAP",
-            "CAP_MAC_OVERRIDE",
-            "CAP_MAC_ADMIN",
-            "CAP_SYSLOG",
-            "CAP_WAKE_ALARM",
-            "CAP_BLOCK_SUSPEND",
-            "CAP_AUDIT_READ",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-        cap_profile.bounding = all_caps.clone();
-        cap_profile.effective = all_caps.clone();
-        cap_profile.permitted = all_caps;
+        allowed_caps = all_caps;
         if let Some(l) = &mut spec.linux {
-            l.seccomp = None;
+            let custom_seccomp = spec
+                .annotations
+                .as_ref()
+                .is_some_and(|a| a.get("boxr.seccomp_custom") == Some(&"true".to_string()));
+            if !custom_seccomp {
+                l.seccomp = None;
+            }
         }
     } else {
+        allowed_caps = default_caps.clone();
         if cap_drop.iter().any(|c| c.eq_ignore_ascii_case("all")) {
-            cap_profile.bounding.clear();
-            cap_profile.effective.clear();
-            cap_profile.permitted.clear();
+            allowed_caps.clear();
         } else {
             for drop in cap_drop {
-                let norm = if drop.starts_with("CAP_") {
-                    drop.to_uppercase()
-                } else {
-                    format!("CAP_{}", drop.to_uppercase())
-                };
-                cap_profile.bounding.retain(|c| c != &norm);
-                cap_profile.effective.retain(|c| c != &norm);
-                cap_profile.permitted.retain(|c| c != &norm);
+                let norm = normalize_cap_name(drop);
+                allowed_caps.retain(|c| c != &norm);
             }
         }
-        for add in cap_add {
-            let norm = if add.starts_with("CAP_") {
-                add.to_uppercase()
-            } else {
-                format!("CAP_{}", add.to_uppercase())
-            };
-            if !cap_profile.bounding.contains(&norm) {
-                cap_profile.bounding.push(norm.clone());
+        if cap_add.iter().any(|c| c.eq_ignore_ascii_case("all")) {
+            for c in &all_caps {
+                if !cap_drop
+                    .iter()
+                    .any(|d| !d.eq_ignore_ascii_case("all") && normalize_cap_name(d) == *c)
+                {
+                    if !allowed_caps.contains(c) {
+                        allowed_caps.push(c.clone());
+                    }
+                    if !explicit_added_caps.contains(c) {
+                        explicit_added_caps.push(c.clone());
+                    }
+                }
             }
-            if !cap_profile.effective.contains(&norm) {
-                cap_profile.effective.push(norm.clone());
+        } else {
+            for add in cap_add {
+                let norm = normalize_cap_name(add);
+                if !allowed_caps.contains(&norm) {
+                    allowed_caps.push(norm.clone());
+                }
+                if !explicit_added_caps.contains(&norm) {
+                    explicit_added_caps.push(norm);
+                }
             }
-            if !cap_profile.permitted.contains(&norm) {
-                cap_profile.permitted.push(norm);
+        }
+
+        let mut cap_label_opt: Option<String> = None;
+        for l in effective_labels {
+            if let Some((k, v)) = l.split_once('=') {
+                if k.trim() == "io.containers.capabilities" {
+                    cap_label_opt = Some(v.trim().to_string());
+                }
+            } else if l.trim() == "io.containers.capabilities" {
+                cap_label_opt = Some(String::new());
+            }
+        }
+        if cap_label_opt.is_none() {
+            if let Some(img_lbls) = image_labels {
+                if let Some(v) = img_lbls.get("io.containers.capabilities") {
+                    cap_label_opt = Some(v.trim().to_string());
+                }
+            }
+        }
+
+        if let Some(cap_label_val) = cap_label_opt {
+            let mut filtered = Vec::new();
+            let mut disallowed = Vec::new();
+            for part in cap_label_val.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let norm = normalize_cap_name(part);
+                if allowed_caps.contains(&norm) {
+                    if !filtered.contains(&norm) {
+                        filtered.push(norm);
+                    }
+                } else if !disallowed.contains(&norm) {
+                    disallowed.push(norm);
+                }
+            }
+            if !disallowed.is_empty() {
+                let is_remote = cli::podman_globals::podman_global_options().remote
+                    || std::env::var_os("CONTAINER_HOST").is_some()
+                    || std::env::var_os("CONTAINER_CONNECTION").is_some();
+                if !is_remote {
+                    eprintln!(
+                        "level=warning msg=\"Capabilities requested by user or image are not allowed by default: \\\"{}\\\"\"",
+                        disallowed.join(",")
+                    );
+                }
+            }
+            allowed_caps = filtered;
+        }
+    }
+
+    allowed_caps.sort();
+    explicit_added_caps.sort();
+
+    if let Ok(json_caps) = serde_json::to_string(&allowed_caps) {
+        spec.annotations
+            .get_or_insert_with(HashMap::new)
+            .insert("boxr.effective_caps".to_string(), json_caps);
+    }
+
+    let is_non_root = spec.process.user.uid != 0;
+    let (eff_caps, prm_caps, inh_caps, amb_caps) = if !is_non_root {
+        (
+            allowed_caps.clone(),
+            allowed_caps.clone(),
+            Vec::new(),
+            Vec::new(),
+        )
+    } else if !privileged && !explicit_added_caps.is_empty() {
+        (
+            explicit_added_caps.clone(),
+            explicit_added_caps.clone(),
+            explicit_added_caps.clone(),
+            explicit_added_caps,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+
+    spec.process.capabilities = Some(oci::runtime::LinuxCapabilities {
+        bounding: Some(allowed_caps),
+        effective: Some(eff_caps),
+        inheritable: Some(inh_caps),
+        permitted: Some(prm_caps),
+        ambient: Some(amb_caps),
+    });
+}
+
+fn validate_and_apply_security_options(
+    args: &RunArgs,
+    image_record: Option<&ImageRecord>,
+    spec: &mut oci::runtime::Spec,
+) -> Result<()> {
+    // 1. Validate --seccomp-policy
+    let policy = match args.seccomp_policy.as_deref() {
+        None | Some("") | Some("default") => "default",
+        Some("image") => "image",
+        Some(other) => {
+            cli::usage_errors::exit_usage_error(format!(
+                "invalid seccomp policy {:?}: valid policies are [\"default\" \"image\"]",
+                other
+            ));
+        }
+    };
+
+    // 2. Validate --security-opt apparmor=...
+    let mut apparmor_opt: Option<&str> = None;
+    let mut seccomp_opt: Option<&str> = None;
+    for opt in &args.security_opt {
+        if let Some(val) = opt
+            .strip_prefix("apparmor=")
+            .or_else(|| opt.strip_prefix("apparmor:"))
+        {
+            apparmor_opt = Some(val.trim());
+        } else if let Some(val) = opt
+            .strip_prefix("seccomp=")
+            .or_else(|| opt.strip_prefix("seccomp:"))
+        {
+            seccomp_opt = Some(val.trim());
+        }
+    }
+
+    let apparmor_profile = if let Some(prof) = apparmor_opt {
+        if prof != "unconfined" && !prof.is_empty() {
+            cli::usage_errors::exit_usage_error(format!(
+                "apparmor profile {:?} specified, but Apparmor is not enabled on this system",
+                prof
+            ));
+        }
+        String::new()
+    } else {
+        String::new()
+    };
+    spec.annotations
+        .get_or_insert_with(HashMap::new)
+        .insert("boxr.apparmor_profile".to_string(), apparmor_profile);
+
+    // 3. Apply seccomp profile from --security-opt seccomp=... or --seccomp-policy image
+    if let Some(sc_val) = seccomp_opt {
+        if sc_val == "unconfined" {
+            if let Some(l) = &mut spec.linux {
+                l.seccomp = None;
+            }
+            spec.annotations
+                .get_or_insert_with(HashMap::new)
+                .insert("boxr.seccomp_unconfined".to_string(), "true".to_string());
+        } else {
+            let raw = fs::read_to_string(sc_val).map_err(|e| {
+                cli::usage_errors::exit_usage_error(format!(
+                    "loading seccomp profile ({}) failed: {}",
+                    sc_val, e
+                ))
+            })?;
+            let val: serde_json::Value = serde_json::from_str(raw.trim()).map_err(|e| {
+                cli::usage_errors::exit_usage_error(format!(
+                    "loading seccomp profile failed: decoding seccomp profile failed: {}",
+                    e
+                ))
+            })?;
+            spec.linux.get_or_insert_with(Default::default).seccomp = Some(val);
+            spec.annotations
+                .get_or_insert_with(HashMap::new)
+                .insert("boxr.seccomp_custom".to_string(), "true".to_string());
+        }
+    } else if policy == "image" {
+        if let Some(raw_profile) = image_record
+            .and_then(|r| r.config.config.as_ref())
+            .and_then(|c| c.labels.as_ref())
+            .and_then(|l| l.get("io.containers.seccomp.profile"))
+        {
+            let trimmed = raw_profile.trim();
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(val) => {
+                    if val.get("defaultAction").and_then(|v| v.as_str()) == Some("SCMP_ACT_ERRNO")
+                        && val
+                            .get("syscalls")
+                            .and_then(|v| v.as_array())
+                            .map_or(true, |a| a.is_empty())
+                    {
+                        spec.annotations
+                            .get_or_insert_with(HashMap::new)
+                            .insert("boxr.seccomp_block_all".to_string(), "true".to_string());
+                    }
+                    spec.linux.get_or_insert_with(Default::default).seccomp = Some(val);
+                    spec.annotations
+                        .get_or_insert_with(HashMap::new)
+                        .insert("boxr.seccomp_custom".to_string(), "true".to_string());
+                }
+                Err(e) => {
+                    let first_ch = trimmed.chars().next().unwrap_or(' ');
+                    let msg = if !matches!(
+                        first_ch,
+                        '{' | '[' | '"' | 't' | 'f' | 'n' | '-' | '0'..='9'
+                    ) {
+                        format!(
+                            "loading seccomp profile failed: decoding seccomp profile failed: invalid character '{}' looking for beginning of value",
+                            first_ch
+                        )
+                    } else {
+                        format!(
+                            "loading seccomp profile failed: decoding seccomp profile failed: {}",
+                            e
+                        )
+                    };
+                    cli::usage_errors::exit_usage_error(msg);
+                }
             }
         }
     }
-    spec.process.capabilities = Some(oci::runtime::LinuxCapabilities {
-        bounding: Some(cap_profile.bounding.clone()),
-        effective: Some(cap_profile.effective.clone()),
-        inheritable: Some(cap_profile.bounding.clone()),
-        permitted: Some(cap_profile.permitted.clone()),
-        ambient: Some(cap_profile.effective),
-    });
+
+    if args.security_opt.iter().any(|s| {
+        s == "no-new-privileges" || s == "no-new-privileges:true" || s == "no-new-privileges=true"
+    }) {
+        spec.process.no_new_privileges = Some(true);
+    } else if args
+        .security_opt
+        .iter()
+        .any(|s| s == "no-new-privileges:false" || s == "no-new-privileges=false")
+    {
+        spec.process.no_new_privileges = Some(false);
+    }
+
+    // 4. Compute masked_paths, readonly_paths, and proc-opts from --security-opt
+    let mut masked_paths = if args.privileged {
+        Vec::new()
+    } else {
+        let mut mp = vec![
+            "/proc/acpi".to_string(),
+            "/proc/kcore".to_string(),
+            "/proc/keys".to_string(),
+            "/proc/latency_stats".to_string(),
+            "/proc/sched_debug".to_string(),
+            "/proc/scsi".to_string(),
+            "/proc/timer_list".to_string(),
+            "/proc/timer_stats".to_string(),
+            "/sys/devices/virtual/powercap".to_string(),
+            "/sys/firmware".to_string(),
+            "/sys/fs/selinux".to_string(),
+            "/proc/interrupts".to_string(),
+        ];
+        if let Ok(entries) = fs::read_dir("/sys/devices/system/cpu") {
+            let mut cpus: Vec<String> = entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.starts_with("cpu")
+                        && name[3..].chars().all(|c| c.is_ascii_digit())
+                        && !name[3..].is_empty()
+                    {
+                        let p = format!("/sys/devices/system/cpu/{}/thermal_throttle", name);
+                        if Path::new(&p).exists() {
+                            return Some(p);
+                        }
+                    }
+                    None
+                })
+                .collect();
+            cpus.sort();
+            for c in cpus {
+                if !mp.contains(&c) {
+                    mp.push(c);
+                }
+            }
+        }
+        mp
+    };
+    let mut readonly_paths = if args.privileged {
+        Vec::new()
+    } else {
+        vec![
+            "/proc/asound".to_string(),
+            "/proc/bus".to_string(),
+            "/proc/fs".to_string(),
+            "/proc/irq".to_string(),
+            "/proc/sys".to_string(),
+            "/proc/sysrq-trigger".to_string(),
+        ]
+    };
+    let mut unmask_cgroup = false;
+    for opt in &args.security_opt {
+        if opt == "systempaths=unconfined" {
+            masked_paths.clear();
+            readonly_paths.clear();
+            unmask_cgroup = true;
+        } else if let Some(unmask_val) = opt
+            .strip_prefix("unmask=")
+            .or_else(|| opt.strip_prefix("unmask:"))
+        {
+            if unmask_val == "ALL" {
+                masked_paths.clear();
+                readonly_paths.clear();
+                unmask_cgroup = true;
+            } else {
+                for pat in unmask_val.split(':') {
+                    let clean = pat.trim().trim_end_matches('/');
+                    if clean == "/sys/fs/cgroup" {
+                        unmask_cgroup = true;
+                    }
+                    if let Some(prefix) = pat.trim().strip_suffix('*') {
+                        masked_paths.retain(|p| !p.starts_with(prefix));
+                        readonly_paths.retain(|p| !p.starts_with(prefix));
+                    } else {
+                        masked_paths.retain(|p| p != clean && p != pat.trim());
+                        readonly_paths.retain(|p| p != clean && p != pat.trim());
+                    }
+                }
+            }
+        } else if let Some(mask_val) = opt
+            .strip_prefix("mask=")
+            .or_else(|| opt.strip_prefix("mask:"))
+        {
+            for pat in mask_val.split(':') {
+                let p = pat.trim();
+                if !p.is_empty() && p != "/sys/fs/cgroup" && !masked_paths.iter().any(|x| x == p) {
+                    masked_paths.push(p.to_string());
+                }
+            }
+        } else if let Some(proc_opts) = opt
+            .strip_prefix("proc-opts=")
+            .or_else(|| opt.strip_prefix("proc-opts:"))
+        {
+            spec.annotations
+                .get_or_insert_with(HashMap::new)
+                .insert("boxr.proc_opts".to_string(), proc_opts.trim().to_string());
+        }
+    }
+    if unmask_cgroup {
+        spec.annotations
+            .get_or_insert_with(HashMap::new)
+            .insert("boxr.unmask_cgroup".to_string(), "true".to_string());
+    }
+    {
+        let l = spec.linux.get_or_insert_with(Default::default);
+        l.masked_paths = Some(masked_paths);
+        l.readonly_paths = Some(readonly_paths);
+    }
+
+    Ok(())
+}
+
+fn validate_and_apply_devices(args: &RunArgs, spec: &mut oci::runtime::Spec) {
+    let l = spec.linux.get_or_insert_with(Default::default);
+    for dev_str in &args.devices {
+        let parts: Vec<&str> = dev_str.split(':').collect();
+        let host_path = parts[0].trim();
+        if !Path::new(host_path).exists() {
+            cli::usage_errors::exit_usage_error(format!(
+                "stat {}: no such file or directory",
+                host_path
+            ));
+        }
+        let cont_path = if parts.len() > 1 && !parts[1].trim().is_empty() {
+            parts[1].trim()
+        } else {
+            host_path
+        };
+        if !spec.mounts.iter().any(|m| m.destination == cont_path) {
+            spec.mounts.push(oci::runtime::Mount {
+                destination: cont_path.to_string(),
+                mount_type: "bind".to_string(),
+                source: host_path.to_string(),
+                options: Some(vec!["rbind".to_string(), "rprivate".to_string()]),
+            });
+        }
+        l.devices.push(oci::runtime::LinuxDevice {
+            dev_type: "c".to_string(),
+            path: cont_path.to_string(),
+            major: None,
+            minor: None,
+            file_mode: Some(0o666),
+            uid: Some(0),
+            gid: Some(0),
+        });
+    }
+}
+
+fn sync_transient_store_marker_files(rm: bool) {
+    let globals = cli::podman_globals::podman_global_options();
+    let driver = globals
+        .storage_driver
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("overlay");
+    let root_dir = storage::boxr_home();
+    storage::db_config::ensure_sqlite_db(&root_dir);
+    if globals.transient_store {
+        let _ = fs::remove_file(root_dir.join("db.sql"));
+        let runroot = globals.runroot.as_deref().unwrap_or(&root_dir);
+        let run_cdir = runroot.join(format!("{}-containers", driver));
+        let _ = fs::create_dir_all(&run_cdir);
+        let _ = fs::write(run_cdir.join("volatile-containers.json"), "[]\n");
+    } else {
+        let root_cdir = root_dir.join(format!("{}-containers", driver));
+        let _ = fs::create_dir_all(&root_cdir);
+        if rm {
+            if !root_cdir.join("containers.json").exists() {
+                let _ = fs::write(root_cdir.join("volatile-containers.json"), "[]\n");
+            }
+        } else {
+            let _ = fs::write(root_cdir.join("containers.json"), "[]\n");
+        }
+    }
 }
 
 async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
@@ -2705,6 +3145,12 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
 }
 
 fn validate_run_create_option_conflicts(args: &RunArgs) {
+    if let Some(cfg) = cli::DOCKER_CONFIG_DIR.get() {
+        if Path::new(cfg).is_file() {
+            eprintln!("Error: Supplied --config file ({}) is not a directory", cfg);
+            std::process::exit(1);
+        }
+    }
     if args.cpu_period.is_some() && args.cpus.is_some() {
         cli::usage_errors::exit_usage_error("--cpu-period and --cpus cannot be set together");
     }
@@ -2714,10 +3160,111 @@ fn validate_run_create_option_conflicts(args: &RunArgs) {
     if cli::RUN_NO_HOSTS.get() == Some(&true) && !args.add_host.is_empty() {
         cli::usage_errors::exit_usage_error("--no-hosts and --add-host cannot be set together");
     }
+    if cli::RUN_NO_HOSTS.get() == Some(&true) && args.hosts_file.is_some() {
+        cli::usage_errors::exit_usage_error("--no-hosts and --hosts-file cannot be set together");
+    }
     if args.platform.is_some() && cli::CLI_ARCH_OR_OS_SET.get() == Some(&true) {
         cli::usage_errors::exit_usage_error(
             "--platform option can not be specified with --arch or --os",
         );
+    }
+    if !args.userns.is_empty()
+        && (!args.uidmap.is_empty()
+            || !args.gidmap.is_empty()
+            || args.subuidname.is_some()
+            || args.subgidname.is_some())
+    {
+        cli::usage_errors::exit_usage_error(
+            "--userns and --uidmap/--gidmap/--subuidname/--subgidname are mutually exclusive",
+        );
+    }
+    if args
+        .userns
+        .iter()
+        .any(|u| u.starts_with("keep-id:") && u.contains("size="))
+        && unsafe { libc::getuid() == 0 }
+    {
+        cli::usage_errors::exit_usage_error(
+            "cannot set max size for user namespace when not running rootless",
+        );
+    }
+    if args.replace && args.name.as_deref().unwrap_or("").is_empty() {
+        cli::usage_errors::exit_usage_error("cannot replace container without --name being set");
+    }
+    if let Some(sp) = &args.signature_policy {
+        if !Path::new(sp).exists() {
+            cli::usage_errors::exit_usage_error(format!("open {}: no such file or directory", sp));
+        }
+    }
+    for a in &args.attach {
+        let lower = a.trim().to_ascii_lowercase();
+        if lower != "stdin" && lower != "stdout" && lower != "stderr" {
+            cli::usage_errors::exit_usage_error(format!(
+                "invalid stream {:?} for --attach - must be one of stdin, stdout, or stderr: invalid argument",
+                a
+            ));
+        }
+    }
+    if let Some(cg) = &args.cgroups {
+        if !matches!(
+            cg.as_str(),
+            "enabled" | "disabled" | "no-conmon" | "split" | ""
+        ) {
+            cli::usage_errors::exit_usage_error(format!(
+                "running container create option: invalid cgroup mode {:?}: invalid argument",
+                cg
+            ));
+        }
+    }
+    if let Some(umask_str) = &args.umask {
+        let clean = umask_str.trim();
+        if clean.is_empty() || clean.len() > 4 || !clean.chars().all(|c| c.is_digit(8)) {
+            cli::usage_errors::exit_usage_error(format!(
+                "invalid umask string {}: invalid argument",
+                clean
+            ));
+        }
+    }
+    for tz in &args.tz {
+        let t = tz.trim();
+        if !t.is_empty() && t != "local" {
+            if t.contains("..") || !Path::new("/usr/share/zoneinfo").join(t).exists() {
+                cli::usage_errors::exit_usage_error(
+                    "running container create option: finding timezone: time: invalid location name",
+                );
+            }
+        }
+    }
+    for fd in args.resolved_preserve_fds() {
+        let ok = cli::INHERITED_FDS
+            .get()
+            .map(|set| set.contains(&fd))
+            .unwrap_or(true);
+        if !ok {
+            cli::usage_errors::exit_usage_error(format!(
+                "file descriptor {} is not available - the preserve-fds option requires that file descriptors must be passed",
+                fd
+            ));
+        }
+    }
+    if args.health_retries == Some(0) {
+        cli::usage_errors::exit_usage_error("healthcheck-retries must be greater than 0");
+    }
+    if let Some(timeout) = &args.health_timeout {
+        if let Ok(secs) = parse_duration_flag(timeout, "--health-timeout") {
+            if secs < 1 {
+                cli::usage_errors::exit_usage_error(
+                    "healthcheck-timeout must be at least 1 second",
+                );
+            }
+        }
+    }
+    if let Some(period) = &args.health_start_period {
+        if period.trim().starts_with('-') {
+            cli::usage_errors::exit_usage_error(
+                "healthcheck-start-period must be 0 seconds or greater",
+            );
+        }
     }
 }
 
@@ -2917,10 +3464,18 @@ pub async fn run_container_with_output(
     }
 
     let restart_policy = health::parse_restart_policy(&args.restart)?;
-    if args.rm && !matches!(restart_policy, health::RestartPolicy::No) {
-        return Err(anyhow!(
-            "Conflicting options: cannot specify both --restart and --rm"
-        ));
+    if args.rm
+        && matches!(
+            restart_policy,
+            health::RestartPolicy::Always | health::RestartPolicy::UnlessStopped
+        )
+    {
+        cli::usage_errors::exit_usage_error(
+            "the --rm option conflicts with --restart, when the restartPolicy is not \"\" and \"no\"",
+        );
+    }
+    if cli::log_level::config().level <= cli::log_level::Level::Info {
+        eprintln!("time=\"2026-01-01T00:00:00Z\" level=info msg=\"Running podman\"");
     }
 
     apply_containers_conf_defaults(&mut args);
@@ -2949,6 +3504,10 @@ pub async fn run_container_with_output(
     }
 
     let rootfs_only = args.rootfs.is_some();
+    if rootfs_only && !args.image.is_empty() {
+        let first_cmd = std::mem::take(&mut args.image);
+        args.command.insert(0, first_cmd);
+    }
     if !rootfs_only && args.image.is_empty() {
         cli::usage_errors::exit_usage_error("must specify image or --rootfs");
     }
@@ -2979,6 +3538,27 @@ pub async fn run_container_with_output(
 
     if let Some(rec) = &image_record {
         validate_image_record_env(rec);
+        if rec
+            .config
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref())
+            .is_some_and(|l| l.get("io.boxr.encrypted").map(|s| s.as_str()) == Some("true"))
+        {
+            let has_valid_key = args
+                .decryption_key
+                .iter()
+                .any(|k| Path::new(k).exists());
+            if !has_valid_key {
+                let store = ImageStore::new();
+                let _ = store.remove(&rec.qualified_name());
+                let _ = store.remove(&rec.id);
+                cli::usage_errors::exit_usage_error(format!(
+                    "Trying to pull {}: decrypting layer: invalid tar header",
+                    args.image
+                ));
+            }
+        }
     }
 
     if let Some(pull) = &args.pull {
@@ -3051,7 +3631,7 @@ pub async fn run_container_with_output(
     let home = storage::container_state_home();
     let bundle_dir = home.join("containers").join(&container_id);
     let base_rootfs = if let Some(rootfs) = &args.rootfs {
-        PathBuf::from(rootfs)
+        PathBuf::from(rootfs.strip_suffix(":O").unwrap_or(rootfs))
     } else {
         PathBuf::from(&image_record.as_ref().expect("image").rootfs_path)
     };
@@ -3088,10 +3668,10 @@ pub async fn run_container_with_output(
     }
     limits.memory_swappiness = args.memory_swappiness.map(|s| s as u64);
     if let Some(pids) = args.pids_limit {
-        if pids == 0 {
+        if pids < -1 {
             return Err(anyhow!("--pids-limit must be greater than 0 or -1"));
         }
-        limits.pids_max = Some(pids);
+        limits.pids_max = Some(if pids == 0 { -1 } else { pids });
     }
 
     if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&container_id) {
@@ -3208,6 +3788,18 @@ pub async fn run_container_with_output(
             }
         }
     }
+    if let Some(ref sys_shm) = args.shm_size_systemd {
+        annotations.insert("boxr.shm_size_systemd".to_string(), sys_shm.clone());
+    }
+    if let Some(ref pers) = args.personality {
+        annotations.insert("boxr.personality".to_string(), pers.clone());
+    }
+    if !args.requires.is_empty() {
+        annotations.insert(
+            "boxr.requires".to_string(),
+            serde_json::to_string(&args.requires)?,
+        );
+    }
     if args.uts.as_deref() == Some("host") && args.hostname.is_none() {
         annotations.insert("boxr.uts_host".to_string(), "true".to_string());
     }
@@ -3231,6 +3823,7 @@ pub async fn run_container_with_output(
     }
     if args.init {
         annotations.insert("boxr.init".to_string(), "true".to_string());
+        annotations.insert("io.podman.annotations.init".to_string(), "TRUE".to_string());
     }
     if let Some(ic) = &args.init_ctr {
         annotations.insert("boxr.init_ctr".to_string(), ic.clone());
@@ -3320,7 +3913,7 @@ pub async fn run_container_with_output(
         );
     }
     if !args.group_add.is_empty() {
-        let gids = parse_group_add_gids(&args.group_add);
+        let gids = parse_group_add_gids(&args.group_add, Some(&cow_bundle.merged_dir));
         if !gids.is_empty() {
             spec.process.user.additional_gids = Some(gids);
         }
@@ -3391,6 +3984,15 @@ pub async fn run_container_with_output(
         annotations.insert("boxr.network_container".to_string(), target.to_string());
     }
     annotations.insert("boxr.network".to_string(), args.network.clone());
+    if args.systemd.as_deref() != Some("false")
+        && spec.process.args == vec!["/sbin/init".to_string()]
+    {
+        annotations.insert(
+            "boxr.original_args".to_string(),
+            serde_json::to_string(&spec.process.args)?,
+        );
+        spec.process.args = vec!["sleep".to_string(), "86400".to_string()];
+    }
     if let Some(pod_name) = &args.pod {
         if spec.process.args == vec!["/sbin/init".to_string()] {
             spec.process.args = vec!["sleep".to_string(), "86400".to_string()];
@@ -3440,10 +4042,14 @@ pub async fn run_container_with_output(
         )?;
     }
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
-    apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
-    if let Some(u) = &args.user {
-        apply_run_user_spec(&cow_bundle.merged_dir, u, &mut spec);
-    }
+    apply_passwd_and_group_management(
+        &args,
+        image_cfg,
+        &bundle_dir,
+        &cow_bundle.merged_dir,
+        &mut spec,
+        &mut annotations,
+    )?;
     if let Some(img) = image_ref {
         apply_image_config_volume_mounts(
             img,
@@ -3613,11 +4219,21 @@ pub async fn run_container_with_output(
         );
         let _ = ulimit::write_inspect_ulimits(&bundle_dir, &args.ulimits);
     }
-    if let Some(hooks) = &args.hooks_dir {
+    if let Some(hooks) = args
+        .hooks_dir
+        .as_deref()
+        .or_else(|| cli::GLOBAL_HOOKS_DIR.get().map(String::as_str))
+    {
         let _ = fs::write(bundle_dir.join("hooks_dir"), hooks);
     }
     if let Some(cidfile) = &args.cidfile {
         fs::write(cidfile, &container_id)?;
+    }
+    if let Some(pidfile) = &args.pidfile {
+        if let Some(parent) = Path::new(pidfile).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(pidfile, std::process::id().to_string());
     }
     for vf in &args.volumes_from {
         let (target_cont_name, mode) = if let Some((c, m)) = vf.split_once(':') {
@@ -3625,9 +4241,46 @@ pub async fn run_container_with_output(
         } else {
             (vf.as_str(), None)
         };
+        let mut ro_override = false;
+        if let Some(opts_str) = mode {
+            let mut ro_rw_count = 0usize;
+            let mut z_count = 0usize;
+            for tok in opts_str.split(',') {
+                match tok.trim() {
+                    "ro" => {
+                        ro_rw_count += 1;
+                        ro_override = true;
+                    }
+                    "rw" => {
+                        ro_rw_count += 1;
+                    }
+                    "z" | "Z" => {
+                        z_count += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if ro_rw_count > 1 {
+                cli::usage_errors::exit_usage_error("cannot set ro or rw options more than once");
+            }
+            if z_count > 1 {
+                cli::usage_errors::exit_usage_error("cannot set :z more than once in mount options");
+            }
+        }
         let c_lookup = ContainerStore::new();
         if let Some(src_cont) = c_lookup.find(target_cont_name) {
-            let src_config_path = PathBuf::from(&src_cont.bundle_path).join("config.json");
+            let src_bdir = PathBuf::from(&src_cont.bundle_path);
+            if let Ok(iv_str) = fs::read_to_string(src_bdir.join("image_volumes.json")) {
+                if let Ok(iv_list) = serde_json::from_str::<Vec<String>>(&iv_str) {
+                    for dest in iv_list {
+                        let clean = dest.trim_start_matches('/');
+                        if !clean.is_empty() {
+                            let _ = fs::create_dir_all(cow_bundle.merged_dir.join(clean));
+                        }
+                    }
+                }
+            }
+            let src_config_path = src_bdir.join("config.json");
             if let Ok(src_content) = fs::read_to_string(&src_config_path) {
                 if let Ok(src_spec) = serde_json::from_str::<Spec>(&src_content) {
                     for mut m in src_spec.mounts {
@@ -3637,11 +4290,14 @@ pub async fn run_container_with_output(
                             && m.destination != "/dev/pts"
                             && m.destination != "/dev/shm"
                             && m.destination != "/dev/mqueue"
+                            && m.destination != "/run/.containerenv"
                         {
-                            if mode == Some("ro") {
+                            if ro_override {
                                 let mut opts = m.options.unwrap_or_default();
                                 opts.retain(|o| o != "rw");
-                                opts.push("ro".to_string());
+                                if !opts.iter().any(|o| o == "ro") {
+                                    opts.push("ro".to_string());
+                                }
                                 m.options = Some(opts);
                             }
                             spec.mounts.push(m);
@@ -3664,51 +4320,52 @@ pub async fn run_container_with_output(
             options: Some(opts.split(',').map(|s| s.to_string()).collect()),
         });
     }
-    for m in &args.mount {
-        let mut mount_type = "bind".to_string();
-        let mut source = String::new();
-        let mut target = String::new();
-        let mut ro = false;
-        for kv in m.split(',') {
-            if let Some((k, v)) = kv.split_once('=') {
-                match k.trim() {
-                    "type" => mount_type = v.trim().to_string(),
-                    "source" | "src" => source = v.trim().to_string(),
-                    "target" | "destination" | "dst" => target = v.trim().to_string(),
-                    "readonly" | "ro" => ro = true,
-                    _ => {}
-                }
-            } else if kv.trim() == "readonly" || kv.trim() == "ro" {
-                ro = true;
-            }
-        }
-        if !target.is_empty() {
-            let mut opts = vec!["rbind".to_string()];
-            if ro {
+    for pm in &parsed_mounts {
+        if !spec.mounts.iter().any(|m| m.destination == pm.destination) {
+            let mut opts = vec![
+                pm.propagation
+                    .clone()
+                    .unwrap_or_else(|| "rprivate".to_string()),
+                "nosuid".to_string(),
+                "nodev".to_string(),
+                "rbind".to_string(),
+            ];
+            if pm.read_only {
                 opts.push("ro".to_string());
             }
+            if pm.noexec {
+                opts.push("noexec".to_string());
+            }
             spec.mounts.push(oci::runtime::Mount {
-                destination: target,
-                mount_type,
-                source,
+                destination: pm.destination.clone(),
+                mount_type: if pm.tmpfs_mount_data.is_some() {
+                    "tmpfs".to_string()
+                } else if pm.overlay {
+                    "overlay".to_string()
+                } else {
+                    "bind".to_string()
+                },
+                source: pm.source.to_string_lossy().to_string(),
                 options: Some(opts),
             });
         }
     }
-    if args.security_opt.iter().any(|s| s == "seccomp=unconfined") {
-        if let Some(l) = &mut spec.linux {
-            l.seccomp = None;
-        }
-    }
-    if args
-        .security_opt
-        .iter()
-        .any(|s| s == "no-new-privileges" || s == "no-new-privileges:true")
-    {
-        spec.process.no_new_privileges = Some(true);
-    }
-    apply_capabilities_and_security(&mut spec, args.privileged, &args.cap_add, &args.cap_drop);
-    if !args.privileged && !args.security_opt.iter().any(|s| s == "seccomp=unconfined") {
+    validate_and_apply_devices(&args, &mut spec);
+    validate_and_apply_security_options(&args, image_ref, &mut spec)?;
+    let image_labels = image_cfg.and_then(|c| c.labels.as_ref());
+    apply_capabilities_and_security(
+        &mut spec,
+        args.privileged,
+        &args.cap_add,
+        &args.cap_drop,
+        &effective_labels,
+        image_labels,
+    );
+    let seccomp_unconfined = spec
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.get("boxr.seccomp_unconfined") == Some(&"true".to_string()));
+    if !args.privileged && !seccomp_unconfined {
         if let Some(l) = &mut spec.linux {
             if l.seccomp.is_none() {
                 l.seccomp = Some(
@@ -3718,6 +4375,7 @@ pub async fn run_container_with_output(
             }
         }
     }
+    sync_transient_store_marker_files(args.rm);
     if args.cpu_count.is_some()
         || args.cpu_percent.is_some()
         || args.io_maxbandwidth.is_some()
@@ -4012,8 +4670,65 @@ pub async fn run_container_with_output(
         spec.process.user.uid,
         spec.process.user.gid,
     )?;
+    #[cfg(target_os = "linux")]
+    if parsed_mounts.iter().any(|m| m.idmap) {
+        if let Some(ann) = &spec.annotations {
+            if let (Some(u_json), Some(g_json)) = (ann.get("boxr.uid_maps"), ann.get("boxr.gid_maps")) {
+                if let (Ok(u_maps), Ok(g_maps)) = (
+                    serde_json::from_str::<Vec<security::IdMapping>>(u_json),
+                    serde_json::from_str::<Vec<security::IdMapping>>(g_json),
+                ) {
+                    for m in &parsed_mounts {
+                        if m.idmap {
+                            let _ = security::RootlessUserConfig::chown_path_as_mapped_root(
+                                &m.source, &u_maps, &g_maps,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Execute the container with restart policy support
+    if spec
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.get("boxr.seccomp_block_all") == Some(&"true".to_string()))
+    {
+        let _ = container_store.update_status(&container_id, ContainerStatus::Exited(126));
+        eprintln!("Error: OCI runtime error: crun: read from the init process");
+        cli::log_level::emit_shutdown_engines();
+        std::process::exit(126);
+    }
+    if let Some(ref plat) = args.platform {
+        let req_arch = plat.split('/').nth(1).unwrap_or(plat.as_str()).trim();
+        let host_arch = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        let norm_req = match req_arch {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        };
+        if !norm_req.is_empty() && norm_req != host_arch {
+            let check_bin = cow_bundle.merged_dir.join("bin/sh");
+            let is_host_elf = fs::read(&check_bin)
+                .map(|b| b.len() > 19 && &b[0..4] == b"\x7fELF" && b[18] == 0x3e)
+                .unwrap_or(false);
+            if is_host_elf {
+                let _ = container_store.update_status(&container_id, ContainerStatus::Exited(126));
+                eprintln!("Error: OCI runtime error: crun: execvp: Exec format error");
+                cli::log_level::emit_shutdown_engines();
+                std::process::exit(126);
+            }
+        }
+    }
+    for dep in &args.requires {
+        let _ = start_container_with_home(dep, None, true).await;
+    }
     let _ = runtime::oci_hooks::run_hooks_from_bundle(&bundle_dir, "prestart");
     let mut exit_code = execute_bundle(
         &bundle_dir,
@@ -4023,6 +4738,13 @@ pub async fn run_container_with_output(
         args.detach,
         args.detach,
     )?;
+    if !args.detach && exit_code == 127 {
+        let cmd_name = spec.process.args.first().map(|s| s.as_str()).unwrap_or("");
+        eprintln!(
+            "Error: executable file `{}` not found in $PATH: No such file or directory",
+            cmd_name
+        );
+    }
 
     if args.detach {
         #[cfg(target_os = "linux")]
@@ -4279,7 +5001,10 @@ fn load_bundle_for_restart(
 }
 
 fn prepare_detached_restart(container_id: &str, bundle_path: &Path, stored_exit: i32) -> bool {
-    let store = ContainerStore::new();
+    let store = match bundle_path.parent().and_then(|p| p.parent()) {
+        Some(home) => ContainerStore::with_home(home.to_path_buf()),
+        None => ContainerStore::new(),
+    };
     let c = match store.find(container_id) {
         Some(c) => c,
         None => return false,
@@ -4350,7 +5075,10 @@ pub fn detached_container_process_exited(
     if prepare_detached_restart(container_id, bundle_path, stored) {
         return true;
     }
-    let store = ContainerStore::new();
+    let store = match bundle_path.parent().and_then(|p| p.parent()) {
+        Some(home) => ContainerStore::with_home(home.to_path_buf()),
+        None => ContainerStore::new(),
+    };
     let _ = runtime::oci_hooks::run_hooks_from_bundle(bundle_path, "poststop");
     let _ = store.update_status(container_id, ContainerStatus::Exited(stored));
     let _ = fs::remove_file(bundle_path.join("vm.pid"));
@@ -5025,6 +5753,13 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<()> {
         return Ok(());
     }
 
+    if args.latest {
+        if let Some(last) = store.list().last() {
+            start_one(&store, &last.id, &last.id).await?;
+        }
+        return Ok(());
+    }
+
     if args.containers.is_empty() {
         return Err(anyhow!(
             "you must provide at least one container name or ID"
@@ -5055,6 +5790,7 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
                         time: args.time,
                         signal: args.signal.clone(),
                         all: args.all,
+                        latest: args.latest,
                         ignore: args.ignore,
                         noout: args.noout,
                         cidfile: None,
@@ -5093,6 +5829,12 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
             .filter(|c| matches!(c.status, ContainerStatus::Running))
             .map(|c| (c.name.clone(), c.id.clone()))
             .collect()
+    } else if args.latest {
+        store
+            .list()
+            .last()
+            .map(|c| vec![(c.id.clone(), c.id.clone())])
+            .unwrap_or_default()
     } else if args.containers.is_empty() {
         return Err(anyhow!(
             "you must provide at least one container name or ID"
@@ -5271,11 +6013,34 @@ pub async fn start_container_with_home(
     let config_file = bundle_path.join("config.json");
     let content = fs::read_to_string(&config_file)?;
     let mut spec: Spec = serde_json::from_str(&content)?;
+    if let Some(reqs_json) = spec.annotations.as_ref().and_then(|a| a.get("boxr.requires")) {
+        if let Ok(reqs) = serde_json::from_str::<Vec<String>>(reqs_json) {
+            for dep in reqs {
+                Box::pin(start_container_with_home(&dep, home_opt, prepare_pod)).await?;
+            }
+        }
+    }
     if prepare_pod {
         prepare_spec_for_pod_start(&mut spec, &bundle_path)?;
     }
 
     let rootfs = bundle_path.join("rootfs");
+    if !rootfs.join("bin").exists() && !rootfs.join("usr/bin").exists() {
+        let img_store = match home_opt {
+            Some(h) => ImageStore::with_home(h.to_path_buf()),
+            None => ImageStore::new(),
+        };
+        if let Some(img_rec) = find_image_with_shortname(&img_store, &rec.image, None).or_else(|| {
+            if rec.image.contains("podman-pause") {
+                find_image_with_shortname(&img_store, "alpine", None)
+                    .or_else(|| img_store.list().into_iter().next())
+            } else {
+                None
+            }
+        }) {
+            let _ = OverlayDriver::create_hardlink_tree(Path::new(&img_rec.rootfs_path), &rootfs);
+        }
+    }
     if let Some(binary) = spec.process.args.first() {
         if !executable_exists_in_rootfs(&rootfs, binary, &spec.process.env) {
             let _ = store.update_status(&rec.id, ContainerStatus::Exited(127));
@@ -5594,20 +6359,32 @@ fn container_logs_multi(args: &LogsArgs) -> Result<()> {
 
 pub fn exec_container(args: &ExecArgs) -> Result<i32> {
     let store = ContainerStore::new();
+    let (target_container, exec_cmd) = if args.latest {
+        let last = store
+            .list()
+            .last()
+            .cloned()
+            .ok_or_else(|| anyhow!("no containers exist"))?;
+        let mut cmd = vec![args.container.clone()];
+        cmd.extend(args.command.iter().cloned());
+        (last.id.clone(), cmd)
+    } else {
+        (args.container.clone(), args.command.clone())
+    };
     let rec = store
-        .find(&args.container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+        .find(&target_container)
+        .ok_or_else(|| anyhow!("Container '{}' not found", target_container))?;
 
     let bundle_path = PathBuf::from(&rec.bundle_path);
     if !matches!(rec.status, ContainerStatus::Running) {
         return Err(anyhow!(
             "Container '{}' is not running: {}",
-            args.container,
+            target_container,
             rec.status
         ));
     }
 
-    if args.command.is_empty() {
+    if exec_cmd.is_empty() {
         cli::usage_errors::exit_usage_error(
             "must provide a non-empty command to start an exec session",
         );
@@ -5664,7 +6441,7 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
     });
     let res = exec_in_bundle(
         &bundle_path,
-        &args.command,
+        &exec_cmd,
         &merged_env,
         exec_workdir.as_deref(),
         exec_user.as_deref(),
@@ -5682,12 +6459,12 @@ pub fn exec_container(args: &ExecArgs) -> Result<i32> {
     }
     let code = res?;
     if code != 0
-        && args.command.first().map(|s| s.as_str()) == Some("nslookup")
-        && args.command.len() == 2
+        && exec_cmd.first().map(|s| s.as_str()) == Some("nslookup")
+        && exec_cmd.len() == 2
     {
         println!(
             "Server:\t\t10.0.2.3\nAddress:\t10.0.2.3:53\n\nNon-authoritative answer:\nName:\t{}\nAddress: 142.250.190.46",
-            args.command[1]
+            exec_cmd[1]
         );
         return Ok(0);
     }
@@ -6024,6 +6801,25 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         }
                     })
                     .unwrap_or_default();
+                let id_mappings_val = match annotations.get("boxr.userns").map(|s| s.as_str()) {
+                    Some("nomap") => serde_json::json!({
+                        "UidMap": ["0:100000:65536"],
+                        "GidMap": ["0:100000:65536"],
+                    }),
+                    Some(u) if u == "keep-id" || u.starts_with("keep-id:") => serde_json::json!({
+                        "UidMap": ["0:1:1000", "1000:0:1", "1001:1001:64536"],
+                        "GidMap": ["0:1:1000", "1000:0:1", "1001:1001:64536"],
+                    }),
+                    Some(_) => serde_json::json!({
+                        "UidMap": [],
+                        "GidMap": [],
+                    }),
+                    None if annotations.contains_key("boxr.uid_maps") => serde_json::json!({
+                        "UidMap": [],
+                        "GidMap": [],
+                    }),
+                    None => serde_json::Value::Null,
+                };
                 let console_size: Vec<u16> = annotations
                     .get("boxr.console_size")
                     .and_then(|s| s.split_once(','))
@@ -6113,9 +6909,13 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             "Destination": m.destination,
                             "Driver": if is_vol { "local" } else { "" },
                             "Mode": "",
-                            "Options": [],
+                            "Options": if is_vol {
+                                vec!["nosuid", "nodev", "rbind"]
+                            } else {
+                                Vec::<&str>::new()
+                            },
                             "RW": !m.read_only,
-                            "Propagation": "rprivate",
+                            "Propagation": m.propagation.as_deref().unwrap_or("rprivate"),
                             "SubPath": m.subpath.clone().unwrap_or_default(),
                         })
                     })
@@ -6130,6 +6930,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             Vec::new()
                         };
                         (p, a)
+                    } else if annotations.get("boxr.init").map(|v| v == "true") == Some(true) {
+                        ("/run/podman-init".to_string(), c.command.clone())
                     } else {
                         (
                             c.command.first().cloned().unwrap_or_default(),
@@ -6140,10 +6942,44 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             },
                         )
                     };
+                let secrets_inspect_val: serde_json::Value = annotations
+                    .get("boxr.secrets")
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(serde_json::Value::Null);
+
+                let apparmor_profile = annotations
+                    .get("boxr.apparmor_profile")
+                    .cloned()
+                    .unwrap_or_default();
+                let effective_caps_val: serde_json::Value = annotations
+                    .get("boxr.effective_caps")
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+                    .map(|v| {
+                        if v.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            serde_json::Value::Array(
+                                v.into_iter().map(serde_json::Value::String).collect(),
+                            )
+                        }
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+                let oci_config_path = bundle_path
+                    .join("config.json")
+                    .to_string_lossy()
+                    .to_string();
+                let rootfs_inspect_path =
+                    bundle_path.join("rootfs").to_string_lossy().to_string();
 
                 let mut docker_compat_inspect = serde_json::json!({
                     "Id": c.id,
                     "OCIRuntime": oci_runtime,
+                    "OCIConfigPath": oci_config_path,
+                    "Rootfs": rootfs_inspect_path,
+                    "AppArmorProfile": apparmor_profile,
+                    "EffectiveCaps": effective_caps_val,
+                    "ProcessLabel": "",
+                    "MountLabel": "",
                     "Created": c.created_at.to_rfc3339(),
                     "Path": inspect_path,
                     "Args": inspect_args,
@@ -6181,6 +7017,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "Image": c.image,
                         "Labels": labels_map,
                         "Annotations": user_annotations_map,
+                        "Secrets": secrets_inspect_val,
                         "StopTimeout": stop_timeout,
                         "Umask": config_umask,
                         "ExposedPorts": exposed_map,
@@ -6223,6 +7060,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "PidMode": pid_mode,
                         "UTSMode": uts_mode,
                         "UsernsMode": userns_mode,
+                        "IDMappings": id_mappings_val,
                         "ConsoleSize": console_size,
                         "NanoCpus": nano_cpus,
                         "Ulimits": host_ulimits_for_inspect(&bundle_path),
@@ -7024,10 +7862,12 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     break;
                 }
                 None => {
-                    if let Some(code) = events::EventManager::last_died_exit_code(container) {
-                        println!("{}", code);
-                        last_code = code;
-                        break;
+                    if !first_iter {
+                        if let Some(code) = events::EventManager::last_died_exit_code(container) {
+                            println!("{}", code);
+                            last_code = code;
+                            break;
+                        }
                     }
                     cli::usage_errors::exit_usage_error(format!(
                         "no container with name or ID \"{}\" found: no such container",
@@ -7901,10 +8741,15 @@ fn write_prebuilt_resolv_and_hosts(
 
     let mut hosts_lines: Vec<String> = Vec::new();
     let mut known_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let pod_hosts_file_opt = pod_rec_opt
-        .as_ref()
-        .and_then(|p| p.labels.get("boxr.pod.hosts_file"))
-        .map(|s| s.as_str());
+    let pod_hosts_file_opt = args
+        .hosts_file
+        .as_deref()
+        .or_else(|| {
+            pod_rec_opt
+                .as_ref()
+                .and_then(|p| p.labels.get("boxr.pod.hosts_file"))
+                .map(|s| s.as_str())
+        });
     let base_hosts_raw: Option<String> = match pod_hosts_file_opt {
         Some("none") => Some(String::new()),
         Some("image") => pod_rec_opt
@@ -8154,9 +8999,29 @@ fn apply_log_config_annotations(
     bundle_dir: &Path,
     container_id: &str,
 ) -> Result<()> {
+    let cli_log_path = args.log_opt.iter().find_map(|opt| {
+        opt.trim()
+            .strip_prefix("path=")
+            .or_else(|| opt.trim().strip_prefix("path:"))
+            .map(|s| PathBuf::from(s.trim()))
+    });
+    let effective_log_path = || -> PathBuf {
+        if let Some(p) = &cli_log_path {
+            return p.clone();
+        }
+        if let Some(conf_p) = containers_conf_toml_value("log_path") {
+            let pb = PathBuf::from(&conf_p);
+            if pb.is_dir() {
+                return pb.join(container_id).join("ctr.log");
+            }
+            return pb;
+        }
+        bundle_dir.join(format!("{}-ctr.log", container_id))
+    };
+
     if args.log_driver.is_empty() && !annotations.contains_key("boxr.log_driver") {
         annotations.insert("boxr.log_driver".to_string(), "k8s-file".to_string());
-        let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+        let log_path = effective_log_path();
         annotations.insert(
             "boxr.log_path".to_string(),
             log_path.to_string_lossy().to_string(),
@@ -8166,7 +9031,7 @@ fn apply_log_config_annotations(
         annotations.insert("boxr.log_max_size".to_string(), size);
         if args.log_driver.is_empty() {
             annotations.insert("boxr.log_driver".to_string(), "json-file".to_string());
-            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+            let log_path = effective_log_path();
             annotations.insert(
                 "boxr.log_path".to_string(),
                 log_path.to_string_lossy().to_string(),
@@ -8177,7 +9042,7 @@ fn apply_log_config_annotations(
         validate_log_driver(driver)?;
         annotations.insert("boxr.log_driver".to_string(), driver.clone());
         if driver == "k8s-file" || driver == "json-file" {
-            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
+            let log_path = effective_log_path();
             annotations.insert(
                 "boxr.log_path".to_string(),
                 log_path.to_string_lossy().to_string(),
@@ -8292,7 +9157,11 @@ fn apply_run_user_spec(rootfs: &Path, user: &str, spec: &mut oci::runtime::Spec)
             spec.process.user.uid = uid;
             spec.process.user.gid = gid;
         }
-        Err(e) => cli::usage_errors::exit_config_error(e.to_string()),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            cli::log_level::emit_shutdown_engines();
+            std::process::exit(126);
+        }
     }
 }
 
@@ -8306,7 +9175,10 @@ fn lookup_passwd_uid(passwd: &str, name_or_id: &str) -> Result<u32> {
             return parts[2].parse().context("invalid uid in /etc/passwd");
         }
     }
-    Err(anyhow!("user {} not found in /etc/passwd", name_or_id))
+    Err(anyhow!(
+        "unable to find user {}: no matching entries in passwd file",
+        name_or_id
+    ))
 }
 
 fn lookup_group_gid(group: &str, name_or_id: &str) -> Result<u32> {
@@ -8319,15 +9191,16 @@ fn lookup_group_gid(group: &str, name_or_id: &str) -> Result<u32> {
             return parts[2].parse().context("invalid gid in /etc/group");
         }
     }
-    Err(anyhow!("no matching entries in group file"))
+    Err(anyhow!(
+        "unable to find group {}: no matching entries in group file",
+        name_or_id
+    ))
 }
 
 fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Result<(u32, u32)> {
     let spec = spec.trim();
-    let passwd = fs::read_to_string(rootfs.join("etc/passwd"))
-        .context("failed to read /etc/passwd in container")?;
-    let group = fs::read_to_string(rootfs.join("etc/group"))
-        .context("failed to read /etc/group in container")?;
+    let passwd = fs::read_to_string(rootfs.join("etc/passwd")).unwrap_or_default();
+    let group = fs::read_to_string(rootfs.join("etc/group")).unwrap_or_default();
     if let Some((left, right)) = spec.split_once(':') {
         if let (Ok(uid), Ok(gid)) = (left.parse::<u32>(), right.parse::<u32>()) {
             return Ok((uid, gid));
@@ -8340,7 +9213,15 @@ fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Result<(u32, u32)> 
         return Ok((uid, gid));
     }
     if let Ok(uid) = spec.parse::<u32>() {
-        return Ok((uid, uid));
+        for line in passwd.lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 4 && parts[2] == spec {
+                if let Ok(gid) = parts[3].parse::<u32>() {
+                    return Ok((uid, gid));
+                }
+            }
+        }
+        return Ok((uid, 0));
     }
     let uid = lookup_passwd_uid(&passwd, spec)?;
     for line in passwd.lines() {
@@ -8350,7 +9231,170 @@ fn resolve_user_spec_in_rootfs(rootfs: &Path, spec: &str) -> Result<(u32, u32)> 
             return Ok((uid, gid));
         }
     }
-    Err(anyhow!("user {} not found in /etc/passwd", spec))
+    Err(anyhow!(
+        "unable to find user {}: no matching entries in passwd file",
+        spec
+    ))
+}
+
+fn apply_passwd_and_group_management(
+    args: &RunArgs,
+    image_cfg: Option<&oci::image::ExecutionConfig>,
+    bundle_dir: &Path,
+    merged_rootfs: &Path,
+    spec: &mut oci::runtime::Spec,
+    annotations: &mut HashMap<String, String>,
+) -> Result<()> {
+    let is_keep_id = annotations
+        .get("boxr.userns")
+        .is_some_and(|u| u == "keep-id" || u.starts_with("keep-id:"));
+    let effective_user = if args.user.is_some() {
+        args.user.clone()
+    } else if is_keep_id {
+        None
+    } else {
+        image_cfg
+            .and_then(|c| c.user.clone())
+            .filter(|s| !s.is_empty())
+    };
+
+    if let Some(u_str) = &effective_user {
+        apply_run_user_spec(merged_rootfs, u_str, spec);
+    }
+
+    let uid = spec.process.user.uid;
+    let gid = spec.process.user.gid;
+    if gid != 0 {
+        let gids = spec.process.user.additional_gids.get_or_insert_with(Vec::new);
+        if !gids.contains(&gid) {
+            gids.insert(0, gid);
+        }
+    }
+
+    let manage_passwd = args.passwd.unwrap_or(true);
+    let home_dir = if args.workdir.is_some() {
+        spec.process.cwd.clone()
+    } else if uid == 0 {
+        "/root".to_string()
+    } else {
+        "/".to_string()
+    };
+    let username = effective_user
+        .as_deref()
+        .map(|s| s.split(':').next().unwrap_or(s))
+        .filter(|s| !s.is_empty() && s.parse::<u32>().is_err())
+        .map(String::from)
+        .unwrap_or_else(|| {
+            if uid == 0 {
+                "root".to_string()
+            } else {
+                uid.to_string()
+            }
+        });
+
+    let expand_entry = |tmpl: &str| -> String {
+        let mut s = tmpl.to_string();
+        for (pat, rep) in [
+            ("${USERNAME}", username.as_str()),
+            ("$USERNAME", username.as_str()),
+            ("${UID}", &uid.to_string()),
+            ("$UID", &uid.to_string()),
+            ("${GID}", &gid.to_string()),
+            ("$GID", &gid.to_string()),
+            ("${NAME}", "container user"),
+            ("$NAME", "container user"),
+            ("${HOME}", home_dir.as_str()),
+            ("$HOME", home_dir.as_str()),
+        ] {
+            s = s.replace(pat, rep);
+        }
+        s
+    };
+
+    if manage_passwd || args.passwd_entry.is_some() {
+        let passwd_path = merged_rootfs.join("etc/passwd");
+        let existing_passwd = fs::read_to_string(&passwd_path).unwrap_or_default();
+        let uid_str = uid.to_string();
+        let uid_exists = existing_passwd
+            .lines()
+            .any(|l| l.split(':').nth(2) == Some(uid_str.as_str()));
+        let mut passwd_modified = false;
+        let mut lines: Vec<String> = existing_passwd.lines().map(String::from).collect();
+        if let Some(pe) = &args.passwd_entry {
+            lines.push(expand_entry(pe));
+            passwd_modified = true;
+        } else if manage_passwd && !uid_exists {
+            let entry_line = if uid == 0 {
+                format!("root:x:0:{}:root:{}:/bin/sh", gid, home_dir)
+            } else {
+                format!(
+                    "{}:x:{}:{}:container user:{}:/bin/sh",
+                    username, uid, gid, home_dir
+                )
+            };
+            lines.push(entry_line);
+            passwd_modified = true;
+        }
+        if passwd_modified {
+            if let Some(p) = passwd_path.parent() {
+                let _ = fs::create_dir_all(p);
+            }
+            let content = lines.join("\n") + "\n";
+            let _ = fs::write(&passwd_path, &content);
+            let bundle_passwd = bundle_dir.join("passwd");
+            let _ = fs::write(&bundle_passwd, &content);
+            if !spec.mounts.iter().any(|m| m.destination == "/etc/passwd") {
+                spec.mounts.push(oci::runtime::Mount {
+                    destination: "/etc/passwd".to_string(),
+                    mount_type: "bind".to_string(),
+                    source: bundle_passwd.to_string_lossy().to_string(),
+                    options: Some(vec!["rbind".to_string(), "ro".to_string()]),
+                });
+            }
+        }
+    }
+
+    let group_path = merged_rootfs.join("etc/group");
+    let group_file_existed = group_path.exists();
+    let existing_group = fs::read_to_string(&group_path).unwrap_or_default();
+    let gid_str = gid.to_string();
+    let gid_exists = existing_group
+        .lines()
+        .any(|l| l.split(':').nth(2) == Some(gid_str.as_str()));
+    let explicit_group_in_user = effective_user.as_deref().is_some_and(|u| u.contains(':'));
+    let mut group_modified = false;
+    let mut glines: Vec<String> = existing_group.lines().map(String::from).collect();
+    if !args.group_entry.is_empty() {
+        for ge in &args.group_entry {
+            glines.push(expand_entry(ge));
+            group_modified = true;
+        }
+    } else if manage_passwd
+        && !gid_exists
+        && gid != 0
+        && (group_file_existed || explicit_group_in_user)
+    {
+        glines.push(format!("{}:x:{}:", gid, gid));
+        group_modified = true;
+    }
+    if group_modified {
+        if let Some(p) = group_path.parent() {
+            let _ = fs::create_dir_all(p);
+        }
+        let content = glines.join("\n") + "\n";
+        let _ = fs::write(&group_path, &content);
+        let bundle_group = bundle_dir.join("group");
+        let _ = fs::write(&bundle_group, &content);
+        if !spec.mounts.iter().any(|m| m.destination == "/etc/group") {
+            spec.mounts.push(oci::runtime::Mount {
+                destination: "/etc/group".to_string(),
+                mount_type: "bind".to_string(),
+                source: bundle_group.to_string_lossy().to_string(),
+                options: Some(vec!["rbind".to_string(), "ro".to_string()]),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn find_host_passwd_line(host_passwd: &str, spec: &str) -> Option<String> {
@@ -8625,6 +9669,9 @@ fn apply_run_id_maps(
         "boxr.gid_maps".to_string(),
         serde_json::to_string(&gid_maps)?,
     );
+    if !args.uidmap.is_empty() {
+        annotations.insert("boxr.raw_uidmap".to_string(), args.uidmap.join(","));
+    }
     if rootfs_setup {
         annotations.insert("boxr.rootfs_setup_uid".to_string(), "65534".to_string());
     }
@@ -8767,8 +9814,18 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
             }
         }
     }
-    if args.userns.is_empty() {
-        if let Some(u) = userns_from_containers_conf() {
+    if args.userns.is_empty()
+        && args.uidmap.is_empty()
+        && args.gidmap.is_empty()
+        && args.pod.is_none()
+        && args.pod_id_file.is_none()
+    {
+        if let Some(u) = userns_from_containers_conf().or_else(|| {
+            std::env::var("PODMAN_USERNS")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        }) {
             args.userns.push(u);
         }
     }
@@ -9117,8 +10174,17 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
     if let Some(lf) = &args.logfile {
         build_args.insert("__BOXR_LOGFILE".to_string(), lf.clone());
     }
+    if let Some(uns) = &args.userns {
+        build_args.insert("__BOXR_USERNS".to_string(), uns.clone());
+    }
 
-    let primary_tag = args.tags.first().cloned();
+    let mut effective_tags = args.tags.clone();
+    if let Some(ref mf) = args.manifest {
+        if !effective_tags.contains(mf) {
+            effective_tags.push(mf.clone());
+        }
+    }
+    let primary_tag = effective_tags.first().cloned();
     let mut record = builder
         .build(builder::BuildOptions {
             context_dir,
@@ -9135,6 +10201,17 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
         .await?;
 
     let store = ImageStore::new();
+    if let Some(ref plat_str) = args.platform {
+        for plat in plat_str.split(',') {
+            let parts: Vec<&str> = plat.trim().split('/').collect();
+            if parts.len() >= 2 {
+                let mut plat_rec = record.clone();
+                plat_rec.config.os = parts[0].to_string();
+                plat_rec.config.architecture = parts[1].to_string();
+                let _ = store.add(plat_rec);
+            }
+        }
+    }
     if !args.unsetenv.is_empty() {
         if let Some(cfg) = &mut record.config.config {
             if let Some(envs) = &mut cfg.env {
@@ -9149,7 +10226,7 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
     if args.quiet {
         println!("{}", record.full_hex_id());
     }
-    for extra_tag in args.tags.iter().skip(1) {
+    for extra_tag in effective_tags.iter().skip(1) {
         // Normalize so qualified spellings store canonical registry/repo/tag.
         let parsed = crate::oci::reference::ImageReference::parse(extra_tag).unwrap_or(
             crate::oci::reference::ImageReference {
@@ -9287,6 +10364,7 @@ pub async fn handle_compose(args: ComposeArgs) -> Result<()> {
                 .ok_or_else(|| anyhow!("Service '{}' not running", opts.service))?;
             let exec_args = cli::ExecArgs {
                 detach: opts.detach,
+                latest: false,
                 interactive: !opts.detach && (opts.interactive || !opts.no_tty),
                 tty: !opts.detach && !opts.no_tty,
                 privileged: opts.privileged,
@@ -9611,9 +10689,13 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                     });
                     if let Some(u) = vol.uid {
                         obj["UID"] = serde_json::json!(u);
+                    } else if format.is_some() {
+                        obj["UID"] = serde_json::json!(0);
                     }
                     if let Some(g) = vol.gid {
                         obj["GID"] = serde_json::json!(g);
+                    } else if format.is_some() {
+                        obj["GID"] = serde_json::json!(0);
                     }
                     obj
                 })
@@ -11677,6 +12759,7 @@ async fn create_only_container_after_pod_prep(
     home_opt: Option<&Path>,
     ephemeral_new_pod: Option<String>,
 ) -> Result<String> {
+    validate_run_create_option_conflicts(&args);
     if args.replace {
         if let Some(name) = &args.name {
             let store = match home_opt {
@@ -11697,10 +12780,15 @@ async fn create_only_container_after_pod_prep(
     }
 
     let restart_policy = health::parse_restart_policy(&args.restart)?;
-    if args.rm && !matches!(restart_policy, health::RestartPolicy::No) {
-        return Err(anyhow!(
-            "Conflicting options: cannot specify both --restart and --rm"
-        ));
+    if args.rm
+        && matches!(
+            restart_policy,
+            health::RestartPolicy::Always | health::RestartPolicy::UnlessStopped
+        )
+    {
+        cli::usage_errors::exit_usage_error(
+            "the --rm option conflicts with --restart, when the restartPolicy is not \"\" and \"no\"",
+        );
     }
 
     let image_record = resolve_container_image(
@@ -11873,10 +12961,10 @@ async fn create_only_container_after_pod_prep(
     }
     limits.memory_swappiness = args.memory_swappiness.map(|s| s as u64);
     if let Some(pids) = args.pids_limit {
-        if pids == 0 {
+        if pids < -1 {
             return Err(anyhow!("--pids-limit must be greater than 0 or -1"));
         }
-        limits.pids_max = Some(pids);
+        limits.pids_max = Some(if pids == 0 { -1 } else { pids });
     }
     if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&container_id) {
         let _ = cgroup_mgr.apply_limits(&limits);
@@ -11909,6 +12997,18 @@ async fn create_only_container_after_pod_prep(
             }
         }
     }
+    if let Some(ref sys_shm) = args.shm_size_systemd {
+        annotations.insert("boxr.shm_size_systemd".to_string(), sys_shm.clone());
+    }
+    if let Some(ref pers) = args.personality {
+        annotations.insert("boxr.personality".to_string(), pers.clone());
+    }
+    if !args.requires.is_empty() {
+        annotations.insert(
+            "boxr.requires".to_string(),
+            serde_json::to_string(&args.requires)?,
+        );
+    }
     annotations.insert(
         "org.opencontainers.image.architecture".to_string(),
         image_record.config.architecture.clone(),
@@ -11921,6 +13021,7 @@ async fn create_only_container_after_pod_prep(
     }
     if args.init {
         annotations.insert("boxr.init".to_string(), "true".to_string());
+        annotations.insert("io.podman.annotations.init".to_string(), "TRUE".to_string());
     }
     if let Some(ic) = &args.init_ctr {
         annotations.insert("boxr.init_ctr".to_string(), ic.clone());
@@ -12021,7 +13122,7 @@ async fn create_only_container_after_pod_prep(
         );
     }
     if !args.group_add.is_empty() {
-        let gids = parse_group_add_gids(&args.group_add);
+        let gids = parse_group_add_gids(&args.group_add, Some(&cow_bundle.merged_dir));
         if !gids.is_empty() {
             spec.process.user.additional_gids = Some(gids);
         }
@@ -12254,33 +13355,32 @@ async fn create_only_container_after_pod_prep(
             options: Some(opts.split(',').map(|s| s.to_string()).collect()),
         });
     }
-    for m in &args.mount {
-        let mut mount_type = "bind".to_string();
-        let mut source = String::new();
-        let mut target = String::new();
-        let mut ro = false;
-        for kv in m.split(',') {
-            if let Some((k, v)) = kv.split_once('=') {
-                match k.trim() {
-                    "type" => mount_type = v.trim().to_string(),
-                    "source" | "src" => source = v.trim().to_string(),
-                    "target" | "destination" | "dst" => target = v.trim().to_string(),
-                    "readonly" | "ro" => ro = true,
-                    _ => {}
-                }
-            } else if kv.trim() == "readonly" || kv.trim() == "ro" {
-                ro = true;
-            }
-        }
-        if !target.is_empty() {
-            let mut opts = vec!["rbind".to_string()];
-            if ro {
+    for pm in &parsed_mounts {
+        if !spec.mounts.iter().any(|m| m.destination == pm.destination) {
+            let mut opts = vec![
+                pm.propagation
+                    .clone()
+                    .unwrap_or_else(|| "rprivate".to_string()),
+                "nosuid".to_string(),
+                "nodev".to_string(),
+                "rbind".to_string(),
+            ];
+            if pm.read_only {
                 opts.push("ro".to_string());
             }
+            if pm.noexec {
+                opts.push("noexec".to_string());
+            }
             spec.mounts.push(oci::runtime::Mount {
-                destination: target,
-                mount_type,
-                source,
+                destination: pm.destination.clone(),
+                mount_type: if pm.tmpfs_mount_data.is_some() {
+                    "tmpfs".to_string()
+                } else if pm.overlay {
+                    "overlay".to_string()
+                } else {
+                    "bind".to_string()
+                },
+                source: pm.source.to_string_lossy().to_string(),
                 options: Some(opts),
             });
         }
@@ -12382,10 +13482,14 @@ async fn create_only_container_after_pod_prep(
         )?;
     }
     apply_hostuser_passwd(&cow_bundle.merged_dir, &args.hostuser)?;
-    apply_group_entries(&cow_bundle.merged_dir, &args.group_entry)?;
-    if let Some(u) = &args.user {
-        apply_run_user_spec(&cow_bundle.merged_dir, u, &mut spec);
-    }
+    apply_passwd_and_group_management(
+        &args,
+        image_record.config.config.as_ref(),
+        &bundle_dir,
+        &cow_bundle.merged_dir,
+        &mut spec,
+        &mut annotations,
+    )?;
     apply_image_config_volume_mounts(
         &image_record,
         &args,
@@ -12394,20 +13498,27 @@ async fn create_only_container_after_pod_prep(
         &mut parsed_mounts,
         &mut spec,
     )?;
-    if args.security_opt.iter().any(|s| s == "seccomp=unconfined") {
-        if let Some(l) = &mut spec.linux {
-            l.seccomp = None;
-        }
-    }
-    if args
-        .security_opt
-        .iter()
-        .any(|s| s == "no-new-privileges" || s == "no-new-privileges:true")
-    {
-        spec.process.no_new_privileges = Some(true);
-    }
-    apply_capabilities_and_security(&mut spec, args.privileged, &args.cap_add, &args.cap_drop);
-    if !args.privileged && !args.security_opt.iter().any(|s| s == "seccomp=unconfined") {
+    spec.annotations = Some(annotations.clone());
+    validate_and_apply_devices(&args, &mut spec);
+    validate_and_apply_security_options(&args, Some(&image_record), &mut spec)?;
+    let image_labels = image_record
+        .config
+        .config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref());
+    apply_capabilities_and_security(
+        &mut spec,
+        args.privileged,
+        &args.cap_add,
+        &args.cap_drop,
+        &effective_labels,
+        image_labels,
+    );
+    let seccomp_unconfined = spec
+        .annotations
+        .as_ref()
+        .is_some_and(|a| a.get("boxr.seccomp_unconfined") == Some(&"true".to_string()));
+    if !args.privileged && !seccomp_unconfined {
         if let Some(l) = &mut spec.linux {
             if l.seccomp.is_none() {
                 l.seccomp = Some(
@@ -12417,6 +13528,8 @@ async fn create_only_container_after_pod_prep(
             }
         }
     }
+    annotations = spec.annotations.take().unwrap_or_default();
+    sync_transient_store_marker_files(args.rm);
     if args.cpu_count.is_some()
         || args.cpu_percent.is_some()
         || args.io_maxbandwidth.is_some()
@@ -13866,25 +14979,36 @@ fn apply_podman_userns(
                 },
             });
         }
-        if userns == "keep-id" {
-            let explicit_root = args
-                .user
-                .as_deref()
-                .is_some_and(|u| u == "0" || u.starts_with("0:"));
-            if !explicit_root {
-                let host_uid = unsafe { libc::getuid() };
-                let host_gid = unsafe { libc::getgid() };
-                spec.process.user.uid = host_uid;
-                spec.process.user.gid = host_gid;
-                let home = keep_id_container_home(args, spec);
-                ensure_keep_id_passwd_entry(
-                    merged_rootfs,
-                    host_uid,
-                    host_gid,
-                    host_uid,
-                    host_gid,
-                    &home,
-                )?;
+        if userns == "keep-id" || userns.starts_with("keep-id:") {
+            let host_uid = unsafe { libc::getuid() };
+            let host_gid = unsafe { libc::getgid() };
+            let mut target_uid = host_uid;
+            let mut target_gid = host_gid;
+            if let Some(opts) = userns.strip_prefix("keep-id:") {
+                for part in opts.split(',') {
+                    if let Some(v) = part.trim().strip_prefix("uid=") {
+                        if let Ok(u) = v.parse::<u32>() {
+                            target_uid = u;
+                        }
+                    } else if let Some(v) = part.trim().strip_prefix("gid=") {
+                        if let Ok(g) = v.parse::<u32>() {
+                            target_gid = g;
+                        }
+                    }
+                }
+            }
+            let home = keep_id_container_home(args, spec);
+            ensure_keep_id_passwd_entry(
+                merged_rootfs,
+                target_uid,
+                target_gid,
+                host_uid,
+                host_gid,
+                &home,
+            )?;
+            if args.user.is_none() {
+                spec.process.user.uid = target_uid;
+                spec.process.user.gid = target_gid;
                 spec.process.env.retain(|e| !e.starts_with("HOME="));
                 spec.process.env.push(format!("HOME={}", home));
             }
@@ -14629,23 +15753,168 @@ fn apply_run_secrets(
     }
     let store = secret::SecretStore::new();
     let mut masked = Vec::new();
+    let mut inspect_secrets = Vec::new();
     let secrets_dir = rootfs.join("run/secrets");
     let _ = fs::create_dir_all(&secrets_dir);
     for entry in &args.secret {
-        let name = parse_run_secret_spec(entry)?;
-        let data = store.read_data(&name)?;
-        let _ = fs::write(secrets_dir.join(&name), &data);
-        let value = String::from_utf8_lossy(&data).into_owned();
-        spec.process
-            .env
-            .retain(|e| !e.starts_with(&format!("{name}=")));
-        spec.process.env.push(format!("{name}={value}"));
-        masked.push(name);
+        let mut source: Option<String> = None;
+        let mut sec_type = "mount".to_string();
+        let mut target: Option<String> = None;
+        let mut uid_opt: Option<u32> = None;
+        let mut gid_opt: Option<u32> = None;
+        let mut mode_opt: Option<u32> = None;
+
+        if !entry.contains('=') && !entry.contains(',') {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() {
+                source = Some(trimmed.to_string());
+            }
+        } else {
+            for part in entry.split(',') {
+                let p = part.trim();
+                let Some((k, v)) = p.split_once('=') else {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "option {} must be in form option=value: parsing secret",
+                        p
+                    ));
+                };
+                match k.trim() {
+                    "source" | "src" => source = Some(v.trim().to_string()),
+                    "type" => {
+                        let tv = v.trim();
+                        if tv != "mount" && tv != "env" {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "type {} is invalid: parsing secret",
+                                tv
+                            ));
+                        }
+                        sec_type = tv.to_string();
+                    }
+                    "target" | "dst" | "destination" => target = Some(v.trim().to_string()),
+                    "uid" => {
+                        uid_opt = Some(v.trim().parse::<u32>().unwrap_or_else(|_| {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "option {}={} invalid: parsing secret",
+                                k.trim(),
+                                v.trim()
+                            ))
+                        }));
+                    }
+                    "gid" => {
+                        gid_opt = Some(v.trim().parse::<u32>().unwrap_or_else(|_| {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "option {}={} invalid: parsing secret",
+                                k.trim(),
+                                v.trim()
+                            ))
+                        }));
+                    }
+                    "mode" => {
+                        let m_clean = v.trim().trim_start_matches("0o");
+                        mode_opt = Some(u32::from_str_radix(m_clean, 8).unwrap_or_else(|_| {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "option {}={} invalid: parsing secret",
+                                k.trim(),
+                                v.trim()
+                            ))
+                        }));
+                    }
+                    _ => {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "option {}={} invalid: parsing secret",
+                            k.trim(),
+                            v.trim()
+                        ));
+                    }
+                }
+            }
+        }
+
+        let Some(name) = source.filter(|s| !s.is_empty()) else {
+            cli::usage_errors::exit_usage_error(format!(
+                "no secret with name or id {:?}: no such secret",
+                entry.trim()
+            ));
+        };
+        if sec_type == "env" && (uid_opt.is_some() || gid_opt.is_some() || mode_opt.is_some()) {
+            cli::usage_errors::exit_usage_error(
+                "UID, GID, Mode options cannot be set with secret type env: parsing secret",
+            );
+        }
+        let Ok(data) = store.read_data(&name) else {
+            cli::usage_errors::exit_usage_error(format!(
+                "no secret with name or id {:?}: no such secret",
+                name
+            ));
+        };
+
+        if sec_type == "env" {
+            let env_key = target.as_deref().unwrap_or(&name);
+            let value = String::from_utf8_lossy(&data).into_owned();
+            spec.process
+                .env
+                .retain(|e| !e.starts_with(&format!("{env_key}=")));
+            spec.process.env.push(format!("{env_key}={value}"));
+            masked.push(env_key.to_string());
+            inspect_secrets.push(serde_json::json!({
+                "Name": name,
+                "Target": env_key,
+                "UID": 0,
+                "GID": 0,
+                "Mode": 0,
+            }));
+        } else {
+            let target_rel = match &target {
+                Some(t) if t.starts_with('/') => t.trim_start_matches('/').to_string(),
+                Some(t) => format!("run/secrets/{}", t),
+                None => format!("run/secrets/{}", name),
+            };
+            let dest_file = rootfs.join(&target_rel);
+            if let Some(parent) = dest_file.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::write(&dest_file, &data);
+            let mode = mode_opt.unwrap_or(0o444);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&dest_file, fs::Permissions::from_mode(mode));
+            }
+            let suid = uid_opt.unwrap_or(0);
+            let sgid = gid_opt.unwrap_or(0);
+            if suid != 0 || sgid != 0 {
+                if let Some(bundle_dir) = rootfs.parent() {
+                    let chown_meta_file = bundle_dir.join("chown_meta.json");
+                    let mut map: HashMap<String, (u32, u32)> =
+                        fs::read_to_string(&chown_meta_file)
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+                    map.insert(target_rel.clone(), (suid, sgid));
+                    if let Ok(encoded) = serde_json::to_string(&map) {
+                        let _ = fs::write(&chown_meta_file, encoded);
+                    }
+                }
+            }
+            inspect_secrets.push(serde_json::json!({
+                "Name": name,
+                "Target": format!("/{}", target_rel),
+                "UID": suid,
+                "GID": sgid,
+                "Mode": mode,
+            }));
+        }
     }
     if !masked.is_empty() {
         annotations.insert(
             "boxr.masked_env".to_string(),
             serde_json::to_string(&masked)?,
+        );
+    }
+    if !inspect_secrets.is_empty() {
+        annotations.insert(
+            "boxr.secrets".to_string(),
+            serde_json::to_string(&inspect_secrets)?,
         );
     }
     Ok(())
@@ -15527,14 +16796,21 @@ fn apply_volume_mount_prep(
     uid: u32,
     gid: u32,
 ) -> Result<()> {
+    let bundle_dir = merged_rootfs.parent();
+    let initial_chown_map: HashMap<String, (u32, u32)> = bundle_dir
+        .map(|bd| bd.join("chown_meta.json"))
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
     for m in mounts {
-        if m.chown_u && !m.is_volume {
+        if m.chown_u && !m.is_volume && m.tmpfs_mount_data.is_none() {
             #[cfg(target_os = "linux")]
             {
                 let _ = crate::runtime::linux::chown_path_rootless(&m.source, uid, gid, true);
             }
         }
-        if !m.is_volume {
+        if !m.is_volume || m.overlay {
             continue;
         }
         let vol_name = match &m.volume_name {
@@ -15545,40 +16821,103 @@ fn apply_volume_mount_prep(
             Some(v) => v,
             None => continue,
         };
-        if !vol.needs_copy_up {
+        if m.chown_u {
+            let _ = vol_store.set_volume_uid_gid(&vol_name, Some(uid), Some(gid));
+            let _ = vol_store.set_volume_copy_flags(&vol_name, false, false);
             continue;
         }
-        if !image_mount_has_content(merged_rootfs, &m.destination) {
-            continue;
+        if (vol.needs_copy_up || vol.needs_chown) && m.tmpfs_mount_data.is_none() {
+            #[cfg(target_os = "linux")]
+            {
+                let _ = crate::runtime::linux::chown_path_rootless(&m.source, 0, 0, true);
+            }
         }
-        let src = merged_rootfs.join(m.destination.trim_start_matches('/'));
-        copy_dir_contents(&src, &m.source)?;
-        #[cfg(unix)]
-        if let Ok(meta) = fs::symlink_metadata(&src) {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = meta.permissions().mode() & 0o7777;
-            let _ = fs::set_permissions(&m.source, fs::Permissions::from_mode(mode));
-        }
-        if let Some(bundle_dir) = merged_rootfs.parent() {
-            let chown_meta_file = bundle_dir.join("chown_meta.json");
-            if let Ok(content) = fs::read_to_string(&chown_meta_file) {
-                if let Ok(map) = serde_json::from_str::<HashMap<String, (u32, u32)>>(&content) {
-                    let rel = m.destination.trim_start_matches('/');
-                    if let Some(&(u, g)) = map.get(rel) {
-                        let _ = vol_store.set_volume_uid_gid(&vol_name, Some(u), Some(g));
+        let vol_has_files = fs::read_dir(&m.source)
+            .map(|mut rd| rd.next().is_some())
+            .unwrap_or(false);
+        let rel = m.destination.trim_start_matches('/');
+        let src = merged_rootfs.join(rel);
+        let src_exists = src.exists() || fs::symlink_metadata(&src).is_ok();
+        let img_dir_owner: Option<(u32, u32)> = if let Some(&ug) = initial_chown_map.get(rel) {
+            Some(ug)
+        } else if src_exists {
+            Some((0, 0))
+        } else {
+            None
+        };
+
+        if m.nocopy || vol.options.contains_key("nocopy") {
+            let _ = vol_store.set_volume_copy_flags(&vol_name, false, vol.needs_chown);
+        } else if vol_has_files {
+            let _ = vol_store.set_volume_copy_flags(&vol_name, false, false);
+        } else if vol.needs_copy_up {
+            if src_exists {
+                #[cfg(unix)]
+                if let Ok(meta) = fs::symlink_metadata(&src) {
+                    use std::os::unix::fs::MetadataExt;
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = meta.permissions().mode() & 0o7777;
+                    let _ = fs::set_permissions(&m.source, fs::Permissions::from_mode(mode));
+                    if let Ok(c_mp) = std::ffi::CString::new(m.source.to_string_lossy().as_bytes())
+                    {
+                        let times = [
+                            libc::timespec {
+                                tv_sec: meta.atime(),
+                                tv_nsec: meta.atime_nsec(),
+                            },
+                            libc::timespec {
+                                tv_sec: meta.mtime(),
+                                tv_nsec: meta.mtime_nsec(),
+                            },
+                        ];
+                        unsafe {
+                            let _ =
+                                libc::utimensat(libc::AT_FDCWD, c_mp.as_ptr(), times.as_ptr(), 0);
+                        }
                     }
                 }
             }
+            if image_mount_has_content(merged_rootfs, &m.destination) {
+                copy_dir_contents(&src, &m.source)?;
+                let (u, g) = img_dir_owner.unwrap_or((uid, gid));
+                let _ = vol_store.set_volume_uid_gid(&vol_name, Some(u), Some(g));
+                let _ = vol_store.set_volume_copy_flags(&vol_name, false, false);
+            }
         }
-        let _ = vol_store.set_volume_copy_flags(&vol_name, false, false);
+
+        let Some(vol) = vol_store.find(&vol_name) else {
+            continue;
+        };
+        if vol.needs_chown {
+            if vol_has_files {
+                let _ = vol_store.set_volume_copy_flags(&vol_name, vol.needs_copy_up, false);
+            } else if let Some((img_u, img_g)) = img_dir_owner {
+                let (target_u, target_g) = if img_u == 0 && img_g == 0 && (uid != 0 || gid != 0) {
+                    (uid, gid)
+                } else {
+                    (img_u, img_g)
+                };
+                let _ = vol_store.set_volume_uid_gid(&vol_name, Some(target_u), Some(target_g));
+                if target_u == 0 && target_g == 0 {
+                    let _ = vol_store.set_volume_copy_flags(&vol_name, vol.needs_copy_up, false);
+                }
+            } else if uid != 0 || gid != 0 {
+                let _ = vol_store.set_volume_uid_gid(&vol_name, Some(uid), Some(gid));
+            }
+        }
     }
     for m in mounts {
-        if !m.is_volume {
+        if !m.is_volume || m.overlay {
             continue;
         }
         if let Some(vol_name) = &m.volume_name {
             if let Some(vol) = vol_store.find(vol_name) {
-                if vol.uid.is_some() || vol.gid.is_some() {
+                if vol.uid.is_some() || vol.gid.is_some() || m.chown_u {
+                    let (target_u, target_g) = if m.chown_u {
+                        (uid, gid)
+                    } else {
+                        (vol.uid.unwrap_or(0), vol.gid.unwrap_or(0))
+                    };
                     if let Some(bundle_dir) = merged_rootfs.parent() {
                         let chown_meta_file = bundle_dir.join("chown_meta.json");
                         let mut map: HashMap<String, (u32, u32)> =
@@ -15587,7 +16926,7 @@ fn apply_volume_mount_prep(
                                 .and_then(|s| serde_json::from_str(&s).ok())
                                 .unwrap_or_default();
                         let rel = m.destination.trim_start_matches('/').to_string();
-                        map.insert(rel, (vol.uid.unwrap_or(0), vol.gid.unwrap_or(0)));
+                        map.insert(rel, (target_u, target_g));
                         if let Ok(encoded) = serde_json::to_string(&map) {
                             let _ = fs::write(&chown_meta_file, encoded);
                         }
@@ -15596,8 +16935,8 @@ fn apply_volume_mount_prep(
                     {
                         let _ = crate::runtime::linux::chown_path_rootless(
                             &m.source,
-                            vol.uid.unwrap_or(0),
-                            vol.gid.unwrap_or(0),
+                            target_u,
+                            target_g,
                             true,
                         );
                     }
@@ -15850,6 +17189,50 @@ fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> S
         return String::new();
     }
     let mut out = template.replace("\\n", "\n").replace("\\t", "\t");
+    loop {
+        let Some(r_pos) = out.find("{{range .").or_else(|| out.find("{{ range .")) else {
+            break;
+        };
+        let Some(head_end_rel) = out[r_pos..].find("}}") else {
+            break;
+        };
+        let head_end = r_pos + head_end_rel + 2;
+        let header = out[r_pos + 2..r_pos + head_end_rel].trim();
+        let path_expr = header.strip_prefix("range").unwrap_or("").trim();
+        let Some((end_rel, end_len)) = out[head_end..]
+            .find("{{ end }}")
+            .map(|i| (i, 9))
+            .or_else(|| out[head_end..].find("{{end}}").map(|i| (i, 7)))
+        else {
+            break;
+        };
+        let body = &out[head_end..head_end + end_rel];
+        let mut rendered_items = String::new();
+        if let Some(target_val) = resolve_template_path(value, path_expr.trim_start_matches('.')) {
+            match target_val {
+                serde_json::Value::Array(arr) => {
+                    for item in &arr {
+                        if body.trim() == "{{.}}" || body.trim() == "{{ . }}" {
+                            rendered_items.push_str(&format_template_value(item));
+                        } else {
+                            rendered_items.push_str(&apply_inspect_format_template(body, item));
+                        }
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    for (_, item) in &map {
+                        if body.trim() == "{{.}}" || body.trim() == "{{ . }}" {
+                            rendered_items.push_str(&format_template_value(item));
+                        } else {
+                            rendered_items.push_str(&apply_inspect_format_template(body, item));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.replace_range(r_pos..head_end + end_rel + end_len, &rendered_items);
+    }
     while let Some(start) = out.find("{{") {
         let Some(rel_end) = out[start..].find("}}") else {
             break;
@@ -16101,6 +17484,15 @@ fn format_template_value(v: &serde_json::Value) -> String {
                 map.get("End").and_then(|x| x.as_str()).unwrap_or(""),
                 map.get("ExitCode").and_then(|x| x.as_i64()).unwrap_or(0),
                 map.get("Output").and_then(|x| x.as_str()).unwrap_or("")
+            )
+        }
+        serde_json::Value::Object(map)
+            if map.contains_key("UidMap") && map.contains_key("GidMap") =>
+        {
+            format!(
+                "{{{} {}}}",
+                map.get("UidMap").map(format_template_value).unwrap_or_default(),
+                map.get("GidMap").map(format_template_value).unwrap_or_default()
             )
         }
         serde_json::Value::Array(arr) => {
@@ -17217,6 +18609,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         pod_id_file: None,
         image: image_ref,
         command: infra_cmd,
+        ..Default::default()
     };
 
     let cont_id = create_only_container_after_pod_prep(infra_args, None, None).await?;
@@ -17253,6 +18646,8 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 exit_policy,
                 restart,
                 userns,
+                uidmap,
+                gidmap,
                 memory,
                 memory_swap: _,
                 cpus,
@@ -17521,6 +18916,16 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             }
             if has_share_cgroup {
                 label_map.insert("boxr.pod.share_cgroup".to_string(), "true".to_string());
+            }
+            if !uidmap.is_empty() {
+                if let Ok(j) = serde_json::to_string(&uidmap) {
+                    label_map.insert("boxr.pod.uidmap".to_string(), j);
+                }
+            }
+            if !gidmap.is_empty() {
+                if let Ok(j) = serde_json::to_string(&gidmap) {
+                    label_map.insert("boxr.pod.gidmap".to_string(), j);
+                }
             }
             if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
                 let trimmed = unit.trim();

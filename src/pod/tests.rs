@@ -230,6 +230,7 @@ fn test_apply_pod_to_run_args() {
         timeout: None,
         image: "alpine".to_string(),
         command: vec![],
+        ..Default::default()
     };
     apply_pod_to_run_args(&pod, "mypod-infra", &mut args);
     assert_eq!(args.network, "container:mypod-infra");

@@ -63,6 +63,23 @@ pub static DOCKER_CONFIG_DIR: OnceLock<String> = OnceLock::new();
 /// Podman `--default-mounts-file` global option
 pub static GLOBAL_DEFAULT_MOUNTS_FILE: OnceLock<String> = OnceLock::new();
 
+/// Podman `--hooks-dir` global option
+pub static GLOBAL_HOOKS_DIR: OnceLock<String> = OnceLock::new();
+
+/// File descriptors (3..64) that were already open when `boxr` started (before Tokio init).
+pub static INHERITED_FDS: OnceLock<std::collections::HashSet<u32>> = OnceLock::new();
+
+pub fn record_inherited_fds() {
+    let mut set = std::collections::HashSet::new();
+    #[cfg(unix)]
+    for fd in 3..64u32 {
+        if unsafe { libc::fcntl(fd as i32, libc::F_GETFD) } != -1 {
+            set.insert(fd);
+        }
+    }
+    let _ = INHERITED_FDS.set(set);
+}
+
 /// Podman `--runtime` global option
 pub static GLOBAL_RUNTIME: OnceLock<String> = OnceLock::new();
 
@@ -378,6 +395,16 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 i += 1;
                 continue;
             }
+            if a == "--hooks-dir" && i + 1 < argv.len() {
+                let _ = GLOBAL_HOOKS_DIR.set(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(v) = a.strip_prefix("--hooks-dir=") {
+                let _ = GLOBAL_HOOKS_DIR.set(v.to_string());
+                i += 1;
+                continue;
+            }
             if a == "--runtime" && i + 1 < argv.len() {
                 let _ = GLOBAL_RUNTIME.set(argv[i + 1].clone());
                 i += 2;
@@ -592,6 +619,43 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         | "--secret"
                         | "--hostuser"
                         | "--group-entry"
+                        | "--passwd-entry"
+                        | "--seccomp-policy"
+                        | "--subuidname"
+                        | "--subgidname"
+                        | "--signature-policy"
+                        | "--init-path"
+                        | "--hosts-file"
+                        | "--requires"
+                        | "--pidfile"
+                        | "--personality"
+                        | "--shm-size-systemd"
+                        | "--decryption-key"
+                        | "--cgroups"
+                        | "--pod-id-file"
+                        | "--sdnotify"
+                        | "--health-cmd"
+                        | "--health-interval"
+                        | "--health-timeout"
+                        | "--health-retries"
+                        | "--health-start-period"
+                        | "--health-start-interval"
+                        | "--health-on-failure"
+                        | "--health-startup-cmd"
+                        | "--health-startup-interval"
+                        | "--health-startup-timeout"
+                        | "--health-startup-retries"
+                        | "--health-startup-success"
+                        | "--health-max-log-count"
+                        | "--health-max-log-size"
+                        | "--health-log-destination"
+                        | "--device-cgroup-rule"
+                        | "--device-read-bps"
+                        | "--device-write-bps"
+                        | "--device-read-iops"
+                        | "--device-write-iops"
+                        | "--blkio-weight"
+                        | "--blkio-weight-device"
                         | "--unsetenv"
                         | "--systemd"
                         | "--preserve-fds"

@@ -126,13 +126,6 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     {
         return true;
     }
-    if img.registry == "localhost" {
-        if query == format!("{}:{}", img.reference, img.tag)
-            || (query == img.reference && img.tag == ImageReference::DEFAULT_TAG)
-        {
-            return true;
-        }
-    }
     match ImageReference::parse(query) {
         Ok(r) => {
             if let Some(digest) = r.digest {
@@ -557,11 +550,37 @@ impl ImageStore {
             }
         }
 
+        let bundle_labels_path = PathBuf::from(&container.bundle_path).join("labels.json");
+        if let Ok(content) = fs::read_to_string(&bundle_labels_path) {
+            if let Ok(ctr_labels) = serde_json::from_str::<Vec<String>>(&content) {
+                let exec = base_config
+                    .config
+                    .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+                let mut labels = exec.labels.take().unwrap_or_default();
+                for l in ctr_labels {
+                    if let Some((k, v)) = l.split_once('=') {
+                        labels.insert(k.trim().to_string(), v.trim().to_string());
+                    } else {
+                        labels.insert(l.trim().to_string(), String::new());
+                    }
+                }
+                exec.labels = Some(labels);
+            }
+        }
+
         for ch in changes {
             let ch = ch.trim();
-            let (key, val) = if let Some((k, v)) = ch.split_once('=') {
-                (k.trim(), v.trim())
-            } else if let Some((k, v)) = ch.split_once(' ') {
+            let (key, val) = if let Some((k, v)) = ch.split_once(' ') {
+                if let Some((eq_k, eq_v)) = ch.split_once('=') {
+                    if !eq_k.contains(' ') {
+                        (eq_k.trim(), eq_v.trim())
+                    } else {
+                        (k.trim(), v.trim())
+                    }
+                } else {
+                    (k.trim(), v.trim())
+                }
+            } else if let Some((k, v)) = ch.split_once('=') {
                 (k.trim(), v.trim())
             } else {
                 (ch, "")
@@ -587,6 +606,34 @@ impl ImageStore {
                     }
                 }
                 exec.entrypoint = Some(vec![val.to_string()]);
+            } else if key.eq_ignore_ascii_case("LABEL") {
+                let mut labels = exec.labels.take().unwrap_or_default();
+                if let Some((lk, lv)) = val.split_once('=') {
+                    let mut clean_v = lv.trim();
+                    if (clean_v.starts_with('\'') && clean_v.ends_with('\'') && clean_v.len() >= 2)
+                        || (clean_v.starts_with('"')
+                            && clean_v.ends_with('"')
+                            && clean_v.len() >= 2)
+                    {
+                        clean_v = &clean_v[1..clean_v.len() - 1];
+                    }
+                    labels.insert(lk.trim().to_string(), clean_v.to_string());
+                } else if !val.is_empty() {
+                    labels.insert(val.to_string(), String::new());
+                }
+                exec.labels = Some(labels);
+            } else if key.eq_ignore_ascii_case("USER") {
+                exec.user = Some(val.to_string());
+            } else if key.eq_ignore_ascii_case("WORKDIR") {
+                exec.working_dir = Some(val.to_string());
+            } else if key.eq_ignore_ascii_case("ENV") {
+                let mut envs = exec.env.take().unwrap_or_default();
+                if let Some((ek, ev)) = val.split_once('=').or_else(|| val.split_once(' ')) {
+                    let prefix = format!("{}=", ek.trim());
+                    envs.retain(|e| !e.starts_with(&prefix));
+                    envs.push(format!("{}={}", ek.trim(), ev.trim()));
+                }
+                exec.env = Some(envs);
             }
         }
 

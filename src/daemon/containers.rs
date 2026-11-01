@@ -270,6 +270,7 @@ pub async fn create_container(
         timeout: None,
         image: payload.image,
         command: payload.cmd.unwrap_or_default(),
+        ..Default::default()
     };
 
     match crate::create_only_container_with_home(run_args, Some(&state.home)).await {

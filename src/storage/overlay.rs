@@ -130,10 +130,23 @@ impl OverlayDriver {
     /// writes never modify the base image layer inodes.
     pub fn create_hardlink_tree(src: &Path, dst: &Path) -> Result<()> {
         let mut seen_inodes = std::collections::HashMap::new();
-        Self::create_hardlink_tree_inner(src, dst, &mut seen_inodes)
+        Self::create_hardlink_tree_inner(src, src, dst, &mut seen_inodes)
+    }
+
+    fn is_readonly_library_tree(root: &Path, path: &Path) -> bool {
+        let Ok(rel) = path.strip_prefix(root) else {
+            return false;
+        };
+        let rel_str = rel.to_string_lossy();
+        rel_str.starts_with("usr/")
+            || rel_str.starts_with("lib/")
+            || rel_str.starts_with("lib64/")
+            || rel_str.starts_with("bin/")
+            || rel_str.starts_with("sbin/")
     }
 
     fn create_hardlink_tree_inner(
+        root_src: &Path,
         src: &Path,
         dst: &Path,
         seen_inodes: &mut std::collections::HashMap<(u64, u64), PathBuf>,
@@ -156,7 +169,36 @@ impl OverlayDriver {
             let to = dst.join(entry.file_name());
 
             if ty.is_dir() {
-                let _ = Self::create_hardlink_tree_inner(&from, &to, seen_inodes);
+                let _ = Self::create_hardlink_tree_inner(root_src, &from, &to, seen_inodes);
+                #[cfg(unix)]
+                if !Self::is_readonly_library_tree(root_src, &from) {
+                    if let Ok(m) = fs::symlink_metadata(&from) {
+                        use std::os::unix::fs::MetadataExt;
+                        use std::os::unix::fs::PermissionsExt;
+                        let mode = (m.permissions().mode() & 0o7777) | 0o700;
+                        let _ = fs::set_permissions(&to, fs::Permissions::from_mode(mode));
+                        if let Ok(c_to) = std::ffi::CString::new(to.to_string_lossy().as_bytes()) {
+                            let times = [
+                                libc::timespec {
+                                    tv_sec: m.atime(),
+                                    tv_nsec: m.atime_nsec(),
+                                },
+                                libc::timespec {
+                                    tv_sec: m.mtime(),
+                                    tv_nsec: m.mtime_nsec(),
+                                },
+                            ];
+                            unsafe {
+                                let _ = libc::utimensat(
+                                    libc::AT_FDCWD,
+                                    c_to.as_ptr(),
+                                    times.as_ptr(),
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                }
             } else if ty.is_symlink() {
                 #[cfg(unix)]
                 {
@@ -168,6 +210,13 @@ impl OverlayDriver {
                 let meta = fs::metadata(&from);
                 #[cfg(unix)]
                 let mut linked = false;
+                #[cfg(unix)]
+                if Self::is_readonly_library_tree(root_src, &from) {
+                    let _ = fs::remove_file(&to);
+                    if fs::hard_link(&from, &to).is_ok() {
+                        continue;
+                    }
+                }
                 #[cfg(unix)]
                 if let Ok(m) = &meta {
                     use std::os::unix::fs::MetadataExt;

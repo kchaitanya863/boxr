@@ -66,9 +66,15 @@ const MINIMAL_SQLITE_DB_HEX: &str = "53514c69746520666f726d617420330002000101004
 const MINIMAL_SQLITE_DB_GZ_HEX: &str = "1f8b08000f3fe66a02ffedd73b0ac2401485e13b51ec443bdb81206863e3067c30821004757cb411a2041203322ec65dd8b83f132c9c42b00fff07339ccb85db9fed3a4a5da2cfc52d8f9d1e4b57949289d6221294af215fd5dcf46625ff05327a3cdb55e8e4d279951f000000000075b7085abd30543b179fb2645f64f73cd9bad8f9b131df98a935da4e6791d1de420f56719e686b8e76b854ad5ebfaf0ede9d79713da7173f073f2e7d36fea9aa9b97a51f0000000000d418fd1f0000000080fa7b03656a225700300000";
 
 pub fn ensure_sqlite_db(graph_root: &Path) {
-    let db_path = graph_root.join("db.sql");
+    let globals = podman_global_options();
+    let target_root = if globals.transient_store {
+        globals.runroot.as_deref().unwrap_or(graph_root)
+    } else {
+        graph_root
+    };
+    let db_path = target_root.join("db.sql");
     if !db_path.exists() {
-        let _ = fs::create_dir_all(graph_root);
+        let _ = fs::create_dir_all(target_root);
         if let Ok(gz_bytes) = hex::decode(MINIMAL_SQLITE_DB_GZ_HEX) {
             use std::io::Read;
             let mut decoder = flate2::read::GzDecoder::new(&gz_bytes[..]);

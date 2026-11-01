@@ -231,6 +231,7 @@ impl ComposeProject {
             timeout: None,
             image: image_name.to_string(),
             command: cmd_vec,
+            ..Default::default()
         })
     }
 }

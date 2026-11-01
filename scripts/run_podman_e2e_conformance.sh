@@ -56,10 +56,14 @@ if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; th
   echo "Installing ginkgo (first run)..."
   make -C "$SRC_DIR" .install.ginkgo
 fi
+[[ -x "$SRC_DIR/bin/ginkgo" ]] && touch "$SRC_DIR/.install.ginkgo"
+
+if [[ ! -x "$SRC_DIR/test/checkseccomp/checkseccomp" ]] || [[ ! -x "$SRC_DIR/test/goecho/goecho" ]] || [[ ! -x "$SRC_DIR/test/version/version" ]]; then
+  make -C "$SRC_DIR" test-binaries
+fi
 
 if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]]; then
   echo "Prebuilding test/e2e/e2e.test..."
-  make -C "$SRC_DIR" test-binaries
   (cd "$SRC_DIR" && ./bin/ginkgo build --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" test/e2e/.)
 fi
 
@@ -75,7 +79,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$focus_pat" != /* ]]; then
     focus_pat="/${focus_pat}$"
   fi
-  if ! make localintegration FOCUS_FILE="$focus_pat" GINKGO_PARALLEL=n GINKGOWHAT=test/e2e/e2e.test; then
+  if ! PATH="$PATH:$SRC_DIR/hack" "$SRC_DIR/bin/ginkgo" -vv --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" --timeout 90m --flake-attempts 0 --trace --no-color --focus-file "$focus_pat" --silence-skips test/e2e/e2e.test; then
     if [[ "${PODMAN_E2E_STRICT:-0}" == "1" ]]; then
       exit 1
     fi
