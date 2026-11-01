@@ -1044,7 +1044,11 @@ fn handle_delete_secret(ctx: &ApiContext, name: &str) -> Response {
 }
 
 fn quadlet_install_dir() -> PathBuf {
-    if cfg!(unix) && unsafe { libc::geteuid() == 0 } {
+    #[cfg(unix)]
+    let is_root = unsafe { libc::geteuid() == 0 };
+    #[cfg(not(unix))]
+    let is_root = false;
+    if is_root {
         PathBuf::from("/etc/containers/systemd")
     } else if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         PathBuf::from(xdg).join("containers/systemd")

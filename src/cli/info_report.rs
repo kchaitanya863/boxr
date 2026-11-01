@@ -144,7 +144,10 @@ pub fn build_podman_info_document() -> Value {
         .to_string();
     let (cgroup_manager, cgroup_version) = linux_cgroup_info();
     let (dist_name, dist_version) = linux_distribution();
-    let rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
+    #[cfg(unix)]
+    let rootless = unsafe { libc::getuid() != 0 };
+    #[cfg(not(unix))]
+    let rootless = false;
     // Podman BATS on non-RHEL expect netavark (005-info); rootless may still use passt/usernet at runtime.
     let network_backend = "netavark";
     let pasta_bin = which_executable("pasta").unwrap_or_else(|| "/usr/bin/pasta".to_string());
@@ -607,7 +610,10 @@ fn storage_conf_rootless_storage_path() -> Option<String> {
                 }
                 let home = std::env::var("HOME").unwrap_or_default();
                 let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+                #[cfg(unix)]
                 let uid = unsafe { libc::getuid().to_string() };
+                #[cfg(not(unix))]
+                let uid = "0".to_string();
                 val = val
                     .replace("$HOME", &home)
                     .replace("$USER", &user)

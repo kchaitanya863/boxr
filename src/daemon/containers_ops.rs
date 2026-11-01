@@ -290,7 +290,10 @@ fn handle_list_containers(ctx: &ApiContext) -> Response {
         }
     }
 
-    let is_rootless = cfg!(unix) && unsafe { libc::geteuid() != 0 };
+    #[cfg(unix)]
+    let is_rootless = unsafe { libc::geteuid() != 0 };
+    #[cfg(not(unix))]
+    let is_rootless = false;
     let net_mode_default = if is_rootless { "pasta" } else { "bridge" };
 
     let out: Vec<serde_json::Value> = containers

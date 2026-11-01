@@ -178,7 +178,10 @@ pub fn build_libpod_info_json(state: &DaemonState) -> serde_json::Value {
     let mut bats = crate::cli::info_report::podman_info_json_for_bats(&doc);
     let vol_path = state.home.join("volumes").to_string_lossy().to_string();
     let graph_root = state.home.to_string_lossy().to_string();
-    let is_rootless = cfg!(unix) && unsafe { libc::geteuid() != 0 };
+    #[cfg(unix)]
+    let is_rootless = unsafe { libc::geteuid() != 0 };
+    #[cfg(not(unix))]
+    let is_rootless = false;
     let features_str = r#"{"ociVersionMin":"1.0.0","ociVersionMax":"1.2.0"}"#;
     if let Some(host) = bats.get_mut("host").and_then(|h| h.as_object_mut()) {
         host.insert(
@@ -241,7 +244,10 @@ pub fn build_compat_info_json(
             )
         })
         .count();
-    let is_rootless = cfg!(unix) && unsafe { libc::geteuid() != 0 };
+    #[cfg(unix)]
+    let is_rootless = unsafe { libc::geteuid() != 0 };
+    #[cfg(not(unix))]
+    let is_rootless = false;
     let mut sec_opts = vec!["name=seccomp,profile=default".to_string()];
     if is_rootless {
         sec_opts.push("name=rootless".to_string());

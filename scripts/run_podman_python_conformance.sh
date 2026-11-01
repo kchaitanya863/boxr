@@ -38,15 +38,37 @@ if [[ -d "$REPO_ROOT/tests/podman_upstream/python" ]]; then
   mkdir -p "$SRC_DIR/test/python"
   rsync -a "$REPO_ROOT/tests/podman_upstream/python/" "$SRC_DIR/test/python/"
 fi
+if [[ -d "$REPO_ROOT/tests/podman_upstream/apiv2" ]]; then
+  mkdir -p "$SRC_DIR/test/apiv2"
+  rsync -a "$REPO_ROOT/tests/podman_upstream/apiv2/" "$SRC_DIR/test/apiv2/"
+fi
+if [[ ! -f "$SRC_DIR/test/registries.conf" && -f "$REPO_ROOT/tests/podman_upstream/e2e/testdata/registries.conf" ]]; then
+  mkdir -p "$SRC_DIR/test"
+  cp "$REPO_ROOT/tests/podman_upstream/e2e/testdata/registries.conf" "$SRC_DIR/test/registries.conf"
+fi
 
 cd "$SRC_DIR"
 touch test/__init__.py
 trap 'rm -f "$SRC_DIR/test/__init__.py"' EXIT
 
+pytest_targets=("test/python/docker/")
+if [[ $# -gt 0 ]]; then
+  pytest_targets=()
+  for arg in "$@"; do
+    if [[ -f "test/python/docker/compat/$arg" ]]; then
+      pytest_targets+=("test/python/docker/compat/$arg")
+    elif [[ -f "test/python/docker/$arg" ]]; then
+      pytest_targets+=("test/python/docker/$arg")
+    else
+      pytest_targets+=("$arg")
+    fi
+  done
+fi
+
 echo "======== Running test/python/docker ========"
 env CONTAINERS_CONF="$SRC_DIR/test/apiv2/containers.conf" \
     PODMAN="$WRAPPER" \
     PODMAN_BINARY="$WRAPPER" \
-    pytest --verbose --disable-warnings test/python/docker/ "$@"
+    pytest --verbose --disable-warnings "${pytest_targets[@]}"
 
 echo "python docker conformance run complete"

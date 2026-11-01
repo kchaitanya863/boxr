@@ -150,7 +150,10 @@ fn remote_service_graph_root(
 fn storage_conf_graph_root() -> Option<PathBuf> {
     let path = std::env::var("CONTAINERS_STORAGE_CONF").ok()?;
     let content = fs::read_to_string(&path).ok()?;
-    let is_rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
+    #[cfg(unix)]
+    let is_rootless = unsafe { libc::getuid() != 0 };
+    #[cfg(not(unix))]
+    let is_rootless = false;
     let mut graphroot = None;
     let mut rootless_path = None;
     for line in content.lines() {
@@ -172,11 +175,10 @@ fn storage_conf_graph_root() -> Option<PathBuf> {
         graphroot?
     };
     let home = std::env::var("HOME").unwrap_or_default();
-    let uid = if cfg!(unix) {
-        unsafe { libc::getuid().to_string() }
-    } else {
-        "0".to_string()
-    };
+    #[cfg(unix)]
+    let uid = unsafe { libc::getuid().to_string() };
+    #[cfg(not(unix))]
+    let uid = "0".to_string();
     let user = std::env::var("USER").unwrap_or_else(|_| {
         #[cfg(unix)]
         unsafe {

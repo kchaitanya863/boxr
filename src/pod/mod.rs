@@ -951,7 +951,11 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
         let cgm = crate::cli::podman_globals::podman_global_options()
             .cgroup_manager
             .unwrap_or_else(|| "systemd".to_string());
-        if cgm == "systemd" && unsafe { libc::getuid() != 0 } {
+        #[cfg(unix)]
+        let is_rootless = unsafe { libc::getuid() != 0 };
+        #[cfg(not(unix))]
+        let is_rootless = false;
+        if cgm == "systemd" && is_rootless {
             args.cgroup_parent = Some("user.slice".to_string());
         }
     }

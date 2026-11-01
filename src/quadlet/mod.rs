@@ -36,7 +36,10 @@ impl QuadletManager {
                 return p;
             }
         }
-        let is_rootless = cfg!(unix) && unsafe { libc::geteuid() != 0 };
+        #[cfg(unix)]
+        let is_rootless = unsafe { libc::geteuid() != 0 };
+        #[cfg(not(unix))]
+        let is_rootless = false;
         let p = if is_rootless {
             let cfg = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
