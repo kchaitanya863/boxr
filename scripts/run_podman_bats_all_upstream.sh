@@ -6,5 +6,13 @@
 #     ./scripts/run_podman_bats_all_upstream.sh
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export MANIFEST="${MANIFEST:-$REPO_ROOT/tests/podman_bats/manifest-all.txt}"
+FULL_MANIFEST="${MANIFEST:-$REPO_ROOT/tests/podman_bats/manifest-all.txt}"
+if [[ -n "${BATS_SHARD_INDEX:-}" && -n "${BATS_SHARD_TOTAL:-}" ]]; then
+  SHARD_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/boxr-bats-shard.XXXXXX")"
+  trap 'rm -f "$SHARD_MANIFEST"' EXIT
+  grep -vE '^\s*(#|$)' "$FULL_MANIFEST" | awk -v idx="$BATS_SHARD_INDEX" -v total="$BATS_SHARD_TOTAL" '(NR - 1) % total == (idx - 1)' > "$SHARD_MANIFEST"
+  export MANIFEST="$SHARD_MANIFEST"
+else
+  export MANIFEST="$FULL_MANIFEST"
+fi
 exec "$REPO_ROOT/scripts/run_podman_bats_conformance.sh" "$@"
