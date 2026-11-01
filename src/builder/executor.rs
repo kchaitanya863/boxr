@@ -115,6 +115,7 @@ impl ImageBuilder {
         let mut step_count = 1;
         let total_steps = instructions.len();
         let mut cache_key = String::from("initial");
+        let mut current_from_image = String::from("scratch");
 
         for inst in &instructions {
             let step_text = format_instruction_for_log(inst, &arg_vars, &current_config.env);
@@ -130,6 +131,7 @@ impl ImageBuilder {
                 Instruction::From { image, as_stage } => {
                     let image_expanded = expand_build_vars(image, &arg_vars, &current_config.env);
                     let image = &image_expanded;
+                    current_from_image = image.clone();
                     // If target was specified and previous stage matches, stop building
                     if let Some(target_stage) = &opts.target {
                         if current_stage_name.as_deref() == Some(target_stage.as_str()) {
@@ -798,6 +800,20 @@ impl ImageBuilder {
                     spec.save_to_bundle(&step_bundle)?;
 
                     let mut default_mounts = Vec::new();
+                    if let Some(vols) = &current_config.volumes {
+                        for v_dest in vols.keys() {
+                            let dest_norm = {
+                                let t = v_dest.trim_end_matches('/');
+                                if t.is_empty() { "/".to_string() } else { t.to_string() }
+                            };
+                            default_mounts.push(crate::volume::MountSpec {
+                                source: PathBuf::from("tmpfs"),
+                                destination: dest_norm,
+                                tmpfs_mount_data: Some("mode=755".to_string()),
+                                ..Default::default()
+                            });
+                        }
+                    }
                     if let Some(mf) = crate::cli::GLOBAL_DEFAULT_MOUNTS_FILE.get() {
                         if let Ok(content) = fs::read_to_string(mf) {
                             for line in content.lines() {
@@ -819,6 +835,18 @@ impl ImageBuilder {
                     let code =
                         execute_bundle(&step_bundle, &spec, &default_mounts, &[], false, false)?;
                     if code != 0 {
+                        let keep_failed = opts
+                            .build_args
+                            .get("__BOXR_FORCE_RM")
+                            .is_some_and(|v| v == "false" || v == "0");
+                        if keep_failed {
+                            let step_id = crate::new_container_id();
+                            let _ = crate::storage::external::add_storage_container(
+                                &step_id,
+                                &current_from_image,
+                                &format!("buildah-{}", &step_id[..12]),
+                            );
+                        }
                         return Err(anyhow!(
                             "The command '{}' returned a non-zero code: {}",
                             cmd,

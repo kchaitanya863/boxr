@@ -187,8 +187,28 @@ pub struct BuildArgs {
     pub shm_size: Option<String>,
 
     /// Always remove intermediate containers
-    #[arg(long = "rm", default_value_t = true)]
+    #[arg(
+        long = "rm",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub rm: bool,
+
+    /// Always remove intermediate containers even if build fails
+    #[arg(
+        long = "force-rm",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub force_rm: bool,
 
     /// Do not cache specified stages
     #[arg(long = "no-cache-filter")]

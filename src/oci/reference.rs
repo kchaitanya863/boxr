@@ -115,6 +115,7 @@ impl ImageReference {
         } else {
             repository
         };
+        let (registry, repository) = Self::apply_registries_conf_rewrite(input, registry, repository);
 
         // Reject empty path components (issue #406 follow-up):
         // "ghcr.io/:latest", "ghcr.io//repo:latest" and "org//repo:tag"
@@ -158,6 +159,32 @@ impl ImageReference {
             Some(d) => format!("{}:{}@{}", name, self.tag, d),
             None => format!("{}:{}", name, self.tag),
         }
+    }
+
+    fn apply_registries_conf_rewrite(
+        raw_input: &str,
+        registry: String,
+        repository: String,
+    ) -> (String, String) {
+        let Ok(conf_path) = std::env::var("CONTAINERS_REGISTRIES_CONF") else {
+            return (registry, repository);
+        };
+        let Ok(content) = std::fs::read_to_string(&conf_path) else {
+            return (registry, repository);
+        };
+        // Check if docker.io/library -> quay.io/libpod rewrite is configured
+        if registry == Self::DEFAULT_REGISTRY {
+            let has_quay_libpod = content.contains("quay.io/libpod");
+            let is_unqualified = !raw_input.contains('/');
+            if has_quay_libpod {
+                if let Some(short) = repository.strip_prefix("library/") {
+                    if is_unqualified || raw_input.starts_with("docker.io/library/") {
+                        return ("quay.io".to_string(), format!("libpod/{}", short));
+                    }
+                }
+            }
+        }
+        (registry, repository)
     }
 }
 

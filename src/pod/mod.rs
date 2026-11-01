@@ -771,6 +771,11 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
             "invalid config provided: published or exposed ports must be defined when the pod is created: network cannot be configured when it is shared with a pod",
         );
     }
+    if pod.share_net && (args.ip.is_some() || args.mac_address.is_some()) {
+        crate::cli::usage_errors::exit_usage_error(
+            "invalid config provided: networks must be defined when the pod is created: network cannot be configured when it is shared with a pod",
+        );
+    }
     let has_infra = pod.infra && !infra_name.is_empty();
     if pod.network.as_deref() == Some("host") {
         args.network = "host".to_string();

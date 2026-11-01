@@ -171,8 +171,8 @@ impl OverlayDriver {
                 #[cfg(unix)]
                 if let Ok(m) = &meta {
                     use std::os::unix::fs::MetadataExt;
+                    let key = (m.dev(), m.ino());
                     if m.nlink() > 1 {
-                        let key = (m.dev(), m.ino());
                         if let Some(first_to) = seen_inodes.get(&key) {
                             let _ = fs::remove_file(&to);
                             if fs::hard_link(first_to, &to).is_ok() {
@@ -182,6 +182,8 @@ impl OverlayDriver {
                             seen_inodes.insert(key, to.clone());
                             linked = true;
                         }
+                    } else if m.len() > 262_144 && fs::hard_link(&from, &to).is_ok() {
+                        linked = true;
                     }
                 }
                 #[cfg(unix)]

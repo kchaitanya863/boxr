@@ -57,6 +57,13 @@ impl ImageRecord {
         if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
             return raw.to_string();
         }
+        let c = self
+            .config_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&self.config_digest);
+        if c.len() == 64 && c.chars().all(|c| c.is_ascii_hexdigit()) && c.starts_with(raw) {
+            return c.to_string();
+        }
         let m = self
             .manifest_digest
             .strip_prefix("sha256:")
@@ -64,11 +71,7 @@ impl ImageRecord {
         if m.len() == 64 && m.chars().all(|c| c.is_ascii_hexdigit()) && m.starts_with(raw) {
             return m.to_string();
         }
-        let c = self
-            .config_digest
-            .strip_prefix("sha256:")
-            .unwrap_or(&self.config_digest);
-        if c.len() == 64 && c.chars().all(|c| c.is_ascii_hexdigit()) && c.starts_with(raw) {
+        if c.len() == 64 && c.chars().all(|c| c.is_ascii_hexdigit()) {
             return c.to_string();
         }
         if m.len() == 64 && m.chars().all(|c| c.is_ascii_hexdigit()) {

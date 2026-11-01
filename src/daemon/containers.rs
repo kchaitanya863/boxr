@@ -270,6 +270,8 @@ pub async fn create_container(
         timeout: None,
         image: payload.image,
         command: payload.cmd.unwrap_or_default(),
+        passwd: true,
+        ..Default::default()
     };
 
     match crate::create_only_container_with_home(run_args, Some(&state.home)).await {
@@ -470,6 +472,7 @@ pub async fn inspect_container(
         ContainerStatus::Stopping => "stopping",
         ContainerStatus::Paused => "paused",
         ContainerStatus::Created => "created",
+        ContainerStatus::Initialized => "initialized",
         ContainerStatus::Exited(_) => "exited",
         ContainerStatus::Failed(_) => "dead",
     };

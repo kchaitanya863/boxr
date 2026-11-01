@@ -57,7 +57,16 @@ pub struct PsArgs {
     pub all: bool,
 
     /// Only display numeric IDs
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(
+        short = 'q',
+        long = "quiet",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub quiet: bool,
 
     /// Display total file sizes
@@ -65,7 +74,15 @@ pub struct PsArgs {
     pub size: bool,
 
     /// Don't truncate output
-    #[arg(long = "no-trunc")]
+    #[arg(
+        long = "no-trunc",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub no_trunc: bool,
 
     /// Format output using a custom template (e.g. json, table)
@@ -89,16 +106,32 @@ pub struct PsArgs {
     pub sort: Option<String>,
 
     /// Do not print headers
-    #[arg(long = "noheading")]
+    #[arg(long = "noheading", alias = "no-heading")]
     pub noheading: bool,
 
     /// Display external containers (buildah, etc.)
-    #[arg(long = "external")]
+    #[arg(
+        long = "external",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub external: bool,
 
     /// Display namespace information (for custom --format templates)
-    #[arg(long = "ns")]
+    #[arg(long = "ns", alias = "namespace")]
     pub ns: bool,
+
+    /// Display pod information in the output
+    #[arg(short = 'p', long = "pod")]
+    pub pod: bool,
+
+    /// Sync container state with OCI runtime
+    #[arg(long = "sync")]
+    pub sync: bool,
 
     /// Container names or IDs (accepted only for validation; not supported with --latest)
     #[arg(value_name = "CONTAINER")]
@@ -147,7 +180,11 @@ pub struct RmArgs {
 
     /// Read container ID from the given file
     #[arg(long = "cidfile")]
-    pub cidfile: Option<String>,
+    pub cidfile: Vec<String>,
+
+    /// Filter output based on conditions provided
+    #[arg(long = "filter")]
+    pub filter: Vec<String>,
 
     /// Container IDs or names to remove
     pub containers: Vec<String>,
@@ -397,7 +434,20 @@ pub struct UpdateArgs {
     #[arg(long = "health-startup-timeout")]
     pub health_startup_timeout: Option<String>,
 
+    /// Set environment variables in the container
+    #[arg(short = 'e', long = "env")]
+    pub env: Vec<String>,
+
+    /// Unset environment variables in the container
+    #[arg(long = "unsetenv")]
+    pub unsetenv: Vec<String>,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Container to update
+    #[arg(default_value = "")]
     pub container: String,
 }
 
@@ -473,6 +523,10 @@ pub struct ContainerCleanupArgs {
     /// Cleanup all containers
     #[arg(short = 'a', long = "all")]
     pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Clean up the given exec session instead of the container
     #[arg(long = "exec")]
@@ -590,9 +644,17 @@ pub struct UnmountArgs {
     pub container: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct InitArgs {
-    /// Container to initialize
-    pub container: String,
+    /// Initialize all containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Containers to initialize
+    pub containers: Vec<String>,
 }

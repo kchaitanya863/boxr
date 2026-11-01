@@ -136,6 +136,8 @@ pub enum ManifestAction {
         arch: Option<String>,
         #[arg(long = "annotation", hide = true)]
         annotation: Vec<String>,
+        #[arg(long = "all", hide = true)]
+        all: bool,
         manifest_list: String,
         source: String,
         #[arg(hide = true)]

@@ -226,7 +226,7 @@ impl NetworkStore {
         gateway: Option<&str>,
         internal: bool,
         attachable: bool,
-        labels: HashMap<String, String>,
+        mut labels: HashMap<String, String>,
     ) -> Result<NetworkRecord> {
         let name_trimmed = name.trim();
         if name_trimmed.is_empty()
@@ -286,22 +286,25 @@ impl NetworkStore {
             });
 
             // Check if chosen subnet overlaps with any existing network subnet
-            for existing_net in &data.networks {
-                if existing_net.name == Self::DEFAULT_NETWORK
-                    && std::env::var_os("BOXR_BATS_HOME").is_some()
-                {
-                    continue;
-                }
-                if existing_net.name == "podman" && std::env::var_os("BOXR_BATS_HOME").is_none() {
-                    continue;
-                }
-                if subnets_overlap(&existing_net.subnet, &chosen_subnet)? {
-                    return Err(anyhow!(
-                        "Pool overlaps with other one on this address space: subnet '{}' overlaps with network '{}' subnet '{}'",
-                        chosen_subnet,
-                        existing_net.name,
-                        existing_net.subnet
-                    ));
+            if driver != "macvlan" && driver != "ipvlan" {
+                for existing_net in &data.networks {
+                    if existing_net.name == Self::DEFAULT_NETWORK {
+                        continue;
+                    }
+                    if existing_net.driver == "macvlan" || existing_net.driver == "ipvlan" {
+                        continue;
+                    }
+                    if existing_net.name == "podman" && std::env::var_os("BOXR_BATS_HOME").is_none() {
+                        continue;
+                    }
+                    if subnets_overlap(&existing_net.subnet, &chosen_subnet)? {
+                        return Err(anyhow!(
+                            "Pool overlaps with other one on this address space: subnet '{}' overlaps with network '{}' subnet '{}'",
+                            chosen_subnet,
+                            existing_net.name,
+                            existing_net.subnet
+                        ));
+                    }
                 }
             }
 

@@ -133,6 +133,15 @@ pub fn parse_restart_policy(input: &str) -> Result<RestartPolicy> {
         Ok(RestartPolicy::OnFailure {
             max_retries: retries,
         })
+    } else if input.starts_with("always:")
+        || input.starts_with("no:")
+        || input.starts_with("none:")
+        || input.starts_with("never:")
+        || input.starts_with("unless-stopped:")
+    {
+        Err(anyhow!(
+            "restart policy retries can only be specified with on-failure restart policy"
+        ))
     } else {
         Err(anyhow!(
             "Invalid restart policy: '{}', expected no, always, on-failure[:max-retries], or unless-stopped",

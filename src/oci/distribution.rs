@@ -19,6 +19,7 @@ pub struct RegistryClient {
     client: Client,
     token: Option<String>,
     basic_auth: Option<String>,
+    use_http: bool,
 }
 
 /// Open/Closed & Dependency Inversion: OCI Image distribution client contract
@@ -132,7 +133,12 @@ impl RegistryClient {
             client: build_registry_http_client(resolve),
             token: None,
             basic_auth: None,
+            use_http: false,
         }
+    }
+
+    fn scheme(&self) -> &'static str {
+        if self.use_http { "http" } else { "https" }
     }
 
     fn inline_credentials(&self) -> Option<(String, String)> {
@@ -227,18 +233,63 @@ impl RegistryClient {
     /// Authenticate against registry if needed (e.g. Docker Hub auth token or private registry).
     pub async fn authenticate(&mut self, reference: &ImageReference) -> Result<()> {
         let creds = self.store_credentials(reference);
+        let opts = crate::oci::registry_options::registry_options_snapshot();
 
-        let ping_url = format!("https://{}/v2/", registry_connect_host(&reference.registry));
-        let resp = self.client.get(&ping_url).send().await.map_err(|e| {
-            use std::error::Error;
-            let mut detail = format!("{e}");
-            let mut src = e.source();
-            while let Some(s) = src {
-                detail.push_str(&format!("; {s}"));
-                src = s.source();
+        let ping_url = format!(
+            "{}://{}/v2/",
+            self.scheme(),
+            registry_connect_host(&reference.registry)
+        );
+        let resp = match self.client.get(&ping_url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                use std::error::Error;
+                let mut detail = format!("{e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    detail.push_str(&format!("; {s}"));
+                    src = s.source();
+                }
+                if !self.use_http && opts.tls_verify == Some(false) {
+                    let http_ping = format!(
+                        "http://{}/v2/",
+                        registry_connect_host(&reference.registry)
+                    );
+                    if let Ok(r) = self.client.get(&http_ping).send().await {
+                        self.use_http = true;
+                        r
+                    } else {
+                        return Err(anyhow!(
+                            "pinging container registry {}: {}",
+                            reference.registry,
+                            detail
+                        ));
+                    }
+                } else {
+                    if detail.contains("InvalidContentType")
+                        || detail.contains("received corrupt message")
+                        || detail.contains("tls")
+                    {
+                        let http_ping = format!(
+                            "http://{}/v2/",
+                            registry_connect_host(&reference.registry)
+                        );
+                        if self.client.get(&http_ping).send().await.is_ok() {
+                            return Err(anyhow!(
+                                "pinging container registry {}: Get \"{}\": http: server gave HTTP response to HTTPS client",
+                                reference.registry,
+                                ping_url
+                            ));
+                        }
+                    }
+                    return Err(anyhow!(
+                        "pinging container registry {}: {}",
+                        reference.registry,
+                        detail
+                    ));
+                }
             }
-            anyhow!("registry ping {}: {}", ping_url, detail)
-        })?;
+        };
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -366,23 +417,74 @@ impl RegistryClient {
             self.basic_auth = Some(encoded);
         }
 
-        let ping_url = format!("https://{}/v2/", registry_connect_host(&reference.registry));
+        let ping_url = format!(
+            "{}://{}/v2/",
+            self.scheme(),
+            registry_connect_host(&reference.registry)
+        );
         let mut req = self.client.get(&ping_url);
         if let Some(auth) = &self.basic_auth {
             if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
                 req = req.header(AUTHORIZATION, val);
             }
         }
-        let resp = req.send().await.map_err(|e| {
-            use std::error::Error;
-            let mut detail = format!("{e}");
-            let mut src = e.source();
-            while let Some(s) = src {
-                detail.push_str(&format!("; {s}"));
-                src = s.source();
+        let opts = crate::oci::registry_options::registry_options_snapshot();
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                use std::error::Error;
+                let mut detail = format!("{e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    detail.push_str(&format!("; {s}"));
+                    src = s.source();
+                }
+                if !self.use_http && opts.tls_verify == Some(false) {
+                    let http_ping = format!(
+                        "http://{}/v2/",
+                        registry_connect_host(&reference.registry)
+                    );
+                    let mut hreq = self.client.get(&http_ping);
+                    if let Some(auth) = &self.basic_auth {
+                        if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
+                            hreq = hreq.header(AUTHORIZATION, val);
+                        }
+                    }
+                    if let Ok(r) = hreq.send().await {
+                        self.use_http = true;
+                        r
+                    } else {
+                        return Err(anyhow!(
+                            "pinging container registry {}: {}",
+                            reference.registry,
+                            detail
+                        ));
+                    }
+                } else {
+                    if detail.contains("InvalidContentType")
+                        || detail.contains("received corrupt message")
+                        || detail.contains("tls")
+                    {
+                        let http_ping = format!(
+                            "http://{}/v2/",
+                            registry_connect_host(&reference.registry)
+                        );
+                        if self.client.get(&http_ping).send().await.is_ok() {
+                            return Err(anyhow!(
+                                "pinging container registry {}: Get \"{}\": http: server gave HTTP response to HTTPS client",
+                                reference.registry,
+                                ping_url
+                            ));
+                        }
+                    }
+                    return Err(anyhow!(
+                        "pinging container registry {}: {}",
+                        reference.registry,
+                        detail
+                    ));
+                }
             }
-            anyhow!("registry ping {}: {}", ping_url, detail)
-        })?;
+        };
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -429,7 +531,8 @@ impl RegistryClient {
         data: &[u8],
     ) -> Result<()> {
         let check_url = format!(
-            "https://{}/v2/{}/blobs/{}",
+            "{}://{}/v2/{}/blobs/{}",
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             digest
@@ -453,7 +556,8 @@ impl RegistryClient {
         }
 
         let upload_url = format!(
-            "https://{}/v2/{}/blobs/uploads/",
+            "{}://{}/v2/{}/blobs/uploads/",
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository
         );
@@ -480,7 +584,8 @@ impl RegistryClient {
             location.to_string()
         } else {
             format!(
-                "https://{}/{}",
+                "{}://{}/{}",
+                self.scheme(),
                 registry_connect_host(&reference.registry),
                 location.trim_start_matches('/')
             )
@@ -633,7 +738,8 @@ impl RegistryClient {
             .unwrap_or(media_types::DOCKER_MANIFEST_V2);
 
         let put_url = format!(
-            "https://{}/v2/{}/manifests/{}",
+            "{}://{}/v2/{}/manifests/{}",
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             reference.tag
@@ -689,7 +795,8 @@ impl RegistryClient {
         let tag_or_digest = reference.digest.as_deref().unwrap_or(&reference.tag);
 
         let url = format!(
-            "https://{}/v2/{}/manifests/{}",
+            "{}://{}/v2/{}/manifests/{}",
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             tag_or_digest
@@ -754,37 +861,59 @@ impl RegistryClient {
                     .filter(|desc| is_runnable_image_descriptor(desc))
                     .collect::<Vec<_>>();
 
-                let chosen_descriptor = runnable
-                    .iter()
-                    .find(|desc| {
-                        if let Some(p) = &desc.platform {
-                            p.os == target_os && p.architecture == target_arch
-                        } else {
-                            false
-                        }
-                    })
-                    .or_else(|| {
-                        runnable.iter().find(|desc| {
+                let chosen_descriptor = if target_platform.is_some() {
+                    runnable
+                        .iter()
+                        .find(|desc| {
                             if let Some(p) = &desc.platform {
-                                p.os == "linux" && p.architecture == "amd64"
+                                p.os == target_os && p.architecture == target_arch
                             } else {
                                 false
                             }
                         })
-                    })
-                    .or_else(|| {
-                        runnable.iter().find(|desc| {
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "choosing an image from manifest list docker://{}/{}:{}: no image found in manifest list for architecture \"{}\", variant \"\", OS \"{}\"",
+                                reference.registry,
+                                reference.repository,
+                                tag_or_digest,
+                                target_arch,
+                                target_os
+                            )
+                        })?
+                } else {
+                    runnable
+                        .iter()
+                        .find(|desc| {
                             if let Some(p) = &desc.platform {
-                                p.os == "linux"
+                                p.os == target_os && p.architecture == target_arch
                             } else {
                                 false
                             }
                         })
-                    })
-                    .or_else(|| runnable.first())
-                    .ok_or_else(|| {
-                        anyhow!("No suitable manifest found in index for target platform")
-                    })?;
+                        .or_else(|| {
+                            runnable.iter().find(|desc| {
+                                if let Some(p) = &desc.platform {
+                                    p.os == "linux" && p.architecture == "amd64"
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                        .or_else(|| {
+                            runnable.iter().find(|desc| {
+                                if let Some(p) = &desc.platform {
+                                    p.os == "linux"
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                        .or_else(|| runnable.first())
+                        .ok_or_else(|| {
+                            anyhow!("No suitable manifest found in index for target platform")
+                        })?
+                };
 
                 // Recursively fetch platform manifest by digest
                 let mut platform_ref = reference.clone();
@@ -815,7 +944,8 @@ impl RegistryClient {
         config_descriptor: &Descriptor,
     ) -> Result<(ImageConfig, Vec<u8>)> {
         let url = format!(
-            "https://{}/v2/{}/blobs/{}",
+            "{}://{}/v2/{}/blobs/{}",
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             config_descriptor.digest
@@ -878,7 +1008,8 @@ impl RegistryClient {
         }
 
         let url = format!(
-            "https://{}/v2/{}/blobs/{}",
+            "{}://{}/v2/{}/blobs/{}",
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             descriptor.digest
