@@ -446,21 +446,6 @@ impl PodStore {
                             running_errors.join("\n")
                         ));
                     }
-                    if let Some(infra) = c_store
-                        .find(&infra_name)
-                        .or_else(|| c_store.find(&pod.infra_container_id))
-                    {
-                        if pod.containers.is_empty()
-                            && pod.status == "Running"
-                            && pod.network.as_deref() != Some("host")
-                            && matches!(infra.status, ContainerStatus::Running)
-                        {
-                            return Err(anyhow!(
-                                "conflict: cannot remove running pod {}. Stop the pod or use force",
-                                pod.name
-                            ));
-                        }
-                    }
                 }
 
                 let removed = data.pods.remove(pos);

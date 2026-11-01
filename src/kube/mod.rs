@@ -958,6 +958,12 @@ impl KubeManager {
             docs.push(val);
         }
 
+        for val in &docs {
+            if args.replace && saved_notify_sock.is_some() {
+                let _ = Self::play_kube_down_value(val.clone());
+            }
+        }
+
         if let Some(sc_name) = &service_ctr_name {
             let sc_image = first_image.unwrap_or_else(|| {
                 crate::storage::ImageStore::new()
@@ -1102,9 +1108,6 @@ impl KubeManager {
                         }
                     }
                 }
-            }
-            if args.replace && saved_notify_sock.is_some() {
-                let _ = Self::play_kube_down_value(val.clone());
             }
             if let Err(e) =
                 Self::play_kube_value_with_args(val, args, &configmaps, service_ctr_name.as_deref())
@@ -3038,6 +3041,13 @@ impl KubeManager {
 
             let mut annotations_vec: Vec<String> = Vec::new();
             for (k, v) in &pod_annotations {
+                if k == "io.containers.autoupdate"
+                    || k.starts_with("io.containers.autoupdate/")
+                    || k == "io.containers.autoupdate.authfile"
+                    || k.starts_with("io.containers.autoupdate.authfile/")
+                {
+                    continue;
+                }
                 if let Some(ctr_suffix) =
                     k.strip_prefix("io.podman.annotations.keep-original-groups/")
                 {

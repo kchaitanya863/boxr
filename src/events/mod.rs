@@ -599,6 +599,11 @@ fn format_event_with_template(event: &ContainerEvent, fmt: &str) -> String {
             ".Name" => event.actor_name.clone(),
             ".Status" | ".Action" => event.action.clone(),
             ".Type" => event.event_type.clone(),
+            ".HealthStatus" => event
+                .attributes
+                .get("health_status")
+                .cloned()
+                .unwrap_or_default(),
             ".OOMKilled" => event
                 .attributes
                 .get("oomKilled")
