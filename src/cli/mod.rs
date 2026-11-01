@@ -56,6 +56,9 @@ pub static RUN_ENV_HOST: OnceLock<bool> = OnceLock::new();
 
 /// Podman `create/pull --arch` or `--os`
 pub static CLI_ARCH_OR_OS_SET: OnceLock<bool> = OnceLock::new();
+pub static CLI_ARCH_VALUE: OnceLock<String> = OnceLock::new();
+pub static CLI_OS_VALUE: OnceLock<String> = OnceLock::new();
+pub static START_SIG_PROXY_EXPLICIT: OnceLock<bool> = OnceLock::new();
 
 /// Podman `--config` global directory for docker config.json
 pub static DOCKER_CONFIG_DIR: OnceLock<String> = OnceLock::new();
@@ -86,6 +89,10 @@ fn expand_combined_short_flags(arg: &str) -> Vec<String> {
     }
     const BULK_RM_FLAGS: &[char] = &['a', 'f', 't', 'v'];
     if body.len() > 1 && body.chars().all(|c| BULK_RM_FLAGS.contains(&c)) {
+        return body.chars().map(|c| format!("-{}", c)).collect();
+    }
+    const PS_FLAGS: &[char] = &['a', 'q', 's', 'l', 'p'];
+    if body.len() > 1 && body.chars().all(|c| PS_FLAGS.contains(&c)) {
         return body.chars().map(|c| format!("-{}", c)).collect();
     }
     vec![arg.to_string()]
@@ -278,6 +285,18 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             println!("buildah 1.36.0");
             std::process::exit(0);
         }
+        if sub2_name == "inspect" {
+            let go_arch = match std::env::consts::ARCH {
+                "x86_64" => "amd64",
+                "aarch64" => "arm64",
+                other => other,
+            };
+            println!(
+                "Name:          default\nDriver:        container\n\nNodes:\nName:      default\nEndpoint:  default\nStatus:    running\nPlatforms: linux/{}",
+                go_arch
+            );
+            std::process::exit(0);
+        }
         if sub2_name == "build" {
             let mut rewritten = Vec::new();
             for (idx, tok) in argv.into_iter().enumerate() {
@@ -298,6 +317,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let is_run_or_create = sub_name == "run"
         || sub_name == "create"
         || (sub_name == "container" && (sub2_name == "run" || sub2_name == "create"));
+    let is_create_only =
+        sub_name == "create" || (sub_name == "container" && sub2_name == "create");
+    let is_start = sub_name == "start" || (sub_name == "container" && sub2_name == "start");
     let is_exec = sub_name == "exec" || (sub_name == "container" && sub2_name == "exec");
     let mut seen_positional_after_sub = false;
     let sub_start = if sub_name == "container"
@@ -424,7 +446,39 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 1;
             continue;
         }
+        if i > sub_start && is_start {
+            if a == "--sig-proxy" || a.starts_with("--sig-proxy=") {
+                let _ = START_SIG_PROXY_EXPLICIT.set(true);
+            }
+        }
         if i > sub_start && (is_run_or_create || is_exec) && !seen_positional_after_sub {
+            if is_create_only {
+                let bin = if hide_remote {
+                    "podman-remote"
+                } else {
+                    "podman"
+                };
+                let verb = if sub_name == "container" {
+                    format!("container {}", sub2_name)
+                } else {
+                    sub_name.to_string()
+                };
+                if a == "-d" {
+                    eprintln!("Error: unknown shorthand flag: 'd' in -d");
+                    eprintln!("See '{} {} --help'", bin, verb);
+                    std::process::exit(125);
+                }
+                if a == "--detach" || a.starts_with("--detach=") {
+                    eprintln!("Error: unknown flag: --detach");
+                    eprintln!("See '{} {} --help'", bin, verb);
+                    std::process::exit(125);
+                }
+                if a == "--detach-keys" || a.starts_with("--detach-keys=") {
+                    eprintln!("Error: unknown flag: --detach-keys");
+                    eprintln!("See '{} {} --help'", bin, verb);
+                    std::process::exit(125);
+                }
+            }
             if a == "-h" && is_run_or_create {
                 if i + 1 >= argv.len() {
                     let bin = if hide_remote {
@@ -453,11 +507,21 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             }
             if (a == "--arch" || a == "--os") && is_run_or_create && i + 1 < argv.len() {
                 let _ = CLI_ARCH_OR_OS_SET.set(true);
+                if a == "--arch" {
+                    let _ = CLI_ARCH_VALUE.set(argv[i + 1].clone());
+                } else {
+                    let _ = CLI_OS_VALUE.set(argv[i + 1].clone());
+                }
                 i += 2;
                 continue;
             }
             if (a.starts_with("--arch=") || a.starts_with("--os=")) && is_run_or_create {
                 let _ = CLI_ARCH_OR_OS_SET.set(true);
+                if let Some(v) = a.strip_prefix("--arch=") {
+                    let _ = CLI_ARCH_VALUE.set(v.to_string());
+                } else if let Some(v) = a.strip_prefix("--os=") {
+                    let _ = CLI_OS_VALUE.set(v.to_string());
+                }
                 i += 1;
                 continue;
             }
@@ -599,6 +663,32 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         | "--authfile"
                         | "--cert-dir"
                         | "--creds"
+                        | "--rdt-class"
+                        | "--signature-policy"
+                        | "--chrootdirs"
+                        | "--pidfile"
+                        | "--ip"
+                        | "--ip6"
+                        | "--mac-address"
+                        | "--cgroups"
+                        | "--cgroup-conf"
+                        | "--pod-id-file"
+                        | "--sdnotify"
+                        | "--health-cmd"
+                        | "--health-interval"
+                        | "--health-timeout"
+                        | "--health-retries"
+                        | "--health-start-period"
+                        | "--health-start-interval"
+                        | "--health-on-failure"
+                        | "--health-startup-cmd"
+                        | "--health-startup-interval"
+                        | "--health-startup-timeout"
+                        | "--health-startup-retries"
+                        | "--health-startup-success"
+                        | "--health-max-log-count"
+                        | "--health-max-log-size"
+                        | "--health-log-destination"
                 );
                 if !prev_takes_val {
                     seen_positional_after_sub = true;
@@ -610,6 +700,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         out.push("--label-file".to_string());
                         out.push(label_files.drain(..).collect::<Vec<_>>().join("\0"));
                     }
+                    out.push(a.clone());
+                    out.push("--".to_string());
+                    i += 1;
+                    continue;
                 }
             }
         }
@@ -698,6 +792,16 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         if podman_globals::should_strip_global_flag_at(&argv, i, subcommand_idx) {
             let skip = podman_globals::global_flag_skip_width(a).unwrap_or(1);
             i += skip;
+            continue;
+        }
+        if !seen_positional_after_sub && is_run_or_create {
+            out.extend(expand_combined_short_flags(a));
+            i += 1;
+            continue;
+        }
+        if seen_positional_after_sub && (is_run_or_create || is_exec) {
+            out.push(a.clone());
+            i += 1;
             continue;
         }
         out.extend(expand_combined_short_flags(a));

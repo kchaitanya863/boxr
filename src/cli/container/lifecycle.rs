@@ -1,11 +1,11 @@
 use super::run::RunArgs;
 use clap::Args;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct StopArgs {
     /// Seconds to wait before killing the container
-    #[arg(short = 't', long = "time", alias = "timeout")]
+    #[arg(short = 't', long = "time", alias = "timeout", allow_hyphen_values = true)]
     pub time: Option<i32>,
 
     /// Signal to send to the container
@@ -16,23 +16,35 @@ pub struct StopArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
 
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Ignore errors when a container cannot be stopped
-    #[arg(long = "ignore")]
+    #[arg(short = 'i', long = "ignore")]
     pub ignore: bool,
 
     /// Suppress output
     #[arg(long = "noout")]
     pub noout: bool,
 
+    /// Stop is being called by a systemd unit
+    #[arg(long = "service")]
+    pub service: bool,
+
     /// Read container ID from the given file
     #[arg(long = "cidfile")]
-    pub cidfile: Option<String>,
+    pub cidfile: Vec<String>,
+
+    /// Filter output based on conditions provided
+    #[arg(short = 'f', long = "filter")]
+    pub filter: Vec<String>,
 
     #[arg(value_name = "CONTAINER")]
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct StartArgs {
     /// Attach container's STDOUT and STDERR and forward signals
@@ -69,8 +81,16 @@ pub struct StartArgs {
     #[arg(long = "all")]
     pub all: bool,
 
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Write the container process ID to the file
+    #[arg(long = "pidfile")]
+    pub pidfile: Option<String>,
+
     /// Filter output based on conditions provided
-    #[arg(long = "filter")]
+    #[arg(short = 'f', long = "filter")]
     pub filter: Vec<String>,
 
     #[arg(value_name = "CONTAINER")]
@@ -229,6 +249,11 @@ pub struct WaitArgs {
     /// Act on the latest container
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
+
+    /// Wait for the first container to match the condition
+    #[arg(long = "exit-first-match")]
+    pub exit_first_match: bool,
+
     /// Containers to wait on
     pub containers: Vec<String>,
 }
@@ -262,7 +287,7 @@ pub struct AttachArgs {
     pub container: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct KillArgs {
     /// Signal to send (e.g. SIGHUP, SIGTERM, SIGKILL)
@@ -273,21 +298,54 @@ pub struct KillArgs {
     #[arg(short = 'a', long = "all")]
     pub all: bool,
 
-    /// Container to kill
-    #[arg(default_value = "")]
-    pub container: String,
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Read container ID from the given file
+    #[arg(long = "cidfile")]
+    pub cidfile: Vec<String>,
+
+    /// Containers to kill
+    pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct RestartArgs {
     /// Seconds to wait before killing the container
-    #[arg(short = 't', long = "time", default_value_t = 10)]
-    pub time: u32,
+    #[arg(
+        short = 't',
+        long = "time",
+        alias = "timeout",
+        default_value_t = 10,
+        allow_hyphen_values = true
+    )]
+    pub time: i32,
 
     #[arg(short = 's', long = "signal")]
     pub signal: Option<String>,
 
-    /// Container to restart
-    pub container: String,
+    /// Restart all containers regardless of their current state
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Restart only running containers when --all is used
+    #[arg(long = "running")]
+    pub running: bool,
+
+    /// Read container ID from the given file
+    #[arg(long = "cidfile")]
+    pub cidfile: Vec<String>,
+
+    /// Filter output based on conditions provided
+    #[arg(short = 'f', long = "filter")]
+    pub filter: Vec<String>,
+
+    /// Containers to restart
+    pub containers: Vec<String>,
 }

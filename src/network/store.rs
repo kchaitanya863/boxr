@@ -254,7 +254,7 @@ impl NetworkStore {
         gateway: Option<&str>,
         internal: bool,
         attachable: bool,
-        labels: HashMap<String, String>,
+        mut labels: HashMap<String, String>,
     ) -> Result<NetworkRecord> {
         let subnets = subnet.into_iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let gateways = gateway
@@ -356,31 +356,34 @@ impl NetworkStore {
             }
 
             // Check if any IPv4 subnet overlaps with any existing network subnet
-            for (chosen_subnet, _) in &canonical_subnets {
-                if chosen_subnet.contains(':') {
-                    continue;
-                }
-                for existing_net in &data.networks {
-                    if existing_net.name == Self::DEFAULT_NETWORK
-                        && std::env::var_os("BOXR_BATS_HOME").is_some()
-                    {
+            if driver != "macvlan" && driver != "ipvlan" {
+                for (chosen_subnet, _) in &canonical_subnets {
+                    if chosen_subnet.contains(':') {
                         continue;
                     }
-                    if existing_net.name == "podman"
-                        && std::env::var_os("BOXR_BATS_HOME").is_none()
-                    {
-                        continue;
-                    }
-                    if !existing_net.subnet.is_empty()
-                        && !existing_net.subnet.contains(':')
-                        && subnets_overlap(&existing_net.subnet, chosen_subnet)?
-                    {
-                        return Err(anyhow!(
-                            "Pool overlaps with other one on this address space: subnet '{}' overlaps with network '{}' subnet '{}'",
-                            chosen_subnet,
-                            existing_net.name,
-                            existing_net.subnet
-                        ));
+                    for existing_net in &data.networks {
+                        if existing_net.name == Self::DEFAULT_NETWORK {
+                            continue;
+                        }
+                        if existing_net.driver == "macvlan" || existing_net.driver == "ipvlan" {
+                            continue;
+                        }
+                        if existing_net.name == "podman"
+                            && std::env::var_os("BOXR_BATS_HOME").is_none()
+                        {
+                            continue;
+                        }
+                        if !existing_net.subnet.is_empty()
+                            && !existing_net.subnet.contains(':')
+                            && subnets_overlap(&existing_net.subnet, chosen_subnet)?
+                        {
+                            return Err(anyhow!(
+                                "Pool overlaps with other one on this address space: subnet '{}' overlaps with network '{}' subnet '{}'",
+                                chosen_subnet,
+                                existing_net.name,
+                                existing_net.subnet
+                            ));
+                        }
                     }
                 }
             }

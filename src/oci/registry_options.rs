@@ -7,6 +7,9 @@ pub struct RegistryOptions {
     pub inline_creds: Option<(String, String)>,
     pub authfile: Option<PathBuf>,
     pub tls_verify: Option<bool>,
+    pub quiet: bool,
+    pub compression_format: Option<String>,
+    pub force_compression: Option<bool>,
 }
 
 static REGISTRY_OPTIONS: Mutex<RegistryOptions> = Mutex::new(RegistryOptions {
@@ -14,6 +17,9 @@ static REGISTRY_OPTIONS: Mutex<RegistryOptions> = Mutex::new(RegistryOptions {
     inline_creds: None,
     authfile: None,
     tls_verify: None,
+    quiet: false,
+    compression_format: None,
+    force_compression: None,
 });
 
 pub fn registry_options_snapshot() -> RegistryOptions {
@@ -65,6 +71,9 @@ pub fn registry_options_from_cli_ext(
         inline_creds,
         authfile: authfile.map(PathBuf::from),
         tls_verify,
+        quiet: false,
+        compression_format: None,
+        force_compression: None,
     }
 }
 

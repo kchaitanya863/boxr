@@ -339,6 +339,7 @@ impl SystemManager {
             let status_col = match c.status {
                 ContainerStatus::Running => "running",
                 ContainerStatus::Created => "created",
+                ContainerStatus::Initialized => "initialized",
                 ContainerStatus::Paused => "paused",
                 ContainerStatus::Stopping => "stopping",
                 ContainerStatus::Exited(_) => "exited",

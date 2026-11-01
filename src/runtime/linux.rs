@@ -437,7 +437,7 @@ fn prepare_bind_mount_target(
 ) -> std::path::PathBuf {
     let clean_dest = destination.trim_start_matches('/');
     let target = rootfs.join(clean_dest);
-    if source.is_file() {
+    if !source.is_dir() {
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -2106,6 +2106,20 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         .or_else(|| net_ifaces.first().map(|(ifn, _, _)| ifn.as_str()))
                         .unwrap_or("eth0");
                     if let Ok(tap_file) = platform::create_tap_device(primary_ifname) {
+                        if let Ok(mac_str) = fs::read_to_string(bundle_path.join("mac_address.txt"))
+                        {
+                            let mac_trim = mac_str.trim();
+                            if !mac_trim.is_empty() {
+                                run_ip_userns(&[
+                                    "link",
+                                    "set",
+                                    "dev",
+                                    primary_ifname,
+                                    "address",
+                                    mac_trim,
+                                ]);
+                            }
+                        }
                         if let Some((_, ips, ipam_none)) = net_ifaces_v2.first() {
                             run_ip_userns(&["link", "set", "lo", "up"]);
                             if *ipam_none {
@@ -4941,13 +4955,27 @@ fn run_container_child(
                 None::<&str>,
             )?;
         }
+        if let Some(prop) = m.propagation.as_deref() {
+            let prop_flag = match prop {
+                "shared" => Some(MsFlags::MS_SHARED),
+                "rshared" => Some(MsFlags::MS_SHARED | MsFlags::MS_REC),
+                "slave" => Some(MsFlags::MS_SLAVE),
+                "rslave" => Some(MsFlags::MS_SLAVE | MsFlags::MS_REC),
+                "private" => Some(MsFlags::MS_PRIVATE),
+                "rprivate" => Some(MsFlags::MS_PRIVATE | MsFlags::MS_REC),
+                _ => None,
+            };
+            if let Some(flag) = prop_flag {
+                let _ = mount(None::<&str>, &target, None::<&str>, flag, None::<&str>);
+            }
+        }
     }
 
     for m in &spec.mounts {
-        if m.mount_type == "bind" {
+        if m.mount_type == "bind" && !mounts.iter().any(|bm| bm.destination == m.destination) {
             let target = prepare_bind_mount_target(rootfs, &m.destination, Path::new(&m.source));
             if let Ok(canon_target) = target.canonicalize() {
-                if !canon_target.starts_with(&canon_rootfs) {
+                if !canon_target.starts_with(&canon_rootfs) && !m.destination.starts_with("/dev/") {
                     return Err(anyhow!(
                         "Mount destination escapes container rootfs: {:?}",
                         m.destination
@@ -4968,6 +4996,22 @@ fn run_container_child(
                     MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
                     None::<&str>,
                 )?;
+            }
+            if let Some(opts) = &m.options {
+                for opt in opts {
+                    let prop_flag = match opt.as_str() {
+                        "shared" => Some(MsFlags::MS_SHARED),
+                        "rshared" => Some(MsFlags::MS_SHARED | MsFlags::MS_REC),
+                        "slave" => Some(MsFlags::MS_SLAVE),
+                        "rslave" => Some(MsFlags::MS_SLAVE | MsFlags::MS_REC),
+                        "private" => Some(MsFlags::MS_PRIVATE),
+                        "rprivate" => Some(MsFlags::MS_PRIVATE | MsFlags::MS_REC),
+                        _ => None,
+                    };
+                    if let Some(flag) = prop_flag {
+                        let _ = mount(None::<&str>, &target, None::<&str>, flag, None::<&str>);
+                    }
+                }
             }
         } else if m.mount_type == "tmpfs"
             && m.destination != "/dev"
@@ -5171,6 +5215,23 @@ fn run_container_child(
             if parent.exists() {
                 let _ = fs::remove_file(&upper_resolv);
                 let _ = fs::write(&upper_resolv, &dns_content);
+            }
+        }
+    }
+    if let Some(ann) = &spec.annotations {
+        if let Some(chroot_json) = ann.get("boxr.chrootdirs") {
+            if let Ok(dirs) = serde_json::from_str::<Vec<String>>(chroot_json) {
+                for d in dirs {
+                    let clean_d = d.trim_start_matches('/');
+                    if !clean_d.is_empty() {
+                        let target_etc = rootfs.join(clean_d).join("etc");
+                        let _ = fs::create_dir_all(&target_etc);
+                        let _ = fs::write(target_etc.join("resolv.conf"), &dns_content);
+                        let upper_target_etc = bundle_dir.join("upper").join(clean_d).join("etc");
+                        let _ = fs::create_dir_all(&upper_target_etc);
+                        let _ = fs::write(upper_target_etc.join("resolv.conf"), &dns_content);
+                    }
+                }
             }
         }
     }

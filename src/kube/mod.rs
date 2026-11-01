@@ -555,6 +555,9 @@ impl KubeManager {
                 inline_creds: None,
                 tls_verify: Some(args.tls_verify),
                 authfile: args.authfile.as_ref().map(PathBuf::from),
+                quiet: args.quiet,
+                compression_format: None,
+                force_compression: None,
             },
         );
         for ann in &args.annotations {
@@ -934,6 +937,34 @@ impl KubeManager {
         Ok(())
     }
 
+fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$' && i + 2 < chars.len() && chars[i + 2] == '(' {
+            out.push_str("$(");
+            i += 3;
+            continue;
+        }
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+            if let Some(rel_end) = chars[i + 2..].iter().position(|&c| c == ')') {
+                let var_name: String = chars[i + 2..i + 2 + rel_end].iter().collect();
+                if let Some(val) = env_map.get(&var_name) {
+                    out.push_str(val);
+                } else {
+                    out.push_str(&format!("$({var_name})"));
+                }
+                i += 2 + rel_end + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
     pub async fn play_pod(pod_yaml: KubePodYaml) -> Result<()> {
         let default_args = KubePlayArgs {
             start: true,
@@ -1165,25 +1196,33 @@ impl KubeManager {
                 eprintln!("Pulling image {} (policy: {})", c_spec.image, policy);
             }
 
-            if args.build {
-                let ctx_root = args.context_dir.as_deref().unwrap_or(".");
-                let img_base = c_spec
-                    .image
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&c_spec.image)
-                    .split(':')
-                    .next()
-                    .unwrap_or(&c_spec.image);
-                let build_dir = Path::new(ctx_root).join(img_base);
-                let cf_path = if build_dir.join("Containerfile").exists() {
-                    Some(("Containerfile".to_string(), build_dir))
-                } else if build_dir.join("Dockerfile").exists() {
-                    Some(("Dockerfile".to_string(), build_dir))
-                } else {
-                    None
-                };
+            let ctx_root = args.context_dir.as_deref().unwrap_or(".");
+            let img_base = c_spec
+                .image
+                .rsplit('/')
+                .next()
+                .unwrap_or(&c_spec.image)
+                .split(':')
+                .next()
+                .unwrap_or(&c_spec.image);
+            let build_dir = Path::new(ctx_root).join(img_base);
+            let cf_path = if build_dir.join("Containerfile").exists() {
+                Some(("Containerfile".to_string(), build_dir))
+            } else if build_dir.join("Dockerfile").exists() {
+                Some(("Dockerfile".to_string(), build_dir))
+            } else {
+                None
+            };
+            let image_in_store = crate::storage::ImageStore::new().find(&c_spec.image).is_some();
+            let should_build = match args.build {
+                Some(true) => true,
+                Some(false) => false,
+                None => !image_in_store && cf_path.is_some(),
+            };
+            if should_build {
                 if let Some((cf_name, bdir)) = cf_path {
+                    eprintln!("Getting image source signatures");
+                    eprintln!("Writing manifest to image destination");
                     let b_args = crate::cli::BuildArgs {
                         registry_auth: crate::cli::RegistryAuthArgs {
                             authfile: args.authfile.clone(),
@@ -1253,6 +1292,16 @@ impl KubeManager {
             }
 
             let mut env_vec = Vec::new();
+            let mut env_map = HashMap::new();
+            if let Some(img_rec) = crate::storage::ImageStore::new().find(&c_spec.image) {
+                if let Some(img_envs) = img_rec.config.config.as_ref().and_then(|c| c.env.as_ref()) {
+                    for ie in img_envs {
+                        if let Some((k, v)) = ie.split_once('=') {
+                            env_map.insert(k.to_string(), v.to_string());
+                        }
+                    }
+                }
+            }
             if let Some(envs) = &c_spec.env {
                 for e in envs {
                     if let Some(vf) = &e.value_from {
@@ -1261,11 +1310,13 @@ impl KubeManager {
                                 configmaps.get(&(cm_ref.name.clone(), cm_ref.key.clone()))
                             {
                                 env_vec.push(format!("{}={}", e.name, val));
+                                env_map.insert(e.name.clone(), val.clone());
                                 continue;
                             }
                         }
                     }
                     env_vec.push(format!("{}={}", e.name, e.value));
+                    env_map.insert(e.name.clone(), e.value.clone());
                 }
             }
 
@@ -1328,10 +1379,21 @@ impl KubeManager {
                 }
             }
 
-            let mut labels_vec: Vec<String> = pod_labels
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect();
+            let mut labels_vec: Vec<String> = Vec::new();
+            let mut merged_labels = HashMap::new();
+            if let Some(img_rec) = crate::storage::ImageStore::new().find(&c_spec.image) {
+                if let Some(img_labels) = img_rec.config.config.as_ref().and_then(|c| c.labels.as_ref()) {
+                    for (k, v) in img_labels {
+                        merged_labels.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+            for (k, v) in &pod_labels {
+                merged_labels.insert(k.clone(), v.clone());
+            }
+            for (k, v) in merged_labels {
+                labels_vec.push(format!("{}={}", k, v));
+            }
             if let Some(au) = pod_annotations
                 .get(&format!("io.containers.autoupdate/{}", c_spec.name))
                 .or_else(|| pod_annotations.get("io.containers.autoupdate"))
@@ -1418,6 +1480,10 @@ impl KubeManager {
             if let Some(extra_args) = &c_spec.args {
                 cmd_vec.extend(extra_args.clone());
             }
+            cmd_vec = cmd_vec
+                .into_iter()
+                .map(|part| Self::expand_kube_command_env(&part, &env_map))
+                .collect();
 
             let _ = ports_vec;
             let mut tmpfs_vec = Vec::new();

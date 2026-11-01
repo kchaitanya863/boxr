@@ -809,6 +809,7 @@ impl VolumeStore {
                 tmpfs_mount_data,
                 volume_name: Some(record.name.clone()),
                 subpath: None,
+                propagation: None,
                 is_volume: true,
             })
         }

@@ -180,7 +180,13 @@ fn main() -> Result<()> {
         let code = match boxr::run_cli(cli).await {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("Error: {}", e);
+                let msg = e.to_string();
+                eprintln!("Error: {}", msg);
+                if msg.contains("restart policy retries can only be specified with on-failure restart policy")
+                    || msg.contains("Invalid restart policy")
+                {
+                    std::process::exit(125);
+                }
                 std::process::exit(1);
             }
         };

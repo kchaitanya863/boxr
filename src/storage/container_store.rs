@@ -28,6 +28,7 @@ pub fn rand_id() -> [u8; 6] {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainerStatus {
     Created,
+    Initialized,
     Running,
     Stopping,
     Paused,
@@ -39,6 +40,7 @@ impl std::fmt::Display for ContainerStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ContainerStatus::Created => write!(f, "Created"),
+            ContainerStatus::Initialized => write!(f, "Initialized"),
             ContainerStatus::Running => write!(f, "Up"),
             ContainerStatus::Stopping => write!(f, "Stopping"),
             ContainerStatus::Paused => write!(f, "Paused"),
@@ -150,11 +152,11 @@ impl ContainerStore {
             return None;
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            Ok(self
-                .load_unlocked()
-                .containers
-                .into_iter()
-                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q))
+            let containers = self.load_unlocked().containers;
+            if let Some(exact) = containers.iter().find(|c| c.name == q || c.id == q).cloned() {
+                return Ok(Some(exact));
+            }
+            Ok(containers.into_iter().find(|c| c.id.starts_with(&q)))
         })
         .ok()
         .flatten()
@@ -199,11 +201,13 @@ impl ContainerStore {
         let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(c) = data
+            let pos = data
                 .containers
-                .iter_mut()
-                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
-            {
+                .iter()
+                .position(|c| c.name == q || c.id == q)
+                .or_else(|| data.containers.iter().position(|c| c.id.starts_with(&q)));
+            if let Some(idx) = pos {
+                let c = &mut data.containers[idx];
                 // SIGKILL during `podman stop` (separate process) must not be downgraded.
                 if matches!(c.status, ContainerStatus::Exited(137))
                     && matches!(status, ContainerStatus::Exited(code) if code != 137)
@@ -338,7 +342,8 @@ impl ContainerStore {
             let pos = data
                 .containers
                 .iter()
-                .position(|c| c.id == q || c.id.starts_with(&q) || c.name == q);
+                .position(|c| c.name == q || c.id == q)
+                .or_else(|| data.containers.iter().position(|c| c.id.starts_with(&q)));
 
             if let Some(index) = pos {
                 let removed = data.containers.remove(index);

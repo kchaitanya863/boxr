@@ -98,8 +98,30 @@ pub struct ImageManifest {
     pub schema_version: i32,
     #[serde(rename = "mediaType", skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    #[serde(default)]
     pub config: Descriptor,
+    #[serde(default)]
     pub layers: Vec<Descriptor>,
+    #[serde(rename = "fsLayers", default, skip_serializing_if = "Option::is_none")]
+    pub fs_layers: Option<Vec<FsLayerEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsLayerEntry {
+    #[serde(rename = "blobSum")]
+    pub blob_sum: String,
+}
+
+impl Default for Descriptor {
+    fn default() -> Self {
+        Self {
+            media_type: String::new(),
+            digest: String::new(),
+            size: 0,
+            platform: None,
+            annotations: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -170,10 +192,20 @@ pub struct ExecutionConfig {
     pub stop_signal: Option<String>,
 }
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootFsConfig {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub fs_type: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub diff_ids: Vec<String>,
 }
 
@@ -214,13 +246,25 @@ pub fn unpack_layer(layer_archive_path: &Path, target_dir: &Path) -> Result<()> 
     let file = File::open(layer_archive_path)
         .with_context(|| format!("Failed to open layer archive: {:?}", layer_archive_path))?;
 
-    // Check if gzipped by reading first 2 bytes (0x1f, 0x8b)
-    let mut header = [0u8; 2];
+    // Check if gzipped (0x1f, 0x8b) or zstd (0x28, 0xb5, 0x2f, 0xfd)
+    let mut header = [0u8; 4];
     let mut reader: Box<dyn Read> = {
         let mut f = File::open(layer_archive_path)?;
         let n = f.read(&mut header).unwrap_or(0);
-        if n == 2 && header[0] == 0x1f && header[1] == 0x8b {
+        if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
             Box::new(GzDecoder::new(file))
+        } else if n == 4
+            && header[0] == 0x28
+            && header[1] == 0xb5
+            && header[2] == 0x2f
+            && header[3] == 0xfd
+        {
+            let out = std::process::Command::new("zstd")
+                .args(["-d", "-c", "--no-check"])
+                .arg(layer_archive_path)
+                .output()
+                .context("Failed to run zstd -d on layer archive")?;
+            Box::new(std::io::Cursor::new(out.stdout))
         } else {
             Box::new(file)
         }
@@ -458,10 +502,14 @@ pub fn unpack_archive_safely<R: Read>(
             if parent.exists() {
                 let canon_parent = parent.canonicalize()?;
                 if !canon_parent.starts_with(&canon_target) {
-                    return Err(anyhow!(
-                        "Tar-slip path traversal rejected: ancestor {:?} resolves outside target directory",
-                        parent
-                    ));
+                    if let Ok(meta) = fs::symlink_metadata(parent) {
+                        if meta.file_type().is_symlink() {
+                            return Err(anyhow!(
+                                "Tar-slip path traversal rejected: ancestor {:?} resolves outside target directory",
+                                parent
+                            ));
+                        }
+                    }
                 }
                 break;
             }
@@ -480,8 +528,21 @@ pub fn unpack_archive_safely<R: Read>(
         // /etc/ssl/certs), incorrectly flagging legitimate container
         // absolute symlinks (issue #407).
         if !entry.header().entry_type().is_symlink() && dest.exists() {
+            if let Ok(meta) = fs::symlink_metadata(&dest) {
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+            }
             let canon_dest = dest.canonicalize()?;
             if !canon_dest.starts_with(&canon_target) {
+                if let Ok(rel) = dest.strip_prefix(target_dir) {
+                    if rel
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                    {
+                        continue;
+                    }
+                }
                 let _ = fs::remove_file(&dest);
                 return Err(anyhow!(
                     "Archive entry escapes target directory: {:?}",

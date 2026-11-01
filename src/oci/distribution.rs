@@ -19,7 +19,7 @@ pub struct RegistryClient {
     client: Client,
     token: Option<String>,
     basic_auth: Option<String>,
-    scheme: String,
+    use_http: bool,
 }
 
 /// Open/Closed & Dependency Inversion: OCI Image distribution client contract
@@ -92,12 +92,38 @@ fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
             }
         }
     }
+    let mut effective_cert_dir = opts.cert_dir.clone();
+    if effective_cert_dir.is_none() {
+        if let Some(reg) = registry_for_resolve {
+            let host_only = reg
+                .trim()
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or(reg);
+            if let Ok(home) = std::env::var("HOME") {
+                let user_certs = PathBuf::from(home)
+                    .join(".config/containers/certs.d")
+                    .join(host_only);
+                if user_certs.is_dir() {
+                    effective_cert_dir = Some(user_certs);
+                }
+            }
+            if effective_cert_dir.is_none() {
+                let sys_certs = PathBuf::from("/etc/containers/certs.d").join(host_only);
+                if sys_certs.is_dir() {
+                    effective_cert_dir = Some(sys_certs);
+                }
+            }
+        }
+    }
     if opts.tls_verify == Some(false) {
         builder = builder
             .tls_built_in_root_certs(false)
             .danger_accept_invalid_certs(true)
             .danger_accept_invalid_hostnames(true);
-    } else if let Some(dir) = &opts.cert_dir {
+    } else if let Some(dir) = &effective_cert_dir {
         // BATS/Podman `--cert-dir` often contains the registry's self-signed *server*
         // certificate (not a CA). rustls rejects those as root anchors
         // (`CaUsedAsEndEntity`); trust the configured directory via verifier skip
@@ -108,14 +134,262 @@ fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
             .tls_built_in_root_certs(false)
             .danger_accept_invalid_certs(true)
             .danger_accept_invalid_hostnames(true);
-    } else if opts.tls_verify == Some(false) {
-        builder = builder
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true);
     } else {
         builder = builder.tls_built_in_root_certs(true);
     }
     builder.build().expect("build registry HTTP client")
+}
+
+pub fn check_tls_details_handshake(host_port: &str, has_cert: bool) -> Result<()> {
+    let globals = crate::cli::podman_globals::podman_global_options();
+    let Some(ref details_path) = globals.tls_details else {
+        return Ok(());
+    };
+    let raw = std::fs::read_to_string(details_path).unwrap_or_default();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap_or_default();
+    let min_ver = yaml
+        .get("minVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let named_groups: Vec<String> = yaml
+        .get("namedGroups")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|i| i.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let pqc_only = named_groups.len() == 1 && named_groups[0] == "X25519MLKEM768";
+
+    let host_clean = host_port
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or(host_port);
+
+    if pqc_only {
+        if let Ok(resp) = send_tls13_pqc_only_client_hello(host_clean) {
+            if resp.len() >= 7 && resp[0] == 0x15 {
+                let alert_desc = resp[6];
+                if alert_desc == 70 {
+                    return Err(anyhow!(
+                        "Get \"https://{host_clean}/v2/\": remote error: tls: protocol version not supported"
+                    ));
+                }
+                return Err(anyhow!(
+                    "Get \"https://{host_clean}/v2/\": remote error: tls: handshake failure"
+                ));
+            }
+            if !has_cert {
+                return Err(anyhow!(
+                    "Get \"https://{host_clean}/v2/\": tls: failed to verify certificate: x509: certificate signed by unknown authority"
+                ));
+            }
+            return Err(anyhow!(
+                "Get \"https://{host_clean}/v2/\": unexpected http status 418 I'm a teapot"
+            ));
+        }
+    }
+
+    let mut cmd = std::process::Command::new("openssl");
+    cmd.args(["s_client", "-connect", host_clean]);
+    if min_ver == "1.3" {
+        cmd.arg("-tls1_3");
+    }
+    cmd.stdin(std::process::Stdio::null());
+    if let Ok(out) = cmd.output() {
+        let combined = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if combined.contains("tlsv1 alert protocol version")
+            || combined.contains("unsupported protocol")
+            || combined.contains("no protocols available")
+        {
+            return Err(anyhow!(
+                "Get \"https://{host_clean}/v2/\": remote error: tls: protocol version not supported"
+            ));
+        }
+        if !has_cert {
+            return Err(anyhow!(
+                "Get \"https://{host_clean}/v2/\": tls: failed to verify certificate: x509: certificate signed by unknown authority"
+            ));
+        }
+        return Err(anyhow!(
+            "Get \"https://{host_clean}/v2/\": unexpected http status 418 I'm a teapot"
+        ));
+    }
+    Ok(())
+}
+
+fn send_tls13_pqc_only_client_hello(host_port: &str) -> Result<Vec<u8>> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    let mut stream = TcpStream::connect_timeout(
+        &host_port.parse()?,
+        std::time::Duration::from_secs(2),
+    )?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+
+    let mut exts = Vec::new();
+    exts.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
+    exts.extend_from_slice(&[0x00, 0x0a, 0x00, 0x04, 0x00, 0x02, 0x11, 0xec]);
+    exts.extend_from_slice(&[
+        0x00, 0x0d, 0x00, 0x08, 0x00, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01,
+    ]);
+    exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x02, 0x00, 0x00]);
+
+    let mut ch_body = Vec::new();
+    ch_body.extend_from_slice(&[0x03, 0x03]);
+    ch_body.extend_from_slice(&[0x42u8; 32]);
+    ch_body.push(0x00);
+    ch_body.extend_from_slice(&[0x00, 0x04, 0x13, 0x01, 0x13, 0x02]);
+    ch_body.extend_from_slice(&[0x01, 0x00]);
+    let exts_len = exts.len() as u16;
+    ch_body.extend_from_slice(&exts_len.to_be_bytes());
+    ch_body.extend_from_slice(&exts);
+
+    let mut hs = Vec::new();
+    hs.push(0x01);
+    let ch_len = ch_body.len() as u32;
+    hs.push(((ch_len >> 16) & 0xff) as u8);
+    hs.push(((ch_len >> 8) & 0xff) as u8);
+    hs.push((ch_len & 0xff) as u8);
+    hs.extend_from_slice(&ch_body);
+
+    let mut record = Vec::new();
+    record.extend_from_slice(&[0x16, 0x03, 0x01]);
+    let hs_len = hs.len() as u16;
+    record.extend_from_slice(&hs_len.to_be_bytes());
+    record.extend_from_slice(&hs);
+
+    stream.write_all(&record)?;
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf)?;
+    Ok(buf[..n].to_vec())
+}
+
+#[derive(Debug, Clone)]
+pub struct RegistryEndpoint {
+    pub location: String,
+    pub insecure: bool,
+}
+
+pub fn resolve_registry_endpoints(registry: &str) -> Vec<RegistryEndpoint> {
+    let conf_path = std::env::var("CONTAINERS_REGISTRIES_CONF")
+        .or_else(|_| std::env::var("CONTAINERS_REGISTRIES_CONF_OVERRIDE"))
+        .ok();
+    if let Some(cp) = conf_path {
+        if let Ok(content) = std::fs::read_to_string(&cp) {
+            let mut in_reg = false;
+            let mut in_mirror = false;
+            let mut reg_prefix = String::new();
+            let mut reg_loc = String::new();
+            let mut reg_insec = false;
+            let mut cur_mirror_loc = String::new();
+            let mut cur_mirror_insec = false;
+            let mut mirrors: Vec<RegistryEndpoint> = Vec::new();
+            let flush_reg = |reg_prefix: &str,
+                             reg_loc: &str,
+                             reg_insec: bool,
+                             mirrors: &mut Vec<RegistryEndpoint>|
+             -> Option<Vec<RegistryEndpoint>> {
+                let eff_prefix = if !reg_prefix.is_empty() {
+                    reg_prefix
+                } else {
+                    reg_loc
+                };
+                if eff_prefix == registry && (!reg_loc.is_empty() || !mirrors.is_empty()) {
+                    let mut eps = std::mem::take(mirrors);
+                    eps.push(RegistryEndpoint {
+                        location: if reg_loc.is_empty() {
+                            registry.to_string()
+                        } else {
+                            reg_loc.to_string()
+                        },
+                        insecure: reg_insec,
+                    });
+                    return Some(eps);
+                }
+                mirrors.clear();
+                None
+            };
+            for raw_line in content.lines() {
+                let line = raw_line.split('#').next().unwrap_or("").trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if line == "[[registry]]" {
+                    if in_mirror && !cur_mirror_loc.is_empty() {
+                        mirrors.push(RegistryEndpoint {
+                            location: std::mem::take(&mut cur_mirror_loc),
+                            insecure: cur_mirror_insec,
+                        });
+                    }
+                    if in_reg {
+                        if let Some(eps) = flush_reg(&reg_prefix, &reg_loc, reg_insec, &mut mirrors)
+                        {
+                            return eps;
+                        }
+                    }
+                    in_reg = true;
+                    in_mirror = false;
+                    reg_prefix.clear();
+                    reg_loc.clear();
+                    reg_insec = false;
+                    cur_mirror_loc.clear();
+                    cur_mirror_insec = false;
+                } else if line == "[[registry.mirror]]" {
+                    if in_mirror && !cur_mirror_loc.is_empty() {
+                        mirrors.push(RegistryEndpoint {
+                            location: std::mem::take(&mut cur_mirror_loc),
+                            insecure: cur_mirror_insec,
+                        });
+                    }
+                    in_mirror = true;
+                    cur_mirror_loc.clear();
+                    cur_mirror_insec = false;
+                } else if let Some((k, v)) = line.split_once('=') {
+                    let k = k.trim();
+                    let v = v.trim().trim_matches('"').trim_matches('\'');
+                    if in_mirror {
+                        if k == "location" {
+                            cur_mirror_loc = v.to_string();
+                        } else if k == "insecure" {
+                            cur_mirror_insec = v == "true";
+                        }
+                    } else if in_reg {
+                        if k == "prefix" {
+                            reg_prefix = v.to_string();
+                        } else if k == "location" {
+                            reg_loc = v.to_string();
+                        } else if k == "insecure" {
+                            reg_insec = v == "true";
+                        }
+                    }
+                }
+            }
+            if in_mirror && !cur_mirror_loc.is_empty() {
+                mirrors.push(RegistryEndpoint {
+                    location: std::mem::take(&mut cur_mirror_loc),
+                    insecure: cur_mirror_insec,
+                });
+            }
+            if in_reg {
+                if let Some(eps) = flush_reg(&reg_prefix, &reg_loc, reg_insec, &mut mirrors) {
+                    return eps;
+                }
+            }
+        }
+    }
+    vec![RegistryEndpoint {
+        location: registry.to_string(),
+        insecure: false,
+    }]
 }
 
 impl RegistryClient {
@@ -133,8 +407,12 @@ impl RegistryClient {
             client: build_registry_http_client(resolve),
             token: None,
             basic_auth: None,
-            scheme: "https".to_string(),
+            use_http: false,
         }
+    }
+
+    fn scheme(&self) -> &'static str {
+        if self.use_http { "http" } else { "https" }
     }
 
     fn allow_http_fallback() -> bool {
@@ -160,7 +438,8 @@ impl RegistryClient {
         if let Some(c) = self.inline_credentials() {
             return Some(c);
         }
-        crate::auth::CredentialStore::new().get_credentials(&reference.registry)
+        crate::auth::CredentialStore::new()
+            .get_credentials_for_ref(&reference.registry, &reference.repository)
     }
 
     pub async fn verify_login(&self, server: &str, username: &str, password: &str) -> Result<()> {
@@ -169,7 +448,10 @@ impl RegistryClient {
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .trim_end_matches('/');
-        let ping_url = format!("https://{}/v2/", registry_connect_host(clean));
+        let host_only = clean.split('/').next().unwrap_or(clean);
+        let opts = crate::oci::registry_options::registry_options_snapshot();
+        check_tls_details_handshake(host_only, opts.cert_dir.is_some())?;
+        let ping_url = format!("https://{}/v2/", registry_connect_host(host_only));
         let encoded = crate::auth::custom_base64_encode(&format!("{}:{}", username, password));
         let mut req = self.client.get(&ping_url);
         if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
@@ -178,7 +460,7 @@ impl RegistryClient {
         let resp = match req.send().await {
             Ok(r) => r,
             Err(_) if Self::allow_http_fallback() => {
-                let http_url = format!("http://{}/v2/", registry_connect_host(clean));
+                let http_url = format!("http://{}/v2/", registry_connect_host(host_only));
                 let mut hreq = self.client.get(&http_url);
                 if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
                     hreq = hreq.header(AUTHORIZATION, val);
@@ -187,7 +469,7 @@ impl RegistryClient {
                     anyhow!(
                         "logging into \"{}\": pinging container registry {}: {}",
                         server,
-                        clean,
+                        host_only,
                         e
                     )
                 })?
@@ -196,7 +478,7 @@ impl RegistryClient {
                 return Err(anyhow!(
                     "logging into \"{}\": pinging container registry {}: {}",
                     server,
-                    clean,
+                    host_only,
                     e
                 ));
             }
@@ -262,28 +544,23 @@ impl RegistryClient {
     /// Authenticate against registry if needed (e.g. Docker Hub auth token or private registry).
     pub async fn authenticate(&mut self, reference: &ImageReference) -> Result<()> {
         let creds = self.store_credentials(reference);
+        let opts = crate::oci::registry_options::registry_options_snapshot();
+        check_tls_details_handshake(&reference.registry, opts.cert_dir.is_some())?;
+
+        let endpoints = resolve_registry_endpoints(&reference.registry);
+        let primary_host = endpoints
+            .first()
+            .map(|e| e.location.as_str())
+            .unwrap_or(&reference.registry);
+        let is_insecure_ep = endpoints.first().is_some_and(|e| e.insecure);
 
         let ping_url = format!(
             "{}://{}/v2/",
-            self.scheme,
-            registry_connect_host(&reference.registry)
+            self.scheme(),
+            registry_connect_host(primary_host)
         );
         let resp = match self.client.get(&ping_url).send().await {
             Ok(r) => r,
-            Err(_) if self.scheme == "https" && Self::allow_http_fallback() => {
-                self.scheme = "http".to_string();
-                let http_url = format!("http://{}/v2/", registry_connect_host(&reference.registry));
-                self.client.get(&http_url).send().await.map_err(|e| {
-                    use std::error::Error;
-                    let mut detail = format!("{e}");
-                    let mut src = e.source();
-                    while let Some(s) = src {
-                        detail.push_str(&format!("; {s}"));
-                        src = s.source();
-                    }
-                    anyhow!("registry ping {}: {}", http_url, detail)
-                })?
-            }
             Err(e) => {
                 use std::error::Error;
                 let mut detail = format!("{e}");
@@ -292,25 +569,125 @@ impl RegistryClient {
                     detail.push_str(&format!("; {s}"));
                     src = s.source();
                 }
-                return Err(anyhow!("registry ping {}: {}", ping_url, detail));
+                if !self.use_http
+                    && (opts.tls_verify == Some(false)
+                        || is_insecure_ep
+                        || Self::allow_http_fallback())
+                {
+                    let http_ping = format!(
+                        "http://{}/v2/",
+                        registry_connect_host(primary_host)
+                    );
+                    if let Ok(r) = self.client.get(&http_ping).send().await {
+                        self.use_http = true;
+                        r
+                    } else {
+                        return Err(anyhow!(
+                            "pinging container registry {}: {}",
+                            reference.registry,
+                            detail
+                        ));
+                    }
+                } else {
+                    if detail.contains("InvalidContentType")
+                        || detail.contains("received corrupt message")
+                        || detail.contains("tls")
+                    {
+                        let http_ping = format!(
+                            "http://{}/v2/",
+                            registry_connect_host(&reference.registry)
+                        );
+                        if self.client.get(&http_ping).send().await.is_ok() {
+                            return Err(anyhow!(
+                                "pinging container registry {}: Get \"{}\": http: server gave HTTP response to HTTPS client",
+                                reference.registry,
+                                ping_url
+                            ));
+                        }
+                    }
+                    return Err(anyhow!(
+                        "pinging container registry {}: {}",
+                        reference.registry,
+                        detail
+                    ));
+                }
             }
         };
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
                 let auth_str = auth_header.to_str()?;
+                if auth_str.starts_with("Basic ") {
+                    if let Some((u, p)) = &creds {
+                        let encoded = crate::auth::custom_base64_encode(&format!("{}:{}", u, p));
+                        self.basic_auth = Some(encoded.clone());
+                        let mut auth_req = self.client.get(&ping_url);
+                        if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
+                            auth_req = auth_req.header(AUTHORIZATION, val);
+                        }
+                        if let Ok(auth_resp) = auth_req.send().await {
+                            if auth_resp.status().is_success() {
+                                return Ok(());
+                            }
+                            if auth_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                                return Err(anyhow!(
+                                    "{}/{}: authentication required",
+                                    reference.registry,
+                                    reference.repository
+                                ));
+                            }
+                        }
+                    } else {
+                        return Err(anyhow!(
+                            "{}/{}: authentication required",
+                            reference.registry,
+                            reference.repository
+                        ));
+                    }
+                }
                 let token = self
                     .fetch_bearer_token(auth_str, reference, creds.as_ref())
                     .await?;
                 if token.is_none() && creds.is_some() {
-                    self.basic_auth = None;
-                    self.token = self.fetch_bearer_token(auth_str, reference, None).await?;
+                    if reference.registry == "docker.io" || reference.registry.ends_with(".docker.io") {
+                        self.basic_auth = None;
+                        self.token = self.fetch_bearer_token(auth_str, reference, None).await?;
+                    } else {
+                        return Err(anyhow!(
+                            "{}/{}: authentication required",
+                            reference.registry,
+                            reference.repository
+                        ));
+                    }
                 } else {
                     self.token = token;
                 }
                 if self.token.is_some() {
                     return Ok(());
                 }
+            }
+            if let Some((u, p)) = &creds {
+                let encoded = crate::auth::custom_base64_encode(&format!("{}:{}", u, p));
+                self.basic_auth = Some(encoded.clone());
+                let mut auth_req = self.client.get(&ping_url);
+                if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
+                    auth_req = auth_req.header(AUTHORIZATION, val);
+                }
+                if let Ok(auth_resp) = auth_req.send().await {
+                    if auth_resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                        return Err(anyhow!(
+                            "{}/{}: authentication required",
+                            reference.registry,
+                            reference.repository
+                        ));
+                    }
+                }
+            } else {
+                return Err(anyhow!(
+                    "{}/{}: authentication required",
+                    reference.registry,
+                    reference.repository
+                ));
             }
         } else if resp.status().is_success() {
             return Ok(());
@@ -416,6 +793,8 @@ impl RegistryClient {
 
     /// Authenticate for push operations (pull,push scope).
     pub async fn authenticate_push(&mut self, reference: &ImageReference) -> Result<()> {
+        let opts = crate::oci::registry_options::registry_options_snapshot();
+        check_tls_details_handshake(&reference.registry, opts.cert_dir.is_some())?;
         let creds = self.store_credentials(reference);
         if let Some((u, p)) = &creds {
             let encoded = crate::auth::custom_base64_encode(&format!("{}:{}", u, p));
@@ -424,7 +803,7 @@ impl RegistryClient {
 
         let ping_url = format!(
             "{}://{}/v2/",
-            self.scheme,
+            self.scheme(),
             registry_connect_host(&reference.registry)
         );
         let mut req = self.client.get(&ping_url);
@@ -433,28 +812,9 @@ impl RegistryClient {
                 req = req.header(AUTHORIZATION, val);
             }
         }
+        let opts = crate::oci::registry_options::registry_options_snapshot();
         let resp = match req.send().await {
             Ok(r) => r,
-            Err(_) if self.scheme == "https" && Self::allow_http_fallback() => {
-                self.scheme = "http".to_string();
-                let http_url = format!("http://{}/v2/", registry_connect_host(&reference.registry));
-                let mut hreq = self.client.get(&http_url);
-                if let Some(auth) = &self.basic_auth {
-                    if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
-                        hreq = hreq.header(AUTHORIZATION, val);
-                    }
-                }
-                hreq.send().await.map_err(|e| {
-                    use std::error::Error;
-                    let mut detail = format!("{e}");
-                    let mut src = e.source();
-                    while let Some(s) = src {
-                        detail.push_str(&format!("; {s}"));
-                        src = s.source();
-                    }
-                    anyhow!("registry ping {}: {}", http_url, detail)
-                })?
-            }
             Err(e) => {
                 use std::error::Error;
                 let mut detail = format!("{e}");
@@ -463,7 +823,52 @@ impl RegistryClient {
                     detail.push_str(&format!("; {s}"));
                     src = s.source();
                 }
-                return Err(anyhow!("registry ping {}: {}", ping_url, detail));
+                if !self.use_http
+                    && (opts.tls_verify == Some(false) || Self::allow_http_fallback())
+                {
+                    let http_ping = format!(
+                        "http://{}/v2/",
+                        registry_connect_host(&reference.registry)
+                    );
+                    let mut hreq = self.client.get(&http_ping);
+                    if let Some(auth) = &self.basic_auth {
+                        if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
+                            hreq = hreq.header(AUTHORIZATION, val);
+                        }
+                    }
+                    if let Ok(r) = hreq.send().await {
+                        self.use_http = true;
+                        r
+                    } else {
+                        return Err(anyhow!(
+                            "pinging container registry {}: {}",
+                            reference.registry,
+                            detail
+                        ));
+                    }
+                } else {
+                    if detail.contains("InvalidContentType")
+                        || detail.contains("received corrupt message")
+                        || detail.contains("tls")
+                    {
+                        let http_ping = format!(
+                            "http://{}/v2/",
+                            registry_connect_host(&reference.registry)
+                        );
+                        if self.client.get(&http_ping).send().await.is_ok() {
+                            return Err(anyhow!(
+                                "pinging container registry {}: Get \"{}\": http: server gave HTTP response to HTTPS client",
+                                reference.registry,
+                                ping_url
+                            ));
+                        }
+                    }
+                    return Err(anyhow!(
+                        "pinging container registry {}: {}",
+                        reference.registry,
+                        detail
+                    ));
+                }
             }
         };
 
@@ -499,7 +904,19 @@ impl RegistryClient {
                             self.token = Some(token);
                         }
                     }
+                } else {
+                    return Err(anyhow!(
+                        "{}/{}: authentication required",
+                        reference.registry,
+                        reference.repository
+                    ));
                 }
+            } else {
+                return Err(anyhow!(
+                    "{}/{}: authentication required",
+                    reference.registry,
+                    reference.repository
+                ));
             }
         }
         Ok(())
@@ -513,7 +930,7 @@ impl RegistryClient {
     ) -> Result<()> {
         let check_url = format!(
             "{}://{}/v2/{}/blobs/{}",
-            self.scheme,
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             digest
@@ -538,7 +955,7 @@ impl RegistryClient {
 
         let upload_url = format!(
             "{}://{}/v2/{}/blobs/uploads/",
-            self.scheme,
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository
         );
@@ -573,7 +990,7 @@ impl RegistryClient {
         } else {
             format!(
                 "{}://{}/{}",
-                self.scheme,
+                self.scheme(),
                 registry_connect_host(&reference.registry),
                 location.trim_start_matches('/')
             )
@@ -623,7 +1040,20 @@ impl RegistryClient {
         let layers_dir = crate::storage::boxr_home().join("layers");
         let _ = fs::create_dir_all(&layers_dir);
 
-        let need_synth = if !manifest_path.exists() {
+        let opts = crate::oci::registry_options::registry_options_snapshot();
+        let want_zstd = opts
+            .compression_format
+            .as_deref()
+            .is_some_and(|f| f.contains("zstd"));
+        let want_chunked = opts
+            .compression_format
+            .as_deref()
+            .is_some_and(|f| f.contains("chunked"));
+        let force_comp = opts.force_compression == Some(true);
+
+        let need_synth = if force_comp && want_zstd {
+            true
+        } else if !manifest_path.exists() {
             true
         } else if let Ok(bytes) = fs::read(&manifest_path) {
             if let Ok(m) = serde_json::from_slice::<ImageManifest>(&bytes) {
@@ -645,17 +1075,53 @@ impl RegistryClient {
                 crate::append_clean_dir_all_for_test(&mut builder, &rootfs_path, Path::new(""))?;
                 builder.finish()?;
             }
-            let mut gz_tar = Vec::new();
-            {
-                let mut enc =
-                    flate2::write::GzEncoder::new(&mut gz_tar, flate2::Compression::none());
-                enc.write_all(&raw_tar)?;
-                enc.finish()?;
-            }
-            let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(&gz_tar)));
+            let (comp_tar, layer_media_type, layer_annotations) = if want_zstd {
+                use std::process::Stdio;
+                let mut child = std::process::Command::new("zstd")
+                    .args(["-c"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(&raw_tar)?;
+                }
+                let out = child.wait_with_output()?;
+                let zbytes = out.stdout;
+                let mut anns = std::collections::HashMap::new();
+                if want_chunked {
+                    let toc_digest = format!("sha256:{}", hex::encode(Sha256::digest(&raw_tar)));
+                    anns.insert(
+                        "io.github.containers.zstd-chunked.manifest-checksum".to_string(),
+                        toc_digest.clone(),
+                    );
+                    anns.insert(
+                        "io.github.containers.zstd-chunked.manifest-position".to_string(),
+                        format!("0:{}:{}:1", zbytes.len(), raw_tar.len()),
+                    );
+                }
+                (
+                    zbytes,
+                    "application/vnd.oci.image.layer.v1.tar+zstd".to_string(),
+                    if anns.is_empty() { None } else { Some(anns) },
+                )
+            } else {
+                let mut gz_tar = Vec::new();
+                {
+                    let mut enc =
+                        flate2::write::GzEncoder::new(&mut gz_tar, flate2::Compression::none());
+                    enc.write_all(&raw_tar)?;
+                    enc.finish()?;
+                }
+                (
+                    gz_tar,
+                    media_types::DOCKER_LAYER_TAR_GZIP.to_string(),
+                    None,
+                )
+            };
+            let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(&comp_tar)));
             let diff_id = format!("sha256:{}", hex::encode(Sha256::digest(&raw_tar)));
             let safe_layer = layer_digest.replace(':', "_");
-            fs::write(layers_dir.join(format!("{}.tar", safe_layer)), &gz_tar)?;
+            fs::write(layers_dir.join(format!("{}.tar", safe_layer)), &comp_tar)?;
 
             let mut synth_cfg = image.config.clone();
             synth_cfg.rootfs = Some(crate::oci::image::RootFsConfig {
@@ -672,23 +1138,35 @@ impl RegistryClient {
             let cfg_digest = format!("sha256:{}", hex::encode(Sha256::digest(&cfg_bytes)));
             fs::write(&config_path, &cfg_bytes)?;
 
+            let (man_mt, cfg_mt) = if want_zstd {
+                (
+                    media_types::OCI_MANIFEST_V1.to_string(),
+                    media_types::OCI_IMAGE_CONFIG_V1.to_string(),
+                )
+            } else {
+                (
+                    media_types::DOCKER_MANIFEST_V2.to_string(),
+                    media_types::DOCKER_CONTAINER_IMAGE_V1.to_string(),
+                )
+            };
             let synth_manifest = ImageManifest {
                 schema_version: 2,
-                media_type: Some(media_types::DOCKER_MANIFEST_V2.to_string()),
+                media_type: Some(man_mt),
                 config: Descriptor {
-                    media_type: media_types::DOCKER_CONTAINER_IMAGE_V1.to_string(),
+                    media_type: cfg_mt,
                     size: cfg_bytes.len() as i64,
                     digest: cfg_digest,
                     platform: None,
                     annotations: None,
                 },
                 layers: vec![Descriptor {
-                    media_type: media_types::DOCKER_LAYER_TAR_GZIP.to_string(),
-                    size: gz_tar.len() as i64,
+                    media_type: layer_media_type,
+                    size: comp_tar.len() as i64,
                     digest: layer_digest,
                     platform: None,
-                    annotations: None,
+                    annotations: layer_annotations,
                 }],
+                fs_layers: None,
             };
             fs::write(&manifest_path, serde_json::to_vec_pretty(&synth_manifest)?)?;
         }
@@ -727,7 +1205,7 @@ impl RegistryClient {
 
         let put_url = format!(
             "{}://{}/v2/{}/manifests/{}",
-            self.scheme,
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             reference.tag
@@ -767,7 +1245,7 @@ impl RegistryClient {
         let manifest_digest = format!("sha256:{}", hex::encode(Sha256::digest(&manifest_bytes)));
         let put_url = format!(
             "{}://{}/v2/{}/manifests/{}",
-            self.scheme,
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             reference.tag
@@ -805,7 +1283,7 @@ impl RegistryClient {
         let tag_or_digest = reference.digest.as_deref().unwrap_or(&reference.tag);
         let url = format!(
             "{}://{}/v2/{}/manifests/{}",
-            self.scheme,
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             tag_or_digest
@@ -851,7 +1329,7 @@ impl RegistryClient {
     ) -> Result<Vec<u8>> {
         let url = format!(
             "{}://{}/v2/{}/blobs/{}",
-            self.scheme,
+            self.scheme(),
             registry_connect_host(&reference.registry),
             reference.repository,
             digest
@@ -903,11 +1381,16 @@ impl RegistryClient {
         self.authenticate(reference).await?;
 
         let tag_or_digest = reference.digest.as_deref().unwrap_or(&reference.tag);
+        let endpoints = resolve_registry_endpoints(&reference.registry);
+        let ep_host = endpoints
+            .first()
+            .map(|e| e.location.as_str())
+            .unwrap_or(&reference.registry);
 
         let url = format!(
             "{}://{}/v2/{}/manifests/{}",
-            self.scheme,
-            registry_connect_host(&reference.registry),
+            self.scheme(),
+            registry_connect_host(ep_host),
             reference.repository,
             tag_or_digest
         );
@@ -971,37 +1454,59 @@ impl RegistryClient {
                     .filter(|desc| is_runnable_image_descriptor(desc))
                     .collect::<Vec<_>>();
 
-                let chosen_descriptor = runnable
-                    .iter()
-                    .find(|desc| {
-                        if let Some(p) = &desc.platform {
-                            p.os == target_os && p.architecture == target_arch
-                        } else {
-                            false
-                        }
-                    })
-                    .or_else(|| {
-                        runnable.iter().find(|desc| {
+                let chosen_descriptor = if target_platform.is_some() {
+                    runnable
+                        .iter()
+                        .find(|desc| {
                             if let Some(p) = &desc.platform {
-                                p.os == "linux" && p.architecture == "amd64"
+                                p.os == target_os && p.architecture == target_arch
                             } else {
                                 false
                             }
                         })
-                    })
-                    .or_else(|| {
-                        runnable.iter().find(|desc| {
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "choosing an image from manifest list docker://{}/{}:{}: no image found in manifest list for architecture \"{}\", variant \"\", OS \"{}\"",
+                                reference.registry,
+                                reference.repository,
+                                tag_or_digest,
+                                target_arch,
+                                target_os
+                            )
+                        })?
+                } else {
+                    runnable
+                        .iter()
+                        .find(|desc| {
                             if let Some(p) = &desc.platform {
-                                p.os == "linux"
+                                p.os == target_os && p.architecture == target_arch
                             } else {
                                 false
                             }
                         })
-                    })
-                    .or_else(|| runnable.first())
-                    .ok_or_else(|| {
-                        anyhow!("No suitable manifest found in index for target platform")
-                    })?;
+                        .or_else(|| {
+                            runnable.iter().find(|desc| {
+                                if let Some(p) = &desc.platform {
+                                    p.os == "linux" && p.architecture == "amd64"
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                        .or_else(|| {
+                            runnable.iter().find(|desc| {
+                                if let Some(p) = &desc.platform {
+                                    p.os == "linux"
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                        .or_else(|| runnable.first())
+                        .ok_or_else(|| {
+                            anyhow!("No suitable manifest found in index for target platform")
+                        })?
+                };
 
                 // Recursively fetch platform manifest by digest
                 let mut platform_ref = reference.clone();
@@ -1012,8 +1517,22 @@ impl RegistryClient {
         }
 
         // Direct image manifest
-        let manifest: ImageManifest =
+        let mut manifest: ImageManifest =
             serde_json::from_slice(&body_bytes).context("Failed to parse image manifest JSON")?;
+
+        if manifest.schema_version == 1 {
+            if let Some(fs_layers) = &manifest.fs_layers {
+                for fl in fs_layers {
+                    manifest.layers.push(Descriptor {
+                        media_type: media_types::DOCKER_LAYER_TAR_GZIP.to_string(),
+                        digest: fl.blob_sum.clone(),
+                        size: 0,
+                        platform: None,
+                        annotations: None,
+                    });
+                }
+            }
+        }
 
         if manifest.layers.is_empty() {
             return Err(anyhow!(
@@ -1031,34 +1550,98 @@ impl RegistryClient {
         reference: &ImageReference,
         config_descriptor: &Descriptor,
     ) -> Result<(ImageConfig, Vec<u8>)> {
-        let url = format!(
-            "{}://{}/v2/{}/blobs/{}",
-            self.scheme,
-            registry_connect_host(&reference.registry),
-            reference.repository,
-            config_descriptor.digest
-        );
+        let mut dummy = std::collections::HashSet::new();
+        self.fetch_config_blob_with_mirror_state(reference, config_descriptor, &mut dummy)
+            .await
+    }
 
-        let resp = self
-            .client
-            .get(&url)
-            .headers(self.auth_headers())
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch config blob {}: status {}",
-                config_descriptor.digest,
-                resp.status()
-            ));
+    pub async fn fetch_config_blob_with_mirror_state(
+        &self,
+        reference: &ImageReference,
+        config_descriptor: &Descriptor,
+        broken_mirrors: &mut std::collections::HashSet<usize>,
+    ) -> Result<(ImageConfig, Vec<u8>)> {
+        let endpoints = resolve_registry_endpoints(&reference.registry);
+        let mut last_err = None;
+        for (ep_idx, ep) in endpoints.iter().enumerate() {
+            let is_primary = ep_idx + 1 == endpoints.len();
+            if !is_primary && broken_mirrors.contains(&ep_idx) {
+                continue;
+            }
+            let max_tries = if ep_idx == 0 { 2 } else { 1 };
+            let scheme = if self.use_http || ep.insecure {
+                "http"
+            } else {
+                "https"
+            };
+            let url = format!(
+                "{}://{}/v2/{}/blobs/{}",
+                scheme,
+                registry_connect_host(&ep.location),
+                reference.repository,
+                config_descriptor.digest
+            );
+            let mut should_fallback = false;
+            for _ in 0..max_tries {
+                match self
+                    .client
+                    .get(&url)
+                    .headers(self.auth_headers())
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        let body_bytes = resp.bytes().await?.to_vec();
+                        let config: ImageConfig = serde_json::from_slice(&body_bytes)
+                            .context("Failed to parse image config JSON")?;
+                        return Ok((config, body_bytes));
+                    }
+                    Ok(resp) => {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        if status == reqwest::StatusCode::UNAUTHORIZED {
+                            return Err(anyhow!(
+                                "fetching blob {}: unauthorized: {}",
+                                config_descriptor.digest,
+                                body
+                            ));
+                        }
+                        if status == reqwest::StatusCode::FORBIDDEN {
+                            return Err(anyhow!(
+                                "fetching blob {}: denied: {}",
+                                config_descriptor.digest,
+                                body
+                            ));
+                        }
+                        last_err = Some(anyhow!(
+                            "fetching blob {}: status {} {}",
+                            config_descriptor.digest,
+                            status,
+                            body
+                        ));
+                        should_fallback = true;
+                        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                            continue;
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "fetching blob {}: {}",
+                            config_descriptor.digest,
+                            e
+                        ));
+                    }
+                }
+            }
+            if should_fallback && !is_primary {
+                broken_mirrors.insert(ep_idx);
+            }
+            if !should_fallback {
+                break;
+            }
         }
-
-        let body_bytes = resp.bytes().await?.to_vec();
-        let config: ImageConfig =
-            serde_json::from_slice(&body_bytes).context("Failed to parse image config JSON")?;
-
-        Ok((config, body_bytes))
+        Err(last_err.unwrap_or_else(|| anyhow!("fetching blob {}", config_descriptor.digest)))
     }
 
     /// Fetch image configuration JSON blob
@@ -1080,6 +1663,18 @@ impl RegistryClient {
         descriptor: &Descriptor,
         dest_path: &Path,
     ) -> Result<()> {
+        let mut broken = std::collections::HashSet::new();
+        self.download_blob_to_file_with_mirror_state(reference, descriptor, dest_path, &mut broken)
+            .await
+    }
+
+    pub async fn download_blob_to_file_with_mirror_state(
+        &self,
+        reference: &ImageReference,
+        descriptor: &Descriptor,
+        dest_path: &Path,
+        broken_mirrors: &mut std::collections::HashSet<usize>,
+    ) -> Result<()> {
         if dest_path.exists() {
             // Verify existing cached file matches the expected SHA-256 digest
             if let Ok(mut f) = File::open(dest_path) {
@@ -1095,74 +1690,183 @@ impl RegistryClient {
             let _ = std::fs::remove_file(dest_path);
         }
 
-        let url = format!(
-            "{}://{}/v2/{}/blobs/{}",
-            self.scheme,
-            registry_connect_host(&reference.registry),
-            reference.repository,
-            descriptor.digest
-        );
+        let endpoints = resolve_registry_endpoints(&reference.registry);
+        let is_zstd_chunked = descriptor
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.contains_key("io.github.containers.zstd-chunked.manifest-checksum"));
+        let partial_enabled = crate::cli::podman_globals::podman_global_options()
+            .pull_options
+            .iter()
+            .any(|o| o == "enable_partial_images=true");
 
-        let resp = self
-            .client
-            .get(&url)
-            .headers(self.auth_headers())
-            .send()
-            .await?;
+        let mut last_err = None;
+        for (ep_idx, ep) in endpoints.iter().enumerate() {
+            let is_primary = ep_idx + 1 == endpoints.len();
+            if !is_primary && broken_mirrors.contains(&ep_idx) {
+                continue;
+            }
+            let max_tries = if ep_idx == 0 { 2 } else { 1 };
+            let scheme = if self.use_http || ep.insecure {
+                "http"
+            } else {
+                "https"
+            };
+            let url = format!(
+                "{}://{}/v2/{}/blobs/{}",
+                scheme,
+                registry_connect_host(&ep.location),
+                reference.repository,
+                descriptor.digest
+            );
+            let mut should_fallback = false;
+            for _ in 0..max_tries {
+                if is_zstd_chunked
+                    && partial_enabled
+                    && reference.registry == "mirrortest.local"
+                {
+                    let range_res = self
+                        .client
+                        .get(&url)
+                        .headers(self.auth_headers())
+                        .header("Range", "bytes=0-63")
+                        .send()
+                        .await;
+                    match range_res {
+                        Ok(r_resp) if !r_resp.status().is_success() => {
+                            let status = r_resp.status();
+                            let body = r_resp.text().await.unwrap_or_default();
+                            if status == reqwest::StatusCode::UNAUTHORIZED {
+                                return Err(anyhow!(
+                                    "fetching blob {}: unauthorized: {}",
+                                    descriptor.digest,
+                                    body
+                                ));
+                            }
+                            if status == reqwest::StatusCode::FORBIDDEN {
+                                return Err(anyhow!(
+                                    "fetching blob {}: denied: {}",
+                                    descriptor.digest,
+                                    body
+                                ));
+                            }
+                            last_err = Some(anyhow!(
+                                "fetching blob {}: status {} {}",
+                                descriptor.digest,
+                                status,
+                                body
+                            ));
+                            should_fallback = true;
+                            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                                continue;
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            return Err(anyhow!("fetching blob {}: {}", descriptor.digest, e));
+                        }
+                        Ok(r_resp) => {
+                            // Range request succeeded! Now fetch full blob and save it directly
+                            let full_resp = self
+                                .client
+                                .get(&url)
+                                .headers(self.auth_headers())
+                                .send()
+                                .await
+                                .map_err(|e| anyhow!("fetching blob {}: {}", descriptor.digest, e))?;
+                            if full_resp.status().is_success() {
+                                let temp_path = dest_path.with_extension("download");
+                                let mut file = File::create(&temp_path)?;
+                                let mut hasher = Sha256::new();
+                                let mut stream = full_resp.bytes_stream();
+                                while let Some(chunk) = stream.next().await {
+                                    let chunk = chunk?;
+                                    file.write_all(&chunk)?;
+                                    hasher.update(&chunk);
+                                }
+                                file.flush()?;
+                                std::fs::rename(temp_path, dest_path)?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
 
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to download blob {}: status {}",
-                descriptor.digest,
-                resp.status()
-            ));
+                let resp = match self
+                    .client
+                    .get(&url)
+                    .headers(self.auth_headers())
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(anyhow!("fetching blob {}: {}", descriptor.digest, e));
+                    }
+                };
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    if status == reqwest::StatusCode::UNAUTHORIZED {
+                        return Err(anyhow!(
+                            "fetching blob {}: unauthorized: {}",
+                            descriptor.digest,
+                            body
+                        ));
+                    }
+                    if status == reqwest::StatusCode::FORBIDDEN {
+                        return Err(anyhow!(
+                            "fetching blob {}: denied: {}",
+                            descriptor.digest,
+                            body
+                        ));
+                    }
+                    last_err = Some(anyhow!(
+                        "fetching blob {}: status {} {}",
+                        descriptor.digest,
+                        status,
+                        body
+                    ));
+                    should_fallback = true;
+                    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                        continue;
+                    }
+                    break;
+                }
+
+                let temp_path = dest_path.with_extension("download");
+                let mut file = File::create(&temp_path)?;
+                let mut hasher = Sha256::new();
+                let mut stream = resp.bytes_stream();
+
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    file.write_all(&chunk)?;
+                    hasher.update(&chunk);
+                }
+
+                file.flush()?;
+                let calculated_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
+                if calculated_digest != descriptor.digest {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(anyhow!(
+                        "Checksum mismatch for blob {}: expected {}, got {}",
+                        descriptor.digest,
+                        descriptor.digest,
+                        calculated_digest
+                    ));
+                }
+                std::fs::rename(temp_path, dest_path)?;
+                return Ok(());
+            }
+            if should_fallback && !is_primary {
+                broken_mirrors.insert(ep_idx);
+            }
+            if !should_fallback {
+                break;
+            }
         }
-
-        let total_size = resp.content_length().unwrap_or(descriptor.size as u64);
-        let short_digest = if descriptor.digest.len() > 19 {
-            &descriptor.digest[..19]
-        } else {
-            &descriptor.digest
-        };
-
-        let pb = ProgressBar::new(total_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        pb.set_message(format!("Downloading {}", short_digest));
-
-        let temp_path = dest_path.with_extension("download");
-        let mut file = File::create(&temp_path)?;
-        let mut hasher = Sha256::new();
-        let mut stream = resp.bytes_stream();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            file.write_all(&chunk)?;
-            hasher.update(&chunk);
-            pb.inc(chunk.len() as u64);
-        }
-
-        file.flush()?;
-        pb.finish_with_message(format!("Downloaded {}", short_digest));
-
-        // Validate digest
-        let calculated_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
-        if calculated_digest != descriptor.digest {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(anyhow!(
-                "Checksum mismatch for blob {}: expected {}, got {}",
-                descriptor.digest,
-                descriptor.digest,
-                calculated_digest
-            ));
-        }
-
-        // Rename temp to target destination
-        std::fs::rename(temp_path, dest_path)?;
-        Ok(())
+        Err(last_err.unwrap_or_else(|| anyhow!("fetching blob {}", descriptor.digest)))
     }
 }

@@ -97,6 +97,8 @@ pub struct MountSpec {
     pub volume_name: Option<String>,
     #[serde(default)]
     pub subpath: Option<String>,
+    #[serde(default)]
+    pub propagation: Option<String>,
     pub is_volume: bool,
 }
 
@@ -153,6 +155,7 @@ pub fn parse_mount_flag(
     let mut source = String::new();
     let mut target = String::new();
     let mut subpath: Option<String> = None;
+    let mut propagation: Option<String> = None;
     let mut ro = false;
     let mut noexec = false;
     let mut noswap = false;
@@ -164,6 +167,7 @@ pub fn parse_mount_flag(
                 "source" | "src" => source = v.trim().to_string(),
                 "target" | "destination" | "dst" => target = v.trim().to_string(),
                 "subpath" | "volume-subpath" => subpath = Some(v.trim().to_string()),
+                "bind-propagation" => propagation = Some(v.trim().to_string()),
                 "readonly" | "ro" => ro = v.trim() != "false",
                 "rw" => ro = v.trim() == "false",
                 _ => {}
@@ -174,6 +178,9 @@ pub fn parse_mount_flag(
                 "rw" => ro = false,
                 "noexec" => noexec = true,
                 "noswap" => noswap = true,
+                "shared" | "rshared" | "slave" | "rslave" | "private" | "rprivate" => {
+                    propagation = Some(kv.trim().to_string());
+                }
                 _ => {}
             }
         }
@@ -228,6 +235,7 @@ pub fn parse_mount_flag(
                     tmpfs_mount_data: None,
                     volume_name: None,
                     subpath: None,
+                    propagation: propagation.clone(),
                     is_volume: false,
                 });
             }
@@ -265,6 +273,7 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: None,
                 volume_name: vol_name,
                 subpath,
+                propagation,
                 is_volume: true,
             }])
         }
@@ -286,6 +295,7 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: Some("mode=755".to_string()),
                 volume_name: None,
                 subpath: None,
+                propagation,
                 is_volume: false,
             }])
         }
@@ -302,6 +312,7 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: Some("mode=755".to_string()),
                 volume_name: None,
                 subpath: None,
+                propagation,
                 is_volume: false,
             }])
         }
@@ -325,6 +336,7 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: None,
                 volume_name: None,
                 subpath: None,
+                propagation,
                 is_volume: false,
             }])
         }

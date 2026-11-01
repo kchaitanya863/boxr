@@ -596,8 +596,54 @@ pub mod platform {
         crate::network::usernet::relay::spawn_in_netns_peer_listener(bundle_path);
         let engine = UserNetEngine::new(Some(bundle_path), ports, host_netns);
         let mut buf = [0u8; 65536];
+        let mut _dynamic_taps: Vec<File> = Vec::new();
+        let mut synced_iface_count: usize = 1;
 
         loop {
+            if let Ok(raw) = std::fs::read_to_string(bundle_path.join("network_interfaces.json")) {
+                if let Ok(ifaces) = serde_json::from_str::<Vec<(String, String, String)>>(&raw) {
+                    if ifaces.len() > synced_iface_count {
+                        for (ifn, ip_str, _) in ifaces.iter().skip(synced_iface_count) {
+                            if let Ok(tf) = create_tap_device(ifn) {
+                                if !ip_str.is_empty() {
+                                    let _ = Command::new("/sbin/ip")
+                                        .args([
+                                            "addr",
+                                            "add",
+                                            &format!("{}/24", ip_str),
+                                            "brd",
+                                            "+",
+                                            "dev",
+                                            ifn,
+                                        ])
+                                        .status()
+                                        .or_else(|_| {
+                                            Command::new("ip")
+                                                .args([
+                                                    "addr",
+                                                    "add",
+                                                    &format!("{}/24", ip_str),
+                                                    "brd",
+                                                    "+",
+                                                    "dev",
+                                                    ifn,
+                                                ])
+                                                .status()
+                                        });
+                                }
+                                let _ = Command::new("/sbin/ip")
+                                    .args(["link", "set", ifn, "up"])
+                                    .status()
+                                    .or_else(|_| {
+                                        Command::new("ip").args(["link", "set", ifn, "up"]).status()
+                                    });
+                                _dynamic_taps.push(tf);
+                            }
+                        }
+                        synced_iface_count = ifaces.len();
+                    }
+                }
+            }
             // Wait for readability using poll() to eliminate busy polling
             let mut pollfd = libc::pollfd {
                 fd: tap_file.as_raw_fd(),

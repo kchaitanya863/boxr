@@ -243,6 +243,8 @@ fn default_run_args(image: &str) -> RunArgs {
         timeout: None,
         image: image.to_string(),
         command: vec!["true".to_string()],
+        passwd: true,
+        ..Default::default()
     }
 }
 
@@ -810,6 +812,8 @@ async fn test_issue_141_search_respects_limit() {
         filter: Vec::new(),
         format: None,
         no_trunc: false,
+        compatible: false,
+        list_tags: false,
     };
     let res = boxr::search_hub(&args).await;
     assert!(res.is_ok());

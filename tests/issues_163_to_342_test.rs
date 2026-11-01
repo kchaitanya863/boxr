@@ -274,6 +274,8 @@ fn default_run_args(image: &str) -> RunArgs {
         tz: Vec::new(),
         image: image.to_string(),
         command: vec!["true".to_string()],
+        passwd: true,
+        ..Default::default()
     }
 }
 
@@ -297,6 +299,8 @@ fn test_issue_163_ps_accepts_invalid_filter_keys_without_returning_an_error() {
         noheading: false,
         external: false,
         ns: false,
+        pod: false,
+        sync: false,
         containers: vec![],
     };
     let res = boxr::list_containers(args, "ps");

@@ -96,8 +96,36 @@ pub struct RunArgs {
     pub cpus: Option<String>,
 
     /// Tune container pids limit (set -1 for unlimited)
-    #[arg(long = "pids-limit")]
+    #[arg(long = "pids-limit", allow_hyphen_values = true)]
     pub pids_limit: Option<i64>,
+
+    /// Add entries to /etc/passwd and /etc/group when running as a user not in /etc/passwd
+    #[arg(
+        long = "passwd",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub passwd: bool,
+
+    /// Class of service (COS) for the container should be assigned to (Intel RDT)
+    #[arg(long = "rdt-class")]
+    pub rdt_class: Option<String>,
+
+    /// Path to signature policy file
+    #[arg(long = "signature-policy")]
+    pub signature_policy: Option<String>,
+
+    /// Chroot directories inside the container
+    #[arg(long = "chrootdirs")]
+    pub chrootdirs: Vec<String>,
+
+    /// Write the container process ID to the file
+    #[arg(long = "pidfile")]
+    pub pidfile: Option<String>,
 
     /// Username or UID (format: <name|uid>[:<group|gid>])
     #[arg(short = 'u', long = "user")]

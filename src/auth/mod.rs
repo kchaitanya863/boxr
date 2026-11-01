@@ -131,11 +131,21 @@ impl CredentialStore {
     }
 
     fn normalize_server(server: &str) -> String {
-        let clean = server
+        let mut clean = server
             .trim()
             .trim_start_matches("https://")
             .trim_start_matches("http://")
             .trim_end_matches('/');
+        if let Some((before_at, _)) = clean.split_once('@') {
+            clean = before_at;
+        }
+        // Strip :tag if it comes after a '/'
+        if let Some(slash_idx) = clean.find('/') {
+            let repo_part = &clean[slash_idx..];
+            if let Some(colon_idx) = repo_part.rfind(':') {
+                clean = &clean[..slash_idx + colon_idx];
+            }
+        }
 
         if clean == "docker.io"
             || clean == "registry-1.docker.io"
@@ -183,6 +193,33 @@ impl CredentialStore {
         cfg.auths.remove(&srv_key);
         self.save(&cfg)?;
         Ok(())
+    }
+
+    pub fn logout_all(&self) -> Result<()> {
+        let mut cfg = self.load();
+        cfg.auths.clear();
+        self.save(&cfg)?;
+        Ok(())
+    }
+
+    pub fn get_credentials_for_ref(&self, registry: &str, repository: &str) -> Option<(String, String)> {
+        let full = if repository.is_empty() {
+            registry.to_string()
+        } else {
+            format!("{}/{}", registry.trim_end_matches('/'), repository.trim_start_matches('/'))
+        };
+        let mut cur = full.as_str();
+        loop {
+            if let Some(creds) = self.get_credentials(cur) {
+                return Some(creds);
+            }
+            if let Some((parent, _)) = cur.rsplit_once('/') {
+                cur = parent;
+            } else {
+                break;
+            }
+        }
+        None
     }
 
     pub fn get_credentials(&self, server: &str) -> Option<(String, String)> {
@@ -373,22 +410,28 @@ impl RegistryPusher {
         let creds = crate::oci::registry_options::registry_options_snapshot()
             .inline_creds
             .clone()
-            .or_else(|| CredentialStore::new().get_credentials(&reference.registry));
+            .or_else(|| CredentialStore::new().get_credentials_for_ref(&reference.registry, &reference.repository));
 
-        println!(
-            "Pushing image {} to {}",
-            reference.display_name(),
-            reference.registry
-        );
-        if let Some((user, _)) = creds {
-            println!("Authenticated as: {}", user);
+        let quiet = crate::oci::registry_options::registry_options_snapshot().quiet;
+        if !quiet {
+            println!(
+                "Pushing image {} to {}",
+                reference.display_name(),
+                reference.registry
+            );
+            if let Some((user, _)) = creds {
+                println!("Authenticated as: {}", user);
+            }
         }
 
         let mut client =
             crate::oci::distribution::RegistryClient::for_registry(&reference.registry);
         let digest = client.push_image(&image, &reference).await?;
-        println!("Digest: {}", digest);
-        println!("Successfully pushed {}:{}", image.reference, image.tag);
+        if !quiet {
+            eprintln!("Writing manifest to image destination");
+            println!("Digest: {}", digest);
+            println!("Successfully pushed {}:{}", image.reference, image.tag);
+        }
 
         let dest_label = destination
             .map(|s| s.to_string())
