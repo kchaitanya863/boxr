@@ -41,23 +41,68 @@ const RLIMIT_SIGPENDING: u32 = libc::RLIMIT_SIGPENDING as u32;
 #[cfg(not(target_os = "linux"))]
 const RLIMIT_SIGPENDING: u32 = 11;
 
+#[cfg(unix)]
+const RLIMIT_CORE: u32 = libc::RLIMIT_CORE as u32;
+#[cfg(not(unix))]
+const RLIMIT_CORE: u32 = 4;
+
+#[cfg(unix)]
+const RLIMIT_CPU: u32 = libc::RLIMIT_CPU as u32;
+#[cfg(not(unix))]
+const RLIMIT_CPU: u32 = 0;
+
+#[cfg(unix)]
+const RLIMIT_DATA: u32 = libc::RLIMIT_DATA as u32;
+#[cfg(not(unix))]
+const RLIMIT_DATA: u32 = 2;
+
+#[cfg(unix)]
+const RLIMIT_FSIZE: u32 = libc::RLIMIT_FSIZE as u32;
+#[cfg(not(unix))]
+const RLIMIT_FSIZE: u32 = 1;
+
+#[cfg(unix)]
+const RLIMIT_MEMLOCK: u32 = libc::RLIMIT_MEMLOCK as u32;
+#[cfg(not(unix))]
+const RLIMIT_MEMLOCK: u32 = 8;
+
+#[cfg(unix)]
+const RLIMIT_NOFILE: u32 = libc::RLIMIT_NOFILE as u32;
+#[cfg(not(unix))]
+const RLIMIT_NOFILE: u32 = 7;
+
+#[cfg(unix)]
+const RLIMIT_NPROC: u32 = libc::RLIMIT_NPROC as u32;
+#[cfg(not(unix))]
+const RLIMIT_NPROC: u32 = 6;
+
+#[cfg(unix)]
+const RLIMIT_RSS: u32 = libc::RLIMIT_RSS as u32;
+#[cfg(not(unix))]
+const RLIMIT_RSS: u32 = 5;
+
+#[cfg(unix)]
+const RLIMIT_STACK: u32 = libc::RLIMIT_STACK as u32;
+#[cfg(not(unix))]
+const RLIMIT_STACK: u32 = 3;
+
 fn rlimit_name_parts(name: &str) -> Option<(&'static str, u32)> {
     match name {
-        "core" => Some(("RLIMIT_CORE", libc::RLIMIT_CORE as u32)),
-        "cpu" => Some(("RLIMIT_CPU", libc::RLIMIT_CPU as u32)),
-        "data" => Some(("RLIMIT_DATA", libc::RLIMIT_DATA as u32)),
-        "fsize" => Some(("RLIMIT_FSIZE", libc::RLIMIT_FSIZE as u32)),
+        "core" => Some(("RLIMIT_CORE", RLIMIT_CORE)),
+        "cpu" => Some(("RLIMIT_CPU", RLIMIT_CPU)),
+        "data" => Some(("RLIMIT_DATA", RLIMIT_DATA)),
+        "fsize" => Some(("RLIMIT_FSIZE", RLIMIT_FSIZE)),
         "locks" => Some(("RLIMIT_LOCKS", RLIMIT_LOCKS)),
-        "memlock" => Some(("RLIMIT_MEMLOCK", libc::RLIMIT_MEMLOCK as u32)),
+        "memlock" => Some(("RLIMIT_MEMLOCK", RLIMIT_MEMLOCK)),
         "msgqueue" => Some(("RLIMIT_MSGQUEUE", RLIMIT_MSGQUEUE)),
         "nice" => Some(("RLIMIT_NICE", RLIMIT_NICE)),
-        "nofile" => Some(("RLIMIT_NOFILE", libc::RLIMIT_NOFILE as u32)),
-        "nproc" => Some(("RLIMIT_NPROC", libc::RLIMIT_NPROC as u32)),
-        "rss" => Some(("RLIMIT_RSS", libc::RLIMIT_RSS as u32)),
+        "nofile" => Some(("RLIMIT_NOFILE", RLIMIT_NOFILE)),
+        "nproc" => Some(("RLIMIT_NPROC", RLIMIT_NPROC)),
+        "rss" => Some(("RLIMIT_RSS", RLIMIT_RSS)),
         "rtprio" => Some(("RLIMIT_RTPRIO", RLIMIT_RTPRIO)),
         "rttime" => Some(("RLIMIT_RTTIME", RLIMIT_RTTIME)),
         "sigpending" => Some(("RLIMIT_SIGPENDING", RLIMIT_SIGPENDING)),
-        "stack" => Some(("RLIMIT_STACK", libc::RLIMIT_STACK as u32)),
+        "stack" => Some(("RLIMIT_STACK", RLIMIT_STACK)),
         _ => None,
     }
 }
@@ -144,6 +189,7 @@ pub fn ulimits_inspect_json(ulimits: &[String]) -> Result<serde_json::Value> {
     Ok(serde_json::Value::Array(entries))
 }
 
+#[cfg(target_os = "linux")]
 fn rlim_from_i64(v: i64) -> libc::rlim_t {
     if v < 0 {
         libc::rlim_t::MAX

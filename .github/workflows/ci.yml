@@ -39,6 +39,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: x86_64-pc-windows-gnu
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -49,10 +50,13 @@ jobs:
       - name: Run Clippy Linter
         run: cargo clippy --all-targets -- -A clippy::all
 
+      - name: Check Windows target (x86_64-pc-windows-gnu)
+        run: cargo check --target x86_64-pc-windows-gnu
+
       - name: Install Linux rootless runtime deps
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq python3-pytest python3-docker
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Build boxr binary
@@ -67,6 +71,15 @@ jobs:
         run: |
           chmod +x scripts/run_podman_bats_offline_gate.sh scripts/run_podman_bats_conformance.sh
           ./scripts/run_podman_bats_offline_gate.sh
+
+      - name: Podman Compose, APIv2, and Python Docker conformance smoke
+        env:
+          BOXR_TEST_EMBEDDED_USERNET: "1"
+        run: |
+          chmod +x scripts/run_podman_compose_conformance.sh scripts/run_podman_apiv2_conformance.sh scripts/run_podman_python_conformance.sh
+          ./scripts/run_podman_compose_conformance.sh simple_port_map
+          SKIP_APIV2_PYTHON=1 ./scripts/run_podman_apiv2_conformance.sh 01
+          ./scripts/run_podman_python_conformance.sh test_system.py
 
       - name: Podman BATS conformance (curated manifest, strict)
         timeout-minutes: 45

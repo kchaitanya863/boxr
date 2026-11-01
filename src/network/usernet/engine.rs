@@ -4,7 +4,6 @@ use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::fs::File;
 use std::net::Ipv4Addr;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -18,7 +17,7 @@ struct TcpFlowKey {
 }
 
 struct TcpFlowState {
-    relay: UnixStream,
+    relay: super::relay::RelayStream,
     /// Next sequence number we send toward the container.
     host_seq: u32,
 }

@@ -5,11 +5,20 @@
 
 use anyhow::{Context, Result, anyhow};
 use std::fs;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, TcpStream};
+use std::net::Ipv4Addr;
+#[cfg(unix)]
+use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::Duration;
+
+#[cfg(unix)]
+pub type RelayStream = UnixStream;
+#[cfg(not(unix))]
+pub type RelayStream = std::net::TcpStream;
 
 pub fn relay_socket_path(bundle_path: &Path) -> std::path::PathBuf {
     let candidate = bundle_path.join("usernet-relay.sock");
@@ -40,6 +49,7 @@ pub fn peer_socket_path(bundle_path: &Path) -> std::path::PathBuf {
 /// Spawn a background thread inside the container's network namespace that accepts
 /// connections from peer containers on the same custom network and relays them to
 /// `127.0.0.1:<port>` inside this container's network namespace.
+#[cfg(unix)]
 pub fn spawn_in_netns_peer_listener(bundle_path: &Path) {
     let sock_path = peer_socket_path(bundle_path);
     let _ = fs::remove_file(&sock_path);
@@ -86,6 +96,9 @@ pub fn spawn_in_netns_peer_listener(bundle_path: &Path) {
     });
 }
 
+#[cfg(not(unix))]
+pub fn spawn_in_netns_peer_listener(_bundle_path: &Path) {}
+
 /// Fork a relay child that serves `bundle/usernet-relay.sock`. Returns child PID.
 #[cfg(target_os = "linux")]
 pub fn spawn_host_relay(bundle_path: &Path) -> Result<i32> {
@@ -125,6 +138,7 @@ pub fn spawn_host_relay(_bundle_path: &Path) -> Result<i32> {
     anyhow::bail!("usernet relay is only supported on Linux")
 }
 
+#[cfg(unix)]
 fn run_relay_server(listener: UnixListener, bundle_path: &Path) -> Result<()> {
     for conn in listener.incoming() {
         let mut unix = match conn {
@@ -141,6 +155,7 @@ fn run_relay_server(listener: UnixListener, bundle_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn dispatch_client(unix: &mut UnixStream, bundle_path: &Path) -> Result<()> {
     let mut reader = BufReader::new(unix.try_clone()?);
     let mut line = String::new();
@@ -712,6 +727,7 @@ fn try_answer_dns_from_bundle_hosts(bundle_path: &Path, query: &[u8]) -> Option<
     Some(resp)
 }
 
+#[cfg(unix)]
 fn connect_peer_bundle_sock(peer_bundle: &Path, port: u16) -> Option<UnixStream> {
     let sock_cand = peer_bundle.join("peer-tcp.sock");
     let sock_path = if sock_cand.exists() {
@@ -734,6 +750,7 @@ fn connect_peer_bundle_sock(peer_bundle: &Path, port: u16) -> Option<UnixStream>
     None
 }
 
+#[cfg(unix)]
 fn try_connect_peer_container(bundle_path: &Path, ip: Ipv4Addr, port: u16) -> Option<UnixStream> {
     let ip_str = ip.to_string();
     if let Some(containers_dir) = bundle_path.parent() {
@@ -799,6 +816,7 @@ fn try_connect_peer_container(bundle_path: &Path, ip: Ipv4Addr, port: u16) -> Op
     None
 }
 
+#[cfg(unix)]
 fn serve_tcp_flow(
     unix: &mut UnixStream,
     reader: &mut BufReader<UnixStream>,
@@ -942,7 +960,8 @@ fn serve_tcp_flow(
 }
 
 /// Dial outbound TCP via the host relay (must run inside container/TAP context).
-pub fn dial_via_relay(bundle_path: &Path, ip: Ipv4Addr, port: u16) -> Result<UnixStream> {
+#[cfg(unix)]
+pub fn dial_via_relay(bundle_path: &Path, ip: Ipv4Addr, port: u16) -> Result<RelayStream> {
     let mut s = UnixStream::connect(relay_socket_path(bundle_path))
         .context("connect usernet-relay.sock")?;
     writeln!(s, "CONNECT {} {}", ip, port)?;
@@ -956,7 +975,13 @@ pub fn dial_via_relay(bundle_path: &Path, ip: Ipv4Addr, port: u16) -> Result<Uni
     Ok(s)
 }
 
+#[cfg(not(unix))]
+pub fn dial_via_relay(_bundle_path: &Path, _ip: Ipv4Addr, _port: u16) -> Result<RelayStream> {
+    anyhow::bail!("usernet relay is only supported on Unix")
+}
+
 /// Forward a DNS UDP query via the host relay (one-shot connection).
+#[cfg(unix)]
 pub fn dns_via_relay(bundle_path: &Path, query: &[u8]) -> Result<Vec<u8>> {
     let mut s = UnixStream::connect(relay_socket_path(bundle_path))
         .context("connect usernet-relay.sock for DNS")?;
@@ -976,7 +1001,13 @@ pub fn dns_via_relay(bundle_path: &Path, query: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub fn relay_exchange(unix: &mut UnixStream, payload: &[u8]) -> Result<Vec<u8>> {
+#[cfg(not(unix))]
+pub fn dns_via_relay(_bundle_path: &Path, _query: &[u8]) -> Result<Vec<u8>> {
+    anyhow::bail!("usernet relay is only supported on Unix")
+}
+
+#[cfg(unix)]
+pub fn relay_exchange(unix: &mut RelayStream, payload: &[u8]) -> Result<Vec<u8>> {
     writeln!(unix, "DATA {}", payload.len())?;
     unix.write_all(payload)?;
     unix.flush()?;
@@ -991,4 +1022,9 @@ pub fn relay_exchange(unix: &mut UnixStream, payload: &[u8]) -> Result<Vec<u8>> 
     let mut out = vec![0u8; len];
     reader.read_exact(&mut out)?;
     Ok(out)
+}
+
+#[cfg(not(unix))]
+pub fn relay_exchange(_unix: &mut RelayStream, _payload: &[u8]) -> Result<Vec<u8>> {
+    anyhow::bail!("usernet relay is only supported on Unix")
 }

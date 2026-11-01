@@ -70,6 +70,10 @@ if [[ -d "$REPO_ROOT/tests/podman_upstream/apiv2" ]]; then
   mkdir -p "$SRC_DIR/test/apiv2"
   rsync -a "$REPO_ROOT/tests/podman_upstream/apiv2/" "$SRC_DIR/test/apiv2/"
 fi
+if [[ ! -f "$SRC_DIR/test/registries.conf" && -f "$REPO_ROOT/tests/podman_upstream/e2e/testdata/registries.conf" ]]; then
+  mkdir -p "$SRC_DIR/test"
+  cp "$REPO_ROOT/tests/podman_upstream/e2e/testdata/registries.conf" "$SRC_DIR/test/registries.conf"
+fi
 
 cd "$SRC_DIR"
 

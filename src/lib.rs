@@ -1752,7 +1752,10 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     .clone()
                     .or_else(|| std::env::var("CONTAINER_HOST").ok())
                     .unwrap_or_else(|| {
+                        #[cfg(unix)]
                         let uid = unsafe { libc::geteuid() };
+                        #[cfg(not(unix))]
+                        let uid = 0u32;
                         if uid == 0 {
                             "unix:///run/podman/podman.sock".to_string()
                         } else {
@@ -1765,16 +1768,26 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     .strip_prefix("unix://")
                     .or_else(|| uri.strip_prefix("unix:"))
                 {
-                    let mut stream = tokio::net::UnixStream::connect(sock_path)
-                        .await
-                        .with_context(|| format!("failed to connect to {}", sock_path))?;
-                    let mut stdin = tokio::io::stdin();
-                    let mut stdout = tokio::io::stdout();
-                    let (mut rd, mut wr) = stream.split();
-                    let _ = tokio::select! {
-                        r1 = tokio::io::copy(&mut stdin, &mut wr) => r1,
-                        r2 = tokio::io::copy(&mut rd, &mut stdout) => r2,
-                    };
+                    #[cfg(unix)]
+                    {
+                        let mut stream = tokio::net::UnixStream::connect(sock_path)
+                            .await
+                            .with_context(|| format!("failed to connect to {}", sock_path))?;
+                        let mut stdin = tokio::io::stdin();
+                        let mut stdout = tokio::io::stdout();
+                        let (mut rd, mut wr) = stream.split();
+                        let _ = tokio::select! {
+                            r1 = tokio::io::copy(&mut stdin, &mut wr) => r1,
+                            r2 = tokio::io::copy(&mut rd, &mut stdout) => r2,
+                        };
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        return Err(anyhow::anyhow!(
+                            "unix sockets are not supported on this platform ({})",
+                            sock_path
+                        ));
+                    }
                 } else if let Some(addr) = uri
                     .strip_prefix("tcp://")
                     .or_else(|| uri.strip_prefix("tcp:"))
@@ -4436,11 +4449,15 @@ fn validate_run_create_option_conflicts(args: &RunArgs) {
             "--userns and --uidmap/--gidmap/--subuidname/--subgidname are mutually exclusive",
         );
     }
+    #[cfg(unix)]
+    let is_root = unsafe { libc::getuid() == 0 };
+    #[cfg(not(unix))]
+    let is_root = false;
     if args
         .userns
         .iter()
         .any(|u| u.starts_with("keep-id:") && u.contains("size="))
-        && unsafe { libc::getuid() == 0 }
+        && is_root
     {
         cli::usage_errors::exit_usage_error(
             "cannot set max size for user namespace when not running rootless",
@@ -4483,7 +4500,10 @@ fn validate_run_create_option_conflicts(args: &RunArgs) {
         }
     }
     if (args.ip.is_some() || args.mac_address.is_some()) && args.pod.is_none() {
+        #[cfg(unix)]
         let is_rootless = unsafe { libc::getuid() != 0 };
+        #[cfg(not(unix))]
+        let is_rootless = false;
         let net = args.network.trim();
         let is_default_rootless_net = net.is_empty()
             || net == "auto"
@@ -9356,18 +9376,21 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .get("boxr.cgroup_manager")
                     .cloned()
                     .unwrap_or_else(|| "systemd".to_string());
-                let cgroup_parent =
-                    if cgroup_manager == "cgroupfs" && unsafe { libc::getuid() != 0 } {
-                        String::new()
-                    } else {
-                        annotations
-                            .get("boxr.cgroup_parent")
-                            .or_else(|| annotations.get("boxr.cgroup-parent"))
-                            .cloned()
-                            .unwrap_or_default()
-                    };
+                #[cfg(unix)]
+                let inspect_rootless = unsafe { libc::getuid() != 0 };
+                #[cfg(not(unix))]
+                let inspect_rootless = false;
+                let cgroup_parent = if cgroup_manager == "cgroupfs" && inspect_rootless {
+                    String::new()
+                } else {
+                    annotations
+                        .get("boxr.cgroup_parent")
+                        .or_else(|| annotations.get("boxr.cgroup-parent"))
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 let pids_limit = if cgroup_manager == "cgroupfs"
-                    && unsafe { libc::getuid() != 0 }
+                    && inspect_rootless
                     && raw_pids_limit.is_some_and(|p| p <= 0)
                 {
                     Some(0i64)
@@ -9541,11 +9564,13 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .get("boxr.cgroups_mode")
                     .cloned()
                     .unwrap_or_else(|| "enabled".to_string());
+                #[cfg(unix)]
+                let euid = unsafe { libc::geteuid() };
+                #[cfg(not(unix))]
+                let euid = 0u32;
                 let cgroup_path = format!(
                     "/user.slice/user-{}.slice/user@{}.service/user.slice/libpod-{}.scope",
-                    unsafe { libc::geteuid() },
-                    unsafe { libc::geteuid() },
-                    c.id
+                    euid, euid, c.id
                 );
 
                 let mut docker_compat_inspect = serde_json::json!({
@@ -10823,11 +10848,19 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                 let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
                 let is_alive =
                     if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
-                        pid_str
-                            .trim()
-                            .parse::<i32>()
-                            .map(|p| unsafe { libc::kill(p, 0) == 0 })
-                            .unwrap_or(false)
+                        #[cfg(unix)]
+                        {
+                            pid_str
+                                .trim()
+                                .parse::<i32>()
+                                .map(|p| unsafe { libc::kill(p, 0) == 0 })
+                                .unwrap_or(false)
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = pid_str;
+                            false
+                        }
                     } else {
                         false
                     };
@@ -13119,7 +13152,11 @@ fn clamp_rootless_oom_score_adj(requested: i32) -> i32 {
 }
 
 fn parse_id_map_list(specs: &[String], is_gid: bool) -> Vec<security::IdMapping> {
-    let is_rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
+    #[cfg(unix)]
+    let is_rootless = unsafe { libc::getuid() != 0 };
+    #[cfg(not(unix))]
+    let is_rootless = false;
+    #[cfg(unix)]
     let host_id = if is_rootless {
         unsafe {
             if is_gid {
@@ -13130,6 +13167,11 @@ fn parse_id_map_list(specs: &[String], is_gid: bool) -> Vec<security::IdMapping>
         }
     } else {
         0
+    };
+    #[cfg(not(unix))]
+    let host_id = {
+        let _ = is_gid;
+        0u32
     };
     let sub_start = if is_rootless {
         security::RootlessUserConfig::read_subordinate_range(is_gid).map(|r| r.start)
@@ -21260,7 +21302,10 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
         .clone()
         .or_else(|| std::env::var("CONTAINER_HOST").ok());
     if (globals.remote || conf_remote) && remote_uri.is_none() && globals.connection.is_none() {
+        #[cfg(unix)]
         let uid = unsafe { libc::geteuid() };
+        #[cfg(not(unix))]
+        let uid = 0u32;
         let default_sock = if uid == 0 {
             "/run/podman/podman.sock".to_string()
         } else {
@@ -21268,7 +21313,11 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
                 std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", uid));
             format!("{}/podman/podman.sock", xdg)
         };
-        if std::os::unix::net::UnixStream::connect(&default_sock).is_err() {
+        #[cfg(unix)]
+        let default_sock_failed = std::os::unix::net::UnixStream::connect(&default_sock).is_err();
+        #[cfg(not(unix))]
+        let default_sock_failed = true;
+        if default_sock_failed {
             cli::usage_errors::exit_usage_error(format!(
                 "Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: Get \"http://d/v5.0.0/libpod/_ping\": dial unix {}: connect: no such file or directory",
                 default_sock
@@ -21280,7 +21329,11 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
             .strip_prefix("unix://")
             .or_else(|| uri.strip_prefix("unix:"))
         {
-            if std::os::unix::net::UnixStream::connect(sock_path).is_err() {
+            #[cfg(unix)]
+            let sock_failed = std::os::unix::net::UnixStream::connect(sock_path).is_err();
+            #[cfg(not(unix))]
+            let sock_failed = true;
+            if sock_failed {
                 cli::usage_errors::exit_usage_error(format!(
                     "Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM\nError: unable to connect to Podman socket: Get \"http://d/v5.0.0/libpod/_ping\": dial unix {}: connect: no such file or directory",
                     sock_path
@@ -21676,8 +21729,14 @@ fn apply_podman_userns(
                 .as_deref()
                 .is_some_and(|u| u == "0" || u.starts_with("0:"));
             if !explicit_root {
+                #[cfg(unix)]
                 let host_uid = unsafe { libc::getuid() };
+                #[cfg(not(unix))]
+                let host_uid = 0u32;
+                #[cfg(unix)]
                 let host_gid = unsafe { libc::getgid() };
+                #[cfg(not(unix))]
+                let host_gid = 0u32;
                 let mut target_uid = host_uid;
                 let mut target_gid = host_gid;
                 if let Some(opts) = userns.strip_prefix("keep-id:") {
@@ -24307,7 +24366,11 @@ fn container_networks_list(c: &ContainerRecord) -> Vec<String> {
             }
         }
     }
-    if nets.is_empty() && unsafe { libc::getuid() == 0 } {
+    #[cfg(unix)]
+    let is_root = unsafe { libc::getuid() == 0 };
+    #[cfg(not(unix))]
+    let is_root = false;
+    if nets.is_empty() && is_root {
         nets.push("podman".to_string());
     }
     nets
@@ -26545,10 +26608,11 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     "--no-hosts and --hosts-file cannot be set together",
                 );
             }
-            if unsafe { libc::getuid() != 0 }
-                && (ip.is_some() || mac_address.is_some())
-                && network.is_none()
-            {
+            #[cfg(unix)]
+            let is_rootless_pod = unsafe { libc::getuid() != 0 };
+            #[cfg(not(unix))]
+            let is_rootless_pod = false;
+            if is_rootless_pod && (ip.is_some() || mac_address.is_some()) && network.is_none() {
                 cli::usage_errors::exit_usage_error(
                     "invalid config provided: networks and static ip/mac address can only be used with Bridge mode networking",
                 );
@@ -27264,7 +27328,11 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 if let Some(unit) = p.labels.get("PODMAN_SYSTEMD_UNIT") {
                     if unit.starts_with("podman-kube@") {
                         let mut sc_cmd = std::process::Command::new("systemctl");
-                        if unsafe { libc::getuid() != 0 } {
+                        #[cfg(unix)]
+                        let is_rootless_sc = unsafe { libc::getuid() != 0 };
+                        #[cfg(not(unix))]
+                        let is_rootless_sc = false;
+                        if is_rootless_sc {
                             sc_cmd.arg("--user");
                         }
                         let _ = sc_cmd.arg("stop").arg(unit).status();
@@ -28969,7 +29037,11 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
                         if is_broken {
                             if rollback_enabled {
                                 let mut rb_cmd = std::process::Command::new("systemctl");
-                                if unsafe { libc::getuid() != 0 } {
+                                #[cfg(unix)]
+                                let is_rootless_rb = unsafe { libc::getuid() != 0 };
+                                #[cfg(not(unix))]
+                                let is_rootless_rb = false;
+                                if is_rootless_rb {
                                     rb_cmd.arg("--user");
                                 }
                                 let _ = rb_cmd.arg("restart").arg(unit).status();
@@ -28990,7 +29062,11 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
         }
 
         let mut restart_cmd = std::process::Command::new("systemctl");
-        if unsafe { libc::getuid() != 0 } {
+        #[cfg(unix)]
+        let is_rootless_restart = unsafe { libc::getuid() != 0 };
+        #[cfg(not(unix))]
+        let is_rootless_restart = false;
+        if is_rootless_restart {
             restart_cmd.arg("--user");
         }
         let restart_ok = restart_cmd
@@ -29032,7 +29108,7 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
                 }
             }
             let mut rb_cmd = std::process::Command::new("systemctl");
-            if unsafe { libc::getuid() != 0 } {
+            if is_rootless_restart {
                 rb_cmd.arg("--user");
             }
             let _ = rb_cmd.arg("restart").arg(unit).status();
