@@ -137,7 +137,11 @@ fn main() -> Result<()> {
             }
         }
         let sub_idx = boxr::cli::podman_subcommand_index(&args);
-        if args.get(sub_idx).map(String::as_str) == Some("unshare") {
+        if args.get(sub_idx).map(String::as_str) == Some("unshare")
+            && !args
+                .iter()
+                .any(|a| a == "__completeNoDesc" || a == "__complete")
+        {
             let sub = &args[sub_idx + 1..];
             let wants_help = sub
                 .iter()

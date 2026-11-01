@@ -809,6 +809,8 @@ fn validate_runtime_flags(flags: &[String]) -> Result<()> {
 pub async fn run_cli(cli: Cli) -> Result<i32> {
     ensure_directories()?;
     let global_auth = cli.authfile.as_deref();
+    let global_tls_cert = cli.tls_cert.clone();
+    let global_tls_key = cli.tls_key.clone();
     let output_policy = CliOutputPolicy::from_cli(&cli);
     if !matches!(&cli.command, Commands::Login(_)) {
         authfile_exit_125(global_auth, None)?;
@@ -1791,6 +1793,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             SystemAction::Reset { force: _ } => {
+                crate::warn_and_clean_corrupted_vfs_images(&storage::boxr_home());
                 let c_store = ContainerStore::new();
                 for c in c_store.list() {
                     let _ = remove_container(&c.id, true);
@@ -1819,11 +1822,13 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 tls_client_ca,
                 uri,
             } => {
+                let eff_cert = tls_cert.or(global_tls_cert);
+                let eff_key = tls_key.or(global_tls_key);
                 daemon::run_podman_system_service(
                     timeout,
                     cors.as_deref(),
-                    tls_cert.as_deref(),
-                    tls_key.as_deref(),
+                    eff_cert.as_deref(),
+                    eff_key.as_deref(),
                     tls_client_ca.as_deref(),
                     uri.as_deref(),
                 )
@@ -6544,8 +6549,6 @@ pub async fn run_container_with_output(
         if !parsed_ports.is_empty() && net_mode != network::pasta::NetworkMode::Pasta {
             let _ =
                 network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
-            let _ =
-                network::wait_for_published_ports(&parsed_ports, std::time::Duration::from_secs(5));
         }
         if !health_cfg.test.is_empty()
             && std::env::var("DISABLE_HC_SYSTEMD").as_deref() != Ok("true")
@@ -6851,8 +6854,9 @@ fn prepare_detached_restart(container_id: &str, bundle_path: &Path, stored_exit:
         return false;
     }
     let should_restart = match &c.restart_policy {
+        health::RestartPolicy::Always | health::RestartPolicy::UnlessStopped => true,
         health::RestartPolicy::OnFailure { max_retries } => {
-            stored_exit != 0 && *max_retries > 0 && c.restart_count < *max_retries
+            stored_exit != 0 && (*max_retries == 0 || c.restart_count < *max_retries)
         }
         _ => false,
     };
@@ -7354,16 +7358,20 @@ pub fn stop_container_with_home_and_timeout(
                 }
             }
             for _i in 0..iters {
-                if !any_pid_alive(&stop_pids) {
-                    break;
-                }
-                if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
+                let workload_alive = if let Ok(pid_str) =
+                    std::fs::read_to_string(bundle_path.join("container.pid"))
+                {
                     if let Ok(init_pid) = pid_str.trim().parse::<i32>() {
-                        if init_pid > 0 && unsafe { libc::kill(init_pid, 0) != 0 } {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            break;
-                        }
+                        init_pid > 0 && unsafe { libc::kill(init_pid, 0) == 0 }
+                    } else {
+                        any_pid_alive(&stop_pids)
                     }
+                } else {
+                    any_pid_alive(&stop_pids)
+                };
+                if !workload_alive {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -7371,7 +7379,17 @@ pub fn stop_container_with_home_and_timeout(
                 logging::wait_k8s_log_quiescent(&bundle_path);
             }
         }
-        if sigkill_live_pids(pids) {
+        let workload_still_alive =
+            if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("container.pid")) {
+                if let Ok(init_pid) = pid_str.trim().parse::<i32>() {
+                    init_pid > 0 && unsafe { libc::kill(init_pid, 0) == 0 }
+                } else {
+                    any_pid_alive(&stop_pids)
+                }
+            } else {
+                any_pid_alive(&stop_pids)
+            };
+        if sigkill_live_pids(pids) && workload_still_alive {
             used_sigkill = true;
         }
         if let Some(cp) = conmon_pid {
@@ -8183,10 +8201,7 @@ pub async fn start_container_with_home(
         let _ = store.update_health_status(&rec.id, health::HealthStatus::Starting);
     }
     execute_bundle(&bundle_path, &spec, &saved_mounts, &ports, true, true)?;
-    if !ports.is_empty() && prepare_pod {
-        network::wait_for_forwarder_pid(&bundle_path, std::time::Duration::from_secs(15))?;
-        network::wait_for_published_ports(&ports, std::time::Duration::from_secs(120))?;
-    } else if !ports.is_empty() {
+    if !ports.is_empty() {
         let _ = network::wait_for_forwarder_pid(&bundle_path, std::time::Duration::from_secs(15));
     }
     if let Ok(raw) = fs::read_to_string(bundle_path.join("health-supervisor.json")) {
@@ -14947,7 +14962,10 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     }
                     return Ok(());
                 }
-                cli::usage_errors::exit_usage_error(format!("network already exists {}", eff_name));
+                cli::usage_errors::exit_usage_error(format!(
+                    "netavark: network already exists {}",
+                    eff_name
+                ));
             }
             let net = match store.create_with_full_options(
                 &eff_name,
@@ -15706,6 +15724,9 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                         next_idx += 1;
                     };
                 }
+                if net_ifaces.is_empty() && !ep.ipv4_address.is_empty() {
+                    let _ = fs::write(bundle_path.join("primary_ip.txt"), &ep.ipv4_address);
+                }
                 net_ifaces.push((ifname.clone(), v4_cidr.clone(), net_rec.gateway.clone()));
                 extra_ifaces_meta.insert(ifname.clone(), (v6_cidr.clone(), ep.mac_address.clone()));
                 if let Ok(j) = serde_json::to_string(&net_ifaces) {
@@ -15784,6 +15805,15 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             }
             if let Ok(j) = serde_json::to_string(&net_ifaces) {
                 let _ = fs::write(bundle_path.join("network_interfaces.json"), j);
+            }
+            if let Some((_, first_cidr, _)) = net_ifaces.first() {
+                let first_ip = first_cidr.split('/').next().unwrap_or("");
+                if !first_ip.is_empty() {
+                    let _ = fs::write(bundle_path.join("primary_ip.txt"), first_ip);
+                }
+            } else {
+                let _ = fs::remove_file(bundle_path.join("primary_ip.txt"));
+                let _ = fs::write(bundle_path.join("network_disconnected"), "1");
             }
             if matches!(c.status, ContainerStatus::Running) {
                 let ifn = removed_ifname.unwrap_or_else(|| "eth0".to_string());
@@ -17460,6 +17490,7 @@ fn rm_container_resolving_depend(
 }
 
 pub fn rm_containers(args: &cli::RmArgs, quiet_stdout: bool) -> Result<()> {
+    let _ = guardrails::ProcessReaper::reap_stale_containers();
     if !args.cidfile.is_empty() && (args.all || args.latest) {
         cli::usage_errors::exit_usage_error(
             "--all, --latest, and --cidfile cannot be used together",
@@ -17713,7 +17744,17 @@ fn remove_container_opts_inner(
     let is_active = matches!(
         c.status,
         ContainerStatus::Running | ContainerStatus::Paused | ContainerStatus::Stopping
-    );
+    ) && {
+        #[cfg(target_os = "linux")]
+        {
+            runtime::linux::bundle_process_is_alive(Path::new(&c.bundle_path))
+                || matches!(c.status, ContainerStatus::Paused)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    };
     if is_active && !force {
         let state = match c.status {
             ContainerStatus::Stopping => "stopping",
@@ -22529,7 +22570,11 @@ fn parse_ports(specs: &[String]) -> Result<Vec<network::PortMapping>> {
 
 fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
     let trimmed = network.trim();
-    if trimmed.is_empty() || trimmed == "private" {
+    if trimmed.is_empty()
+        || trimmed == "private"
+        || trimmed.to_ascii_lowercase() == "pasta"
+        || trimmed.to_ascii_lowercase().starts_with("pasta:")
+    {
         return Ok(());
     }
     if trimmed.contains(',') && !trimmed.contains('=') {
@@ -22851,17 +22896,15 @@ fn container_inspect_health_config(
             }
         }
     }
-    if health_cfg.test.is_empty() {
-        if let Some(cmd) = annotations.get("boxr.health_cmd") {
-            if cmd.eq_ignore_ascii_case("none") {
-                health_cfg.test = vec!["NONE".to_string()];
-            } else if let Some(rest) = cmd.strip_prefix("CMD ") {
-                let mut v = vec!["CMD".to_string()];
-                v.extend(rest.split_whitespace().map(String::from));
-                health_cfg.test = v;
-            } else if !cmd.is_empty() {
-                health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
-            }
+    if let Some(cmd) = annotations.get("boxr.health_cmd") {
+        if cmd.eq_ignore_ascii_case("none") {
+            health_cfg.test = vec!["NONE".to_string()];
+        } else if let Some(rest) = cmd.strip_prefix("CMD ") {
+            let mut v = vec!["CMD".to_string()];
+            v.extend(rest.split_whitespace().map(String::from));
+            health_cfg.test = v;
+        } else if !cmd.is_empty() {
+            health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
         }
     }
     if let Some(v) = annotations.get("boxr.health_interval") {
@@ -23418,6 +23461,9 @@ fn format_running_for(created_at: chrono::DateTime<chrono::Utc>) -> String {
 
 /// Podman/Docker `ps` STATUS column (distinct from CREATED "… ago" strings).
 fn format_ps_status_column(c: &ContainerRecord) -> String {
+    if c.bundle_path == "__external_storage__" {
+        return "Storage".to_string();
+    }
     match &c.status {
         ContainerStatus::Running => {
             let duration = chrono::Utc::now().signed_duration_since(c.created_at);
@@ -28951,17 +28997,15 @@ pub async fn run_healthcheck_with_options(
     {
         health_cfg.retries = r as u32;
     }
-    if health_cfg.test.is_empty() {
-        if let Some(test) = health_inspect
-            .healthcheck
-            .get("Test")
-            .and_then(|t| t.as_array())
-        {
-            health_cfg.test = test
-                .iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect();
-        }
+    if let Some(test) = health_inspect
+        .healthcheck
+        .get("Test")
+        .and_then(|t| t.as_array())
+    {
+        health_cfg.test = test
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
     }
     let mut is_startup_probe = false;
     if let Some(scmd) = annotations

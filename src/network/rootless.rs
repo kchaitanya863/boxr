@@ -640,16 +640,23 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
         }));
     }
     for (container_port, listener) in tcp_listeners {
-        let primary_ip = primary_ip.clone();
+        let bundle_dir = bundle_path.to_path_buf();
         handles.push(std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let unix_stream = match conn {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let primary_ip = primary_ip.clone();
+                let bundle_dir = bundle_dir.clone();
                 std::thread::spawn(move || {
-                    let tcp = primary_ip
+                    if bundle_dir.join("network_disconnected").exists() {
+                        return;
+                    }
+                    let cur_primary_ip = std::fs::read_to_string(bundle_dir.join("primary_ip.txt"))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    let tcp = cur_primary_ip
                         .as_deref()
                         .and_then(|ip| {
                             std::net::TcpStream::connect(format!("{}:{}", ip, container_port)).ok()

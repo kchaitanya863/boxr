@@ -514,18 +514,6 @@ pub fn hotunplug_container_network_interface(bundle_path: &Path, ifname: &str) {
     use nix::sys::wait::waitpid;
     use nix::unistd::{ForkResult, fork};
 
-    if ifname == "eth0" {
-        if let Ok(tp_s) = fs::read_to_string(bundle_path.join("tap_worker.pid")) {
-            if let Ok(tp) = tp_s.trim().parse::<i32>() {
-                if tp > 1 {
-                    unsafe {
-                        let _ = libc::kill(tp, libc::SIGKILL);
-                    }
-                }
-            }
-        }
-    }
-
     let Some(pid) = crate::pod::read_container_pid_from_bundle(bundle_path) else {
         return;
     };

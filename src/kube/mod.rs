@@ -400,13 +400,10 @@ pub struct KubeSecurityContext {
 pub struct KubeSeLinuxOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
-    #[serde(
-        rename = "type",
-        default,
-        alias = "filetype",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filetype: Option<String>,
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub selinux_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3149,6 +3146,9 @@ impl KubeManager {
                     if let Some(ft) = &sel.filetype {
                         security_opt.push(format!("label=filetype:{}", ft));
                     }
+                    if let Some(st) = &sel.selinux_type {
+                        security_opt.push(format!("label=type:{}", st));
+                    }
                 }
             }
             let effective_seccomp = c_spec
@@ -3263,10 +3263,9 @@ impl KubeManager {
 
             let _ = ports_vec;
             let mut tmpfs_vec = Vec::new();
-            if read_only
-                && !volumes_vec
-                    .iter()
-                    .any(|v| v.contains(":/tmp:") || v.ends_with(":/tmp"))
+            if !volumes_vec
+                .iter()
+                .any(|v| v.contains(":/tmp:") || v.ends_with(":/tmp"))
             {
                 tmpfs_vec.push("/tmp:rw,nosuid,nodev,mode=1777".to_string());
             }
@@ -3712,7 +3711,12 @@ impl KubeManager {
                 if let Some(c) = c_store.find(cid) {
                     if matches!(c.status, ContainerStatus::Running) {
                         let _ = crate::stop_container_with_home_and_timeout(
-                            &c.id, None, None, None, true, None,
+                            &c.id,
+                            None,
+                            Some(0),
+                            None,
+                            true,
+                            None,
                         );
                     }
                 }
@@ -3722,12 +3726,32 @@ impl KubeManager {
             println!("Pods stopped:\n{}\nPods removed:\n{}", pod.id, pod.id);
         }
         for c_spec in containers {
-            for candidate in [format!("{}-{}", pod_name, c_spec.name), c_spec.name.clone()] {
-                if c_store.find(&candidate).is_some() {
+            let candidate = format!("{}-{}", pod_name, c_spec.name);
+            if c_store.find(&candidate).is_some() {
+                let _ = crate::stop_container_with_home_and_timeout(
+                    &candidate,
+                    None,
+                    Some(0),
+                    None,
+                    true,
+                    None,
+                );
+                let _ = crate::remove_container(&candidate, true);
+            }
+            if let Some(c) = c_store.find(&c_spec.name) {
+                let in_this_pod = crate::load_container_labels_from_bundle(&c.bundle_path)
+                    .get("boxr.pod_name")
+                    .is_some_and(|pn| pn == pod_name);
+                if in_this_pod {
                     let _ = crate::stop_container_with_home_and_timeout(
-                        &candidate, None, None, None, true, None,
+                        &c_spec.name,
+                        None,
+                        Some(0),
+                        None,
+                        true,
+                        None,
                     );
-                    let _ = crate::remove_container(&candidate, true);
+                    let _ = crate::remove_container(&c_spec.name, true);
                 }
             }
         }
@@ -4434,22 +4458,26 @@ impl KubeManager {
                 if let Ok(sec_list) = serde_json::from_str::<Vec<String>>(sec_json) {
                     let mut level = None;
                     let mut filetype = None;
+                    let mut selinux_type = None;
                     for item in sec_list {
                         if item == "unmask=all" {
                             proc_mount = Some("Unmasked".to_string());
                         } else if let Some(l) = item.strip_prefix("label=level:") {
                             level = Some(l.to_string());
-                        } else if let Some(ft) = item
-                            .strip_prefix("label=filetype:")
-                            .or_else(|| item.strip_prefix("label=type:"))
-                        {
+                        } else if let Some(ft) = item.strip_prefix("label=filetype:") {
                             filetype = Some(ft.to_string());
+                        } else if let Some(st) = item.strip_prefix("label=type:") {
+                            selinux_type = Some(st.to_string());
                         } else if item == "label=disable" {
-                            filetype = Some("spc_t".to_string());
+                            selinux_type = Some("spc_t".to_string());
                         }
                     }
-                    if level.is_some() || filetype.is_some() {
-                        selinux_opts = Some(KubeSeLinuxOptions { level, filetype });
+                    if level.is_some() || filetype.is_some() || selinux_type.is_some() {
+                        selinux_opts = Some(KubeSeLinuxOptions {
+                            level,
+                            filetype,
+                            selinux_type,
+                        });
                     }
                 }
             }

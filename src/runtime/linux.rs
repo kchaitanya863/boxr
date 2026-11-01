@@ -528,6 +528,7 @@ fn bind_mount_destinations(spec: &Spec, mounts: &[MountSpec]) -> Vec<String> {
 fn write_container_exit_code(bundle_path: &Path, status: i32) {
     let stored = if status == 255 { -1 } else { status };
     let _ = fs::write(bundle_path.join("boxr-exitcode"), stored.to_string());
+    let _ = fs::remove_file(bundle_path.join("container.pid"));
 }
 
 fn process_alive(pid: i32) -> bool {
@@ -1315,6 +1316,7 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                     })
                 });
                 let status = child.wait()?;
+                let _ = fs::remove_file(bundle_path.join("container.pid"));
                 drop(pty_slave_keepalive);
                 if let Some(h) = h_pty {
                     let _ = h.join();
@@ -4629,16 +4631,28 @@ fn exec_in_bundle_via_setns(
     } else {
         None
     };
-    let exec_pty_pair = if attach.tty && !attach.quiet && !detach {
+    let exec_pty_pair = if attach.tty
+        && !attach.quiet
+        && !detach
+        && !std::io::IsTerminal::is_terminal(&std::io::stdin())
+    {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let has_ws = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 }
+            || unsafe { libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 };
+        let ws_ptr = if has_ws {
+            &mut ws as *mut libc::winsize
+        } else {
+            std::ptr::null_mut()
+        };
         if unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                ws_ptr,
             )
         } == 0
         {
@@ -4651,6 +4665,8 @@ fn exec_in_bundle_via_setns(
         } else {
             nix::unistd::pipe().ok()
         }
+    } else if attach.tty && !attach.quiet && !detach {
+        nix::unistd::pipe().ok()
     } else {
         None
     };
@@ -4774,11 +4790,14 @@ fn exec_in_bundle_via_setns(
             drop(parent_sock);
             if let Some((r_fd, w_fd)) = exec_pty_pair {
                 drop(r_fd);
-                if attach.interactive {
+                let is_pty = unsafe { libc::isatty(w_fd.as_raw_fd()) == 1 };
+                if attach.interactive && is_pty {
                     let _ = nix::unistd::dup2(w_fd.as_raw_fd(), 0);
                 }
                 let _ = nix::unistd::dup2(w_fd.as_raw_fd(), 1);
-                let _ = nix::unistd::dup2(w_fd.as_raw_fd(), 2);
+                if is_pty {
+                    let _ = nix::unistd::dup2(w_fd.as_raw_fd(), 2);
+                }
                 drop(w_fd);
             }
             let _ = fs::write("/proc/self/setgroups", "allow");

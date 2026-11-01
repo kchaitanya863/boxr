@@ -8,19 +8,15 @@ function gen-cert-pair {
   cn=$1 key=$2 cert=$3
   shift 3
   openssl req -x509 \
-    -quiet \
     -nodes \
     -newkey rsa:2048 -keyout "${key}" \
     -out "${cert}" \
     -days 1 \
     -subj "/C=US/ST=Test/L=Test/O=Boxr/OU=BATS/CN=${cn}" \
-    "$@"
+    "$@" 2>/dev/null
 }
 
 function gen-tls {
-  if ! is_remote; then
-    return 0
-  fi
   gen-cert-pair ca "${REMOTESYSTEM_TLS_CA_KEY}" "${REMOTESYSTEM_TLS_CA_CRT}" -addext basicConstraints=critical,CA:TRUE,pathlen:1
   gen-cert-pair server "${REMOTESYSTEM_TLS_SERVER_KEY}" "${REMOTESYSTEM_TLS_SERVER_CRT}" -CA "${REMOTESYSTEM_TLS_CA_CRT}" -CAkey "${REMOTESYSTEM_TLS_CA_KEY}" -addext "subjectAltName = IP:127.0.0.1,IP:::1,DNS:localhost"
   gen-cert-pair client "${REMOTESYSTEM_TLS_CLIENT_KEY}" "${REMOTESYSTEM_TLS_CLIENT_CRT}" -CA "${REMOTESYSTEM_TLS_CA_CRT}" -CAkey "${REMOTESYSTEM_TLS_CA_KEY}"
