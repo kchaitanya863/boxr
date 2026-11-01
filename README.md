@@ -170,6 +170,20 @@ boxr/
 
 ### Installation
 
+#### Universal One-Liner (Linux, macOS & Windows)
+
+Install precompiled `boxr` binaries, shell completions, and environment PATH configurations with a single command:
+
+- **Linux & macOS**:
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | sh
+  ```
+
+- **Windows PowerShell**:
+  ```powershell
+  irm https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.ps1 | iex
+  ```
+
 #### Homebrew (macOS & Linux)
 
 ```bash
@@ -189,11 +203,11 @@ Download and install the native `.deb` package from the [latest release](https:/
 
 ```bash
 # x86_64 / amd64:
-curl -fsSLO https://github.com/kchaitanya863/homebrew-tap/releases/latest/download/boxr_0.1.61_amd64.deb
+curl -fsSLO https://github.com/kchaitanya863/homebrew-tap/releases/latest/download/boxr_0.1.68_amd64.deb
 sudo dpkg -i boxr_*_amd64.deb
 
 # ARM64 / aarch64:
-curl -fsSLO https://github.com/kchaitanya863/homebrew-tap/releases/latest/download/boxr_0.1.61_arm64.deb
+curl -fsSLO https://github.com/kchaitanya863/homebrew-tap/releases/latest/download/boxr_0.1.68_arm64.deb
 sudo dpkg -i boxr_*_arm64.deb
 ```
 
@@ -203,7 +217,7 @@ Download and install the native `.rpm` package from the [latest release](https:/
 
 ```bash
 # Install via dnf or rpm:
-sudo dnf install https://github.com/kchaitanya863/homebrew-tap/releases/latest/download/boxr-0.1.61-1.x86_64.rpm
+sudo dnf install https://github.com/kchaitanya863/homebrew-tap/releases/latest/download/boxr-0.1.68-1.x86_64.rpm
 
 # Or via rpm directly:
 sudo rpm -ivh boxr-*.rpm
@@ -225,15 +239,13 @@ Expand-Archive boxr.zip -DestinationPath C:\ProgramData\boxr
 [Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\ProgramData\boxr\bin", "Machine")
 ```
 
-#### Automated Shell Installer (curl | sh)
+#### Cross-Platform Container Execution
 
-```bash
-# Build & install boxr binary and completions
-./install.sh
+`boxr` provides consistent, native performance across major operating systems:
 
-# Or install from GitHub:
-curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | sh
-```
+- **Linux**: Direct kernel execution via native namespaces (`CLONE_NEWUSER`, `CLONE_NEWPID`, `CLONE_NEWNET`, `CLONE_NEWNS`, `CLONE_NEWIPC`, `CLONE_NEWUTS`), cgroups v2 resource controllers, and native OverlayFS with copy-on-write trees. Zero daemon overhead and 100% rootless security by default.
+- **macOS**: High-performance micro-VM container execution powered by Apple's native `Virtualization.framework` (`boxr-vz`). Unprivileged and owned by the logged-in user without running root daemons or requiring `sudo`.
+- **Windows**: Native Windows container isolation for Windows container images, or transparent rootless Linux container execution via native Windows container isolation or WSL2 backend.
 
 #### (Optional) Docker & Podman Drop-in Alias
 If you would like existing `docker` or `podman` commands to transparently run with `boxr`, you can choose to configure an alias or wrapper:

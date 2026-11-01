@@ -355,6 +355,7 @@ jobs:
           mkdir -p package/bin package/completions
           cp target/${{ matrix.target }}/release/boxr package/bin/
           cp install.sh package/
+          cp install.ps1 package/ 2>/dev/null || true
           cp README.md package/
           cp LICENSE package/ 2>/dev/null || true
           cp completions/boxr.bash package/completions/
@@ -369,6 +370,8 @@ jobs:
         run: |
           mkdir -p package-win/bin package-win/completions
           cp target/${{ matrix.target }}/release/boxr.exe package-win/bin/
+          cp install.ps1 package-win/ 2>/dev/null || true
+          cp install.sh package-win/ 2>/dev/null || true
           cp README.md package-win/
           cp LICENSE package-win/ 2>/dev/null || true
           cp completions/boxr.bash package-win/completions/
