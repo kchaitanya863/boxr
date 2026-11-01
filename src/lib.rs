@@ -6910,6 +6910,7 @@ fn prepare_detached_restart(container_id: &str, bundle_path: &Path, stored_exit:
         return false;
     }
     let _ = runtime::oci_hooks::run_hooks_from_bundle(bundle_path, "poststop");
+    let _ = fs::write(bundle_path.join("last-exitcode"), stored_exit.to_string());
     if store.increment_restart_count(container_id).is_err() {
         return false;
     }
@@ -7466,7 +7467,8 @@ pub fn stop_container_with_home_and_timeout(
             }
         }
         stop_wait_clear_pid_files(&bundle_path, &c.id);
-        if !quiet && used_sigkill && sig_num == libc::SIGTERM && grace_secs > 0 {
+        let emit_warn = (!quiet || output_label.is_some()) && grace_secs > 0;
+        if emit_warn && used_sigkill && sig_num == libc::SIGTERM {
             let label = output_label.unwrap_or(container);
             eprintln!(
                 "StopSignal SIGTERM failed to stop container {} in {} seconds, resorting to SIGKILL",
@@ -10872,6 +10874,24 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     #[cfg(unix)]
                     {
                         let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
+                        let unbounded_restart = matches!(
+                            cont.restart_policy,
+                            health::RestartPolicy::Always
+                                | health::RestartPolicy::UnlessStopped
+                                | health::RestartPolicy::OnFailure { max_retries: 0 }
+                        );
+                        if unbounded_restart && cont.restart_count > 0 {
+                            let code = std::fs::read_to_string(bundle_path.join("last-exitcode"))
+                                .or_else(|_| {
+                                    std::fs::read_to_string(bundle_path.join("boxr-exitcode"))
+                                })
+                                .ok()
+                                .and_then(|s| s.trim().parse::<i32>().ok())
+                                .unwrap_or(0);
+                            println!("{}", code);
+                            last_code = code;
+                            break;
+                        }
                         let conmon_alive = if let Ok(cp_str) =
                             std::fs::read_to_string(bundle_path.join("conmon.pid"))
                         {
