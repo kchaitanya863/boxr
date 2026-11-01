@@ -151,12 +151,25 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
                     || img.tag == digest
                     || img.tag.ends_with(&format!("@{}", digest));
             }
+            let clean_q = query
+                .trim()
+                .strip_prefix("docker://")
+                .or_else(|| query.trim().strip_prefix("containers-storage:"))
+                .unwrap_or(query.trim());
+            let query_has_explicit_registry = if let Some((first, _)) = clean_q.split_once('/') {
+                first.contains('.') || first.contains(':') || first == "localhost"
+            } else {
+                false
+            };
             let (reg, repo, tag) = record_identity(img);
-            if tag == r.tag && repo == r.repository {
+            let repo_matches = repo == r.repository
+                || (!query_has_explicit_registry
+                    && (repo.strip_prefix("library/") == Some(r.repository.as_str())
+                        || r.repository.strip_prefix("library/") == Some(repo.as_str())));
+            if tag == r.tag && repo_matches {
                 if reg == r.registry
-                    || reg == "localhost"
-                    || reg == "registry-1.docker.io"
-                    || r.registry == "localhost"
+                    || (!query_has_explicit_registry
+                        && (reg == "localhost" || reg == "registry-1.docker.io"))
                 {
                     return true;
                 }

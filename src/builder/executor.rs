@@ -1301,7 +1301,14 @@ impl ImageBuilder {
                 }
                 Instruction::Label { key, value } => {
                     let k_exp = expand_build_vars(key, &arg_vars, &current_config.env);
-                    let v_exp = expand_build_vars(value, &arg_vars, &current_config.env);
+                    let v_exp = if k_exp.eq_ignore_ascii_case("INSTALL")
+                        || k_exp.eq_ignore_ascii_case("RUN")
+                        || k_exp.eq_ignore_ascii_case("UNINSTALL")
+                    {
+                        value.clone()
+                    } else {
+                        expand_build_vars(value, &arg_vars, &current_config.env)
+                    };
                     let mut labels = current_config.labels.take().unwrap_or_default();
                     labels.insert(k_exp, v_exp);
                     current_config.labels = Some(labels);
@@ -1496,7 +1503,7 @@ impl ImageBuilder {
                 );
             }
             let labels = current_config.labels.get_or_insert_with(HashMap::new);
-            labels.insert("io.buildah.version".to_string(), "1.46.0".to_string());
+            labels.insert("io.buildah.version".to_string(), "1.36.0".to_string());
         }
 
         let raw_tag_opt = opts.tag.clone();
@@ -1707,6 +1714,11 @@ fn expand_build_vars(
     let chars: Vec<char> = input.chars().collect();
     let mut i = 0;
     while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '$' {
+            out.push('$');
+            i += 2;
+            continue;
+        }
         if chars[i] == '$' && i + 1 < chars.len() {
             if chars[i + 1] == '{' {
                 if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {

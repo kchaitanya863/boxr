@@ -187,7 +187,7 @@ impl ArchiveManager {
                 crate::events::EventManager::record(crate::events::ContainerEvent::new(
                     "image",
                     "save",
-                    &format!("sha256:{}", first.id),
+                    &first.full_hex_id(),
                     &path.to_string_lossy(),
                     std::collections::HashMap::new(),
                 ));
@@ -261,6 +261,7 @@ impl ArchiveManager {
             let mut annotations = std::collections::HashMap::new();
             let ref_name = format!("{}:{}", image.display_reference(), image.tag);
             annotations.insert("org.opencontainers.image.ref.name".to_string(), ref_name);
+            annotations.insert("io.boxr.image.id".to_string(), image.id.clone());
             if is_cached {
                 annotations.insert(
                     "io.boxr.cached.rootfs".to_string(),
@@ -485,6 +486,7 @@ impl ArchiveManager {
             let mut annotations = std::collections::HashMap::new();
             let ref_name = format!("{}:{}", image.display_reference(), image.tag);
             annotations.insert("org.opencontainers.image.ref.name".to_string(), ref_name);
+            annotations.insert("io.boxr.image.id".to_string(), image.id.clone());
             if is_cached {
                 annotations.insert(
                     "io.boxr.cached.rootfs".to_string(),
@@ -792,6 +794,10 @@ impl ArchiveManager {
                     .join("images")
                     .join(image_id.replace(':', "_"))
                     .join("rootfs");
+                if d.exists() {
+                    crate::storage::container_store::make_tree_writable(&d);
+                    let _ = fs::remove_dir_all(&d);
+                }
                 fs::create_dir_all(&d)?;
                 d
             };
@@ -880,7 +886,7 @@ impl ArchiveManager {
                 };
 
                 store.add(record.clone())?;
-                if !is_internal_cache {
+                if !is_internal_cache && std::env::var_os("BOXR_LOAD_SILENT").is_none() {
                     if record.reference == "<none>" && record.tag == "<none>" {
                         println!("Loaded image: sha256:{}", record.full_hex_id());
                     } else {
@@ -954,7 +960,11 @@ impl ArchiveManager {
                 }
             };
 
-            let short_id = config_hash[..12.min(config_hash.len())].to_string();
+            let short_id = descriptor
+                .annotations
+                .get("io.boxr.image.id")
+                .cloned()
+                .unwrap_or_else(|| config_hash[..12.min(config_hash.len())].to_string());
             let cached_rootfs = descriptor
                 .annotations
                 .get("io.boxr.cached.rootfs")

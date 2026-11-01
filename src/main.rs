@@ -137,7 +137,11 @@ fn main() -> Result<()> {
             }
         }
         let sub_idx = boxr::cli::podman_subcommand_index(&args);
-        if args.get(sub_idx).map(String::as_str) == Some("unshare") {
+        if args.get(sub_idx).map(String::as_str) == Some("unshare")
+            && !args
+                .iter()
+                .any(|a| a == "__completeNoDesc" || a == "__complete")
+        {
             let sub = &args[sub_idx + 1..];
             let wants_help = sub
                 .iter()
@@ -207,6 +211,10 @@ fn main() -> Result<()> {
                         if msg.contains(
                             "restart policy retries can only be specified with on-failure restart policy",
                         ) || msg.contains("Invalid restart policy")
+                            || msg.contains("the --rm option conflicts with --restart")
+                            || msg.contains("bad format for add-host:")
+                            || msg.contains("invalid DNS server address:")
+                            || msg.contains("conflicting port mappings for host port")
                         {
                             std::process::exit(125);
                         }

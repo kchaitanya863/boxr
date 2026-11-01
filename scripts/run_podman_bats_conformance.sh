@@ -21,10 +21,10 @@ PODMAN_TESTS_REPO="${PODMAN_TESTS_REPO:-https://github.com/podman-container-tool
 PODMAN_TESTS_REF="${PODMAN_TESTS_REF:-main}"
 CACHE_DIR="${PODMAN_BATS_CACHE:-$REPO_ROOT/.cache/podman-bats}"
 SRC_DIR="$CACHE_DIR/podman"
-# Run one pattern without a temp manifest file: PODMAN_BATS_PATTERN=035-logs
+# Run one or more patterns without a temp manifest file: PODMAN_BATS_PATTERN='015-help|020-tag'
 if [[ -n "${PODMAN_BATS_PATTERN:-}" ]]; then
   MANIFEST="$(mktemp "${TMPDIR:-/tmp}/boxr-bats-manifest.XXXXXX")"
-  echo "$PODMAN_BATS_PATTERN" >"$MANIFEST"
+  printf '%s\n' "${PODMAN_BATS_PATTERN}" | tr '|,' '\n\n' >"$MANIFEST"
   trap 'rm -f "$MANIFEST"' EXIT
 fi
 MANIFEST="${MANIFEST:-$REPO_ROOT/tests/podman_bats/manifest.txt}"
@@ -98,6 +98,9 @@ if [[ -f "$CACHE_DIR/current_boxr_home" ]]; then
   DEFAULT_BOXR_HOME="\$(cat "$CACHE_DIR/current_boxr_home")"
 else
   DEFAULT_BOXR_HOME="$HOME/.boxr-bats"
+fi
+if [[ "\$(id -u)" == "0" ]]; then
+  DEFAULT_BOXR_HOME="\${DEFAULT_BOXR_HOME}-root"
 fi
 export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-\$DEFAULT_BOXR_HOME}}"
 mkdir -p "\$BOXR_HOME"
@@ -239,6 +242,7 @@ EOF
     "$BOXR_BIN" rm -a -f >/dev/null 2>&1 || true
     chmod -R u+w "$BOXR_HOME" 2>/dev/null || true
     rm -rf "$BOXR_HOME" 2>/dev/null || true
+    sudo -n rm -rf "${BOXR_HOME}-root" 2>/dev/null || true
   done
 
   echo "Log: $log"

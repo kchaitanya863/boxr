@@ -169,28 +169,40 @@ impl ContainerStore {
                     if let Ok(raw) = fs::read_to_string(h.join("pods.json")) {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
                             if let Some(pods_arr) = val.get("pods").and_then(|v| v.as_array()) {
-                                for p_val in pods_arr {
-                                    let pid =
-                                        p_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let matched_pod = pods_arr
+                                    .iter()
+                                    .find(|p_val| {
+                                        let pid =
+                                            p_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                        let pname = p_val
+                                            .get("name")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        !pid.is_empty()
+                                            && (pname == pod_prefix || pid == pod_prefix)
+                                    })
+                                    .or_else(|| {
+                                        pods_arr.iter().find(|p_val| {
+                                            let pid = p_val
+                                                .get("id")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            !pid.is_empty() && pid.starts_with(pod_prefix)
+                                        })
+                                    });
+                                if let Some(p_val) = matched_pod {
                                     let pname =
                                         p_val.get("name").and_then(|v| v.as_str()).unwrap_or("");
                                     let infra_cid = p_val
                                         .get("infra_container_id")
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("");
-                                    if !pid.is_empty()
-                                        && (pname == pod_prefix
-                                            || pid == pod_prefix
-                                            || pid.starts_with(pod_prefix))
+                                    let alt_name = format!("{}-infra", pname);
+                                    if let Some(found) = containers
+                                        .into_iter()
+                                        .find(|c| c.id == infra_cid || c.name == alt_name)
                                     {
-                                        let alt_name = format!("{}-infra", pname);
-                                        if let Some(found) = containers
-                                            .into_iter()
-                                            .find(|c| c.id == infra_cid || c.name == alt_name)
-                                        {
-                                            return Ok(Some(found));
-                                        }
-                                        break;
+                                        return Ok(Some(found));
                                     }
                                 }
                             }

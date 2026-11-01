@@ -322,6 +322,8 @@ impl CgroupV2Manager {
                 swap.to_string()
             };
             let _ = fs::write(self.cgroup_path.join("memory.swap.max"), swap_v2);
+        } else if let Some(mem) = limits.memory_max_bytes.filter(|&m| m > 0) {
+            let _ = fs::write(self.cgroup_path.join("memory.swap.max"), mem.to_string());
         }
 
         // Apply memory reservation (cgroups v2 memory.low)
@@ -458,6 +460,12 @@ impl CgroupV2Manager {
                             "MemorySwapMax".to_string(),
                             "t".to_string(),
                             swap_val.to_string(),
+                        ));
+                    } else if let Some(mem) = lim.memory_max_bytes.filter(|&m| m > 0) {
+                        props.push((
+                            "MemorySwapMax".to_string(),
+                            "t".to_string(),
+                            (mem as u64).to_string(),
                         ));
                     }
                     if let Some(shares) = lim.cpu_shares {

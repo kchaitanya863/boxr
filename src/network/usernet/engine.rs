@@ -326,8 +326,8 @@ impl UserNetEngine {
             return None;
         }
 
-        // If pinging gateway, construct Echo Reply (type 0, code 0)
-        if ip.dst_ip == self.gateway_ip {
+        // Reply to ICMP Echo Request (type 8, code 0) with Echo Reply (type 0, code 0)
+        {
             let mut reply_payload = payload.to_vec();
             reply_payload[0] = 0; // Echo Reply
             reply_payload[2] = 0; // Reset checksum
@@ -344,7 +344,7 @@ impl UserNetEngine {
                 ttl: 64,
                 protocol: IP_PROTO_ICMP,
                 checksum: 0,
-                src_ip: self.gateway_ip,
+                src_ip: ip.dst_ip,
                 dst_ip: ip.src_ip,
             };
 
@@ -358,10 +358,8 @@ impl UserNetEngine {
             reply_eth.write_to(&mut out);
             reply_ip.write_to(&mut out);
             out.extend_from_slice(&reply_payload);
-            return Some(out);
+            Some(out)
         }
-
-        None
     }
 
     fn handle_udp(&self, eth: &EthernetHeader, ip: &Ipv4Header, payload: &[u8]) -> Option<Vec<u8>> {

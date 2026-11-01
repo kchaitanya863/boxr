@@ -8,23 +8,31 @@ function gen-cert-pair {
   cn=$1 key=$2 cert=$3
   shift 3
   openssl req -x509 \
-    -quiet \
     -nodes \
     -newkey rsa:2048 -keyout "${key}" \
     -out "${cert}" \
     -days 1 \
     -subj "/C=US/ST=Test/L=Test/O=Boxr/OU=BATS/CN=${cn}" \
-    "$@"
+    "$@" 2>/dev/null
 }
 
 function gen-tls {
-  if ! is_remote; then
-    return 0
+  local cache_dir="/tmp/boxr-bats-tls-cache-$(id -u)"
+  if [[ ! -f "$cache_dir/ca.crt.pem" || ! -f "$cache_dir/server.crt.pem" || ! -f "$cache_dir/client.crt.pem" || ! -f "$cache_dir/bogus.crt.pem" ]]; then
+    mkdir -p "$cache_dir"
+    gen-cert-pair ca "$cache_dir/ca.key.pem" "$cache_dir/ca.crt.pem" -addext basicConstraints=critical,CA:TRUE,pathlen:1
+    gen-cert-pair server "$cache_dir/server.key.pem" "$cache_dir/server.crt.pem" -CA "$cache_dir/ca.crt.pem" -CAkey "$cache_dir/ca.key.pem" -addext "subjectAltName = IP:127.0.0.1,IP:::1,DNS:localhost"
+    gen-cert-pair client "$cache_dir/client.key.pem" "$cache_dir/client.crt.pem" -CA "$cache_dir/ca.crt.pem" -CAkey "$cache_dir/ca.key.pem"
+    gen-cert-pair bogus "$cache_dir/bogus.key.pem" "$cache_dir/bogus.crt.pem" -addext basicConstraints=critical,CA:TRUE,pathlen:1
   fi
-  gen-cert-pair ca "${REMOTESYSTEM_TLS_CA_KEY}" "${REMOTESYSTEM_TLS_CA_CRT}" -addext basicConstraints=critical,CA:TRUE,pathlen:1
-  gen-cert-pair server "${REMOTESYSTEM_TLS_SERVER_KEY}" "${REMOTESYSTEM_TLS_SERVER_CRT}" -CA "${REMOTESYSTEM_TLS_CA_CRT}" -CAkey "${REMOTESYSTEM_TLS_CA_KEY}" -addext "subjectAltName = IP:127.0.0.1,IP:::1,DNS:localhost"
-  gen-cert-pair client "${REMOTESYSTEM_TLS_CLIENT_KEY}" "${REMOTESYSTEM_TLS_CLIENT_CRT}" -CA "${REMOTESYSTEM_TLS_CA_CRT}" -CAkey "${REMOTESYSTEM_TLS_CA_KEY}"
-  gen-cert-pair bogus "${REMOTESYSTEM_TLS_BOGUS_KEY}" "${REMOTESYSTEM_TLS_BOGUS_CRT}" -addext basicConstraints=critical,CA:TRUE,pathlen:1
+  cp -f "$cache_dir/ca.key.pem" "${REMOTESYSTEM_TLS_CA_KEY}"
+  cp -f "$cache_dir/ca.crt.pem" "${REMOTESYSTEM_TLS_CA_CRT}"
+  cp -f "$cache_dir/server.key.pem" "${REMOTESYSTEM_TLS_SERVER_KEY}"
+  cp -f "$cache_dir/server.crt.pem" "${REMOTESYSTEM_TLS_SERVER_CRT}"
+  cp -f "$cache_dir/client.key.pem" "${REMOTESYSTEM_TLS_CLIENT_KEY}"
+  cp -f "$cache_dir/client.crt.pem" "${REMOTESYSTEM_TLS_CLIENT_CRT}"
+  cp -f "$cache_dir/bogus.key.pem" "${REMOTESYSTEM_TLS_BOGUS_KEY}"
+  cp -f "$cache_dir/bogus.crt.pem" "${REMOTESYSTEM_TLS_BOGUS_CRT}"
 }
 
 function timeout() {
@@ -105,6 +113,9 @@ for rec in matched:
         try:
             os.chmod(dst_img_dir, 0o755)
             os.chmod(os.path.join(dst_img_dir, "rootfs"), 0o755)
+            tid = os.path.join(dst_img_dir, "rootfs", "home", "podman", "testimage-id")
+            if os.path.exists(tid):
+                os.utime(tid, (1600000000, 1600000000))
         except OSError:
             pass
     rec["rootfs_path"] = os.path.join(dst_img_dir, "rootfs")

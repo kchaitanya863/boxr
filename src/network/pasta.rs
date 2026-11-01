@@ -89,9 +89,8 @@ impl NetworkMode {
     pub fn should_use_pasta(&self) -> bool {
         match self {
             Self::Pasta => true,
-            Self::Auto | Self::UserNet => {
-                PastaDriver::is_available() && !Self::force_embedded_usernet()
-            }
+            Self::Auto => PastaDriver::is_available(),
+            Self::UserNet => PastaDriver::is_available() && !Self::force_embedded_usernet(),
             _ => false,
         }
     }

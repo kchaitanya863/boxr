@@ -236,6 +236,7 @@ impl OverlayDriver {
                                 linked = true;
                             }
                         } else if fs::copy(&from, &to).is_ok() {
+                            Self::preserve_file_timestamps(&from, &to, m);
                             seen_inodes.insert(key, to.clone());
                             linked = true;
                         }

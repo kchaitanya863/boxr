@@ -164,6 +164,9 @@ fn normalize_usage_line(
         return format!("  {full} [command]");
     }
 
+    if sub_path == ["network", "inspect"] {
+        return "  podman network inspect [options] NETWORK [NETWORK...]".to_string();
+    }
     let mut u = usage.trim().to_string();
     u = u.replace("[OPTIONS]", "[options]");
     u = u.replace('<', "").replace('>', "");
@@ -209,7 +212,12 @@ fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
         };
         cmd = sub.clone();
     }
-    let mut help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    let rendered = if sub_path == ["generate", "systemd"] {
+        cmd.render_long_help().to_string()
+    } else {
+        cmd.render_help().to_string()
+    };
+    let mut help = normalize_help_for_bats(&rendered, sub_path);
     if sub_path.is_empty() {
         let rt = crate::containers_conf_toml_value("runtime").unwrap_or_else(|| "crun".to_string());
         help.push_str(&format!(

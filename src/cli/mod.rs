@@ -446,7 +446,11 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             && !seen_positional_after_sub
         {
             let raw_val = &argv[i + 1];
-            if is_run_or_create && raw_val.contains(',') && !raw_val.contains(':') {
+            if is_run_or_create
+                && raw_val.contains(',')
+                && !raw_val.contains(':')
+                && !raw_val.trim().to_ascii_lowercase().starts_with("pasta:")
+            {
                 for part in raw_val.split(',') {
                     let p = part.trim();
                     if p.is_empty() {
@@ -475,7 +479,11 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             && !seen_positional_after_sub
         {
             let val = a.split_once('=').map(|(_, v)| v).unwrap_or("");
-            if is_run_or_create && val.contains(',') && !val.contains(':') {
+            if is_run_or_create
+                && val.contains(',')
+                && !val.contains(':')
+                && !val.trim().to_ascii_lowercase().starts_with("pasta:")
+            {
                 for part in val.split(',') {
                     let p = part.trim();
                     if p.is_empty() {
@@ -852,6 +860,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                             | "--mac-address"
                             | "--link"
                             | "--network-alias"
+                            | "--storage-opt"
+                            | "--volume-driver"
+                            | "--use-api-socket"
                             | "--isolation"
                             | "--gpus"
                             | "--kernel-memory"

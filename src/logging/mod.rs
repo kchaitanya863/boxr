@@ -18,11 +18,12 @@ pub fn append_k8s_log_chunk(path: &Path, stream: &str, data: &[u8]) -> Result<()
         .format("%Y-%m-%dT%H:%M:%S%.9f%:z")
         .to_string();
     let flag = if data.ends_with(b"\n") { "F" } else { "P" };
-    file.write_all(format!("{} {} {} ", ts, stream, flag).as_bytes())?;
-    file.write_all(data)?;
-    if !data.ends_with(b"\n") {
-        file.write_all(b"\n")?;
-    }
+    let clean_data = data.strip_suffix(b"\n").unwrap_or(data);
+    let mut record = format!("{} {} {} ", ts, stream, flag).into_bytes();
+    record.extend_from_slice(clean_data);
+    record.push(b'\n');
+    file.write_all(&record)?;
+    let _ = file.flush();
     #[cfg(unix)]
     if let Some(bundle_dir) = path.parent() {
         let jmeta = bundle_dir.join("journald_meta.json");
@@ -112,7 +113,13 @@ pub fn tee_k8s_stream_with_tty<R: Read>(
             std::thread::sleep(Duration::from_millis(5));
         }
         let chunk = &buf[..n];
-        let _ = append_k8s_log_chunk(&log_path, stream, chunk);
+        for (i, part) in chunk.split_inclusive(|&b| b == b'\n').enumerate() {
+            if i > 0 {
+                let _ = append_k8s_log_chunk(&log_path, stream, part);
+            } else {
+                let _ = append_k8s_log_chunk(&log_path, stream, part);
+            }
+        }
         if tty && stream == "stdout" {
             let formatted = format_tty_crlf(chunk, &mut prev_cr);
             let _ = attach_out.write_all(&formatted);
@@ -284,7 +291,18 @@ fn parse_k8s_log_line(line: &[u8]) -> Option<K8sLogEntry> {
             let needle = format!(" {stream} {flag} ");
             if let Some(pos) = s.find(&needle) {
                 let ts_str = s[..pos].trim();
-                let payload = s[pos + needle.len()..].as_bytes().to_vec();
+                let mut payload = s[pos + needle.len()..].as_bytes().to_vec();
+                if let Some((next_idx, _)) =
+                    s[pos + needle.len()..]
+                        .match_indices("\n20")
+                        .find(|(idx, _)| {
+                            looks_like_k8s_record_start(
+                                s[pos + needle.len() + idx + 1..].as_bytes(),
+                            )
+                        })
+                {
+                    payload.truncate(next_idx);
+                }
                 let timestamp = DateTime::parse_from_rfc3339(ts_str)
                     .or_else(|_| chrono::DateTime::parse_from_str(ts_str, "%+"))
                     .ok()?;

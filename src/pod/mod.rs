@@ -452,6 +452,11 @@ impl PodStore {
                     {
                         if pod.containers.is_empty()
                             && pod.status == "Running"
+                            && pod
+                                .labels
+                                .get("boxr.pod.explicit_start")
+                                .map(|s| s.as_str())
+                                == Some("true")
                             && pod.network.as_deref() != Some("host")
                             && matches!(infra.status, ContainerStatus::Running)
                         {
@@ -612,6 +617,26 @@ impl PodStore {
         Ok(pruned)
     }
 
+    pub fn set_label(&self, pod_query: &str, key: &str, val: &str) -> Result<()> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            let pos = data
+                .pods
+                .iter()
+                .position(|p| p.name == pod_query || p.id == pod_query)
+                .or_else(|| data.pods.iter().position(|p| p.id.starts_with(pod_query)));
+            if let Some(idx) = pos {
+                data.pods[idx]
+                    .labels
+                    .insert(key.to_string(), val.to_string());
+                self.save_unlocked(&data)?;
+                Ok(())
+            } else {
+                Err(anyhow!("Pod '{}' not found", pod_query))
+            }
+        })
+    }
+
     pub fn update_status(&self, pod_query: &str, status: &str) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
@@ -622,6 +647,9 @@ impl PodStore {
                 .or_else(|| data.pods.iter().position(|p| p.id.starts_with(pod_query)));
             if let Some(idx) = pos {
                 data.pods[idx].status = status.to_string();
+                if status != "Running" {
+                    data.pods[idx].labels.remove("boxr.pod.explicit_start");
+                }
                 self.save_unlocked(&data)?;
                 Ok(())
             } else {
