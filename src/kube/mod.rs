@@ -897,6 +897,14 @@ impl KubeManager {
                 }
             }
         }
+        if let Some(ref prop) = args.service_exit_code_propagation {
+            if !matches!(prop.as_str(), "all" | "any" | "none") {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "unsupported exit-code propagation {:?}",
+                    prop
+                ));
+            }
+        }
 
         let saved_notify_sock = std::env::var("NOTIFY_SOCKET")
             .ok()
@@ -1120,6 +1128,52 @@ impl KubeManager {
         #[cfg(unix)]
         if let (Some(sock), Some(sc)) = (saved_notify_sock.as_ref(), service_ctr_name.as_deref()) {
             let c_store = ContainerStore::new();
+            let p_store = PodStore::new();
+            let mut sdnotify_ctr_bundles = Vec::new();
+            for pname in &pod_names {
+                if let Some(p) = p_store.find(pname) {
+                    for cid in &p.containers {
+                        if let Some(c) = c_store.find(cid) {
+                            let bp = std::path::PathBuf::from(&c.bundle_path);
+                            if let Ok(raw) = fs::read_to_string(bp.join("config.json")) {
+                                if let Ok(sp) =
+                                    serde_json::from_str::<crate::oci::runtime::Spec>(&raw)
+                                {
+                                    if sp
+                                        .annotations
+                                        .as_ref()
+                                        .and_then(|a| a.get("boxr.sdnotify_mode"))
+                                        .map(|m| m.as_str())
+                                        == Some("container")
+                                    {
+                                        sdnotify_ctr_bundles.push((c.id.clone(), bp));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for (_cid, bp) in &sdnotify_ctr_bundles {
+                let start = std::time::Instant::now();
+                let mut ready = false;
+                while start.elapsed() < std::time::Duration::from_secs(10) {
+                    if bp.join("sdnotify-ready").exists() {
+                        ready = true;
+                        break;
+                    }
+                    if bp.join("boxr-exitcode").exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if !ready {
+                    let _ = crate::remove_container_quiet(sc, true, false);
+                    return Err(anyhow!(
+                        "container exited before sending READY=1 on notify socket"
+                    ));
+                }
+            }
             if let Some(sc_rec) = c_store.find(sc) {
                 let b = std::path::PathBuf::from(&sc_rec.bundle_path);
                 if let Ok(pid_str) = fs::read_to_string(b.join("conmon.pid")) {
@@ -1138,6 +1192,13 @@ impl KubeManager {
 
         if let Some(sc_name) = &service_ctr_name {
             if saved_notify_sock.is_none() {
+                let yaml_sdnotify_conmon = docs.iter().any(|val| {
+                    val.get("metadata")
+                        .and_then(|m| m.get("annotations"))
+                        .and_then(|a| a.get("io.containers.sdnotify"))
+                        .and_then(|v| v.as_str())
+                        == Some("conmon")
+                });
                 loop {
                     let c_store = ContainerStore::new();
                     let sc_running = c_store
@@ -1172,8 +1233,54 @@ impl KubeManager {
                         }
                     }
                     if !any_pod_running && !pod_names.is_empty() {
+                        let prop = args
+                            .service_exit_code_propagation
+                            .as_deref()
+                            .unwrap_or("none");
+                        let mut workload_codes = Vec::new();
                         for pname in &pod_names {
+                            if let Some(p) = p_store.find(pname) {
+                                let infra_name = p_store.infra_name(&p);
+                                for cid in &p.containers {
+                                    if cid == &infra_name || cid == &p.infra_container_id {
+                                        continue;
+                                    }
+                                    if let Some(wc) = c_store.find(cid) {
+                                        if wc.name == infra_name || wc.id == p.infra_container_id {
+                                            continue;
+                                        }
+                                        let code = match wc.status {
+                                            ContainerStatus::Exited(ec) => ec,
+                                            _ => fs::read_to_string(
+                                                PathBuf::from(&wc.bundle_path)
+                                                    .join("boxr-exitcode"),
+                                            )
+                                            .ok()
+                                            .and_then(|s| s.trim().parse::<i32>().ok())
+                                            .unwrap_or(0),
+                                        };
+                                        workload_codes.push(code);
+                                    }
+                                }
+                            }
                             let _ = p_store.update_status(pname, "Exited");
+                        }
+                        let svc_exit_code = if prop == "all"
+                            && !workload_codes.is_empty()
+                            && workload_codes.iter().all(|&ec| ec != 0)
+                        {
+                            137
+                        } else if prop == "any" && workload_codes.iter().any(|&ec| ec != 0) {
+                            137
+                        } else {
+                            0
+                        };
+                        if let Some(sc_rec) = c_store.find(sc_name) {
+                            let svc_bundle = PathBuf::from(&sc_rec.bundle_path);
+                            let _ = fs::write(
+                                svc_bundle.join("service-exitcode"),
+                                svc_exit_code.to_string(),
+                            );
                         }
                         let _ = crate::stop_container_with_home_and_timeout(
                             sc_name,
@@ -1183,9 +1290,38 @@ impl KubeManager {
                             true,
                             None,
                         );
+                        if let Some(sc_rec) = c_store.find(sc_name) {
+                            let svc_bundle = PathBuf::from(&sc_rec.bundle_path);
+                            let _ = fs::write(
+                                svc_bundle.join("boxr-exitcode"),
+                                svc_exit_code.to_string(),
+                            );
+                            let _ = c_store
+                                .update_status(&sc_rec.id, ContainerStatus::Exited(svc_exit_code));
+                        }
+                        if yaml_sdnotify_conmon && svc_exit_code != 0 {
+                            std::process::exit(svc_exit_code);
+                        }
                         break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                if yaml_sdnotify_conmon {
+                    let c_store = ContainerStore::new();
+                    if let Some(sc_rec) = c_store.find(sc_name) {
+                        let code = match sc_rec.status {
+                            ContainerStatus::Exited(ec) => ec,
+                            _ => fs::read_to_string(
+                                PathBuf::from(&sc_rec.bundle_path).join("boxr-exitcode"),
+                            )
+                            .ok()
+                            .and_then(|s| s.trim().parse::<i32>().ok())
+                            .unwrap_or(0),
+                        };
+                        if code != 0 {
+                            std::process::exit(code);
+                        }
+                    }
                 }
             }
         }
@@ -3540,6 +3676,17 @@ impl KubeManager {
                 log_driver: args.log_driver.iter().cloned().collect(),
                 log_opt: args.log_opt.clone(),
                 sig_proxy: true,
+                sdnotify: pod_annotations
+                    .get(&format!("io.containers.sdnotify/{}", c_spec.name))
+                    .or_else(|| pod_annotations.get("io.containers.sdnotify"))
+                    .cloned()
+                    .or_else(|| {
+                        if service_ctr_name.is_some() {
+                            Some("ignore".to_string())
+                        } else {
+                            None
+                        }
+                    }),
                 workdir: c_spec.working_dir.clone(),
                 pod: Some(pod.name.clone()),
                 image: c_spec.image.clone(),

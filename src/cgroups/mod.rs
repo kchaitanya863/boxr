@@ -499,6 +499,7 @@ impl CgroupV2Manager {
                 busctl_args.push("0".to_string());
                 let _ = std::process::Command::new("busctl")
                     .args(&busctl_args)
+                    .env_remove("NOTIFY_SOCKET")
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())

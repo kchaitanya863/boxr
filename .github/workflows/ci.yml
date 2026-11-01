@@ -57,7 +57,7 @@ jobs:
       - name: Install Linux rootless runtime deps
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc-mingw-w64-x86-64 uidmap passt iproute2 bats apache2-utils jq python3-pytest python3-requests python3-docker
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc-mingw-w64-x86-64 uidmap passt iproute2 bats apache2-utils jq socat skopeo python3-pytest python3-requests python3-docker
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: Check Windows target (x86_64-pc-windows-gnu)
@@ -140,7 +140,7 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats apache2-utils jq socat skopeo
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Build
         run: cargo build

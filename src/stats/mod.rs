@@ -196,6 +196,20 @@ impl StatsCollector {
 
         loop {
             let mut containers = store.list();
+            containers.retain(|c| {
+                let cfg_path = PathBuf::from(&c.bundle_path).join("config.json");
+                if let Ok(raw) = fs::read_to_string(cfg_path) {
+                    if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&raw) {
+                        if spec.annotations.as_ref().is_some_and(|a| {
+                            a.get("boxr.cgroups").is_some_and(|v| v == "disabled")
+                                || a.get("boxr.cgroups_mode").is_some_and(|v| v == "disabled")
+                        }) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
             if !args.containers.is_empty() {
                 let mut ordered = Vec::new();
                 for t in &args.containers {
