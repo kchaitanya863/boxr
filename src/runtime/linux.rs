@@ -2566,6 +2566,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
 
                 // If using pasta, notify parent that netns has been unshared so pasta can attach
+                let _ = fs::write("/proc/sys/net/ipv4/ping_group_range", "0 2147483647\n");
                 if use_pasta {
                     let _ = child_sock.write_all(b"netok");
                     let mut go_buf = [0u8; 5];
@@ -5703,6 +5704,12 @@ fn run_container_child(
         .as_ref()
         .and_then(|a| a.get("boxr.cgroupns"))
         .map(|s| s.as_str());
+    let cgroupns_joined = spec.linux.as_ref().is_some_and(|l| {
+        l.namespaces
+            .iter()
+            .any(|ns| (ns.ns_type == "cgroup" || ns.ns_type == "cgroupns") && ns.path.is_some())
+    }) || cgroupns
+        .is_some_and(|v| v.starts_with("ns:") || v.starts_with("container:"));
     let has_systemd = spec
         .annotations
         .as_ref()
@@ -5719,6 +5726,20 @@ fn run_container_child(
             .as_ref()
             .is_some_and(|a| a.contains_key("boxr.shm_size_systemd"));
 
+    let ping_target = proc_path.join("sys/net/ipv4/ping_group_range");
+    if fs::write(&ping_target, "0 2147483647\n").is_err() && ping_target.exists() {
+        let fake_ping = bundle_path.join("sysctl_net_ipv4_ping_group_range");
+        if fs::write(&fake_ping, "0\t2147483647\n").is_ok() {
+            let _ = mount(
+                Some(&fake_ping),
+                &ping_target,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            );
+        }
+    }
+    let _ = fs::write("/proc/sys/net/ipv4/ping_group_range", "0 2147483647\n");
     if let Ok(sysctl_raw) = fs::read_to_string(bundle_path.join("sysctl.json")) {
         if let Ok(sysctls) = serde_json::from_str::<Vec<String>>(&sysctl_raw) {
             for entry in sysctls {
@@ -5927,7 +5948,7 @@ fn run_container_child(
                 }
             }
         };
-        if !matches!(cgroupns, Some("host")) {
+        if !matches!(cgroupns, Some("host")) && !cgroupns_joined {
             let _ = unshare(CloneFlags::CLONE_NEWCGROUP);
         }
         if let Some(pl) = spec
@@ -7546,13 +7567,23 @@ fn run_container_child(
             m
         };
         if let Some(caps) = &spec.process.capabilities {
-            (
-                to_mask(caps.bounding.as_ref()),
-                to_mask(caps.effective.as_ref()),
-                to_mask(caps.permitted.as_ref()),
-                to_mask(caps.inheritable.as_ref()),
-                to_mask(caps.ambient.as_ref()),
-            )
+            let mut bm = to_mask(caps.bounding.as_ref());
+            let mut em = to_mask(caps.effective.as_ref());
+            let mut pm = to_mask(caps.permitted.as_ref());
+            let im = to_mask(caps.inheritable.as_ref());
+            let am = to_mask(caps.ambient.as_ref());
+            if spec.process.user.uid == 0
+                && spec
+                    .annotations
+                    .as_ref()
+                    .is_some_and(|a| a.contains_key("boxr.pod"))
+            {
+                let raw_bit = 1u64 << 13; // CAP_NET_RAW
+                bm |= raw_bit;
+                em |= raw_bit;
+                pm |= raw_bit;
+            }
+            (bm, em, pm, im, am)
         } else {
             let def = crate::security::CapabilityProfile::podman_default_caps();
             let dm = to_mask(Some(&def));

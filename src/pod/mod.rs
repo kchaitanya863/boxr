@@ -452,7 +452,10 @@ impl PodStore {
                     {
                         if pod.containers.is_empty()
                             && pod.status == "Running"
-                            && pod.labels.get("boxr.pod.explicit_start").map(|s| s.as_str())
+                            && pod
+                                .labels
+                                .get("boxr.pod.explicit_start")
+                                .map(|s| s.as_str())
                                 == Some("true")
                             && pod.network.as_deref() != Some("host")
                             && matches!(infra.status, ContainerStatus::Running)

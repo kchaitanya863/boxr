@@ -4730,7 +4730,10 @@ fn check_duplicate_mount_destinations(
         let dst = if dst.is_empty() { "/".to_string() } else { dst };
         if let Some(prev_src) = seen.get(&dst) {
             if prev_src != &src_key {
-                cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+                cli::usage_errors::exit_usage_error(format!(
+                    "{}: duplicate mount destination",
+                    dst
+                ));
             }
         } else {
             seen.insert(dst, src_key);
@@ -4769,7 +4772,10 @@ fn check_duplicate_mount_destinations(
         let src_key = format!("tmpfs:{}", t.trim());
         if let Some(prev_src) = seen.get(&dst) {
             if prev_src != &src_key {
-                cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+                cli::usage_errors::exit_usage_error(format!(
+                    "{}: duplicate mount destination",
+                    dst
+                ));
             }
         } else {
             seen.insert(dst, src_key);
@@ -10866,17 +10872,17 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     #[cfg(unix)]
                     {
                         let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
-                        let conmon_alive =
-                            if let Ok(cp_str) = std::fs::read_to_string(bundle_path.join("conmon.pid"))
-                            {
-                                cp_str
-                                    .trim()
-                                    .parse::<i32>()
-                                    .map(|cp| cp > 0 && unsafe { libc::kill(cp, 0) == 0 })
-                                    .unwrap_or(false)
-                            } else {
-                                false
-                            };
+                        let conmon_alive = if let Ok(cp_str) =
+                            std::fs::read_to_string(bundle_path.join("conmon.pid"))
+                        {
+                            cp_str
+                                .trim()
+                                .parse::<i32>()
+                                .map(|cp| cp > 0 && unsafe { libc::kill(cp, 0) == 0 })
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
                         if !conmon_alive {
                             let exitcode_file = bundle_path.join("boxr-exitcode");
                             if exitcode_file.exists() {
@@ -17813,7 +17819,7 @@ fn remove_container_opts_inner(
     };
 
     let c_annotations = load_container_labels_from_bundle(&c.bundle_path);
-    if c_annotations.get("boxr.is_service").map(|s| s.as_str()) == Some("true") {
+    if print_removed && c_annotations.get("boxr.is_service").map(|s| s.as_str()) == Some("true") {
         if let Some(pods_csv) = c_annotations.get("boxr.service_pods") {
             let p_store = pod::PodStore::new();
             let active_pods: Vec<&str> = pods_csv
@@ -23670,7 +23676,7 @@ fn load_container_labels_from_bundle(bundle_path: &str) -> HashMap<String, Strin
             if let Some(ann) = v.get("annotations").and_then(|a| a.as_object()) {
                 for (k, val) in ann {
                     if let Some(s) = val.as_str() {
-                        labels_map.insert(k.clone(), s.to_string());
+                        labels_map.entry(k.clone()).or_insert_with(|| s.to_string());
                     }
                 }
             }
@@ -24466,7 +24472,13 @@ fn apply_ps_container_format_template(
 }
 
 fn apply_ps_pod_format_template(template: &str, p: &pod::PodRecord) -> String {
-    let labels_flat = ps_labels_string(&p.labels);
+    let user_labels: HashMap<String, String> = p
+        .labels
+        .iter()
+        .filter(|(k, _)| !k.starts_with("boxr."))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let labels_flat = ps_labels_string(&user_labels);
     let short_id = &p.id[..12.min(p.id.len())];
     let mut line = template.to_string();
     for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
@@ -24765,7 +24777,7 @@ fn apply_inspect_format_template(template: &str, value: &serde_json::Value) -> S
         let rendered = evaluate_simple_template(token, value);
         out.replace_range(start..end, &rendered);
     }
-    out.replace("\\n", "\n")
+    out
 }
 
 fn evaluate_go_template_conditionals(template: &str, value: &serde_json::Value) -> String {
@@ -24818,7 +24830,7 @@ fn evaluate_go_template_conditionals(template: &str, value: &serde_json::Value) 
 }
 
 fn evaluate_go_template_multi(template: &str, value: &serde_json::Value) -> String {
-    let mut out = template.to_string();
+    let mut out = template.replace("\\n", "\n");
     while let Some(start) = out.find("{{") {
         let Some(rel_end) = out[start..].find("}}") else {
             break;
@@ -24828,7 +24840,7 @@ fn evaluate_go_template_multi(template: &str, value: &serde_json::Value) -> Stri
         let rendered = evaluate_simple_template(token, value);
         out.replace_range(start..end, &rendered);
     }
-    out.replace("\\n", "\n")
+    out
 }
 
 fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String {
@@ -26158,7 +26170,24 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
                 && !rp.join("bin/sleep").exists()
                 && !rp.join("usr/bin/sleep").exists()
         });
-    let (entrypoint_override, infra_cmd) = if has_pause_only {
+    let (entrypoint_override, infra_cmd) = if let Some(cmd_str) = &pod.infra_command {
+        let parts: Vec<String> = cmd_str.split_whitespace().map(|s| s.to_string()).collect();
+        if let Some((first, rest)) = parts.split_first() {
+            let bin_exists =
+                find_image_with_shortname(&image_store, &image_ref, None).is_some_and(|img| {
+                    let rp = Path::new(&img.rootfs_path);
+                    let rel = first.trim_start_matches('/');
+                    !rel.is_empty() && rp.join(rel).exists()
+                });
+            if bin_exists {
+                (Some(first.clone()), rest.to_vec())
+            } else {
+                (Some("sleep".to_string()), vec!["86400".to_string()])
+            }
+        } else {
+            (Some("sleep".to_string()), vec!["86400".to_string()])
+        }
+    } else if has_pause_only {
         (Some("/pause".to_string()), Vec::new())
     } else {
         (Some("sleep".to_string()), vec!["86400".to_string()])
@@ -27824,7 +27853,11 @@ fn generate_systemd_for_container(
         }
     }
 
-    let name_or_id = if name_flag { &cont.name } else { &cont.id };
+    let name_or_id = if name_flag || is_new {
+        &cont.name
+    } else {
+        &cont.id
+    };
     let service_name = if container_prefix.is_empty() {
         name_or_id.clone()
     } else {
@@ -28344,7 +28377,11 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                     if template {
                         cli::usage_errors::exit_usage_error("--template is not supported for pods");
                     }
-                    let pod_name_or_id = if name_flag { &pod.name } else { &pod.id };
+                    let pod_name_or_id = if name_flag || is_new {
+                        &pod.name
+                    } else {
+                        &pod.id
+                    };
                     let pod_service_name = if pod_prefix.is_empty() {
                         pod_name_or_id.clone()
                     } else {
@@ -28834,15 +28871,17 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
         for t in tasks.iter_mut() {
             if t.policy == "local" {
                 let current_id = find_image_with_shortname(&ImageStore::new(), &t.raw_image, None)
-                    .map(|img| {
-                        if img.id.starts_with("sha256:") {
-                            img.id
-                        } else {
-                            format!("sha256:{}", img.id)
-                        }
-                    })
+                    .map(|img| img.full_hex_id())
                     .unwrap_or_default();
-                let changed = !current_id.is_empty() && current_id != t.old_image_id;
+                let old_clean = t
+                    .old_image_id
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&t.old_image_id);
+                let cur_clean = current_id.strip_prefix("sha256:").unwrap_or(&current_id);
+                let changed = !cur_clean.is_empty()
+                    && cur_clean != old_clean
+                    && !cur_clean.starts_with(old_clean)
+                    && !old_clean.starts_with(cur_clean);
                 if changed {
                     if args.dry_run {
                         t.status = "pending".to_string();
@@ -28952,11 +28991,11 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
                     .old_image_id
                     .strip_prefix("sha256:")
                     .unwrap_or(&t.old_image_id);
-                if let Some(old_img) = store
-                    .list()
-                    .into_iter()
-                    .find(|i| i.id.starts_with(short_old))
-                {
+                if let Some(old_img) = store.list().into_iter().find(|i| {
+                    i.id.starts_with(short_old)
+                        || short_old.starts_with(&i.id)
+                        || i.full_hex_id() == short_old
+                }) {
                     let parsed = oci::reference::ImageReference::parse(&t.raw_image).unwrap_or(
                         oci::reference::ImageReference {
                             registry: "localhost".to_string(),
@@ -29313,7 +29352,7 @@ pub async fn run_healthcheck_with_options(
 
     if exit_code != 0 {
         if !from_supervisor {
-            if status == health::HealthStatus::Starting {
+            if start_period_active && health_cfg.start_period_secs > 0 {
                 println!("starting");
             } else {
                 println!("unhealthy");
