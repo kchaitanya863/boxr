@@ -1,6 +1,6 @@
 [package]
 name = "boxr"
-version = "0.1.61"
+version = "0.1.62"
 edition = "2024"
 description = "A fast, lightweight OCI container engine and runtime written in Rust"
 authors = ["Boxr Contributors"]
