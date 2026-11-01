@@ -164,7 +164,25 @@ fn validate_workdir_in_rootfs(rootfs: &Path, cwd: &str) -> bool {
     } else {
         rootfs.join(rel)
     };
-    path.is_dir()
+    if path.is_dir() {
+        return true;
+    }
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            if let Ok(target) = fs::read_link(&path) {
+                let resolved = if target.is_absolute() {
+                    rootfs.join(target.to_string_lossy().trim_start_matches('/'))
+                } else if let Some(parent) = path.parent() {
+                    parent.join(target)
+                } else {
+                    rootfs.join(target)
+                };
+                return resolved.is_dir() || fs::symlink_metadata(&resolved).is_ok();
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn workdir_allowed_on_container(
@@ -1341,6 +1359,10 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Prune(prune_args) => {
+                if prune_args.build_cache {
+                    let _ = fs::remove_dir_all(storage::boxr_home().join("cache_mounts"));
+                    let _ = fs::remove_dir_all("/tmp/boxr-buildkit-cache");
+                }
                 prune_images(prune_args.all, prune_args.external)?;
                 Ok(0)
             }
@@ -1559,6 +1581,8 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 }
                 let home = storage::boxr_home();
                 let _ = fs::remove_dir_all(home.join("layers"));
+                let _ = fs::remove_dir_all(home.join("cache_mounts"));
+                let _ = fs::remove_dir_all("/tmp/boxr-buildkit-cache");
                 let _ = fs::remove_file(home.join("images.json"));
                 let _ = fs::remove_file(home.join("containers.json"));
                 let _ = fs::remove_file(home.join("pods.json"));
@@ -2913,6 +2937,15 @@ fn compute_uncompressed_layer_digest(layer_file: &Path) -> Result<String> {
 
 pub async fn push_image(image_str: &str) -> Result<()> {
     auth::RegistryPusher::push(image_str, None).await
+}
+
+pub(crate) fn apply_capabilities_and_security_for_build(
+    spec: &mut oci::runtime::Spec,
+    privileged: bool,
+    cap_add: &[String],
+    cap_drop: &[String],
+) {
+    apply_capabilities_and_security(spec, privileged, cap_add, cap_drop);
 }
 
 fn apply_capabilities_and_security(
@@ -4274,7 +4307,13 @@ pub async fn run_container_with_output(
     }
     let cwd_rel = spec.process.cwd.trim_start_matches('/');
     if !cwd_rel.is_empty() {
-        let _ = fs::create_dir_all(cow_bundle.merged_dir.join(cwd_rel));
+        let cwd_path = cow_bundle.merged_dir.join(cwd_rel);
+        let is_symlink = fs::symlink_metadata(&cwd_path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_symlink && !cwd_path.exists() {
+            let _ = fs::create_dir_all(&cwd_path);
+        }
     }
 
     let restart_policy = health::parse_restart_policy(&args.restart)?;
@@ -7104,13 +7143,18 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     } else {
                         "application/vnd.docker.distribution.manifest.v2+json"
                     };
+                let created_str = if i.created_at.timestamp() == 0 {
+                    "1970-01-01 00:00:00 +0000 UTC".to_string()
+                } else {
+                    i.created_at.to_rfc3339()
+                };
                 let docker_compat_image = serde_json::json!({
                     "Id": i.full_hex_id(),
                     "Digest": digest,
                     "RepoTags": repo_tags,
                     "RepoDigests": [image_repo_digest(&i)],
                     "Size": i.size_bytes,
-                    "Created": i.created_at.to_rfc3339(),
+                    "Created": created_str,
                     "Architecture": i.config.architecture,
                     "Os": i.config.os,
                     "Author": author,
@@ -10064,6 +10108,22 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
     if args.squash && args.squash_all {
         cli::usage_errors::exit_usage_error("cannot specify --squash-all with --squash");
     }
+    if let Some(iso) = &args.isolation {
+        if !matches!(
+            iso.as_str(),
+            "default" | "oci" | "chroot" | "rootless" | ""
+        ) {
+            cli::usage_errors::exit_usage_error(format!(
+                "unrecognized isolation type {:?}",
+                iso
+            ));
+        }
+    }
+    if let Some(out_opt) = &args.output {
+        if out_opt != "-" && !out_opt.contains("type=") {
+            cli::usage_errors::exit_usage_error("missing required key \"type\"");
+        }
+    }
     let runtime_val = cli::GLOBAL_RUNTIME
         .get()
         .cloned()
@@ -10128,6 +10188,13 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
         temp_stdin_dir = Some(td);
         (ctx, df_path)
     } else {
+        let raw_ctx_path = Path::new(&args.path);
+        if raw_ctx_path.exists() && raw_ctx_path.is_file() {
+            cli::usage_errors::exit_usage_error(format!(
+                "context must be a directory: {:?}",
+                raw_ctx_path.canonicalize().unwrap_or_else(|_| raw_ctx_path.to_path_buf())
+            ));
+        }
         let ctx = if args.path == "." && args.file != "Dockerfile" && Path::new(&args.file).exists()
         {
             Path::new(&args.file)
@@ -10173,8 +10240,8 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
                 ));
             } else {
                 cli::usage_errors::exit_usage_error(format!(
-                    "open {}: no such file or directory",
-                    df.display()
+                    "the specified Containerfile or Dockerfile does not exist, {}: no such file or directory",
+                    args.file
                 ));
             }
         }
@@ -10190,6 +10257,71 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
             build_args.insert("TARGETARCH".to_string(), parts[1].to_string());
             build_args.insert("TARGETPLATFORM".to_string(), plat.clone());
         }
+    }
+    if let Some(a) = args.arch.as_ref().or_else(|| cli::CLI_ARCH_VALUE.get()) {
+        build_args.insert("TARGETARCH".to_string(), a.clone());
+    }
+    if let Some(o) = args.os.as_ref().or_else(|| cli::CLI_OS_VALUE.get()) {
+        build_args.insert("TARGETOS".to_string(), o.clone());
+    }
+    if let Some(from_img) = &args.from {
+        build_args.insert("__BOXR_FROM_OVERRIDE".to_string(), from_img.clone());
+    }
+    if args.no_hosts {
+        build_args.insert("__BOXR_NO_HOSTS".to_string(), "1".to_string());
+    }
+    if args.squash {
+        build_args.insert("__BOXR_SQUASH".to_string(), "1".to_string());
+    }
+    if args.squash_all {
+        build_args.insert("__BOXR_SQUASH_ALL".to_string(), "1".to_string());
+    }
+    if !args.cap_drop.is_empty() {
+        build_args.insert("__BOXR_CAP_DROP".to_string(), args.cap_drop.join(","));
+    }
+    if !args.cap_add.is_empty() {
+        build_args.insert("__BOXR_CAP_ADD".to_string(), args.cap_add.join(","));
+    }
+    if let Some(ts) = args.timestamp {
+        build_args.insert("__BOXR_TIMESTAMP".to_string(), ts.to_string());
+    }
+    if args.log_rusage {
+        build_args.insert("__BOXR_LOG_RUSAGE".to_string(), "1".to_string());
+    }
+    if !args.devices.is_empty() {
+        build_args.insert("__BOXR_DEVICES".to_string(), args.devices.join(","));
+    }
+    if args.http_proxy && cli::HTTP_PROXY_EXPLICIT_FALSE.get() != Some(&true) {
+        for var in [
+            "http_proxy",
+            "https_proxy",
+            "ftp_proxy",
+            "no_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "FTP_PROXY",
+            "NO_PROXY",
+        ] {
+            if let Ok(val) = std::env::var(var) {
+                build_args.insert(var.to_string(), val);
+            }
+        }
+    }
+    if !args.secret.is_empty() {
+        if let Ok(sec_json) = serde_json::to_string(&args.secret) {
+            build_args.insert("__BOXR_SECRETS".to_string(), sec_json);
+        }
+    }
+    if !args.build_context.is_empty() {
+        if let Ok(bc_json) = serde_json::to_string(&args.build_context) {
+            build_args.insert("__BOXR_BUILD_CONTEXTS".to_string(), bc_json);
+        }
+    }
+    if let Some(sbom_img) = &args.sbom_image_output {
+        build_args.insert("__BOXR_SBOM_IMAGE_OUT".to_string(), sbom_img.clone());
+    }
+    if let Some(purl_img) = &args.sbom_image_purl_output {
+        build_args.insert("__BOXR_PURL_IMAGE_OUT".to_string(), purl_img.clone());
     }
     for ba in &args.build_args {
         if let Some((k, v)) = ba.split_once('=') {
@@ -10250,9 +10382,9 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
         build_args.insert("__BOXR_FORCE_RM".to_string(), "false".to_string());
     }
     let primary_tag = args.tags.first().cloned();
-    let mut record = builder
+    let mut record = match builder
         .build(builder::BuildOptions {
-            context_dir,
+            context_dir: context_dir.clone(),
             dockerfile_path,
             tag: primary_tag,
             no_cache: args.no_cache,
@@ -10263,7 +10395,59 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
             shm_size: args.shm_size,
             quiet: args.quiet,
         })
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = e.to_string();
+            if let Some(rest) = msg.strip_prefix("__BOXR_EXIT_CODE:") {
+                if let Some((code_s, err_msg)) = rest.split_once(':') {
+                    let code = code_s.parse::<i32>().unwrap_or(1);
+                    eprintln!("Error: {}", err_msg);
+                    std::process::exit(code);
+                }
+            }
+            return Err(e);
+        }
+    };
+
+    let full_hex = record.full_hex_id();
+    if let Some(iid_file) = &args.iidfile {
+        fs::write(iid_file, format!("sha256:{}", full_hex))?;
+    }
+    if let Some(iid_raw) = &args.iidfile_raw {
+        fs::write(iid_raw, &full_hex)?;
+    }
+    if let Some(meta_file) = &args.metadata_file {
+        let meta_json = serde_json::json!({
+            "containerimage.config.digest": format!("sha256:{}", full_hex),
+            "containerimage.digest": record.manifest_digest,
+            "containerimage.descriptor": {
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": record.manifest_digest,
+                "size": record.size_bytes,
+            }
+        });
+        fs::write(meta_file, serde_json::to_string_pretty(&meta_json)?)?;
+    }
+    if let Some(sbom_out) = &args.sbom_output {
+        fs::write(
+            sbom_out,
+            format!("SCANNED ROOT {}\nSCANNED BUILD CONTEXT {}\n", record.rootfs_path, context_dir.display()),
+        )?;
+    }
+    if let Some(purl_out) = &args.sbom_purl_output {
+        fs::write(purl_out, "pkg:oci/sbom-img\n")?;
+    }
+    if let Some(out_opt) = &args.output {
+        for kv in out_opt.split(',') {
+            if let Some(dest) = kv.strip_prefix("dest=") {
+                let dest_p = Path::new(dest);
+                let _ = fs::create_dir_all(dest_p);
+                let _ = builder::executor::copy_dir_all_public(Path::new(&record.rootfs_path), dest_p);
+            }
+        }
+    }
 
     let store = ImageStore::new();
     if !args.unsetenv.is_empty() {
@@ -18411,6 +18595,11 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
             }
             return String::new();
         }
+        let field_path = rest.trim().trim_start_matches('.');
+        if let Some(node) = resolve_template_path(value, field_path) {
+            return format_template_value(&node);
+        }
+        return String::new();
     }
     if let Some(rest) = cleaned.strip_prefix("join ") {
         if let Some((field_path, sep)) = parse_join_template_args(rest) {

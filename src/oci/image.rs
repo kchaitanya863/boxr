@@ -502,10 +502,14 @@ pub fn unpack_archive_safely<R: Read>(
             if parent.exists() {
                 let canon_parent = parent.canonicalize()?;
                 if !canon_parent.starts_with(&canon_target) {
-                    return Err(anyhow!(
-                        "Tar-slip path traversal rejected: ancestor {:?} resolves outside target directory",
-                        parent
-                    ));
+                    if let Ok(meta) = fs::symlink_metadata(parent) {
+                        if meta.file_type().is_symlink() {
+                            return Err(anyhow!(
+                                "Tar-slip path traversal rejected: ancestor {:?} resolves outside target directory",
+                                parent
+                            ));
+                        }
+                    }
                 }
                 break;
             }
@@ -524,8 +528,21 @@ pub fn unpack_archive_safely<R: Read>(
         // /etc/ssl/certs), incorrectly flagging legitimate container
         // absolute symlinks (issue #407).
         if !entry.header().entry_type().is_symlink() && dest.exists() {
+            if let Ok(meta) = fs::symlink_metadata(&dest) {
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+            }
             let canon_dest = dest.canonicalize()?;
             if !canon_dest.starts_with(&canon_target) {
+                if let Ok(rel) = dest.strip_prefix(target_dir) {
+                    if rel
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                    {
+                        continue;
+                    }
+                }
                 let _ = fs::remove_file(&dest);
                 return Err(anyhow!(
                     "Archive entry escapes target directory: {:?}",

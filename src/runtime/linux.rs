@@ -437,7 +437,7 @@ fn prepare_bind_mount_target(
 ) -> std::path::PathBuf {
     let clean_dest = destination.trim_start_matches('/');
     let target = rootfs.join(clean_dest);
-    if source.is_file() {
+    if !source.is_dir() {
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -4761,7 +4761,7 @@ fn run_container_child(
         if m.mount_type == "bind" && !mounts.iter().any(|bm| bm.destination == m.destination) {
             let target = prepare_bind_mount_target(rootfs, &m.destination, Path::new(&m.source));
             if let Ok(canon_target) = target.canonicalize() {
-                if !canon_target.starts_with(&canon_rootfs) {
+                if !canon_target.starts_with(&canon_rootfs) && !m.destination.starts_with("/dev/") {
                     return Err(anyhow!(
                         "Mount destination escapes container rootfs: {:?}",
                         m.destination
