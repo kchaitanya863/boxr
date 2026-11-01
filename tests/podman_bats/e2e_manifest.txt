@@ -41,6 +41,12 @@ run_exit_test.go
 run_memory_test.go
 run_staticip_test.go
 run_working_dir_test.go
-
-
+checkpoint_image_test.go
+checkpoint_test.go
+config_test.go
+containers_conf_test.go
+generate_systemd_test.go
+info_test.go
+negative_test.go
+quadlet_test.go
 

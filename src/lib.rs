@@ -2563,6 +2563,23 @@ fn apply_capabilities_and_security(
     cap_drop: &[String],
 ) {
     let mut cap_profile = security::CapabilityProfile::default();
+    let conf_caps = containers_conf_string_array("default_capabilities");
+    if !conf_caps.is_empty() {
+        let normalized_conf: Vec<String> = conf_caps
+            .into_iter()
+            .map(|c| {
+                let up = c.trim().to_uppercase();
+                if up.starts_with("CAP_") {
+                    up
+                } else {
+                    format!("CAP_{}", up)
+                }
+            })
+            .collect();
+        cap_profile.bounding = normalized_conf.clone();
+        cap_profile.effective = normalized_conf.clone();
+        cap_profile.permitted = normalized_conf;
+    }
     if privileged {
         let all_caps: Vec<String> = vec![
             "CAP_CHOWN",
@@ -2952,6 +2969,7 @@ pub async fn run_container_with_output(
     }
 
     apply_containers_conf_defaults(&mut args);
+    validate_run_create_option_conflicts(&args);
     if let Some(adj) = args.oom_score_adj {
         args.oom_score_adj = Some(clamp_rootless_oom_score_adj(adj));
     }
@@ -3184,7 +3202,13 @@ pub async fn run_container_with_output(
         }
     }
     apply_podman_run_env(&mut spec, &args);
-    if let Some(tz) = args.tz.last() {
+    let effective_tz = args
+        .tz
+        .last()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| containers_conf_toml_value("tz"));
+    if let Some(tz) = &effective_tz {
         apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
     }
     if !args.unsetenv_all
@@ -3202,14 +3226,16 @@ pub async fn run_container_with_output(
     apply_read_only_rootfs_config(&args, &mut spec);
 
     if let Some(shm) = &args.shm_size {
-        cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_bytes = cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_kb = (shm_bytes / 1024).max(4);
+        let aligned_kb = (shm_kb / 4) * 4;
         if let Some(m) = spec.mounts.iter_mut().find(|m| m.destination == "/dev/shm") {
             m.options = Some(vec![
                 "nosuid".to_string(),
                 "noexec".to_string(),
                 "nodev".to_string(),
                 "mode=1777".to_string(),
-                format!("size={}", shm),
+                format!("size={}k", aligned_kb),
             ]);
         }
     }
@@ -3639,6 +3665,15 @@ pub async fn run_container_with_output(
         if !sock.is_empty() && args.sdnotify.as_deref() != Some("ignore") {
             annotations.insert("boxr.sdnotify_socket".to_string(), sock);
         }
+    }
+    if let Some(cg_mode) = &args.cgroups {
+        annotations.insert("boxr.cgroups".to_string(), cg_mode.clone());
+    }
+    if !args.sysctl.is_empty() {
+        annotations.insert(
+            "boxr.sysctls".to_string(),
+            serde_json::to_string(&args.sysctl)?,
+        );
     }
     let mut merged_exposed_ports = Vec::new();
     let is_shared_net = args.network.starts_with("container:")
@@ -6396,6 +6431,10 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "PidsLimit": pids_limit,
                         "CgroupManager": cgroup_manager,
                         "CgroupParent": cgroup_parent,
+                        "Cgroups": annotations
+                            .get("boxr.cgroups")
+                            .cloned()
+                            .unwrap_or_else(|| "default".to_string()),
                         "MemorySwappiness": memory_swappiness
                             .map(serde_json::Value::from)
                             .unwrap_or(serde_json::Value::Null),
@@ -7742,14 +7781,22 @@ pub fn kill_container(args: &cli::KillArgs) -> Result<()> {
 }
 
 fn containers_conf_content() -> Option<String> {
+    let mut combined = String::new();
     for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
         if let Ok(path) = std::env::var(var) {
             if let Ok(content) = fs::read_to_string(&path) {
-                return Some(content);
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&content);
             }
         }
     }
-    None
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined)
+    }
 }
 
 /// Default container env entries from `CONTAINERS_CONF*` and `--module` (override replaces `[containers].env`).
@@ -7874,7 +7921,9 @@ pub(crate) fn containers_conf_toml_value(key: &str) -> Option<String> {
         if line.starts_with('#') || line.is_empty() || line.starts_with('[') {
             continue;
         }
-        let (k, v) = line.split_once('=')?;
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         if k.trim() != key {
             continue;
         }
@@ -7899,9 +7948,9 @@ fn containers_conf_bool(key: &str) -> Option<bool> {
     })
 }
 
-fn containers_conf_string_array(key: &str) -> Vec<String> {
+pub(crate) fn containers_conf_string_array(key: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut parse_from = |content: &str| -> Vec<String> {
+    let parse_from = |content: &str| -> Vec<String> {
         let mut res = Vec::new();
         let mut in_arr = false;
         for line in content.lines() {
@@ -7929,8 +7978,15 @@ fn containers_conf_string_array(key: &str) -> Vec<String> {
         }
         res
     };
-    if let Some(content) = containers_conf_content() {
-        out = parse_from(&content);
+    for var in ["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"] {
+        if let Ok(path) = std::env::var(var) {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let entries = parse_from(&content);
+                if !entries.is_empty() {
+                    out = entries;
+                }
+            }
+        }
     }
     for mod_path in &cli::podman_globals::podman_global_options().modules {
         if let Ok(content) = fs::read_to_string(mod_path) {
@@ -8127,12 +8183,17 @@ fn write_prebuilt_resolv_and_hosts(
             .and_then(|p| p.labels.get("boxr.pod.base_hosts_content"))
             .cloned()
             .or_else(|| fs::read_to_string(merged_rootfs.join("etc/hosts")).ok()),
-        Some("") | None => {
-            containers_conf_toml_value("base_hosts_file").and_then(|p| fs::read_to_string(p).ok())
-        }
+        Some("") | None => match containers_conf_toml_value("base_hosts_file").as_deref() {
+            Some("none") => Some(String::new()),
+            Some("image") => fs::read_to_string(merged_rootfs.join("etc/hosts")).ok(),
+            Some(p) if !p.is_empty() => fs::read_to_string(p).ok(),
+            _ => None,
+        },
         Some(custom_path) => fs::read_to_string(custom_path).ok(),
     };
-    let sep = if pod_hosts_file_opt.is_some() {
+    let sep = if pod_hosts_file_opt.is_some()
+        || containers_conf_toml_value("base_hosts_file").is_some()
+    {
         " "
     } else {
         "\t"
@@ -8403,6 +8464,40 @@ fn apply_log_config_annotations(
                 "boxr.journald_capture".to_string(),
                 capture.to_string_lossy().to_string(),
             );
+            let mut raw_tag = args
+                .log_opt
+                .iter()
+                .find_map(|o| o.strip_prefix("tag="))
+                .map(|s| s.to_string())
+                .or_else(|| containers_conf_toml_value("log_tag"))
+                .unwrap_or_default();
+            if raw_tag.contains("{{") {
+                let short_img = args
+                    .image
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(args.image.as_str())
+                    .split(':')
+                    .next()
+                    .unwrap_or(args.image.as_str());
+                let short_id = if container_id.len() > 12 {
+                    &container_id[..12]
+                } else {
+                    container_id
+                };
+                raw_tag = raw_tag
+                    .replace("{{.ImageName}}", short_img)
+                    .replace("{{ .ImageName }}", short_img)
+                    .replace("{{.ImageFullName}}", &args.image)
+                    .replace("{{ .ImageFullName }}", &args.image)
+                    .replace("{{.ID}}", short_id)
+                    .replace("{{ .ID }}", short_id)
+                    .replace("{{.FullID}}", container_id)
+                    .replace("{{ .FullID }}", container_id);
+            }
+            if !raw_tag.is_empty() {
+                annotations.insert("boxr.log_tag".to_string(), raw_tag);
+            }
         } else if driver == "passthrough" || driver == "passthrough-tty" {
             annotations.insert("boxr.attach_stdin".to_string(), "true".to_string());
         }
@@ -8915,6 +9010,18 @@ fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs, contai
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "localhost".to_string());
         spec.hostname = Some(host_hn);
+    } else if containers_conf_bool("container_name_as_hostname") == Some(true) {
+        let cname = args
+            .name
+            .as_ref()
+            .map(|n| ContainerStore::normalize_container_name(n))
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
+        let mut hn = cname.replace('_', "");
+        if hn.len() > 64 {
+            hn.truncate(64);
+        }
+        spec.hostname = Some(hn);
     } else {
         let short_id = if container_id.len() > 12 {
             &container_id[..12]
@@ -9216,10 +9323,69 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
         merged.extend(args.env.drain(..));
         args.env = merged;
     }
-    if (args.network == "auto" || args.network == "default" || args.network.is_empty())
-        && containers_conf_toml_value("default_rootless_network_cmd").as_deref() == Some("pasta")
+    if args.network == "auto" || args.network == "default" || args.network.is_empty() {
+        let is_rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
+        if is_rootless {
+            if let Some(cmd) = containers_conf_toml_value("default_rootless_network_cmd") {
+                if !matches!(cmd.as_str(), "pasta" | "slirp4netns") {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid default_rootless_network_cmd option {:?}",
+                        cmd
+                    ));
+                }
+                if cmd == "pasta" {
+                    args.network = "pasta".to_string();
+                }
+            }
+        }
+        if args.network == "auto" || args.network == "default" || args.network.is_empty() {
+            if let Some(netns) = containers_conf_toml_value("netns") {
+                args.network = netns;
+            }
+        }
+    }
+    if args.ipc.is_none() {
+        args.ipc = containers_conf_toml_value("ipcns");
+    }
+    if args.uts.is_none() {
+        args.uts = containers_conf_toml_value("utsns");
+    }
+    if args.pid.is_none() {
+        args.pid = containers_conf_toml_value("pidns");
+    }
+    if args.cgroupns.is_none() {
+        args.cgroupns = containers_conf_toml_value("cgroupns");
+    }
+    if args.cgroups.is_none() {
+        args.cgroups = containers_conf_toml_value("cgroups");
+    }
+    if args.shm_size.is_none() {
+        args.shm_size = containers_conf_toml_value("shm_size");
+    }
+    let conf_volumes = containers_conf_string_array("volumes");
+    for v in conf_volumes {
+        if !args.volumes.contains(&v) {
+            args.volumes.push(v);
+        }
+    }
+    if args.sysctl.is_empty() {
+        args.sysctl.extend(containers_conf_string_array("default_sysctls"));
+    }
+    if args.tz.is_empty() {
+        if let Some(tz) = containers_conf_toml_value("tz") {
+            args.tz.push(tz);
+        }
+    }
+    let conf_anns = containers_conf_string_array("annotations");
+    for ann in conf_anns {
+        if !args.annotations.contains(&ann) {
+            args.annotations.push(ann);
+        }
+    }
+    if cli::RUN_NO_HOSTS_EXPLICIT_FALSE.get() != Some(&true)
+        && containers_conf_bool("no_hosts") == Some(true)
     {
-        args.network = "pasta".to_string();
+        let _ = cli::RUN_NO_HOSTS.set(true);
     }
     for mod_path in &cli::podman_globals::podman_global_options().modules {
         if let Ok(content) = fs::read_to_string(mod_path) {
@@ -12221,6 +12387,7 @@ async fn create_only_container_after_pod_prep(
     validate_image_record_env(&image_record);
 
     apply_containers_conf_defaults(&mut args);
+    validate_run_create_option_conflicts(&args);
     if let Err(e) = ulimit::validate_ulimit_cli_options(&args.ulimits) {
         cli::usage_errors::exit_usage_error(e.to_string());
     }
@@ -12317,7 +12484,13 @@ async fn create_only_container_after_pod_prep(
         }
     }
     apply_podman_run_env(&mut spec, &args);
-    if let Some(tz) = args.tz.last() {
+    let effective_tz = args
+        .tz
+        .last()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| containers_conf_toml_value("tz"));
+    if let Some(tz) = &effective_tz {
         apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
     }
     if !args.unsetenv_all
@@ -12335,14 +12508,16 @@ async fn create_only_container_after_pod_prep(
     apply_read_only_rootfs_config(&args, &mut spec);
 
     if let Some(shm) = &args.shm_size {
-        cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_bytes = cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_kb = (shm_bytes / 1024).max(4);
+        let aligned_kb = (shm_kb / 4) * 4;
         if let Some(m) = spec.mounts.iter_mut().find(|m| m.destination == "/dev/shm") {
             m.options = Some(vec![
                 "nosuid".to_string(),
                 "noexec".to_string(),
                 "nodev".to_string(),
                 "mode=1777".to_string(),
-                format!("size={}", shm),
+                format!("size={}k", aligned_kb),
             ]);
         }
     }
@@ -12992,6 +13167,15 @@ async fn create_only_container_after_pod_prep(
     )?;
     if !image_id_for_env.is_empty() {
         let _ = fs::write(bundle_dir.join("image_id.txt"), &image_id_for_env);
+    }
+    if let Some(cg_mode) = &args.cgroups {
+        annotations.insert("boxr.cgroups".to_string(), cg_mode.clone());
+    }
+    if !args.sysctl.is_empty() {
+        annotations.insert(
+            "boxr.sysctls".to_string(),
+            serde_json::to_string(&args.sysctl)?,
+        );
     }
     let mut merged_exposed_ports = Vec::new();
     let is_shared_net = args.network.starts_with("container:")
@@ -14158,12 +14342,30 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
         if normalized.is_empty() || normalized == "__EMPTY_FORMAT__" {
             return Ok(());
         }
-        if normalized.eq_ignore_ascii_case("json") || normalized == "{{json .}}" {
+        if normalized.starts_with("{{") && !normalized.ends_with("}}") {
+            cli::usage_errors::exit_usage_error(format!(
+                "template: info:1: unclosed action"
+            ));
+        }
+        let is_json_template = normalized.eq_ignore_ascii_case("json")
+            || (normalized.starts_with("{{")
+                && normalized.ends_with("}}")
+                && matches!(
+                    normalized[2..normalized.len() - 2].trim(),
+                    "json" | "json ."
+                ));
+        if is_json_template {
             let bats_json = cli::info_report::podman_info_json_for_bats(&doc);
             println!("{}", serde_json::to_string_pretty(&bats_json)?);
             return Ok(());
         }
-        println!("{}", render_info_format(fmt, &doc));
+        let has_trim_right = normalized.ends_with("-}}") || normalized.ends_with("- }}");
+        let rendered = render_info_format(fmt, &doc);
+        if has_trim_right {
+            print!("{}", rendered);
+        } else {
+            println!("{}", rendered);
+        }
         return Ok(());
     }
 
@@ -16574,9 +16776,33 @@ fn evaluate_go_template_multi(template: &str, value: &serde_json::Value) -> Stri
 }
 
 fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String {
-    let mut cleaned = template.trim();
+    let trimmed = template.trim();
+    if trimmed.contains("}} {{") {
+        let parts: Vec<String> = trimmed
+            .split("}} {{")
+            .enumerate()
+            .map(|(idx, part)| {
+                let mut p = part.to_string();
+                if idx > 0 {
+                    p = format!("{{{{{p}");
+                }
+                if !p.ends_with("}}") {
+                    p.push_str("}}");
+                }
+                evaluate_simple_template(&p, value)
+            })
+            .collect();
+        return parts.join(" ");
+    }
+    let mut cleaned = trimmed;
     if cleaned.starts_with("{{") && cleaned.ends_with("}}") {
-        cleaned = cleaned[2..cleaned.len() - 2].trim();
+        cleaned = cleaned[2..cleaned.len() - 2]
+            .trim()
+            .trim_start_matches('-')
+            .trim_end_matches('-')
+            .trim();
+    } else if !cleaned.starts_with('.') {
+        return cleaned.to_string();
     }
     if cleaned == "\"\\n\"" {
         return String::new();
@@ -19025,8 +19251,24 @@ fn generate_systemd_for_container(
     let mut extra_envs = Vec::new();
     let mut add_envs = Vec::new();
     for e in extra_env_flags {
-        if e.contains('=') {
-            add_envs.push(escape_systemd_arg(e));
+        if let Some((k, v)) = e.split_once('=') {
+            if k.is_empty() {
+                cli::usage_errors::exit_usage_error(format!(
+                    "invalid variable {:?}: variable name is empty",
+                    e
+                ));
+            }
+            add_envs.push(escape_systemd_arg(&format!("{k}={v}")));
+        } else if e.is_empty() {
+            cli::usage_errors::exit_usage_error("invalid variable \"\": variable name is empty");
+        } else if let Some(prefix) = e.strip_suffix('*') {
+            let mut vars: Vec<(String, String)> = std::env::vars()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .collect();
+            vars.sort_by(|a, b| a.0.cmp(&b.0));
+            for (k, v) in vars {
+                add_envs.push(escape_systemd_arg(&format!("{k}={v}")));
+            }
         } else if let Ok(v) = std::env::var(e) {
             add_envs.push(escape_systemd_arg(&format!("{}={}", e, v)));
         }
@@ -19043,6 +19285,30 @@ fn generate_systemd_for_container(
             if a == "create" || a == "run" {
                 sub_idx = Some(i + 1);
                 break;
+            }
+        }
+        let mut root_flags = Vec::new();
+        if !cli::podman_globals::podman_global_options().remote {
+            if let Some(idx) = sub_idx {
+                let pre = &create_cmd[1..idx - 1];
+                let mut m = 0;
+                while m < pre.len() {
+                    if pre[m] == "--root" || pre[m] == "--runroot" || pre[m] == "--storage-driver" || pre[m] == "--storage-opt" {
+                        if m + 1 < pre.len() {
+                            root_flags.push(pre[m].clone());
+                            root_flags.push(pre[m + 1].clone());
+                            m += 2;
+                            continue;
+                        }
+                    } else if pre[m].starts_with("--root=")
+                        || pre[m].starts_with("--runroot=")
+                        || pre[m].starts_with("--storage-driver=")
+                        || pre[m].starts_with("--storage-opt=")
+                    {
+                        root_flags.push(pre[m].clone());
+                    }
+                    m += 1;
+                }
             }
         }
         let remaining = if let Some(idx) = sub_idx {
@@ -19169,13 +19435,14 @@ fn generate_systemd_for_container(
             k += 1;
         }
 
-        let mut start_cmd = vec![
-            exe.clone(),
+        let mut start_cmd = vec![exe.clone()];
+        start_cmd.extend(root_flags.clone());
+        start_cmd.extend([
             "run".to_string(),
             "--cidfile=%t/%n.ctr-id".to_string(),
             "--cgroups=no-conmon".to_string(),
             "--rm".to_string(),
-        ];
+        ]);
         if let Some(pif) = pod_id_file {
             start_cmd.push("--pod-id-file".to_string());
             start_cmd.push(pif.to_string());
@@ -19210,16 +19477,19 @@ fn generate_systemd_for_container(
             }
         }
         let exec_start = format_systemd_options(&start_cmd);
-        let exec_stop = format_systemd_options(&[
-            exe.clone(),
+        let mut stop_cmd = vec![exe.clone()];
+        stop_cmd.extend(root_flags.clone());
+        stop_cmd.extend([
             "stop".to_string(),
             "--ignore".to_string(),
             "-t".to_string(),
             stop_timeout.to_string(),
             "--cidfile=%t/%n.ctr-id".to_string(),
         ]);
-        let exec_stop_post = format_systemd_options(&[
-            exe.clone(),
+        let exec_stop = format_systemd_options(&stop_cmd);
+        let mut rm_cmd = vec![exe.clone()];
+        rm_cmd.extend(root_flags);
+        rm_cmd.extend([
             "rm".to_string(),
             "-f".to_string(),
             "--ignore".to_string(),
@@ -19227,6 +19497,7 @@ fn generate_systemd_for_container(
             stop_timeout.to_string(),
             "--cidfile=%t/%n.ctr-id".to_string(),
         ]);
+        let exec_stop_post = format_systemd_options(&rm_cmd);
         (
             exec_start,
             exec_stop,
@@ -19236,15 +19507,11 @@ fn generate_systemd_for_container(
             "all".to_string(),
         )
     } else {
-        let conmon_pf = bundle_path.join("conmon.pid").to_string_lossy().to_string();
+        let userdata_dir = bundle_path.join("userdata");
+        let _ = fs::create_dir_all(&userdata_dir);
+        let conmon_pf = userdata_dir.join("conmon.pid").to_string_lossy().to_string();
         let exec_start = format!("{} start {}", exe, name_or_id);
-        let exec_stop = format_systemd_options(&[
-            exe.clone(),
-            "stop".to_string(),
-            "-t".to_string(),
-            stop_timeout.to_string(),
-            name_or_id.to_string(),
-        ]);
+        let exec_stop = format!("{} stop -t {} {}", exe, stop_timeout, name_or_id);
         let exec_stop_post = exec_stop.clone();
         (
             exec_start,
@@ -19278,7 +19545,12 @@ fn generate_systemd_for_container(
     out.push_str("Documentation=man:podman-generate-systemd(1)\n");
     out.push_str("Wants=network-online.target\n");
     out.push_str("After=network-online.target\n");
-    out.push_str("RequiresMountsFor=%t/containers\n");
+    let run_root = cli::podman_globals::podman_global_options()
+        .runroot
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "%t/containers".to_string());
+    out.push_str(&format!("RequiresMountsFor={}\n", run_root));
     if !bound_to_services.is_empty() {
         let joined = bound_to_services
             .iter()
@@ -19293,6 +19565,9 @@ fn generate_systemd_for_container(
             .join(" ");
         out.push_str(&format!("BindsTo={}\n", joined));
         out.push_str(&format!("After={}\n", joined));
+    }
+    if !wants.is_empty() || !after.is_empty() || !requires.is_empty() {
+        out.push_str("\n# User-defined dependencies\n");
     }
     if !wants.is_empty() {
         out.push_str(&format!("Wants={}\n", wants.join(" ")));
@@ -19366,12 +19641,39 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
             container_prefix,
             pod_prefix,
             separator,
-            format: _,
+            format,
             wants,
             after,
             requires,
             env,
         } => {
+            if let Some(st) = stop_timeout {
+                if st < 0 {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid argument \"{}\" for \"-t, --time\" flag: strconv.ParseUint: parsing \"{}\": invalid syntax",
+                        st, st
+                    ));
+                }
+            }
+            let stop_timeout_u64 = stop_timeout.map(|st| st as u64);
+            let no_header = no_header.unwrap_or(false);
+            if let Some(ref rp) = restart_policy {
+                if !matches!(
+                    rp.as_str(),
+                    "no"
+                        | "on-success"
+                        | "on-failure"
+                        | "on-abnormal"
+                        | "on-watchdog"
+                        | "on-abort"
+                        | "always"
+                ) {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "{} is not a valid restart policy",
+                        rp
+                    ));
+                }
+            }
             eprint!(
                 "\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details.\n"
             );
@@ -19386,6 +19688,8 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                 .as_ref()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let mut json_units: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
 
             for target in containers {
                 if let Some(pod) = p_store.find(&target) {
@@ -19408,6 +19712,18 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                             continue;
                         }
                         if let Some(c) = c_store.find(cid) {
+                            let is_init = fs::read_to_string(
+                                PathBuf::from(&c.bundle_path).join("config.json"),
+                            )
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
+                            .and_then(|sp| sp.annotations)
+                            .is_some_and(|a| a.contains_key("boxr.init_ctr"));
+                            if is_init {
+                                cli::usage_errors::exit_usage_error(
+                                    "cannot generate systemd units for init containers",
+                                );
+                            }
                             let (c_svc, c_content) = generate_systemd_for_container(
                                 &c,
                                 name_flag,
@@ -19416,7 +19732,7 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                                 restart_policy.as_deref(),
                                 restart_sec,
                                 start_timeout,
-                                stop_timeout,
+                                stop_timeout_u64,
                                 no_header,
                                 &container_prefix,
                                 &separator,
@@ -19441,7 +19757,12 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                                 .unwrap_or_else(|_| "/usr/bin/podman".to_string())
                         });
                     let rp = restart_policy.as_deref().unwrap_or("on-failure");
-                    let timeout_stop = 60 + stop_timeout.unwrap_or(10);
+                    let timeout_stop = 60 + stop_timeout_u64.unwrap_or(10);
+                    let run_root = cli::podman_globals::podman_global_options()
+                        .runroot
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "%t/containers".to_string());
 
                     let mut pod_unit = String::new();
                     pod_unit.push_str(&format!("# {}.service\n", pod_service_name));
@@ -19456,20 +19777,44 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                     pod_unit.push_str("Documentation=man:podman-generate-systemd(1)\n");
                     pod_unit.push_str("Wants=network-online.target\n");
                     pod_unit.push_str("After=network-online.target\n");
-                    pod_unit.push_str("RequiresMountsFor=%t/containers\n");
+                    pod_unit.push_str(&format!("RequiresMountsFor={}\n", run_root));
                     if !req_services.is_empty() {
                         let joined = req_services.join(" ");
                         pod_unit.push_str(&format!("Wants={}\n", joined));
                         pod_unit.push_str(&format!("Before={}\n", joined));
                     }
+                    if !wants.is_empty() || !after.is_empty() || !requires.is_empty() {
+                        pod_unit.push_str("\n# User-defined dependencies\n");
+                    }
+                    if !wants.is_empty() {
+                        pod_unit.push_str(&format!("Wants={}\n", wants.join(" ")));
+                    }
+                    if !after.is_empty() {
+                        pod_unit.push_str(&format!("After={}\n", after.join(" ")));
+                    }
+                    if !requires.is_empty() {
+                        pod_unit.push_str(&format!("Requires={}\n", requires.join(" ")));
+                    }
                     pod_unit.push_str("\n[Service]\n");
                     pod_unit.push_str("Environment=PODMAN_SYSTEMD_UNIT=%n\n");
                     pod_unit.push_str(&format!("Restart={}\n", rp));
+                    if let Some(rs) = restart_sec {
+                        if rs > 0 {
+                            pod_unit.push_str(&format!("RestartSec={}\n", rs));
+                        }
+                    }
                     pod_unit.push_str(&format!("TimeoutStopSec={}\n", timeout_stop));
                     if is_new {
+                        let mut label_args = String::new();
+                        let mut sorted_labels: Vec<(&String, &String)> = pod.labels.iter().collect();
+                        sorted_labels.sort_by(|a, b| a.0.cmp(b.0));
+                        for (k, v) in sorted_labels {
+                            let kv = escape_systemd_arg(&format!("{k}={v}"));
+                            label_args.push_str(&format!(" --label {kv}"));
+                        }
                         pod_unit.push_str(&format!(
-                            "ExecStartPre={} pod create --infra-conmon-pidfile {} --pod-id-file {} --exit-policy=stop --name {} --replace\n",
-                            exe, pid_file, pod_id_file, pod.name
+                            "ExecStartPre={} pod create --infra-conmon-pidfile {} --pod-id-file {} --exit-policy=stop --name {}{} --replace\n",
+                            exe, pid_file, pod_id_file, pod.name, label_args
                         ));
                         pod_unit.push_str(&format!(
                             "ExecStart={} pod start --pod-id-file {}\n",
@@ -19485,13 +19830,49 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         ));
                         pod_unit.push_str(&format!("PIDFile={}\n", pid_file));
                     } else {
-                        pod_unit.push_str(&format!("ExecStart={} pod start {}\n", exe, pod.name));
-                        pod_unit.push_str(&format!("ExecStop={} pod stop {}\n", exe, pod.name));
-                        pod_unit.push_str(&format!("ExecStopPost={} pod stop {}\n", exe, pod.name));
+                        let infra_id_or_name = if name_flag {
+                            infra_name.clone()
+                        } else if !pod.infra_container_id.is_empty() {
+                            pod.infra_container_id.clone()
+                        } else {
+                            pod.name.clone()
+                        };
+                        let infra_pidfile = c_store
+                            .find(&pod.infra_container_id)
+                            .map(|ic| {
+                                let ud = PathBuf::from(&ic.bundle_path).join("userdata");
+                                let _ = fs::create_dir_all(&ud);
+                                ud.join("conmon.pid").to_string_lossy().to_string()
+                            })
+                            .unwrap_or_else(|| {
+                                format!("{}/userdata/conmon.pid", run_root)
+                            });
+                        pod_unit.push_str(&format!(
+                            "ExecStart={} start {}\n",
+                            exe, infra_id_or_name
+                        ));
+                        pod_unit.push_str(&format!(
+                            "ExecStop={} stop -t {} {}\n",
+                            exe,
+                            stop_timeout_u64.unwrap_or(10),
+                            infra_id_or_name
+                        ));
+                        pod_unit.push_str(&format!(
+                            "ExecStopPost={} stop -t {} {}\n",
+                            exe,
+                            stop_timeout_u64.unwrap_or(10),
+                            infra_id_or_name
+                        ));
+                        pod_unit.push_str(&format!("PIDFile={}\n", infra_pidfile));
                     }
                     pod_unit.push_str("Type=forking\n\n[Install]\nWantedBy=default.target\n");
 
-                    if files || output.is_some() {
+                    if format.as_deref() == Some("json") {
+                        json_units.insert(pod_service_name, pod_unit);
+                        for (c_svc, c_content) in ctr_units {
+                            json_units.insert(c_svc, c_content);
+                        }
+                    } else if files || output.is_some() {
                         let p_path = out_dir.join(format!("{}.service", pod_service_name));
                         fs::write(&p_path, &pod_unit)?;
                         println!("{}", p_path.display());
@@ -19507,6 +19888,17 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         }
                     }
                 } else if let Some(cont) = c_store.find(&target) {
+                    let is_init =
+                        fs::read_to_string(PathBuf::from(&cont.bundle_path).join("config.json"))
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
+                            .and_then(|sp| sp.annotations)
+                            .is_some_and(|a| a.contains_key("boxr.init_ctr"));
+                    if is_init {
+                        cli::usage_errors::exit_usage_error(
+                            "cannot generate systemd units for init containers",
+                        );
+                    }
                     let (svc_name, unit_content) = generate_systemd_for_container(
                         &cont,
                         name_flag,
@@ -19515,7 +19907,7 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         restart_policy.as_deref(),
                         restart_sec,
                         start_timeout,
-                        stop_timeout,
+                        stop_timeout_u64,
                         no_header,
                         &container_prefix,
                         &separator,
@@ -19526,7 +19918,9 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         &[],
                         None,
                     )?;
-                    if files || output.is_some() {
+                    if format.as_deref() == Some("json") {
+                        json_units.insert(svc_name, unit_content);
+                    } else if files || output.is_some() {
                         let path = out_dir.join(format!("{}.service", svc_name));
                         fs::write(&path, unit_content)?;
                         println!("{}", path.display());
@@ -19535,10 +19929,13 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                     }
                 } else {
                     cli::usage_errors::exit_usage_error(format!(
-                        "no container or pod with name or ID \"{}\" found: no such container",
-                        target
+                        "{} does not refer to a container or pod: no pod with name or ID {} found: no such pod: no container with name or ID \"{}\" found: no such container",
+                        target, target, target
                     ));
                 }
+            }
+            if format.as_deref() == Some("json") {
+                println!("{}", serde_json::to_string_pretty(&json_units)?);
             }
         }
         GenerateAction::Spec(spec_args) => {

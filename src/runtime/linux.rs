@@ -820,6 +820,9 @@ fn prepare_conmon_shim(bundle_path: &Path, spec: &Spec, exe: &Path) -> Result<Pa
         if let Some(cap) = ann.get("boxr.journald_capture") {
             fs::write(bundle_path.join("journald-capture.path"), cap)?;
         }
+        if let Some(tag) = ann.get("boxr.log_tag") {
+            fs::write(bundle_path.join("log-tag.txt"), tag)?;
+        }
     }
     Ok(conmon)
 }
@@ -832,6 +835,35 @@ fn scrub_conmon_parent_env(cmd: &mut std::process::Command) {
     if unsafe { libc::getuid() } != 0 {
         cmd.env_remove("DBUS_SESSION_BUS_ADDRESS");
     }
+}
+
+#[cfg(target_os = "linux")]
+fn journal_line_with_meta(line: &str, cid: &str, tag: &str) {
+    use std::os::unix::net::UnixDatagram;
+
+    if let Ok(sock) = UnixDatagram::unbound() {
+        let mut packet = format!("MESSAGE={}\nPRIORITY=6\n", line);
+        if !cid.is_empty() {
+            let short = if cid.len() > 12 { &cid[..12] } else { cid };
+            packet.push_str(&format!(
+                "CONTAINER_ID={}\nCONTAINER_ID_FULL={}\n",
+                short, cid
+            ));
+        }
+        if !tag.is_empty() {
+            packet.push_str(&format!(
+                "CONTAINER_TAG={}\nSYSLOG_IDENTIFIER={}\n",
+                tag, tag
+            ));
+        }
+        if sock
+            .send_to(packet.as_bytes(), "/run/systemd/journal/socket")
+            .is_ok()
+        {
+            return;
+        }
+    }
+    journal_line(line);
 }
 
 #[cfg(target_os = "linux")]
@@ -877,6 +909,18 @@ fn tee_journald_capture_stream<R: std::io::Read>(
         }
         p
     });
+    let bundle_dir = file.as_ref().and_then(|p| p.parent().map(Path::to_path_buf));
+    let cid = bundle_dir
+        .as_ref()
+        .and_then(|b| b.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let log_tag = bundle_dir
+        .as_ref()
+        .and_then(|b| fs::read_to_string(b.join("log-tag.txt")).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     let mut attach_out: Box<dyn Write + Send> = if attach {
         if stream == "stderr" {
             Box::new(std::io::stderr())
@@ -893,7 +937,7 @@ fn tee_journald_capture_stream<R: std::io::Read>(
             if stream == "stderr" {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            journal_line(trimmed);
+            journal_line_with_meta(trimmed, &cid, &log_tag);
             if let Some(path) = &file {
                 let _ = crate::logging::append_k8s_log_chunk(path, stream, trimmed.as_bytes());
             }
@@ -1026,6 +1070,9 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         }
     }
     fs::write(bundle_path.join("conmon.pid"), conmon_pid.to_string())?;
+    let userdata_dir = bundle_path.join("userdata");
+    let _ = fs::create_dir_all(&userdata_dir);
+    let _ = fs::write(userdata_dir.join("conmon.pid"), conmon_pid.to_string());
 
     let detach = bundle_path.join("conmon-detach.flag").exists();
     let log_driver = fs::read_to_string(bundle_path.join("log-driver.txt"))
@@ -1050,7 +1097,7 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
     cmd.stdin(Stdio::null());
 
     if detach {
-        if file_log {
+        if file_log || journald {
             cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         } else {
             let log_file = fs::File::create(bundle_path.join("logs.txt"))?;
@@ -1095,6 +1142,23 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                         crate::logging::tee_k8s_stream(pipe, path, "stderr", false);
                     })
                 });
+                let status = child.wait()?;
+                if let Some(h) = h_out {
+                    let _ = h.join();
+                }
+                if let Some(h) = h_err {
+                    let _ = h.join();
+                }
+                status
+            } else if detach && journald {
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let cap_out = capture_path.clone();
+                let cap_err = capture_path.clone();
+                let h_out =
+                    stdout.map(|pipe| thread::spawn(move || tee_reader_to_journal(pipe, cap_out, "stdout")));
+                let h_err =
+                    stderr.map(|pipe| thread::spawn(move || tee_reader_to_journal(pipe, cap_err, "stderr")));
                 let status = child.wait()?;
                 if let Some(h) = h_out {
                     let _ = h.join();
@@ -5377,6 +5441,31 @@ fn run_container_child(
         }
     }
 
+    if bundle_path.join("sysctl.json").exists()
+        && spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.network"))
+            .map(|s| s.as_str())
+            != Some("host")
+    {
+        if let Ok(content) = fs::read_to_string(bundle_path.join("sysctl.json")) {
+            if let Ok(sysctls) = serde_json::from_str::<Vec<String>>(&content) {
+                for entry in sysctls {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        let rel = k.trim().replace('.', "/");
+                        let sys_path = rootfs.join("proc/sys").join(&rel);
+                        let val_norm = v.trim().split_whitespace().collect::<Vec<_>>().join("\t");
+                        if fs::write(&sys_path, format!("{}\n", val_norm)).is_err() {
+                            let tmp_file = bundle_path.join(format!("sysctl-{}", k.trim()));
+                            let _ = fs::write(&tmp_file, format!("{}\n", val_norm));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Setup pivot_root
     let oldroot_path = rootfs.join(".oldroot");
     let _ = fs::create_dir_all(&oldroot_path);
@@ -5400,6 +5489,46 @@ fn run_container_child(
         MsFlags::empty(),
         None::<&str>,
     );
+    if let Some(sysctls_json) = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.sysctls"))
+    {
+        if spec
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("boxr.network"))
+            .map(|s| s.as_str())
+            != Some("host")
+        {
+            if let Ok(sysctls) = serde_json::from_str::<Vec<String>>(sysctls_json) {
+                for entry in sysctls {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        let rel = k.trim().replace('.', "/");
+                        let sys_path = Path::new("/proc/sys").join(&rel);
+                        let val_norm = v.trim().split_whitespace().collect::<Vec<_>>().join("\t");
+                        if fs::write(&sys_path, format!("{}\n", val_norm)).is_err() {
+                            if let Some(parent) = sys_path.parent() {
+                                let _ = fs::create_dir_all(parent);
+                            }
+                            let tmp_file =
+                                PathBuf::from(format!("/tmp/.boxr-sysctl-{}", k.trim()));
+                            if fs::write(&tmp_file, format!("{}\n", val_norm)).is_ok() {
+                                let _ = mount(
+                                    Some(&tmp_file),
+                                    &sys_path,
+                                    None::<&str>,
+                                    MsFlags::MS_BIND,
+                                    None::<&str>,
+                                );
+                                let _ = fs::remove_file(&tmp_file);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Some(userns_val) = spec
         .annotations
         .as_ref()
@@ -5685,6 +5814,88 @@ fn run_container_child(
                         libc::prctl(libc::PR_CAPBSET_DROP, cap_num, 0, 0, 0);
                     }
                 }
+            }
+            // Also drop from effective/permitted capability sets via capset(2)
+            #[repr(C)]
+            struct CapUserHeader {
+                version: u32,
+                pid: i32,
+            }
+            #[repr(C)]
+            #[derive(Copy, Clone, Default)]
+            struct CapUserData {
+                effective: u32,
+                permitted: u32,
+                inheritable: u32,
+            }
+            let mut mask: u64 = 0;
+            for cap_num in 0..41u32 {
+                let cap_name = match cap_num {
+                    0 => "CAP_CHOWN",
+                    1 => "CAP_DAC_OVERRIDE",
+                    2 => "CAP_DAC_READ_SEARCH",
+                    3 => "CAP_FOWNER",
+                    4 => "CAP_FSETID",
+                    5 => "CAP_KILL",
+                    6 => "CAP_SETGID",
+                    7 => "CAP_SETUID",
+                    8 => "CAP_SETPCAP",
+                    9 => "CAP_LINUX_IMMUTABLE",
+                    10 => "CAP_NET_BIND_SERVICE",
+                    11 => "CAP_NET_BROADCAST",
+                    12 => "CAP_NET_ADMIN",
+                    13 => "CAP_NET_RAW",
+                    14 => "CAP_IPC_LOCK",
+                    15 => "CAP_IPC_OWNER",
+                    16 => "CAP_SYS_MODULE",
+                    17 => "CAP_SYS_RAWIO",
+                    18 => "CAP_SYS_CHROOT",
+                    19 => "CAP_SYS_PTRACE",
+                    20 => "CAP_SYS_PACCT",
+                    21 => "CAP_SYS_ADMIN",
+                    22 => "CAP_SYS_BOOT",
+                    23 => "CAP_SYS_NICE",
+                    24 => "CAP_SYS_RESOURCE",
+                    25 => "CAP_SYS_TIME",
+                    26 => "CAP_SYS_TTY_CONFIG",
+                    27 => "CAP_MKNOD",
+                    28 => "CAP_LEASE",
+                    29 => "CAP_AUDIT_WRITE",
+                    30 => "CAP_AUDIT_CONTROL",
+                    31 => "CAP_SETFCAP",
+                    32 => "CAP_MAC_OVERRIDE",
+                    33 => "CAP_MAC_ADMIN",
+                    34 => "CAP_SYSLOG",
+                    35 => "CAP_WAKE_ALARM",
+                    36 => "CAP_BLOCK_SUSPEND",
+                    37 => "CAP_AUDIT_READ",
+                    38 => "CAP_PERFMON",
+                    39 => "CAP_BPF",
+                    40 => "CAP_CHECKPOINT_RESTORE",
+                    _ => "",
+                };
+                if !cap_name.is_empty() && bounding.contains(&cap_name.to_string()) {
+                    mask |= 1u64 << cap_num;
+                }
+            }
+            let hdr = CapUserHeader {
+                version: 0x20080522,
+                pid: 0,
+            };
+            let data = [
+                CapUserData {
+                    effective: (mask & 0xffff_ffff) as u32,
+                    permitted: (mask & 0xffff_ffff) as u32,
+                    inheritable: 0,
+                },
+                CapUserData {
+                    effective: (mask >> 32) as u32,
+                    permitted: (mask >> 32) as u32,
+                    inheritable: 0,
+                },
+            ];
+            unsafe {
+                libc::syscall(libc::SYS_capset, &hdr as *const _, data.as_ptr());
             }
         }
     }

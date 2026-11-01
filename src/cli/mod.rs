@@ -50,6 +50,7 @@ pub static HTTP_PROXY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run/create --no-hosts`
 pub static RUN_NO_HOSTS: OnceLock<bool> = OnceLock::new();
+pub static RUN_NO_HOSTS_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run/create --env-host`
 pub static RUN_ENV_HOST: OnceLock<bool> = OnceLock::new();
@@ -414,13 +415,17 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         if i > sub_start
             && !seen_positional_after_sub
-            && a == "--no-hosts"
+            && (a == "--no-hosts" || a == "--no-hosts=true" || a == "--no-hosts=false")
             && (is_run_or_create
                 || sub_name == "build"
                 || (sub_name == "image" && sub2_name == "build")
                 || (sub_name == "pod" && sub2_name == "create"))
         {
-            let _ = RUN_NO_HOSTS.set(true);
+            if a == "--no-hosts=false" {
+                let _ = RUN_NO_HOSTS_EXPLICIT_FALSE.set(true);
+            } else {
+                let _ = RUN_NO_HOSTS.set(true);
+            }
             i += 1;
             continue;
         }
@@ -632,6 +637,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         | "--cpu-percent"
                         | "--io-maxbandwidth"
                         | "--io-maxiops"
+                        | "--init-ctr"
+                        | "--subuidname"
+                        | "--subgidname"
                 );
                 if !prev_takes_val {
                     seen_positional_after_sub = true;

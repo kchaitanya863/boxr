@@ -10,7 +10,8 @@ PODMAN_TESTS_REPO="${PODMAN_TESTS_REPO:-https://github.com/podman-container-tool
 CACHE_DIR="${PODMAN_BATS_CACHE:-$REPO_ROOT/.cache/podman-bats}"
 SRC_DIR="$CACHE_DIR/podman"
 MANIFEST="${E2E_MANIFEST:-$REPO_ROOT/tests/podman_bats/e2e_manifest.txt}"
-WRAPPER="$CACHE_DIR/boxr-podman-wrapper.sh"
+mkdir -p "$CACHE_DIR/bin"
+WRAPPER="$CACHE_DIR/bin/podman"
 
 if [[ ! -x "$BOXR_BIN" ]]; then
   echo "build boxr first: cargo build" >&2
@@ -45,9 +46,11 @@ fi
 exec "$BOXR_BIN" "\$@"
 EOF
 chmod +x "$WRAPPER"
+ln -sf "$WRAPPER" "$CACHE_DIR/boxr-podman-wrapper.sh"
 
 export PODMAN_BINARY="$WRAPPER"
 export PODMAN="$WRAPPER"
+export PODMAN_REMOTE_BINARY="$WRAPPER"
 export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
 
@@ -56,6 +59,11 @@ if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; th
   echo "Installing ginkgo (first run)..."
   make -C "$SRC_DIR" .install.ginkgo
 fi
+if [[ ! -x "$SRC_DIR/bin/quadlet" ]]; then
+  echo "Building bin/quadlet..."
+  make -C "$SRC_DIR" bin/quadlet
+fi
+export QUADLET_BINARY="$SRC_DIR/bin/quadlet"
 
 if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]]; then
   echo "Prebuilding test/e2e/e2e.test..."
