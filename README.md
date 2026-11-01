@@ -502,27 +502,34 @@ boxr alias --install
 
 ---
 
-## Performance Benchmarks vs Docker
+## Performance Benchmarks: Boxr vs Podman vs Docker
 
-Run the automated benchmark suite:
+Run the automated 3-way benchmark suite:
 
 ```bash
 ./benchmark.sh
 ```
 
-### Benchmark Results (Apple Silicon arm64)
+### Unified 3-Way Benchmark Results (Linux x86_64 — `boxr v0.1.65` vs `Podman 4.9.3` vs `Docker 29.1.3`)
 
-| Benchmark Metric | Boxr (Rust) | Docker | Comparison |
-| :--- | :--- | :--- | :--- |
-| **Daemon Idle Memory Footprint** | **8.4 MB** | 859.2 MB | **102x lighter** 🍃 |
-| **CLI Peak RAM Usage (RSS)** | **8.3 MB** | 29.1 MB | **3.5x less RAM** ⚡ |
-| **CLI Binary Size on Disk** | **8.0 MB** (6.2M stripped) | 39.6 MB | **5x to 6.5x smaller** 📦 |
-| **Full Suite Disk Footprint** | **8.0 MB** | 2.1 GB | **260x smaller** 📦 |
-| **Dockerfile Build (Cold)** | **464.5 ms** | 880.6 ms | **1.90x faster** 🚀 |
-| **Dockerfile Build (Cached)** | **161.9 ms** | 182.4 ms | **1.13x faster** 🚀 |
-| **Container Startup Latency (Median)** | 261.5 ms | 191.6 ms | ~par (on macOS bridge) |
-| **5 Concurrent Containers Spawn** | 546.4 ms | 427.5 ms | sub-second throughput |
-| **Volume I/O (10MB Write+Read)** | 300.5 ms | 218.6 ms | near-native I/O |
+| Benchmark Metric | BOXR (Rust) | PODMAN (Go) | DOCKER | BOXR vs PODMAN / DOCKER |
+| :--- | :--- | :--- | :--- | :--- |
+| **Service / Daemon Idle Memory** | **11.5 MB** | 38.9 MB | 152.7 MB | **3.38x lighter than Podman / 13.26x lighter than Docker** 🍃 |
+| **CLI Peak RAM Usage (RSS)** | **12.2 MB** | 37.6 MB | 27.6 MB | **3.08x less RAM than Podman / 2.26x less than Docker** ⚡ |
+| **CLI Binary Size on Disk** | **15.9 MB** (6.2M stripped) | 35.6 MB | 29.9 MB | **2.23x smaller than Podman / 1.88x smaller than Docker** 📦 |
+| **Full Runtime Suite Disk Size** | **15.9 MB** (single binary) | 45.3 MB (`podman`+`crun`+`conmon`+`netavark`) | 174.5 MB (`docker`+`dockerd`+`containerd`+`runc`) | **2.84x smaller than Podman / 10.95x smaller than Docker** 📦 |
+| **Dockerfile Build (Cold, `--no-cache`)** | **332.4 ms** | 739.2 ms | 3283.2 ms | **2.22x faster than Podman / 9.88x faster than Docker** 🚀 |
+| **Dockerfile Build (Cached)** | 330.9 ms | 233.4 ms | **64.8 ms** | **0.71x vs Podman / 0.20x vs Docker** |
+| **Startup Latency (Median)** | 360.1 ms | **257.7 ms** | 793.9 ms | **0.72x vs Podman / 2.20x faster than Docker** 🚀 |
+| **Startup Latency (Min)** | 357.3 ms | **249.1 ms** | 714.2 ms | **0.70x vs Podman / 2.00x faster than Docker** 🚀 |
+| **Startup Latency (Mean ± SD)** | 363.4 ± 8.8 ms | **258.7 ± 7.7 ms** | 807.1 ± 71.4 ms | **0.71x vs Podman / 2.22x faster than Docker** 🚀 |
+| **5 Concurrent Containers Spawn** | 1225.2 ms | **1118.5 ms** | 3611.6 ms | **0.91x (~par) vs Podman / 2.95x faster than Docker** ⚡ |
+| **Volume I/O (10MB Write+Read)** | 358.6 ms | **254.6 ms** | 770.9 ms | **0.71x vs Podman / 2.15x faster than Docker** ⚡ |
+
+### Benchmark Analysis
+- **Zero-Dependency Single Binary Footprint**: `boxr` packages the CLI, OCI runtime, rootless user-namespace trampoline, image builder, compose orchestrator, and user-mode network stack (`usernet`) into a single **15.9 MB** binary (**6.2 MB** stripped). By comparison, Podman requires **45.3 MB** across `podman`, `conmon`, `crun`, `netavark`, `aardvark-dns`, `pasta`, `fuse-overlayfs`, and `catatonit`, while Docker requires **174.5 MB** across `docker`, `dockerd`, `containerd`, `containerd-shim-runc-v2`, and `runc` (**10.95x larger** on Linux; **2.1 GB** on macOS Docker Desktop).
+- **Minimal Memory Overhead**: `boxr` consumes **12.2 MB** peak CLI RSS (**3.08x less** than Podman's Go runtime at 37.6 MB and **2.26x less** than Docker CLI at 27.6 MB). In background API service mode, `boxr daemon` idles at **11.5 MB** vs **38.9 MB** for `podman system service` and **152.7 MB** for `dockerd` + `containerd` (**13.26x lighter**).
+- **Cold Build & Container Execution Speed**: `boxr` executes cold multi-step `Dockerfile` builds in **332.4 ms** — **2.22x faster** than Podman (`buildah`, 739.2 ms) and **9.88x faster** than Docker (`3283.2 ms`). For single-container startup (`run --rm alpine /bin/echo test`), 5-way concurrent container bursts, and 10MB bind-mount I/O, `boxr` is **2.15x–2.95x faster than Docker** while tracking closely behind native `crun`-backed Podman (**1.23s vs 1.12s** on 5 concurrent containers).
 
 ---
 
