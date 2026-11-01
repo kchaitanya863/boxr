@@ -22,35 +22,51 @@ pub struct ResourceLimits {
 impl ResourceLimits {
     pub fn parse_memory(input: &str) -> Result<i64> {
         let input = input.trim().to_lowercase();
-        let (num_str, multiplier) = if let Some(n) = input.strip_suffix("g") {
-            (n, 1024 * 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("gb") {
-            (n, 1024 * 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("m") {
-            (n, 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("mb") {
-            (n, 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("k") {
-            (n, 1024)
-        } else if let Some(n) = input.strip_suffix("kb") {
-            (n, 1024)
+        let (num_str, multiplier) = if let Some(n) = input.strip_suffix("ti") {
+            (n, 1024_i64 * 1024 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("tb").or_else(|| input.strip_suffix("t")) {
+            (n, 1024_i64 * 1024 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("gi") {
+            (n, 1024_i64 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("gb").or_else(|| input.strip_suffix("g")) {
+            (n, 1024_i64 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("mi") {
+            (n, 1024_i64 * 1024)
+        } else if let Some(n) = input.strip_suffix("mb").or_else(|| input.strip_suffix("m")) {
+            (n, 1024_i64 * 1024)
+        } else if let Some(n) = input.strip_suffix("ki") {
+            (n, 1024_i64)
+        } else if let Some(n) = input.strip_suffix("kb").or_else(|| input.strip_suffix("k")) {
+            (n, 1024_i64)
         } else if let Some(n) = input.strip_suffix("b") {
-            (n, 1)
+            (n, 1_i64)
         } else {
-            (input.as_str(), 1)
+            (input.as_str(), 1_i64)
         };
 
-        let val: i64 = num_str.parse().context("Invalid memory limit string")?;
-        if val < 0 {
+        if let Ok(val) = num_str.parse::<i64>() {
+            if val < 0 {
+                return Err(anyhow::anyhow!(
+                    "Memory limit must be non-negative, got '{}'",
+                    input
+                ));
+            }
+            if val == 0 {
+                return Ok(0);
+            }
+            return Ok(val * multiplier);
+        }
+        let val_f: f64 = num_str.parse().context("Invalid memory limit string")?;
+        if !val_f.is_finite() || val_f < 0.0 {
             return Err(anyhow::anyhow!(
                 "Memory limit must be non-negative, got '{}'",
                 input
             ));
         }
-        if val == 0 {
+        if val_f == 0.0 {
             return Ok(0);
         }
-        Ok(val * multiplier)
+        Ok((val_f * multiplier as f64) as i64)
     }
 
     pub fn parse_cpus(input: &str) -> Result<(i64, u64)> {
@@ -105,22 +121,93 @@ impl ResourceManager for CgroupV2Manager {
 impl CgroupV2Manager {
     /// locate or initialize the rootless / system cgroups v2 hierarchy for a container or pod
     pub fn new(container_id: &str) -> Result<Self> {
+        Self::new_with_parent(container_id, None)
+    }
+
+    pub fn new_with_parent(container_id: &str, cgroup_parent: Option<&str>) -> Result<Self> {
         let base_cgroup = Self::detect_cgroup_root();
-        let boxr_cgroup = base_cgroup.join("boxr");
-        let container_cgroup = boxr_cgroup.join(container_id);
+        let parent_cgroup =
+            if let Some(parent) = cgroup_parent.map(str::trim).filter(|s| !s.is_empty()) {
+                if parent.starts_with('/') {
+                    PathBuf::from("/sys/fs/cgroup").join(parent.trim_start_matches('/'))
+                } else {
+                    base_cgroup.join("app.slice").join(parent)
+                }
+            } else {
+                base_cgroup.join("boxr")
+            };
+        let container_cgroup = parent_cgroup.join(container_id);
 
         if base_cgroup.exists() {
-            let _ = fs::create_dir_all(&boxr_cgroup);
+            let _ = fs::create_dir_all(&parent_cgroup);
+            let app_slice = base_cgroup.join("app.slice");
             for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
                 let _ = fs::write(base_cgroup.join("cgroup.subtree_control"), ctl);
-                let _ = fs::write(boxr_cgroup.join("cgroup.subtree_control"), ctl);
+                if app_slice.exists() {
+                    let _ = fs::write(app_slice.join("cgroup.subtree_control"), ctl);
+                }
+                let _ = fs::write(parent_cgroup.join("cgroup.subtree_control"), ctl);
             }
-            let _ = fs::create_dir_all(&container_cgroup);
+            if fs::create_dir_all(&container_cgroup).is_err() {
+                if let Ok(entries) = fs::read_dir(&parent_cgroup) {
+                    for entry in entries.flatten() {
+                        if entry.path().is_dir() {
+                            let _ = fs::remove_dir(entry.path());
+                        }
+                    }
+                }
+                let _ = fs::create_dir_all(&container_cgroup);
+            }
         }
 
         Ok(Self {
             cgroup_path: container_cgroup,
         })
+    }
+
+    pub fn for_bundle(bundle_path: &std::path::Path) -> Result<Self> {
+        let container_id = bundle_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        let mut parent_opt = None;
+        if let Ok(content) = fs::read_to_string(bundle_path.join("config.json")) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(p) = val
+                    .get("annotations")
+                    .and_then(|a| a.get("boxr.cgroup-parent"))
+                    .and_then(|v| v.as_str())
+                {
+                    parent_opt = Some(p.to_string());
+                } else if let Some(p) = val
+                    .get("linux")
+                    .and_then(|l| l.get("cgroupParent"))
+                    .and_then(|v| v.as_str())
+                {
+                    parent_opt = Some(p.to_string());
+                }
+            }
+        }
+        Self::new_with_parent(container_id, parent_opt.as_deref())
+    }
+
+    pub fn check_oom_killed(&self) -> bool {
+        let events_file = self.cgroup_path.join("memory.events");
+        if let Ok(content) = fs::read_to_string(events_file) {
+            for line in content.lines() {
+                if let Some(rest) = line
+                    .strip_prefix("oom_kill ")
+                    .or_else(|| line.strip_prefix("oom "))
+                {
+                    if let Ok(n) = rest.trim().parse::<u64>() {
+                        if n > 0 {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     pub fn was_oom_killed(container_id: &str) -> bool {
@@ -153,6 +240,10 @@ impl CgroupV2Manager {
         Self {
             cgroup_path: container_cgroup,
         }
+    }
+
+    pub fn from_path(cgroup_path: PathBuf) -> Self {
+        Self { cgroup_path }
     }
 
     pub fn cgroup_path(&self) -> &std::path::Path {
@@ -247,11 +338,18 @@ impl CgroupV2Manager {
             let _ = fs::write(self.cgroup_path.join("cpu.weight"), weight.to_string());
         }
 
-        // Apply CPU quota (cgroups v2 and v1)
-        if let (Some(quota), Some(period)) = (limits.cpu_quota_us, limits.cpu_period_us) {
-            let val = format!("{} {}", quota, period);
+        // Apply CPU quota/period (cgroups v2 and v1)
+        if limits.cpu_quota_us.is_some() || limits.cpu_period_us.is_some() {
+            let quota_str = match limits.cpu_quota_us {
+                Some(q) if q > 0 => q.to_string(),
+                _ => "max".to_string(),
+            };
+            let period = limits.cpu_period_us.unwrap_or(100_000);
+            let val = format!("{} {}", quota_str, period);
             let _ = fs::write(self.cgroup_path.join("cpu.max"), val);
-            let _ = fs::write(self.cgroup_path.join("cpu.cfs_quota_us"), quota.to_string());
+            if let Some(quota) = limits.cpu_quota_us {
+                let _ = fs::write(self.cgroup_path.join("cpu.cfs_quota_us"), quota.to_string());
+            }
             let _ = fs::write(
                 self.cgroup_path.join("cpu.cfs_period_us"),
                 period.to_string(),
@@ -301,40 +399,147 @@ impl CgroupV2Manager {
 
     /// Attach a process ID to this cgroup
     pub fn add_process(&self, pid: i32) -> Result<()> {
+        self.add_process_with_limits(pid, None)
+    }
+
+    pub fn add_process_with_limits(&self, pid: i32, limits: Option<&ResourceLimits>) -> Result<()> {
+        if let Some(parent) = self.cgroup_path.parent() {
+            let _ = fs::create_dir_all(parent);
+            for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                let _ = fs::write(parent.join("cgroup.subtree_control"), ctl);
+            }
+        }
         if !self.cgroup_path.exists() {
-            return Ok(());
+            let _ = fs::create_dir_all(&self.cgroup_path);
+        }
+        if let Some(lim) = limits {
+            let _ = self.apply_limits(lim);
         }
         if fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string()).is_err() {
             #[cfg(target_os = "linux")]
             {
                 let scope_name = format!("boxr-cg-{}-{}.scope", pid, std::process::id());
                 let pid_str = pid.to_string();
+                let slice_name = self
+                    .cgroup_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .filter(|n| n.ends_with(".slice"))
+                    .unwrap_or("app.slice");
+                let mut busctl_args = vec![
+                    "--user".to_string(),
+                    "call".to_string(),
+                    "org.freedesktop.systemd1".to_string(),
+                    "/org/freedesktop/systemd1".to_string(),
+                    "org.freedesktop.systemd1.Manager".to_string(),
+                    "StartTransientUnit".to_string(),
+                    "ssa(sv)a(sa(sv))".to_string(),
+                    scope_name.clone(),
+                    "fail".to_string(),
+                ];
+                let mut props: Vec<(String, String, String)> = Vec::new();
+                if let Some(lim) = limits {
+                    if let Some(mem) = lim.memory_max_bytes.filter(|&m| m > 0) {
+                        props.push(("MemoryMax".to_string(), "t".to_string(), mem.to_string()));
+                    }
+                    if let Some(res) = lim.memory_reservation_bytes.filter(|&m| m > 0) {
+                        props.push(("MemoryLow".to_string(), "t".to_string(), res.to_string()));
+                    }
+                    if let Some(swap) = lim.memory_swap_max_bytes {
+                        let swap_val = if swap < 0 {
+                            u64::MAX
+                        } else if let Some(mem) = lim.memory_max_bytes {
+                            swap.saturating_sub(mem) as u64
+                        } else {
+                            swap as u64
+                        };
+                        props.push((
+                            "MemorySwapMax".to_string(),
+                            "t".to_string(),
+                            swap_val.to_string(),
+                        ));
+                    }
+                    if let Some(shares) = lim.cpu_shares {
+                        let weight =
+                            (1 + ((shares.saturating_sub(2)) * 9999) / 262142).clamp(1, 10000);
+                        props.push(("CPUWeight".to_string(), "t".to_string(), weight.to_string()));
+                    }
+                    if let Some(pids) = lim.pids_max.filter(|&p| p > 0) {
+                        props.push(("TasksMax".to_string(), "t".to_string(), pids.to_string()));
+                    }
+                }
+                let prop_count = 3 + props.len();
+                busctl_args.push(prop_count.to_string());
+                busctl_args.extend([
+                    "PIDs".to_string(),
+                    "au".to_string(),
+                    "1".to_string(),
+                    pid_str.clone(),
+                    "Delegate".to_string(),
+                    "b".to_string(),
+                    "1".to_string(),
+                    "Slice".to_string(),
+                    "s".to_string(),
+                    slice_name.to_string(),
+                ]);
+                for (k, t, v) in props {
+                    busctl_args.push(k);
+                    busctl_args.push(t);
+                    busctl_args.push(v);
+                }
+                busctl_args.push("0".to_string());
                 let _ = std::process::Command::new("busctl")
-                    .args([
-                        "--user",
-                        "call",
-                        "org.freedesktop.systemd1",
-                        "/org/freedesktop/systemd1",
-                        "org.freedesktop.systemd1.Manager",
-                        "StartTransientUnit",
-                        "ssa(sv)a(sa(sv))",
-                        &scope_name,
-                        "fail",
-                        "2",
-                        "PIDs",
-                        "au",
-                        "1",
-                        &pid_str,
-                        "Delegate",
-                        "b",
-                        "1",
-                        "0",
-                    ])
+                    .args(&busctl_args)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
-                let _ = fs::write(self.cgroup_path.join("cgroup.procs"), pid.to_string());
+                let is_default_boxr_parent = self
+                    .cgroup_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some("boxr");
+                let proc_cg_file = format!("/proc/{}/cgroup", pid);
+                for _ in 0..40 {
+                    if let Ok(cg_txt) = fs::read_to_string(&proc_cg_file) {
+                        if let Some(rel) = cg_txt.lines().find_map(|l| l.strip_prefix("0::")) {
+                            let rel_trimmed = rel.trim();
+                            if rel_trimmed.contains("user@") || rel_trimmed.contains(&scope_name) {
+                                let cur_cg = PathBuf::from("/sys/fs/cgroup")
+                                    .join(rel_trimmed.trim_start_matches('/'));
+                                if cur_cg.exists() {
+                                    if let Some(lim) = limits {
+                                        let tmp_mgr = Self {
+                                            cgroup_path: cur_cg.clone(),
+                                        };
+                                        let _ = tmp_mgr.apply_limits(lim);
+                                    }
+                                }
+                                if !is_default_boxr_parent {
+                                    if let Some(parent) = self.cgroup_path.parent() {
+                                        let _ = fs::create_dir_all(parent);
+                                        for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                                            let _ = fs::write(
+                                                parent.join("cgroup.subtree_control"),
+                                                ctl,
+                                            );
+                                        }
+                                    }
+                                    let _ = fs::create_dir_all(&self.cgroup_path);
+                                    if let Some(lim) = limits {
+                                        let _ = self.apply_limits(lim);
+                                    }
+                                    let _ =
+                                        fs::write(self.cgroup_path.join("cgroup.procs"), &pid_str);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
         }
         let _ = fs::write(self.cgroup_path.join("tasks"), pid.to_string());

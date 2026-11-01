@@ -23,6 +23,45 @@ pub fn append_k8s_log_chunk(path: &Path, stream: &str, data: &[u8]) -> Result<()
     if !data.ends_with(b"\n") {
         file.write_all(b"\n")?;
     }
+    #[cfg(unix)]
+    if let Some(bundle_dir) = path.parent() {
+        let jmeta = bundle_dir.join("journald_meta.json");
+        if jmeta.exists() {
+            if let Ok(raw) = fs::read_to_string(&jmeta) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let cid_full = val
+                        .get("container_id_full")
+                        .or_else(|| val.get("container_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let cname = val
+                        .get("container_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let ctag = val
+                        .get("container_tag")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let short_id = &cid_full[..12.min(cid_full.len())];
+                    let text = String::from_utf8_lossy(data);
+                    if let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() {
+                        for line in text.lines() {
+                            let payload = format!(
+                                "MESSAGE={}\nSYSLOG_IDENTIFIER={}\nCONTAINER_ID={}\nCONTAINER_ID_FULL={}\nCONTAINER_NAME={}\nCONTAINER_TAG={}\nPRIORITY=6\n",
+                                line,
+                                if ctag.is_empty() { cname } else { ctag },
+                                short_id,
+                                cid_full,
+                                cname,
+                                ctag
+                            );
+                            let _ = sock.send_to(payload.as_bytes(), "/run/systemd/journal/socket");
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -87,6 +126,8 @@ pub fn tee_k8s_stream_with_tty<R: Read>(
 #[derive(Debug, Clone)]
 pub struct K8sLogEntry {
     pub timestamp: DateTime<FixedOffset>,
+    pub stream: String,
+    pub is_stderr: bool,
     pub partial: bool,
     pub payload: Vec<u8>,
 }
@@ -249,6 +290,8 @@ fn parse_k8s_log_line(line: &[u8]) -> Option<K8sLogEntry> {
                     .ok()?;
                 return Some(K8sLogEntry {
                     timestamp,
+                    stream: stream.to_string(),
+                    is_stderr: stream == "stderr",
                     partial,
                     payload,
                 });
@@ -371,7 +414,7 @@ pub fn format_log_lines_timestamped(lines: &[(DateTime<FixedOffset>, Vec<u8>)]) 
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&ts.to_rfc3339());
+        out.push_str(&ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, false));
         out.push(' ');
         out.push_str(&String::from_utf8_lossy(line));
     }
@@ -474,7 +517,8 @@ pub fn resolve_container_log_path(
 }
 
 pub fn is_k8s_log_path(path: &Path) -> bool {
-    path.to_string_lossy().contains("-ctr.log")
+    let s = path.to_string_lossy();
+    s.contains("ctr.log") || s.contains("journald")
 }
 
 pub fn read_log_output(
@@ -569,6 +613,40 @@ pub fn stream_k8s_container_logs(
     };
 
     if !follow {
+        if is_k8s_log_path(path) {
+            let entries = filter_k8s_entries_opts(read_k8s_log_entries(path)?, since, until);
+            if entries.iter().any(|e| e.is_stderr || e.stream == "stderr")
+                && since.is_none()
+                && until.is_none()
+                && tail.is_none()
+                && !timestamps
+            {
+                let mut out_entries = Vec::new();
+                let mut err_entries = Vec::new();
+                for e in entries {
+                    if e.is_stderr || e.stream == "stderr" {
+                        err_entries.push(e);
+                    } else {
+                        out_entries.push(e);
+                    }
+                }
+                let out_lines = expand_embedded_newlines(reconstruct_k8s_lines(&out_entries));
+                let err_lines = expand_embedded_newlines(reconstruct_k8s_lines(&err_entries));
+                if !out_lines.is_empty() {
+                    write_log_text_opts(&format_log_lines(&out_lines), false, true)?;
+                }
+                if !err_lines.is_empty() {
+                    let err_text = format_log_lines(&err_lines);
+                    let mut stderr = std::io::stderr();
+                    stderr.write_all(err_text.as_bytes())?;
+                    if !err_text.ends_with('\n') {
+                        stderr.write_all(b"\n")?;
+                    }
+                    stderr.flush()?;
+                }
+                return Ok(());
+            }
+        }
         let text = read_log_output_opts(path, since, until, tail, timestamps)?;
         return write_log_text_opts(&text, false, false);
     }

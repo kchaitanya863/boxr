@@ -46,6 +46,10 @@ pub struct RunArgs {
     #[arg(long = "unsetenv-all")]
     pub unsetenv_all: bool,
 
+    /// Preprocess environment variables from image before injecting into container
+    #[arg(long = "env-merge")]
+    pub env_merge: Vec<String>,
+
     /// Run container in systemd mode (Podman-compatible flag; accepted for parity)
     #[arg(long = "systemd")]
     pub systemd: Option<String>,
@@ -96,8 +100,16 @@ pub struct RunArgs {
     pub cpus: Option<String>,
 
     /// Tune container pids limit (set -1 for unlimited)
-    #[arg(long = "pids-limit")]
+    #[arg(long = "pids-limit", allow_hyphen_values = true)]
     pub pids_limit: Option<i64>,
+
+    /// Class of service (COS) for the container should be assigned to (Intel RDT)
+    #[arg(long = "rdt-class")]
+    pub rdt_class: Option<String>,
+
+    /// Chroot directories inside the container
+    #[arg(long = "chrootdirs")]
+    pub chrootdirs: Vec<String>,
 
     /// Username or UID (format: <name|uid>[:<group|gid>])
     #[arg(short = 'u', long = "user")]
@@ -110,6 +122,65 @@ pub struct RunArgs {
     /// Add a custom group line to /etc/group (Podman --group-entry)
     #[arg(long = "group-entry")]
     pub group_entry: Vec<String>,
+
+    /// Add entries to /etc/passwd and /etc/group (Podman --passwd)
+    #[arg(
+        long = "passwd",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub passwd: Option<bool>,
+
+    /// Add a custom user line to /etc/passwd (Podman --passwd-entry)
+    #[arg(long = "passwd-entry")]
+    pub passwd_entry: Option<String>,
+
+    /// Select which seccomp profile policy to use ("default" or "image")
+    #[arg(long = "seccomp-policy", allow_hyphen_values = true)]
+    pub seccomp_policy: Option<String>,
+
+    /// Name of range listed in /etc/subuid for use in user namespace
+    #[arg(long = "subuidname")]
+    pub subuidname: Option<String>,
+
+    /// Name of range listed in /etc/subgid for use in user namespace
+    #[arg(long = "subgidname")]
+    pub subgidname: Option<String>,
+
+    /// Path to the signature-policy file
+    #[arg(long = "signature-policy")]
+    pub signature_policy: Option<String>,
+
+    /// Path to the container-init binary
+    #[arg(long = "init-path")]
+    pub init_path: Option<String>,
+
+    /// Base file to create the /etc/hosts file inside the container ("image", "none", or path)
+    #[arg(long = "hosts-file", num_args = 0..=1, default_missing_value = "")]
+    pub hosts_file: Option<String>,
+
+    /// Add one or more requirement containers that must be started before this container will start
+    #[arg(long = "requires")]
+    pub requires: Vec<String>,
+
+    /// Write the container process ID to the file
+    #[arg(long = "pidfile")]
+    pub pidfile: Option<String>,
+
+    /// Configure execution domain using personality (e.g., LINUX/LINUX32)
+    #[arg(long = "personality")]
+    pub personality: Option<String>,
+
+    /// Size of systemd-specific tmpfs mounts (/run, /run/lock, /tmp, /var/log/journal)
+    #[arg(long = "shm-size-systemd")]
+    pub shm_size_systemd: Option<String>,
+
+    /// Key needed to decrypt the image (e.g. /path/to/key.pem)
+    #[arg(long = "decryption-key")]
+    pub decryption_key: Vec<String>,
 
     /// Container host name
     #[arg(long = "hostname")]
@@ -203,6 +274,10 @@ pub struct RunArgs {
     /// Add a host device to the container
     #[arg(long = "device")]
     pub devices: Vec<String>,
+
+    /// Directories to scan for CDI spec files
+    #[arg(long = "cdi-spec-dir")]
+    pub cdi_spec_dir: Vec<String>,
 
     /// Security Options
     #[arg(long = "security-opt")]
@@ -365,11 +440,11 @@ pub struct RunArgs {
     pub mount: Vec<String>,
 
     /// Time between running the check (ms|s|m|h) (default 30s)
-    #[arg(long = "health-interval")]
+    #[arg(long = "health-interval", allow_hyphen_values = true)]
     pub health_interval: Option<String>,
 
     /// Maximum time to allow one check to run (ms|s|m|h) (default 30s)
-    #[arg(long = "health-timeout")]
+    #[arg(long = "health-timeout", allow_hyphen_values = true)]
     pub health_timeout: Option<String>,
 
     /// Consecutive failures needed to report unhealthy
@@ -377,11 +452,11 @@ pub struct RunArgs {
     pub health_retries: Option<u32>,
 
     /// Start period for the container to initialize before starting health-retries countdown
-    #[arg(long = "health-start-period")]
+    #[arg(long = "health-start-period", allow_hyphen_values = true)]
     pub health_start_period: Option<String>,
 
     /// Time between running the check during the start period
-    #[arg(long = "health-start-interval")]
+    #[arg(long = "health-start-interval", allow_hyphen_values = true)]
     pub health_start_interval: Option<String>,
 
     /// Action to take when the container becomes unhealthy

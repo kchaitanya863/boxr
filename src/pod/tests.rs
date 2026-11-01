@@ -95,6 +95,7 @@ fn test_apply_pod_to_run_args() {
         env: vec![],
         unsetenv: vec![],
         unsetenv_all: false,
+        env_merge: vec![],
         systemd: None,
         ports: vec![],
         volumes: vec![],
@@ -142,6 +143,7 @@ fn test_apply_pod_to_run_args() {
         init: false,
         tmpfs: vec![],
         devices: vec![],
+        cdi_spec_dir: vec![],
         security_opt: vec![],
         cpu_shares: None,
         cpuset_cpus: None,
@@ -230,6 +232,7 @@ fn test_apply_pod_to_run_args() {
         timeout: None,
         image: "alpine".to_string(),
         command: vec![],
+        ..Default::default()
     };
     apply_pod_to_run_args(&pod, "mypod-infra", &mut args);
     assert_eq!(args.network, "container:mypod-infra");

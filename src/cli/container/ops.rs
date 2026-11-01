@@ -57,7 +57,16 @@ pub struct PsArgs {
     pub all: bool,
 
     /// Only display numeric IDs
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(
+        short = 'q',
+        long = "quiet",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub quiet: bool,
 
     /// Display total file sizes
@@ -65,7 +74,15 @@ pub struct PsArgs {
     pub size: bool,
 
     /// Don't truncate output
-    #[arg(long = "no-trunc")]
+    #[arg(
+        long = "no-trunc",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub no_trunc: bool,
 
     /// Format output using a custom template (e.g. json, table)
@@ -89,16 +106,32 @@ pub struct PsArgs {
     pub sort: Option<String>,
 
     /// Do not print headers
-    #[arg(long = "noheading")]
+    #[arg(long = "noheading", alias = "no-heading")]
     pub noheading: bool,
 
     /// Display external containers (buildah, etc.)
-    #[arg(long = "external")]
+    #[arg(
+        long = "external",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub external: bool,
 
     /// Display namespace information (for custom --format templates)
-    #[arg(long = "ns")]
+    #[arg(long = "ns", alias = "namespace")]
     pub ns: bool,
+
+    /// Display pod information in the output
+    #[arg(short = 'p', long = "pod")]
+    pub pod: bool,
+
+    /// Sync container state with OCI runtime
+    #[arg(long = "sync")]
+    pub sync: bool,
 
     /// Container names or IDs (accepted only for validation; not supported with --latest)
     #[arg(value_name = "CONTAINER")]
@@ -138,7 +171,7 @@ pub struct RmArgs {
     pub time: Option<i32>,
 
     /// Ignore errors when a container cannot be removed
-    #[arg(long = "ignore")]
+    #[arg(short = 'i', long = "ignore")]
     pub ignore: bool,
 
     /// Remove dependent containers before removing the container
@@ -147,7 +180,11 @@ pub struct RmArgs {
 
     /// Read container ID from the given file
     #[arg(long = "cidfile")]
-    pub cidfile: Option<String>,
+    pub cidfile: Vec<String>,
+
+    /// Filter output based on conditions provided
+    #[arg(long = "filter")]
+    pub filter: Vec<String>,
 
     /// Container IDs or names to remove
     pub containers: Vec<String>,
@@ -218,6 +255,22 @@ pub struct CommitArgs {
     )]
     pub pause: bool,
 
+    /// File containing a container configuration to merge into the image
+    #[arg(long = "config")]
+    pub config: Option<String>,
+
+    /// Squash newly built layers into a single new layer
+    #[arg(short = 's', long = "squash")]
+    pub squash: bool,
+
+    /// Include container volumes as image volumes
+    #[arg(long = "include-volumes")]
+    pub include_volumes: bool,
+
+    /// Write the image ID to the file
+    #[arg(long = "iidfile")]
+    pub iidfile: Option<String>,
+
     /// Container to commit
     pub container: String,
 
@@ -258,6 +311,18 @@ pub struct CpArgs {
         require_equals = true
     )]
     pub archive: bool,
+
+    /// Pause the container while copying
+    #[arg(
+        long = "pause",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub pause: bool,
 
     #[arg(
         long = "overwrite",
@@ -397,7 +462,20 @@ pub struct UpdateArgs {
     #[arg(long = "health-startup-timeout")]
     pub health_startup_timeout: Option<String>,
 
+    /// Set environment variables in the container
+    #[arg(short = 'e', long = "env")]
+    pub env: Vec<String>,
+
+    /// Unset environment variables in the container
+    #[arg(long = "unsetenv")]
+    pub unsetenv: Vec<String>,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Container to update
+    #[arg(default_value = "")]
     pub container: String,
 }
 
@@ -430,11 +508,23 @@ pub struct ExportArgs {
     pub container: String,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerCheckpointArgs {
     /// Container to checkpoint
+    #[arg(default_value = "")]
     pub container: String,
+
+    /// Additional containers to checkpoint
+    pub extra_containers: Vec<String>,
+
+    /// Checkpoint all running containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Export checkpoint to a tar.gz archive
     #[arg(short = 'e', long = "export")]
@@ -447,21 +537,117 @@ pub struct ContainerCheckpointArgs {
     /// Leave the container running after checkpoint
     #[arg(short = 'R', long = "leave-running")]
     pub leave_running: bool,
+
+    /// Checkpoint a container with established TCP connections
+    #[arg(long = "tcp-established")]
+    pub tcp_established: bool,
+
+    /// Do not include root file-system changes when exporting
+    #[arg(long = "ignore-rootfs")]
+    pub ignore_rootfs: bool,
+
+    /// Do not export volumes associated with container
+    #[arg(long = "ignore-volumes")]
+    pub ignore_volumes: bool,
+
+    /// Dump container's memory information only, leave the container running
+    #[arg(short = 'P', long = "pre-checkpoint")]
+    pub pre_checkpoint: bool,
+
+    /// Checkpoint container with pre-checkpoint images
+    #[arg(long = "with-previous")]
+    pub with_previous: bool,
+
+    /// Create checkpoint image with specified name
+    #[arg(long = "create-image")]
+    pub create_image: Option<String>,
+
+    /// Select compression algorithm (gzip, none, zstd) for checkpoint archive
+    #[arg(short = 'c', long = "compress")]
+    pub compress: Option<String>,
+
+    /// Checkpoint a container with file locks
+    #[arg(long = "file-locks")]
+    pub file_locks: bool,
+
+    /// Display checkpoint statistics
+    #[arg(long = "print-stats")]
+    pub print_stats: bool,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerRestoreArgs {
-    /// Container to restore
+    /// Container or checkpoint image to restore
+    #[arg(default_value = "")]
     pub container: String,
+
+    /// Additional containers or checkpoint images to restore
+    pub extra_containers: Vec<String>,
+
+    /// Restore all checkpointed containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Import checkpoint from a tar.gz archive
     #[arg(short = 'i', long = "import")]
     pub import: Option<String>,
 
+    /// Restore from pre-checkpoint images
+    #[arg(long = "import-previous")]
+    pub import_previous: Option<String>,
+
     /// Keep all temporary checkpoint files
     #[arg(short = 'k', long = "keep")]
     pub keep: bool,
+
+    /// Specify new name for container restored from exported checkpoint
+    #[arg(short = 'n', long = "name")]
+    pub name: Option<String>,
+
+    /// Restore a container with established TCP connections
+    #[arg(long = "tcp-established")]
+    pub tcp_established: bool,
+
+    /// Restore a container with TCP connections and close them during restore
+    #[arg(long = "tcp-close")]
+    pub tcp_close: bool,
+
+    /// Do not restore root file-system changes when importing
+    #[arg(long = "ignore-rootfs")]
+    pub ignore_rootfs: bool,
+
+    /// Do not restore volumes associated with container
+    #[arg(long = "ignore-volumes")]
+    pub ignore_volumes: bool,
+
+    /// Ignore IP address set via --ip
+    #[arg(long = "ignore-static-ip")]
+    pub ignore_static_ip: bool,
+
+    /// Ignore MAC address set via --mac-address
+    #[arg(long = "ignore-static-mac")]
+    pub ignore_static_mac: bool,
+
+    /// Restore a container with file locks
+    #[arg(long = "file-locks")]
+    pub file_locks: bool,
+
+    /// Display restore statistics
+    #[arg(long = "print-stats")]
+    pub print_stats: bool,
+
+    /// Publish a container's port(s) to the host
+    #[arg(short = 'p', long = "publish")]
+    pub publish: Vec<String>,
+
+    /// Pod to restore into
+    #[arg(long = "pod")]
+    pub pod: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -473,6 +659,10 @@ pub struct ContainerCleanupArgs {
     /// Cleanup all containers
     #[arg(short = 'a', long = "all")]
     pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Clean up the given exec session instead of the container
     #[arg(long = "exec")]
@@ -579,20 +769,44 @@ pub struct ContainerRunlabelArgs {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct MountArgs {
+    /// Do not truncate output
+    #[arg(long = "no-trunc")]
+    pub no_trunc: bool,
+
+    /// Mount all containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
     /// Container to mount
-    pub container: String,
+    pub container: Option<String>,
 }
 
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UnmountArgs {
+    /// Unmount all containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Force unmount
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
+
     /// Container to unmount
-    pub container: String,
+    pub container: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct InitArgs {
-    /// Container to initialize
-    pub container: String,
+    /// Initialize all containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Containers to initialize
+    pub containers: Vec<String>,
 }

@@ -135,6 +135,7 @@ pub async fn create_container(
         env: payload.env.unwrap_or_default(),
         unsetenv: Vec::new(),
         unsetenv_all: false,
+        env_merge: Vec::new(),
         systemd: None,
         ports,
         volumes,
@@ -183,6 +184,7 @@ pub async fn create_container(
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
+        cdi_spec_dir: Vec::new(),
         security_opt: Vec::new(),
         cpu_shares: None,
         cpuset_cpus: None,
@@ -270,6 +272,7 @@ pub async fn create_container(
         timeout: None,
         image: payload.image,
         command: payload.cmd.unwrap_or_default(),
+        ..Default::default()
     };
 
     match crate::create_only_container_with_home(run_args, Some(&state.home)).await {
@@ -470,6 +473,7 @@ pub async fn inspect_container(
         ContainerStatus::Stopping => "stopping",
         ContainerStatus::Paused => "paused",
         ContainerStatus::Created => "created",
+        ContainerStatus::Initialized => "initialized",
         ContainerStatus::Exited(_) => "exited",
         ContainerStatus::Failed(_) => "dead",
     };

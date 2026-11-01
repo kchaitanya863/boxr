@@ -72,6 +72,21 @@ pub fn spawn_detached_health_supervisor(
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                #[cfg(target_os = "linux")]
+                {
+                    let rc = libc::syscall(libc::SYS_close_range, 3usize, !0u32 as usize, 0usize);
+                    if rc == 0 {
+                        return Ok(());
+                    }
+                }
+                for fd in 3..4096i32 {
+                    let _ = libc::close(fd);
+                }
+                Ok(())
+            });
+        }
     }
     let _ = cmd.spawn();
 }

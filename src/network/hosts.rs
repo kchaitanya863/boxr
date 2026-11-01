@@ -27,6 +27,7 @@ pub fn resolved_bridge_network_name(network: &str) -> Option<String> {
 
 /// Write `/etc/hosts` into a container bundle (rootfs and overlay upper when present).
 pub fn write_bundle_hosts_file(bundle_path: &Path, content: &str) -> Result<()> {
+    let _ = fs::write(bundle_path.join("hosts"), content);
     let rootfs_hosts = bundle_path.join("rootfs/etc/hosts");
     if let Some(parent) = rootfs_hosts.parent() {
         fs::create_dir_all(parent)?;
@@ -39,6 +40,23 @@ pub fn write_bundle_hosts_file(bundle_path: &Path, content: &str) -> Result<()> 
     }
     if bundle_path.join("upper").exists() {
         fs::write(&upper_hosts, content)?;
+    }
+    Ok(())
+}
+
+pub fn write_bundle_resolv_conf(bundle_path: &Path, content: &str) -> Result<()> {
+    let _ = fs::write(bundle_path.join("resolv.conf"), content);
+    let rootfs_rc = bundle_path.join("rootfs/etc/resolv.conf");
+    if let Some(parent) = rootfs_rc.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&rootfs_rc, content);
+    let upper_rc = bundle_path.join("upper/etc/resolv.conf");
+    if bundle_path.join("upper").exists() {
+        if let Some(parent) = upper_rc.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&upper_rc, content);
     }
     Ok(())
 }
@@ -71,22 +89,100 @@ pub fn assemble_bridge_hosts_content(
     bundle_path: &Path,
 ) -> Result<String> {
     let (hostname, add_host_entries) = load_bundle_host_context(bundle_path);
+    let config_path = bundle_path.join("config.json");
+    if let Ok(raw) = fs::read_to_string(&config_path) {
+        if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&raw) {
+            if spec
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("boxr.no_hosts"))
+                .is_some_and(|v| v == "true")
+            {
+                return Ok(
+                    "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n".to_string(),
+                );
+            }
+        }
+    }
     let mut lines = vec![
         "127.0.0.1\tlocalhost".to_string(),
         "::1\tlocalhost ip6-localhost ip6-loopback".to_string(),
     ];
-    if let Some(h) = &hostname {
-        lines.push(format!("127.0.0.1\t{}", h));
-    }
     for entry in &add_host_entries {
         if let Some((host, ip)) = entry.split_once(':') {
             lines.push(format!("{}\t{}", ip.trim(), host.trim()));
         }
     }
-    let bridge_body = net_store.generate_hosts_file(network_name, container_id)?;
-    for line in bridge_body.lines().skip(2) {
-        if !line.is_empty() {
-            lines.push(line.to_string());
+    let mut self_has_bridge_ip = false;
+    let all_nets = net_store.list();
+    let mut target_nets: Vec<super::store::NetworkRecord> = all_nets
+        .into_iter()
+        .filter(|n| {
+            n.name == network_name
+                || n.containers.contains_key(container_id)
+                || n.containers
+                    .values()
+                    .any(|ep| ep.container_name == container_id)
+        })
+        .collect();
+    if target_nets.is_empty() {
+        if let Some(n) = net_store.find(network_name) {
+            target_nets.push(n);
+        }
+    }
+    for net in &target_nets {
+        for (cid, ep) in &net.containers {
+            let short_id = if cid.len() >= 12 { &cid[..12] } else { cid };
+            let is_self = cid == container_id || ep.container_name == container_id;
+            let mut names = vec![ep.container_name.clone()];
+            if ep.container_name != *cid && ep.container_name != short_id {
+                names.push(short_id.to_string());
+            }
+            if is_self {
+                if let Some(ref h) = hostname {
+                    if !h.is_empty() && !names.contains(h) {
+                        names.insert(0, h.clone());
+                    }
+                }
+            }
+            for a in &ep.aliases {
+                if !names.contains(a) {
+                    names.push(a.clone());
+                }
+            }
+            if net.dns_enabled {
+                let base_names = names.clone();
+                for bn in base_names {
+                    let fqdn = format!("{}.dns.podman", bn);
+                    if !names.contains(&fqdn) {
+                        names.push(fqdn);
+                    }
+                }
+            }
+            let joined = names.join(" ");
+            if !ep.ipv4_address.is_empty() {
+                if is_self {
+                    self_has_bridge_ip = true;
+                }
+                let line = format!("{}\t{}", ep.ipv4_address, joined);
+                if !lines.contains(&line) {
+                    lines.push(line);
+                }
+            }
+            if !ep.ipv6_address.is_empty() {
+                if is_self {
+                    self_has_bridge_ip = true;
+                }
+                let line = format!("{}\t{}", ep.ipv6_address, joined);
+                if !lines.contains(&line) {
+                    lines.push(line);
+                }
+            }
+        }
+    }
+    if !self_has_bridge_ip {
+        if let Some(h) = &hostname {
+            lines.push(format!("127.0.0.1\t{}", h));
         }
     }
     Ok(lines.join("\n") + "\n")
@@ -188,6 +284,60 @@ pub fn connect_container_to_bridge_network(
     container_name: &str,
     home: Option<&std::path::Path>,
 ) -> Result<()> {
+    connect_container_to_bridge_network_with_opts(network, container_id, container_name, &[], home)
+}
+
+pub fn connect_container_to_bridge_network_with_aliases(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    aliases: &[String],
+    ip_override: Option<&str>,
+    mac_override: Option<&str>,
+    home: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut cli_ips = Vec::new();
+    if let Some(ip) = ip_override.filter(|s| !s.trim().is_empty()) {
+        cli_ips.push(ip.trim().to_string());
+    }
+    connect_container_to_bridge_network_full(
+        network,
+        container_id,
+        container_name,
+        aliases,
+        &cli_ips,
+        mac_override,
+        home,
+    )
+}
+
+pub fn connect_container_to_bridge_network_with_opts(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    cli_ips: &[String],
+    home: Option<&std::path::Path>,
+) -> Result<()> {
+    connect_container_to_bridge_network_full(
+        network,
+        container_id,
+        container_name,
+        &[],
+        cli_ips,
+        None,
+        home,
+    )
+}
+
+pub fn connect_container_to_bridge_network_full(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    aliases: &[String],
+    cli_ips: &[String],
+    mac_override: Option<&str>,
+    home: Option<&std::path::Path>,
+) -> Result<()> {
     let net_name = resolved_bridge_network_name(network)
         .ok_or_else(|| anyhow!("network {} is not a bridge network", network))?;
     let store = match home {
@@ -197,7 +347,216 @@ pub fn connect_container_to_bridge_network(
     if store.find(&net_name).is_none() {
         return Err(anyhow!("network {} not found", net_name));
     }
-    let _ = store.connect_container(&net_name, container_id, container_name)?;
+    let mut all_aliases: Vec<String> = aliases.to_vec();
+    let mut static_ips: Vec<String> = cli_ips.to_vec();
+    let mut ifname_opt: Option<String> = None;
+    let mut mac_opt: Option<String> = mac_override.map(|s| s.to_string());
+    if !network.starts_with("container:")
+        && !network.starts_with("pasta:")
+        && !network.starts_with("ns:")
+    {
+        if let Some((_, opts)) = network.split_once(':') {
+            for kv in opts.split(',') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    let kt = k.trim();
+                    let vt = v.trim();
+                    if kt == "alias" && !vt.is_empty() {
+                        all_aliases.push(vt.to_string());
+                    } else if (kt == "ip" || kt == "ip6") && !vt.is_empty() {
+                        static_ips.push(vt.to_string());
+                    } else if kt == "interface_name" && !vt.is_empty() {
+                        ifname_opt = Some(vt.to_string());
+                    } else if kt == "mac" && !vt.is_empty() && mac_opt.is_none() {
+                        mac_opt = Some(vt.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let _ = store.connect_container_with_ips_and_aliases(
+        &net_name,
+        container_id,
+        container_name,
+        mac_opt.as_deref(),
+        ifname_opt.as_deref(),
+        &static_ips,
+        &all_aliases,
+    )?;
     refresh_bridge_hosts_for_network(&net_name, home)?;
     Ok(())
 }
+
+pub fn refresh_container_resolv_conf(container_query: &str, home: Option<&Path>) -> Result<()> {
+    let net_store = match home {
+        Some(h) => NetworkStore::with_home(h.to_path_buf()),
+        None => NetworkStore::new(),
+    };
+    let c_store = match home {
+        Some(h) => ContainerStore::with_home(h.to_path_buf()),
+        None => ContainerStore::new(),
+    };
+    let Some(record) = c_store.find(container_query) else {
+        return Ok(());
+    };
+    let bundle = PathBuf::from(&record.bundle_path);
+    if !bundle.exists() {
+        return Ok(());
+    }
+    let mut gateways = Vec::new();
+    for net in net_store.list() {
+        if net.name == NetworkStore::DEFAULT_NETWORK {
+            continue;
+        }
+        if net.containers.contains_key(&record.id)
+            || net
+                .containers
+                .values()
+                .any(|ep| ep.container_name == record.name)
+        {
+            if !net.gateway.is_empty() && !gateways.contains(&net.gateway) {
+                gateways.push(net.gateway.clone());
+            }
+            for sub in &net.subnets {
+                if !sub.gateway.is_empty() && !gateways.contains(&sub.gateway) {
+                    gateways.push(sub.gateway.clone());
+                }
+            }
+        }
+    }
+    let mut lines = Vec::new();
+    for gw in &gateways {
+        lines.push(format!("nameserver {}", gw));
+    }
+    if lines.is_empty() {
+        lines.push("nameserver 8.8.8.8".to_string());
+    }
+    write_bundle_resolv_conf(&bundle, &(lines.join("\n") + "\n"))
+}
+
+#[cfg(target_os = "linux")]
+pub fn hotplug_container_network_interface(
+    bundle_path: &Path,
+    ifname: &str,
+    ipv4_cidr: &str,
+    ipv6_cidr: &str,
+    mac: &str,
+) {
+    use nix::sched::{CloneFlags, setns};
+    use nix::sys::wait::waitpid;
+    use nix::unistd::{ForkResult, fork};
+
+    let Some(pid) = crate::pod::read_container_pid_from_bundle(bundle_path) else {
+        return;
+    };
+    if unsafe { libc::kill(pid, 0) != 0 } {
+        return;
+    }
+    let ifname_s = ifname.to_string();
+    let v4_s = ipv4_cidr.to_string();
+    let v6_s = ipv6_cidr.to_string();
+    let mac_s = mac.to_string();
+
+    if let Ok(ForkResult::Parent { child }) = unsafe { fork() } {
+        let _ = waitpid(child, None);
+    } else {
+        let same_userns = match (
+            fs::read_link("/proc/self/ns/user"),
+            fs::read_link(format!("/proc/{pid}/ns/user")),
+        ) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if !same_userns {
+            if let Ok(uf) = fs::File::open(format!("/proc/{pid}/ns/user")) {
+                let _ = setns(&uf, CloneFlags::CLONE_NEWUSER);
+            }
+        }
+        if let Ok(nf) = fs::File::open(format!("/proc/{pid}/ns/net")) {
+            if setns(&nf, CloneFlags::CLONE_NEWNET).is_ok() {
+                let _ = super::usernet::engine::platform::create_persistent_tap_device(&ifname_s);
+                if !mac_s.is_empty() {
+                    let _ = std::process::Command::new("ip")
+                        .args(["link", "set", "dev", &ifname_s, "address", &mac_s])
+                        .output();
+                }
+                if !v4_s.is_empty() {
+                    let _ = std::process::Command::new("ip")
+                        .args(["addr", "add", &v4_s, "brd", "+", "dev", &ifname_s])
+                        .output();
+                }
+                if !v6_s.is_empty() {
+                    let _ = std::process::Command::new("ip")
+                        .args(["-6", "addr", "add", &v6_s, "dev", &ifname_s, "nodad"])
+                        .output();
+                }
+                let _ = std::process::Command::new("ip")
+                    .args(["link", "set", &ifname_s, "up"])
+                    .output();
+            }
+        }
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn hotplug_container_network_interface(
+    _bundle_path: &Path,
+    _ifname: &str,
+    _ipv4_cidr: &str,
+    _ipv6_cidr: &str,
+    _mac: &str,
+) {
+}
+
+#[cfg(target_os = "linux")]
+pub fn hotunplug_container_network_interface(bundle_path: &Path, ifname: &str) {
+    use nix::sched::{CloneFlags, setns};
+    use nix::sys::wait::waitpid;
+    use nix::unistd::{ForkResult, fork};
+
+    if ifname == "eth0" {
+        if let Ok(tp_s) = fs::read_to_string(bundle_path.join("tap_worker.pid")) {
+            if let Ok(tp) = tp_s.trim().parse::<i32>() {
+                if tp > 1 {
+                    unsafe {
+                        let _ = libc::kill(tp, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+    }
+
+    let Some(pid) = crate::pod::read_container_pid_from_bundle(bundle_path) else {
+        return;
+    };
+    if unsafe { libc::kill(pid, 0) != 0 } {
+        return;
+    }
+    let ifname_s = ifname.to_string();
+
+    if let Ok(ForkResult::Parent { child }) = unsafe { fork() } {
+        let _ = waitpid(child, None);
+    } else {
+        let same_userns = match (
+            fs::read_link("/proc/self/ns/user"),
+            fs::read_link(format!("/proc/{pid}/ns/user")),
+        ) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        };
+        if !same_userns {
+            if let Ok(uf) = fs::File::open(format!("/proc/{pid}/ns/user")) {
+                let _ = setns(&uf, CloneFlags::CLONE_NEWUSER);
+            }
+        }
+        if let Ok(nf) = fs::File::open(format!("/proc/{pid}/ns/net")) {
+            if setns(&nf, CloneFlags::CLONE_NEWNET).is_ok() {
+                super::usernet::engine::platform::destroy_tap_device(&ifname_s);
+            }
+        }
+        std::process::exit(0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn hotunplug_container_network_interface(_bundle_path: &Path, _ifname: &str) {}

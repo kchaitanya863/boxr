@@ -6,9 +6,31 @@ pub struct KubePlayArgs {
     /// Path to Kubernetes YAML file (or '-' for stdin, or URL)
     #[arg(value_name = "KUBEFILE|-")]
     pub file: String,
+    /// Additional Kubernetes YAML files
+    #[arg(value_name = "KUBEFILE")]
+    pub extra_files: Vec<String>,
+    /// Validate Kubernetes YAML against schema (strict, warn, ignore, noop)
+    #[arg(long = "validate")]
+    pub validate: Option<String>,
+    /// Do not prefix container name with pod name
+    #[arg(long = "no-pod-prefix")]
+    pub no_pod_prefix: bool,
+    /// Create multiple pods for Deployment/DaemonSet/ReplicaSet replicas
+    #[arg(
+        long = "multiple-pods",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set
+    )]
+    pub multiple_pods: bool,
     /// Tear down resources from the YAML file
     #[arg(long = "down")]
     pub down: bool,
+    /// Remove volumes on --down
+    #[arg(long = "force")]
+    pub force: bool,
     /// Replace existing pods and containers
     #[arg(long = "replace")]
     pub replace: bool,
@@ -46,20 +68,19 @@ pub struct KubePlayArgs {
     pub network: Vec<String>,
     /// Static MAC address for pod interface
     #[arg(long = "mac-address")]
-    pub mac_address: Option<String>,
+    pub mac_address: Vec<String>,
     /// Static IP address for pod
     #[arg(long = "ip")]
     pub ip: Vec<String>,
     /// Build images even if they are found in the local storage
     #[arg(
         long = "build",
-        default_value_t = false,
         num_args = 0..=1,
         default_missing_value = "true",
         require_equals = true,
         action = clap::ArgAction::Set
     )]
-    pub build: bool,
+    pub build: Option<bool>,
     /// Use directory at path to find Containerfile for --build
     #[arg(long = "context-dir")]
     pub context_dir: Option<String>,
@@ -100,7 +121,14 @@ pub struct KubePlayArgs {
     #[arg(long = "publish")]
     pub publish: Vec<String>,
     /// Publish all exposed ports to random ports on the host interfaces
-    #[arg(long = "publish-all")]
+    #[arg(
+        long = "publish-all",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set
+    )]
     pub publish_all: bool,
     /// Suppress output information when pulling images
     #[arg(short = 'q', long = "quiet")]
@@ -125,6 +153,9 @@ pub struct KubeDownArgs {
     /// Path to Kubernetes YAML file
     #[arg(value_name = "KUBEFILE|-")]
     pub file: String,
+    /// Additional Kubernetes YAML files
+    #[arg(value_name = "KUBEFILE")]
+    pub extra_files: Vec<String>,
     /// Remove volumes as well
     #[arg(long = "force")]
     pub force: bool,

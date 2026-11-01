@@ -158,16 +158,17 @@ pub struct NetworkSubcommands {
 #[derive(clap::Subcommand, Debug)]
 pub enum NetworkAction {
     Create {
+        #[arg(default_value = "")]
         name: String,
         /// Driver to manage the Network (default "bridge")
         #[arg(short = 'd', long = "driver", default_value = "bridge")]
         driver: String,
         /// Subnet in CIDR format
         #[arg(long = "subnet")]
-        subnet: Option<String>,
+        subnet: Vec<String>,
         /// IPv4 or IPv6 Gateway for the master subnet
         #[arg(long = "gateway")]
-        gateway: Option<String>,
+        gateway: Vec<String>,
         /// Restrict external access to the network
         #[arg(long = "internal")]
         internal: bool,
@@ -191,7 +192,13 @@ pub enum NetworkAction {
         ingress: bool,
         /// Allocate container ip from a sub-range
         #[arg(long = "ip-range")]
-        ip_range: Option<String>,
+        ip_range: Vec<String>,
+        /// Static routes to add to the network
+        #[arg(long = "route")]
+        route: Vec<String>,
+        /// Do not fail if the network already exists
+        #[arg(long = "ignore")]
+        ignore: bool,
         /// IP Address Management Driver
         #[arg(long = "ipam-driver")]
         ipam_driver: Option<String>,
@@ -213,14 +220,22 @@ pub enum NetworkAction {
         /// Control the network's scope
         #[arg(long = "scope")]
         scope: Option<String>,
+        /// Set custom DNS servers for a network
+        #[arg(long = "dns", alias = "network-dns-server", value_delimiter = ',')]
+        dns: Vec<String>,
+        /// Disable placement of the DNS plugin on the network
+        #[arg(long = "disable-dns")]
+        disable_dns: bool,
     },
     #[command(alias = "list")]
     Ls(NetworkLsArgs),
     Inspect {
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
+        #[arg(default_value = "")]
         name: String,
     },
+    #[command(alias = "remove")]
     Rm {
         #[arg(short = 'f', long = "force")]
         force: bool,
@@ -232,6 +247,14 @@ pub enum NetworkAction {
     },
     Prune(NetworkPruneArgs),
     Connect {
+        #[arg(long = "alias")]
+        alias: Vec<String>,
+        #[arg(long = "ip")]
+        ip: Option<String>,
+        #[arg(long = "ip6")]
+        ip6: Option<String>,
+        #[arg(long = "mac-address")]
+        mac_address: Option<String>,
         network: String,
         container: String,
     },
@@ -307,10 +330,10 @@ pub struct NetworkUpdateArgs {
     /// Network name to update
     pub network: String,
     /// DNS servers to add
-    #[arg(long = "dns-add")]
+    #[arg(long = "dns-add", value_delimiter = ',')]
     pub dns_add: Vec<String>,
     /// DNS servers to drop
-    #[arg(long = "dns-drop")]
+    #[arg(long = "dns-drop", value_delimiter = ',')]
     pub dns_drop: Vec<String>,
     /// Labels to add (key=value)
     #[arg(long = "label-add")]

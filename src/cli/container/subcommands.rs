@@ -28,7 +28,7 @@ pub enum ContainerAction {
     Exec(ExecArgs),
     Attach(AttachArgs),
     Logs(LogsArgs),
-    #[command(alias = "ps")]
+    #[command(aliases = ["ps", "list"])]
     Ls(PsArgs),
     Inspect(InspectArgs),
     #[command(trailing_var_arg = true)]
@@ -51,20 +51,14 @@ pub enum ContainerAction {
     /// Clone a container into a new container
     Clone(ContainerCloneArgs),
     /// Initialize a container
-    Init {
-        container: String,
-    },
+    Init(InitArgs),
     /// Run a container using an image label command
     Runlabel(ContainerRunlabelArgs),
     /// Mount a container filesystem
-    Mount {
-        container: String,
-    },
+    Mount(MountArgs),
     /// Unmount a container filesystem
     #[command(alias = "umount")]
-    Unmount {
-        container: String,
-    },
+    Unmount(UnmountArgs),
     /// Return 0 if the container exists, 1 otherwise
     Exists(ContainerExistsArgs),
 }

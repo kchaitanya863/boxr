@@ -22,7 +22,10 @@ pub struct RootlessUserConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UsernsMappingMode {
     pub keep_id: bool,
+    pub keep_id_uid: Option<u32>,
+    pub keep_id_gid: Option<u32>,
     pub nomap: bool,
+    pub max_size: Option<u32>,
 }
 
 impl Default for RootlessUserConfig {
@@ -178,8 +181,12 @@ impl RootlessUserConfig {
         let sub_gid_first = sub_gid.first().copied();
 
         if mode.keep_id {
-            let uid_maps = Self::keep_id_uid_mappings(host_uid, &sub_uid);
-            let gid_maps = Self::keep_id_uid_mappings(host_gid, &sub_gid);
+            let target_uid = mode.keep_id_uid.unwrap_or(host_uid);
+            let target_gid = mode.keep_id_gid.unwrap_or(host_gid);
+            let uid_maps =
+                Self::keep_id_uid_mappings_ext(target_uid, host_uid, &sub_uid, mode.max_size);
+            let gid_maps =
+                Self::keep_id_uid_mappings_ext(target_gid, host_gid, &sub_gid, mode.max_size);
             if Self::apply_id_mappings(pid, &uid_maps, &gid_maps).is_ok() {
                 return Ok(());
             }
@@ -237,10 +244,62 @@ using single-ID mapping only (images requiring chown/--user may fail)"
 
     #[cfg(target_os = "linux")]
     fn keep_id_uid_mappings(host_id: u32, sub_ranges: &[SubordinateRange]) -> Vec<IdMapping> {
+        Self::keep_id_uid_mappings_ext(host_id, host_id, sub_ranges, None)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn keep_id_uid_mappings_ext(
+        target_id: u32,
+        host_id: u32,
+        sub_ranges: &[SubordinateRange],
+        max_size: Option<u32>,
+    ) -> Vec<IdMapping> {
         let mut maps = Vec::new();
         if let Some(r) = sub_ranges.first() {
-            if host_id > 0 {
-                let first_size = host_id.min(r.count);
+            if let Some(sz) = max_size {
+                if sz <= 1 {
+                    maps.push(IdMapping {
+                        container_id: target_id,
+                        host_id,
+                        size: 1,
+                    });
+                } else if target_id >= sz {
+                    maps.push(IdMapping {
+                        container_id: 0,
+                        host_id: r.start,
+                        size: sz - 1,
+                    });
+                    maps.push(IdMapping {
+                        container_id: target_id,
+                        host_id,
+                        size: 1,
+                    });
+                } else {
+                    if target_id > 0 {
+                        maps.push(IdMapping {
+                            container_id: 0,
+                            host_id: r.start,
+                            size: target_id,
+                        });
+                    }
+                    maps.push(IdMapping {
+                        container_id: target_id,
+                        host_id,
+                        size: 1,
+                    });
+                    let rem = sz - target_id - 1;
+                    if rem > 0 {
+                        maps.push(IdMapping {
+                            container_id: target_id + 1,
+                            host_id: r.start + target_id,
+                            size: rem,
+                        });
+                    }
+                }
+                return maps;
+            }
+            if target_id > 0 {
+                let first_size = target_id.min(r.count);
                 if first_size > 0 {
                     maps.push(IdMapping {
                         container_id: 0,
@@ -250,20 +309,20 @@ using single-ID mapping only (images requiring chown/--user may fail)"
                 }
             }
             maps.push(IdMapping {
-                container_id: host_id,
+                container_id: target_id,
                 host_id,
                 size: 1,
             });
-            if r.count > host_id {
+            if r.count > target_id {
                 maps.push(IdMapping {
-                    container_id: host_id + 1,
-                    host_id: r.start + host_id,
-                    size: r.count - host_id,
+                    container_id: target_id + 1,
+                    host_id: r.start + target_id,
+                    size: r.count - target_id,
                 });
             }
         } else {
             maps.push(IdMapping {
-                container_id: host_id,
+                container_id: target_id,
                 host_id,
                 size: 1,
             });

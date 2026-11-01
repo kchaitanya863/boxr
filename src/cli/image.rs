@@ -59,13 +59,25 @@ pub struct PullArgs {
     pub retry_delay: String,
 
     /// Suppress output information when pulling images
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
+
+    #[arg(short = 'a', long = "all-tags", hide = true)]
+    pub all_tags: bool,
+
+    #[arg(long = "decryption-key", hide = true)]
+    pub decryption_key: Vec<String>,
+
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
 
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
 
     pub image: String,
+
+    #[arg(hide = true)]
+    pub extra_images: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -73,28 +85,34 @@ pub struct PullArgs {
 pub struct SaveArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<String>,
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
     #[arg(long = "format")]
     pub format: Option<String>,
     #[arg(short = 'm', long = "multi-image-archive")]
     pub multi_image_archive: bool,
+    #[arg(long = "compress")]
+    pub compress: bool,
     #[arg(long = "uncompressed")]
     pub uncompressed: bool,
     #[arg(long = "oci-accept-uncompressed-layers")]
     pub oci_accept_uncompressed_layers: bool,
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
     /// Image(s) to save
     #[arg(value_name = "IMAGE")]
     pub images: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LoadArgs {
     #[arg(short = 'i', long = "input")]
     pub input: Option<String>,
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -112,6 +130,39 @@ pub struct PushArgs {
     pub format: Option<String>,
     #[arg(long = "compression-format", hide = true)]
     pub compression_format: Option<String>,
+    #[arg(long = "compression-level", allow_hyphen_values = true, hide = true)]
+    pub compression_level: Option<i32>,
+    #[arg(
+        long = "force-compression",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub force_compression: Option<bool>,
+    #[arg(long = "remove-signatures", hide = true)]
+    pub remove_signatures: bool,
+    #[arg(long = "digestfile", hide = true)]
+    pub digestfile: Option<String>,
+    #[arg(long = "encryption-key", hide = true)]
+    pub encryption_key: Vec<String>,
+    #[arg(long = "encrypt-layer", hide = true)]
+    pub encrypt_layer: Vec<String>,
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
+    #[arg(long = "sign-by", hide = true)]
+    pub sign_by: Option<String>,
+    #[arg(long = "sign-by-sigstore", hide = true)]
+    pub sign_by_sigstore: Option<String>,
+    #[arg(long = "sign-by-sigstore-private-key", hide = true)]
+    pub sign_by_sigstore_private_key: Option<String>,
+    #[arg(long = "sign-passphrase-file", hide = true)]
+    pub sign_passphrase_file: Option<String>,
+    #[arg(long = "sign-by-sq-fingerprint", hide = true)]
+    pub sign_by_sq_fingerprint: Option<String>,
+    #[arg(long = "platform", hide = true)]
+    pub platform: Option<String>,
     #[arg(short = 'q', long = "quiet", hide = true)]
     pub quiet: bool,
     /// Source image
@@ -160,6 +211,12 @@ pub struct BuildArgs {
     #[arg(short = 't', long = "tag")]
     pub tags: Vec<String>,
 
+    #[arg(long = "manifest", hide = true)]
+    pub manifest: Option<String>,
+
+    #[arg(long = "annotation", hide = true)]
+    pub annotations: Vec<String>,
+
     #[arg(short = 'f', long = "file", default_value = "Dockerfile")]
     pub file: String,
 
@@ -187,8 +244,27 @@ pub struct BuildArgs {
     pub shm_size: Option<String>,
 
     /// Always remove intermediate containers
-    #[arg(long = "rm", default_value_t = true)]
+    #[arg(
+        long = "rm",
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub rm: bool,
+
+    /// Always remove intermediate containers after a build, even if the build is unsuccessful
+    #[arg(
+        long = "force-rm",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub force_rm: bool,
 
     /// Do not cache specified stages
     #[arg(long = "no-cache-filter")]
@@ -279,6 +355,10 @@ pub struct BuildArgs {
     #[arg(long = "pull-never", hide = true)]
     pub pull_never: bool,
 
+    /// User namespace to use for build containers
+    #[arg(long = "userns")]
+    pub userns: Option<String>,
+
     /// Sets the configuration for network namespaces when handling RUN instructions
     #[arg(long = "network", alias = "net", hide = true)]
     pub network: Option<String>,
@@ -309,6 +389,74 @@ pub struct BuildArgs {
 
     #[arg(long = "unsetenv")]
     pub unsetenv: Vec<String>,
+
+    #[arg(long = "iidfile", hide = true)]
+    pub iidfile: Option<String>,
+
+    #[arg(long = "iidfile-raw", hide = true)]
+    pub iidfile_raw: Option<String>,
+
+    #[arg(long = "metadata-file", hide = true)]
+    pub metadata_file: Option<String>,
+
+    #[arg(long = "from", hide = true)]
+    pub from: Option<String>,
+
+    #[arg(long = "no-hosts", hide = true)]
+    pub no_hosts: bool,
+
+    #[arg(long = "cap-drop", hide = true)]
+    pub cap_drop: Vec<String>,
+
+    #[arg(long = "arch", hide = true)]
+    pub arch: Option<String>,
+
+    #[arg(long = "os", hide = true)]
+    pub os: Option<String>,
+
+    #[arg(long = "timestamp", allow_hyphen_values = true, hide = true)]
+    pub timestamp: Option<i64>,
+
+    #[arg(long = "log-rusage", hide = true)]
+    pub log_rusage: bool,
+
+    #[arg(long = "device", hide = true)]
+    pub devices: Vec<String>,
+
+    #[arg(
+        long = "http-proxy",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub http_proxy: bool,
+
+    #[arg(long = "build-context", hide = true)]
+    pub build_context: Vec<String>,
+
+    #[arg(long = "sbom-output", hide = true)]
+    pub sbom_output: Option<String>,
+
+    #[arg(long = "sbom-purl-output", hide = true)]
+    pub sbom_purl_output: Option<String>,
+
+    #[arg(long = "sbom-image-output", hide = true)]
+    pub sbom_image_output: Option<String>,
+
+    #[arg(long = "sbom-image-purl-output", hide = true)]
+    pub sbom_image_purl_output: Option<String>,
+
+    #[arg(long = "sbom-scanner-image", hide = true)]
+    pub sbom_scanner_image: Option<String>,
+
+    #[arg(long = "sbom-scanner-command", hide = true)]
+    pub sbom_scanner_command: Vec<String>,
+
+    #[arg(long = "sbom-merge-strategy", hide = true)]
+    pub sbom_merge_strategy: Option<String>,
 
     #[arg(default_value = ".")]
     pub path: String,
@@ -638,6 +786,9 @@ pub struct ImagePruneArgs {
     #[arg(long = "external")]
     pub external: bool,
 
+    #[arg(long = "build-cache")]
+    pub build_cache: bool,
+
     #[arg(long = "filter")]
     pub filter: Vec<String>,
 }
@@ -800,8 +951,21 @@ pub struct SearchArgs {
     #[arg(long = "format")]
     pub format: Option<String>,
 
-    #[arg(long = "no-trunc")]
+    #[arg(
+        long = "no-trunc",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub no_trunc: bool,
+
+    #[arg(long = "compatible")]
+    pub compatible: bool,
+
+    #[arg(long = "list-tags")]
+    pub list_tags: bool,
 
     /// Search term
     pub term: String,

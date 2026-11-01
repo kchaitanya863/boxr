@@ -83,8 +83,34 @@ pub struct FarmBuildArgs {
     #[arg(long = "platforms")]
     pub platforms: Option<String>,
     /// Build on local machine as well
-    #[arg(short = 'l', long = "local")]
-    pub local: bool,
+    #[arg(
+        short = 'l',
+        long = "local",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub local: Option<bool>,
+    /// Remove built images from farm nodes on success
+    #[arg(long = "cleanup")]
+    pub cleanup: bool,
+    /// Path of the authentication file
+    #[arg(long = "authfile")]
+    pub authfile: Option<String>,
+    /// Require HTTPS and verify certificates when talking to the container registry
+    #[arg(
+        long = "tls-verify",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub tls_verify: Option<bool>,
+    /// Credentials (USERNAME:PASSWORD) to use for authenticating to a registry
+    #[arg(long = "creds")]
+    pub creds: Option<String>,
+    /// Use certificates at the specified path to access the registry
+    #[arg(long = "cert-dir")]
+    pub cert_dir: Option<String>,
     /// Build context directory (default: current directory)
     pub context: Option<String>,
 }

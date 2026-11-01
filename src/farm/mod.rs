@@ -78,7 +78,16 @@ pub fn connections_conf_path() -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    boxr_home().join("connections.json")
+    if let Some(root) = &crate::cli::podman_globals::podman_global_options().root {
+        return root.join("connections.json");
+    }
+    if let Ok(custom) = std::env::var("BOXR_HOME") {
+        if !custom.trim().is_empty() {
+            return PathBuf::from(custom).join("connections.json");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".boxr").join("connections.json")
 }
 
 pub fn load_connections_file() -> ConnectionsFile {

@@ -537,6 +537,10 @@ pub fn forward_udp_sock_path(bundle_path: &Path, container_port: u16) -> PathBuf
 /// Unix only; Windows has no network namespaces.
 #[cfg(unix)]
 pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMapping]) -> Result<()> {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     use std::io::{Read, Write};
     use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
     use std::os::unix::net::UnixListener;
@@ -578,7 +582,12 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
             }
         }
     }
-    if tcp_listeners.is_empty() && udp_listeners.is_empty() {
+
+    let peer_sock_path = bundle_forward_sock_path(bundle_path, "peer-tcp.sock");
+    let _ = std::fs::remove_file(&peer_sock_path);
+    let peer_listener = UnixListener::bind(&peer_sock_path).ok();
+
+    if tcp_listeners.is_empty() && udp_listeners.is_empty() && peer_listener.is_none() {
         return Ok(());
     }
 
@@ -588,6 +597,48 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
         .filter(|s| !s.is_empty());
 
     let mut handles = Vec::new();
+    if let Some(pl) = peer_listener {
+        let primary_ip = primary_ip.clone();
+        handles.push(std::thread::spawn(move || {
+            for conn in pl.incoming() {
+                let mut unix_stream = match conn {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let primary_ip = primary_ip.clone();
+                std::thread::spawn(move || {
+                    let mut port_buf = [0u8; 2];
+                    if unix_stream.read_exact(&mut port_buf).is_err() {
+                        return;
+                    }
+                    let target_port = u16::from_be_bytes(port_buf);
+                    let tcp = primary_ip
+                        .as_deref()
+                        .and_then(|ip| {
+                            std::net::TcpStream::connect(format!("{}:{}", ip, target_port)).ok()
+                        })
+                        .or_else(|| {
+                            std::net::TcpStream::connect(format!("127.0.0.1:{}", target_port)).ok()
+                        });
+                    let Some(mut tcp) = tcp else {
+                        let _ = unix_stream.write_all(&[0u8]);
+                        return;
+                    };
+                    let _ = unix_stream.write_all(&[1u8]);
+                    let _ = tcp.set_nodelay(true);
+                    if let (Ok(mut u2), Ok(mut t2)) = (unix_stream.try_clone(), tcp.try_clone()) {
+                        let h = std::thread::spawn(move || {
+                            let _ = std::io::copy(&mut u2, &mut t2);
+                            let _ = t2.shutdown(std::net::Shutdown::Write);
+                        });
+                        let _ = std::io::copy(&mut tcp, &mut unix_stream);
+                        let _ = unix_stream.shutdown(std::net::Shutdown::Write);
+                        let _ = h.join();
+                    }
+                });
+            }
+        }));
+    }
     for (container_port, listener) in tcp_listeners {
         let primary_ip = primary_ip.clone();
         handles.push(std::thread::spawn(move || {
@@ -685,6 +736,10 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
 /// Persistent port forwarder daemon for a running container bundle.
 /// Runs in a background process decoupled from the short-lived CLI process.
 pub async fn run_port_forward_daemon(bundle_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     let ports_path = bundle_path.join("ports.json");
     if !ports_path.exists() {
         return Ok(());

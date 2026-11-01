@@ -69,7 +69,7 @@ impl UserNetEngine {
     }
 
     fn is_outbound_ipv4(&self, ip: &Ipv4Header) -> bool {
-        ip.src_ip == self.container_ip
+        ip.dst_ip != ip.src_ip
             && ip.dst_ip != self.container_ip
             && ip.dst_ip != self.gateway_ip
             && ip.dst_ip != self.dns_ip
@@ -277,6 +277,19 @@ impl UserNetEngine {
                         };
                         flow_state.host_seq = flow_state.host_seq.wrapping_add(n as u32);
                         return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &response_data));
+                    } else {
+                        let reply_tcp = TcpHeader {
+                            src_port: tcp.dst_port,
+                            dst_port: tcp.src_port,
+                            seq_num: flow_state.host_seq,
+                            ack_num: tcp.seq_num.wrapping_add(tcp_data.len() as u32),
+                            data_offset: 20,
+                            flags: TCP_FLAG_ACK,
+                            window_size: 65535,
+                            checksum: 0,
+                            urgent_ptr: 0,
+                        };
+                        return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
                     }
                 }
             }
@@ -359,7 +372,10 @@ impl UserNetEngine {
             let dns_reply = self
                 .bundle_path
                 .as_deref()
-                .and_then(|b| super::relay::dns_via_relay(b, udp_payload).ok())
+                .and_then(|b| {
+                    super::relay::try_resolve_aardvark_dns(udp_payload, b)
+                        .or_else(|| super::relay::dns_via_relay(b, udp_payload).ok())
+                })
                 .or_else(|| forward_dns_query(self.host_netns.as_ref(), udp_payload).ok());
             if let Some(dns_reply) = dns_reply {
                 return self.build_udp_reply(eth, ip, &udp, &dns_reply);
@@ -504,6 +520,7 @@ pub mod platform {
     }
 
     const TUNSETIFF: libc::c_ulong = 0x400454ca;
+    const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
     const IFF_TAP: libc::c_short = 0x0002;
     const IFF_NO_PI: libc::c_short = 0x1000;
 
@@ -542,38 +559,54 @@ pub mod platform {
         Ok(tun_file)
     }
 
-    /// Configure IP address, netmask, MTU, and default gateway inside the container network namespace
-    pub fn configure_container_netns(ifname: &str, ip: Ipv4Addr, gateway: Ipv4Addr) -> Result<()> {
-        // Bring loopback up
+    fn run_ip(args: &[&str]) {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        let ip_bin = ip_command();
+        let mut cmd = Command::new(ip_bin);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                let _ = libc::setresgid(0, 0, 0);
+                let _ = libc::setresuid(0, 0, 0);
+                Ok(())
+            });
+        }
+        let _ = cmd.status();
+    }
+
+    pub fn create_persistent_tap_device(dev_name: &str) -> Result<()> {
+        let f = create_tap_device(dev_name)?;
+        unsafe {
+            let _ = libc::ioctl(f.as_raw_fd(), TUNSETPERSIST as _, 1);
+        }
+        Ok(())
+    }
+
+    pub fn destroy_tap_device(dev_name: &str) {
+        if let Ok(f) = create_tap_device(dev_name) {
+            unsafe {
+                let _ = libc::ioctl(f.as_raw_fd(), TUNSETPERSIST as _, 0);
+            }
+            drop(f);
+        }
         let ip_bin = ip_command();
         let _ = Command::new(ip_bin)
-            .args(["link", "set", "lo", "up"])
-            .status();
+            .args(["link", "delete", dev_name])
+            .output();
+    }
 
-        // Assign IP address to TAP device
+    /// Configure IP address, netmask, MTU, and default gateway inside the container network namespace
+    pub fn configure_container_netns(ifname: &str, ip: Ipv4Addr, gateway: Ipv4Addr) -> Result<()> {
+        run_ip(&["link", "set", "lo", "up"]);
         let ip_cidr = format!("{}/24", ip);
-        let _ = Command::new(ip_bin)
-            .args(["addr", "add", &ip_cidr, "brd", "+", "dev", ifname])
-            .status();
-
-        // Bring TAP interface up
-        let _ = Command::new(ip_bin)
-            .args(["link", "set", ifname, "up"])
-            .status();
-
-        // Set default route via gateway
-        let _ = Command::new(ip_bin)
-            .args([
-                "route",
-                "add",
-                "default",
-                "via",
-                &gateway.to_string(),
-                "dev",
-                ifname,
-            ])
-            .status();
-
+        run_ip(&["addr", "add", &ip_cidr, "brd", "+", "dev", ifname]);
+        run_ip(&["link", "set", ifname, "up"]);
+        let gw_str = gateway.to_string();
+        run_ip(&["route", "add", "default", "via", &gw_str, "dev", ifname]);
         Ok(())
     }
 
@@ -585,10 +618,57 @@ pub mod platform {
         host_netns: Option<File>,
     ) {
         use std::io::{Read, Write};
+        crate::network::usernet::relay::spawn_in_netns_peer_listener(bundle_path);
         let engine = UserNetEngine::new(Some(bundle_path), ports, host_netns);
         let mut buf = [0u8; 65536];
+        let mut _dynamic_taps: Vec<File> = Vec::new();
+        let mut synced_iface_count: usize = 1;
 
         loop {
+            if let Ok(raw) = std::fs::read_to_string(bundle_path.join("network_interfaces.json")) {
+                if let Ok(ifaces) = serde_json::from_str::<Vec<(String, String, String)>>(&raw) {
+                    if ifaces.len() > synced_iface_count {
+                        for (ifn, ip_str, _) in ifaces.iter().skip(synced_iface_count) {
+                            if let Ok(tf) = create_tap_device(ifn) {
+                                if !ip_str.is_empty() {
+                                    let _ = Command::new("/sbin/ip")
+                                        .args([
+                                            "addr",
+                                            "add",
+                                            &format!("{}/24", ip_str),
+                                            "brd",
+                                            "+",
+                                            "dev",
+                                            ifn,
+                                        ])
+                                        .status()
+                                        .or_else(|_| {
+                                            Command::new("ip")
+                                                .args([
+                                                    "addr",
+                                                    "add",
+                                                    &format!("{}/24", ip_str),
+                                                    "brd",
+                                                    "+",
+                                                    "dev",
+                                                    ifn,
+                                                ])
+                                                .status()
+                                        });
+                                }
+                                let _ = Command::new("/sbin/ip")
+                                    .args(["link", "set", ifn, "up"])
+                                    .status()
+                                    .or_else(|_| {
+                                        Command::new("ip").args(["link", "set", ifn, "up"]).status()
+                                    });
+                                _dynamic_taps.push(tf);
+                            }
+                        }
+                        synced_iface_count = ifaces.len();
+                    }
+                }
+            }
             // Wait for readability using poll() to eliminate busy polling
             let mut pollfd = libc::pollfd {
                 fd: tap_file.as_raw_fd(),

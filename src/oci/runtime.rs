@@ -147,6 +147,10 @@ pub struct Linux {
     pub seccomp: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<LinuxDevice>,
+    #[serde(rename = "maskedPaths", skip_serializing_if = "Option::is_none")]
+    pub masked_paths: Option<Vec<String>>,
+    #[serde(rename = "readonlyPaths", skip_serializing_if = "Option::is_none")]
+    pub readonly_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -209,6 +213,18 @@ impl Spec {
         env_override: Option<&[String]>,
     ) -> Self {
         let mut args = Vec::new();
+        let has_cmd_override = cmd_override.is_some_and(|c| !c.is_empty());
+
+        if let Some(cfg) = image_config {
+            if let Some(entrypoint) = &cfg.entrypoint {
+                args.extend(entrypoint.iter().filter(|s| !s.is_empty()).cloned());
+            }
+            if !has_cmd_override {
+                if let Some(cmd) = &cfg.cmd {
+                    args.extend_from_slice(cmd);
+                }
+            }
+        }
 
         if let Some(overrides) = cmd_override {
             if !overrides.is_empty() {
@@ -217,18 +233,17 @@ impl Spec {
         }
 
         if args.is_empty() {
-            if let Some(cfg) = image_config {
-                if let Some(entrypoint) = &cfg.entrypoint {
-                    args.extend_from_slice(entrypoint);
-                }
-                if let Some(cmd) = &cfg.cmd {
-                    args.extend_from_slice(cmd);
-                }
+            let explicit_empty = image_config.is_some_and(|cfg| {
+                cfg.entrypoint
+                    .as_ref()
+                    .is_some_and(|e| e.iter().all(|s| s.is_empty()))
+                    && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
+            });
+            if explicit_empty {
+                args.push(String::new());
+            } else {
+                args.push("/bin/sh".to_string());
             }
-        }
-
-        if args.is_empty() {
-            args.push("/bin/sh".to_string());
         }
 
         let mut env =
@@ -343,6 +358,8 @@ impl Spec {
             cgroup_parent: None,
             seccomp: None,
             devices: Vec::new(),
+            masked_paths: None,
+            readonly_paths: None,
         };
 
         Self {
@@ -358,7 +375,7 @@ impl Spec {
                 args,
                 env,
                 cwd,
-                no_new_privileges: Some(true),
+                no_new_privileges: Some(false),
                 capabilities: None,
                 oom_score_adj: None,
                 umask: None,

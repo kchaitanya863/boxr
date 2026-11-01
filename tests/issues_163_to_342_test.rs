@@ -139,6 +139,7 @@ fn default_run_args(image: &str) -> RunArgs {
         env: Vec::new(),
         unsetenv: Vec::new(),
         unsetenv_all: false,
+        env_merge: Vec::new(),
         systemd: None,
         ports: Vec::new(),
         volumes: Vec::new(),
@@ -186,6 +187,7 @@ fn default_run_args(image: &str) -> RunArgs {
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
+        cdi_spec_dir: Vec::new(),
         security_opt: Vec::new(),
         cpu_shares: None,
         cpuset_cpus: None,
@@ -274,6 +276,7 @@ fn default_run_args(image: &str) -> RunArgs {
         tz: Vec::new(),
         image: image.to_string(),
         command: vec!["true".to_string()],
+        ..Default::default()
     }
 }
 
@@ -297,6 +300,8 @@ fn test_issue_163_ps_accepts_invalid_filter_keys_without_returning_an_error() {
         noheading: false,
         external: false,
         ns: false,
+        pod: false,
+        sync: false,
         containers: vec![],
     };
     let res = boxr::list_containers(args, "ps");

@@ -22,8 +22,23 @@ pub struct StatsArgs {
     #[arg(long = "no-stream")]
     pub no_stream: bool,
 
-    #[arg(short = 'a', long = "all")]
+    #[arg(
+        short = 'a',
+        long = "all",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub all: bool,
+
+    #[arg(long = "no-reset")]
+    pub no_reset: bool,
+
+    #[arg(short = 'i', long = "interval", allow_hyphen_values = true)]
+    pub interval: Option<i64>,
 
     #[arg(long = "format")]
     pub format: Option<String>,
@@ -180,6 +195,10 @@ pub enum SystemAction {
         force: bool,
         #[arg(long = "volumes")]
         volumes: bool,
+        #[arg(long = "external")]
+        external: bool,
+        #[arg(long = "build")]
+        build: bool,
         #[arg(long = "filter")]
         filter: Vec<String>,
     },
@@ -232,6 +251,9 @@ pub enum SystemAction {
     /// Prepare Hyper-V virtualization prerequisites
     #[command(name = "hyperv-prep")]
     HypervPrep,
+    /// Proxy stdio to the Podman service socket
+    #[command(name = "dial-stdio")]
+    DialStdio,
 }
 
 #[derive(Args, Debug)]
@@ -298,9 +320,16 @@ pub struct PodLsArgs {
     pub no_trunc: bool,
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
-
     #[arg(short = 'n', long = "noheading")]
     pub noheading: bool,
+    #[arg(long = "ctr-names")]
+    pub ctr_names: bool,
+    #[arg(long = "ctr-ids")]
+    pub ctr_ids: bool,
+    #[arg(long = "ctr-status")]
+    pub ctr_status: bool,
+    #[arg(long = "ns")]
+    pub ns: bool,
 
     #[arg(value_name = "POD")]
     pub pods: Vec<String>,
@@ -460,6 +489,12 @@ pub struct PodCreateArgs {
     /// Write the infra container's conmon PID to the file
     #[arg(long = "infra-conmon-pidfile")]
     pub infra_conmon_pidfile: Option<String>,
+    /// UID map for the user namespace
+    #[arg(long = "uidmap")]
+    pub uidmap: Vec<String>,
+    /// GID map for the user namespace
+    #[arg(long = "gidmap")]
+    pub gidmap: Vec<String>,
     /// Pod name (positional; same as --name)
     #[arg(value_name = "NAME")]
     pub pod: Option<String>,
@@ -575,6 +610,12 @@ pub enum PodAction {
     Top(PodTopArgs),
     /// Display a live stream of pod resource usage statistics
     Stats {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
+        #[arg(long = "no-reset")]
+        no_reset: bool,
         #[arg(long = "no-stream")]
         no_stream: bool,
         #[arg(long = "format")]
@@ -590,10 +631,49 @@ pub enum PodAction {
     Exists { pod: String },
     /// Clone a pod and its containers
     Clone {
+        /// New pod name
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// Start the cloned pod
+        #[arg(long = "start")]
+        start: bool,
+        /// Destroy the original pod
+        #[arg(long = "destroy")]
+        destroy: bool,
+        /// Volumes to mount in the cloned pod
+        #[arg(short = 'v', long = "volume")]
+        volumes: Vec<String>,
+        /// Size of /dev/shm
+        #[arg(long = "shm-size")]
+        shm_size: Option<String>,
+        /// UTS namespace for the cloned pod
+        #[arg(long = "uts")]
+        uts: Option<String>,
+        /// PID namespace for the cloned pod
+        #[arg(long = "pid")]
+        pid: Option<String>,
+        /// IPC namespace for the cloned pod
+        #[arg(long = "ipc")]
+        ipc: Option<String>,
+        /// User namespace for the cloned pod
+        #[arg(long = "userns")]
+        userns: Option<String>,
+        /// Hostname for the cloned pod
+        #[arg(long = "hostname")]
+        hostname: Option<String>,
+        /// Labels for the cloned pod
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<String>,
+        /// CPU limit for the cloned pod
+        #[arg(long = "cpus")]
+        cpus: Option<String>,
+        /// Memory limit for the cloned pod
+        #[arg(short = 'm', long = "memory")]
+        memory: Option<String>,
         /// Source pod name or ID
         source: String,
-        /// Target pod name
-        target: String,
+        /// Target pod name (optional positional)
+        target: Option<String>,
     },
     /// Fetch logs for all containers in a pod
     Logs(PodLogsArgs),
@@ -635,16 +715,16 @@ pub enum GenerateAction {
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
         /// Use container/pod names instead of IDs
-        #[arg(short = 'n', long = "name")]
+        #[arg(short = 'n', long = "name", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         name: bool,
         /// Generate .service files instead of printing to stdout
-        #[arg(short = 'f', long = "files")]
+        #[arg(short = 'f', long = "files", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         files: bool,
         /// Create a new container or pod instead of starting an existing one
         #[arg(long = "new", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
         new: Option<bool>,
         /// Make it a template file and use %i and %I specifiers
-        #[arg(long = "template")]
+        #[arg(long = "template", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         template: bool,
         /// Systemd restart-policy
         #[arg(long = "restart-policy", alias = "restart")]
@@ -656,10 +736,15 @@ pub enum GenerateAction {
         #[arg(long = "start-timeout")]
         start_timeout: Option<u64>,
         /// Stop timeout override
-        #[arg(long = "stop-timeout", short = 't', visible_alias = "time")]
-        stop_timeout: Option<u64>,
+        #[arg(
+            long = "stop-timeout",
+            short = 't',
+            visible_alias = "time",
+            allow_hyphen_values = true
+        )]
+        stop_timeout: Option<String>,
         /// Skip header generation
-        #[arg(long = "no-header")]
+        #[arg(long = "no-header", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]
         no_header: bool,
         /// Systemd unit name prefix for containers
         #[arg(long = "container-prefix", default_value = "container")]
@@ -772,6 +857,9 @@ pub struct PodLogsArgs {
     /// Act on the latest pod
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
+    /// Output the containers with different colors in the log
+    #[arg(long = "color")]
+    pub color: bool,
 }
 
 #[derive(Args, Debug, Clone)]

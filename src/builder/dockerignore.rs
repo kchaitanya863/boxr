@@ -1,5 +1,6 @@
 use std::path::Path;
 
+#[derive(Clone, Debug)]
 pub struct DockerIgnore {
     patterns: Vec<String>,
 }

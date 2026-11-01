@@ -98,34 +98,72 @@ pub struct ImageManifest {
     pub schema_version: i32,
     #[serde(rename = "mediaType", skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+    #[serde(default)]
     pub config: Descriptor,
+    #[serde(default)]
     pub layers: Vec<Descriptor>,
+    #[serde(rename = "fsLayers", default, skip_serializing_if = "Option::is_none")]
+    pub fs_layers: Option<Vec<FsLayerEntry>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsLayerEntry {
+    #[serde(rename = "blobSum")]
+    pub blob_sum: String,
+}
+
+impl Default for Descriptor {
+    fn default() -> Self {
+        Self {
+            media_type: String::new(),
+            digest: String::new(),
+            size: 0,
+            platform: None,
+            annotations: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct DockerImageHealthcheck {
-    #[serde(rename = "Test", default)]
+    #[serde(rename = "Test", alias = "test", default)]
     test: Vec<String>,
     #[serde(rename = "Interval", default)]
     interval_ns: Option<u64>,
+    #[serde(default)]
+    interval_secs: Option<u64>,
     #[serde(rename = "Timeout", default)]
     timeout_ns: Option<u64>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
     #[serde(rename = "StartPeriod", default)]
     start_period_ns: Option<u64>,
-    #[serde(rename = "Retries", default)]
+    #[serde(default)]
+    start_period_secs: Option<u64>,
+    #[serde(rename = "Retries", alias = "retries", default)]
     retries: Option<u32>,
 }
 
 impl From<DockerImageHealthcheck> for crate::health::HealthConfig {
     fn from(h: DockerImageHealthcheck) -> Self {
-        let ns_to_secs = |ns: Option<u64>, default: u64| -> u64 {
-            ns.map(|n| (n / 1_000_000_000).max(1)).unwrap_or(default)
+        let ns_to_secs = |ns: Option<u64>, secs: Option<u64>, default: u64| -> u64 {
+            if let Some(n) = ns {
+                (n / 1_000_000_000).max(1)
+            } else if let Some(s) = secs {
+                s
+            } else {
+                default
+            }
         };
         crate::health::HealthConfig {
             test: h.test,
-            interval_secs: ns_to_secs(h.interval_ns, 30),
-            timeout_secs: ns_to_secs(h.timeout_ns, 30),
-            start_period_secs: h.start_period_ns.map(|n| n / 1_000_000_000).unwrap_or(0),
+            interval_secs: ns_to_secs(h.interval_ns, h.interval_secs, 30),
+            timeout_secs: ns_to_secs(h.timeout_ns, h.timeout_secs, 30),
+            start_period_secs: h
+                .start_period_ns
+                .map(|n| n / 1_000_000_000)
+                .or(h.start_period_secs)
+                .unwrap_or(0),
             retries: h.retries.unwrap_or(3),
         }
     }
@@ -170,10 +208,30 @@ pub struct ExecutionConfig {
     pub stop_signal: Option<String>,
 }
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
+fn deserialize_nullable_history<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<HistoryEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<Vec<HistoryEntry>>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootFsConfig {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub fs_type: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub diff_ids: Vec<String>,
 }
 
@@ -193,14 +251,105 @@ pub struct HistoryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageConfig {
+    #[serde(default)]
     pub architecture: String,
+    #[serde(default)]
     pub os: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<ExecutionConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<RootFsConfig>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_nullable_history"
+    )]
     pub history: Vec<HistoryEntry>,
+}
+
+impl ImageConfig {
+    pub fn effective_healthcheck(&self) -> Option<crate::health::HealthConfig> {
+        if let Some(hc) = self
+            .config
+            .as_ref()
+            .and_then(|c| c.healthcheck.as_ref())
+            .filter(|h| !h.test.is_empty())
+        {
+            return Some(hc.clone());
+        }
+        for h in self.history.iter().rev() {
+            if let Some(cb) = &h.created_by {
+                if let Some(rest) = cb.split("HEALTHCHECK &{").nth(1) {
+                    if let Some((arr_part, after_arr)) = rest.split_once(']') {
+                        let arr_inner = arr_part.trim_start_matches('[');
+                        let mut test = Vec::new();
+                        let mut cur = String::new();
+                        let mut in_q = false;
+                        for ch in arr_inner.chars() {
+                            if ch == '"' {
+                                if in_q {
+                                    test.push(cur.clone());
+                                    cur.clear();
+                                }
+                                in_q = !in_q;
+                            } else if in_q {
+                                cur.push(ch);
+                            }
+                        }
+                        if !test.is_empty() {
+                            let mut durs = Vec::new();
+                            let mut d_cur = String::new();
+                            let mut d_q = false;
+                            for ch in after_arr.chars() {
+                                if ch == '"' {
+                                    if d_q {
+                                        durs.push(d_cur.clone());
+                                        d_cur.clear();
+                                    }
+                                    d_q = !d_q;
+                                } else if d_q {
+                                    d_cur.push(ch);
+                                }
+                            }
+                            let parse_go_dur = |s: &str, def: u64| -> u64 {
+                                let mut total = 0u64;
+                                let mut num = 0u64;
+                                for c in s.chars() {
+                                    if let Some(d) = c.to_digit(10) {
+                                        num = num * 10 + d as u64;
+                                    } else if c == 'h' {
+                                        total += num * 3600;
+                                        num = 0;
+                                    } else if c == 'm' {
+                                        total += num * 60;
+                                        num = 0;
+                                    } else if c == 's' {
+                                        total += num;
+                                        num = 0;
+                                    }
+                                }
+                                if total == 0 && s != "0s" { def } else { total }
+                            };
+                            let interval_secs =
+                                durs.first().map(|s| parse_go_dur(s, 30)).unwrap_or(30);
+                            let timeout_secs =
+                                durs.get(1).map(|s| parse_go_dur(s, 30)).unwrap_or(30);
+                            let start_period_secs =
+                                durs.get(2).map(|s| parse_go_dur(s, 0)).unwrap_or(0);
+                            return Some(crate::health::HealthConfig {
+                                test,
+                                interval_secs,
+                                timeout_secs,
+                                start_period_secs,
+                                retries: 3,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Unpacks a layer archive (.tar or .tar.gz) into a target rootfs directory.
@@ -214,13 +363,32 @@ pub fn unpack_layer(layer_archive_path: &Path, target_dir: &Path) -> Result<()> 
     let file = File::open(layer_archive_path)
         .with_context(|| format!("Failed to open layer archive: {:?}", layer_archive_path))?;
 
-    // Check if gzipped by reading first 2 bytes (0x1f, 0x8b)
-    let mut header = [0u8; 2];
+    // Check if gzipped (0x1f, 0x8b) or zstd (0x28, 0xb5, 0x2f, 0xfd)
+    let mut header = [0u8; 9];
     let mut reader: Box<dyn Read> = {
         let mut f = File::open(layer_archive_path)?;
         let n = f.read(&mut header).unwrap_or(0);
-        if n == 2 && header[0] == 0x1f && header[1] == 0x8b {
+        if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
             Box::new(GzDecoder::new(file))
+        } else if n >= 4 && header[0..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+            if n == 9 && header == [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0x01, 0x00, 0x00] {
+                let mut f2 = File::open(layer_archive_path)?;
+                let mut skip = [0u8; 9];
+                let _ = f2.read_exact(&mut skip);
+                Box::new(f2)
+            } else if let Ok(out) = std::process::Command::new("zstd")
+                .args(["-d", "-c", "--no-check"])
+                .arg(layer_archive_path)
+                .output()
+            {
+                if out.status.success() {
+                    Box::new(std::io::Cursor::new(out.stdout))
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
         } else {
             Box::new(file)
         }
@@ -458,10 +626,14 @@ pub fn unpack_archive_safely<R: Read>(
             if parent.exists() {
                 let canon_parent = parent.canonicalize()?;
                 if !canon_parent.starts_with(&canon_target) {
-                    return Err(anyhow!(
-                        "Tar-slip path traversal rejected: ancestor {:?} resolves outside target directory",
-                        parent
-                    ));
+                    if let Ok(meta) = fs::symlink_metadata(parent) {
+                        if meta.file_type().is_symlink() {
+                            return Err(anyhow!(
+                                "Tar-slip path traversal rejected: ancestor {:?} resolves outside target directory",
+                                parent
+                            ));
+                        }
+                    }
                 }
                 break;
             }
@@ -480,8 +652,21 @@ pub fn unpack_archive_safely<R: Read>(
         // /etc/ssl/certs), incorrectly flagging legitimate container
         // absolute symlinks (issue #407).
         if !entry.header().entry_type().is_symlink() && dest.exists() {
+            if let Ok(meta) = fs::symlink_metadata(&dest) {
+                if meta.file_type().is_symlink() {
+                    continue;
+                }
+            }
             let canon_dest = dest.canonicalize()?;
             if !canon_dest.starts_with(&canon_target) {
+                if let Ok(rel) = dest.strip_prefix(target_dir) {
+                    if rel
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+                    {
+                        continue;
+                    }
+                }
                 let _ = fs::remove_file(&dest);
                 return Err(anyhow!(
                     "Archive entry escapes target directory: {:?}",

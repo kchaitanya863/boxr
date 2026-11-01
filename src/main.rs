@@ -6,8 +6,17 @@ fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    boxr::cli::record_inherited_fds();
 
     let args: Vec<String> = std::env::args().collect();
+    if args
+        .first()
+        .is_some_and(|a| a.ends_with("/conmon") || a == "conmon")
+        && args.get(1).is_some_and(|a| a == "--version" || a == "-v")
+    {
+        println!("conmon version 2.2.0");
+        std::process::exit(0);
+    }
     if args.len() > 1 {
         if args[1] == "__internal-trampoline" {
             #[cfg(target_os = "linux")]
@@ -127,13 +136,21 @@ fn main() -> Result<()> {
                 }
             }
         }
-        if args[1] == "unshare" {
-            let sub = &args[2..];
-            let wants_help = sub.is_empty() || sub.iter().any(|a| a == "--help" || a == "-h");
+        let sub_idx = boxr::cli::podman_subcommand_index(&args);
+        if args.get(sub_idx).map(String::as_str) == Some("unshare") {
+            let sub = &args[sub_idx + 1..];
+            let wants_help = sub
+                .iter()
+                .take_while(|a| a.starts_with('-'))
+                .any(|a| *a == "--help" || *a == "-h");
             if !wants_help {
                 #[cfg(target_os = "linux")]
                 {
-                    let code = boxr::runtime::linux::run_unshare_cli(sub, false)?;
+                    let globals =
+                        boxr::cli::podman_globals::parse_podman_global_options(&args[..=sub_idx]);
+                    boxr::cli::podman_globals::set_podman_global_options(globals);
+                    let noout = args[..=sub_idx].iter().any(|a| a == "--noout");
+                    let code = boxr::runtime::linux::run_unshare_cli(sub, noout)?;
                     std::process::exit(code);
                 }
             }
@@ -165,25 +182,39 @@ fn main() -> Result<()> {
         unreachable!();
     }
 
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        let raw_argv: Vec<String> = std::env::args().collect();
-        let argv: Vec<String> = boxr::cli::preprocess_argv(raw_argv);
-        let cli = match boxr::cli::Cli::try_parse_from(&argv) {
-            Ok(c) => c,
-            Err(e) => {
-                boxr::cli::usage_errors::exit_on_clap_error(e, &argv);
-            }
-        };
-        let code = match boxr::run_cli(cli).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            }
-        };
-        std::process::exit(code);
-    })
+    let handle = std::thread::Builder::new()
+        .name("boxr-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| -> Result<()> {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()?;
+            rt.block_on(async {
+                let raw_argv: Vec<String> = std::env::args().collect();
+                let argv: Vec<String> = boxr::cli::preprocess_argv(raw_argv);
+                let cli = match boxr::cli::Cli::try_parse_from(&argv) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        boxr::cli::usage_errors::exit_on_clap_error(e, &argv);
+                    }
+                };
+                let code = match boxr::run_cli(cli).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        eprintln!("Error: {}", msg);
+                        if msg.contains(
+                            "restart policy retries can only be specified with on-failure restart policy",
+                        ) || msg.contains("Invalid restart policy")
+                        {
+                            std::process::exit(125);
+                        }
+                        std::process::exit(1);
+                    }
+                };
+                std::process::exit(code);
+            })
+        })?;
+    handle.join().unwrap()
 }

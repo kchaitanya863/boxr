@@ -45,23 +45,47 @@ pub static READ_ONLY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 /// Podman `pod create --infra=false` (clap `SetTrue` cannot represent this).
 pub static POD_INFRA_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
+/// Whether `--network` / `--net` was explicitly supplied on the CLI.
+pub static CLI_EXPLICIT_NETWORK: OnceLock<bool> = OnceLock::new();
+
 /// Podman `run --http-proxy=false` (accepted for e2e; boxr does not inject proxy env).
 pub static HTTP_PROXY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run/create --no-hosts`
 pub static RUN_NO_HOSTS: OnceLock<bool> = OnceLock::new();
+pub static RUN_NO_HOSTS_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run/create --env-host`
 pub static RUN_ENV_HOST: OnceLock<bool> = OnceLock::new();
 
 /// Podman `create/pull --arch` or `--os`
 pub static CLI_ARCH_OR_OS_SET: OnceLock<bool> = OnceLock::new();
+pub static CLI_ARCH_VALUE: OnceLock<String> = OnceLock::new();
+pub static CLI_OS_VALUE: OnceLock<String> = OnceLock::new();
+pub static START_SIG_PROXY_EXPLICIT: OnceLock<bool> = OnceLock::new();
 
 /// Podman `--config` global directory for docker config.json
 pub static DOCKER_CONFIG_DIR: OnceLock<String> = OnceLock::new();
 
 /// Podman `--default-mounts-file` global option
 pub static GLOBAL_DEFAULT_MOUNTS_FILE: OnceLock<String> = OnceLock::new();
+
+/// Podman `--hooks-dir` global option
+pub static GLOBAL_HOOKS_DIR: OnceLock<String> = OnceLock::new();
+
+/// File descriptors (3..64) that were already open when `boxr` started (before Tokio init).
+pub static INHERITED_FDS: OnceLock<std::collections::HashSet<u32>> = OnceLock::new();
+
+pub fn record_inherited_fds() {
+    let mut set = std::collections::HashSet::new();
+    #[cfg(unix)]
+    for fd in 3..64u32 {
+        if unsafe { libc::fcntl(fd as i32, libc::F_GETFD) } != -1 {
+            set.insert(fd);
+        }
+    }
+    let _ = INHERITED_FDS.set(set);
+}
 
 /// Podman `--runtime` global option
 pub static GLOBAL_RUNTIME: OnceLock<String> = OnceLock::new();
@@ -86,6 +110,10 @@ fn expand_combined_short_flags(arg: &str) -> Vec<String> {
     }
     const BULK_RM_FLAGS: &[char] = &['a', 'f', 't', 'v'];
     if body.len() > 1 && body.chars().all(|c| BULK_RM_FLAGS.contains(&c)) {
+        return body.chars().map(|c| format!("-{}", c)).collect();
+    }
+    const PS_FLAGS: &[char] = &['a', 'q', 's', 'l', 'p'];
+    if body.len() > 1 && body.chars().all(|c| PS_FLAGS.contains(&c)) {
         return body.chars().map(|c| format!("-{}", c)).collect();
     }
     vec![arg.to_string()]
@@ -121,7 +149,7 @@ fn is_podman_global_flag_token(a: &str) -> bool {
 }
 
 /// Index of the first Podman subcommand token (skip flags before it).
-pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
+pub fn podman_subcommand_index(argv: &[String]) -> usize {
     const SUBCOMMANDS: &[&str] = &[
         "help",
         "pull",
@@ -210,11 +238,15 @@ pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
             || a == "--runroot"
             || a == "--tmpdir"
             || a == "--volumepath"
+            || a == "--imagestore"
             || a == "--storage-driver"
             || a == "--storage-opt"
             || a == "--pull-option"
             || a == "--runtime"
             || a == "--log-level"
+            || a == "--cdi-spec-dir"
+            || a == "--url"
+            || a == "--connection"
         {
             i += 2;
             continue;
@@ -233,6 +265,11 @@ pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
 
 pub static EXTRA_NETWORK_SPECS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 pub static NETWORK_CONNECT_MAC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub static NETWORK_CONNECT_IP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub static NETWORK_CONNECT_IP6: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub static NETWORK_CONNECT_ALIASES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+pub static EXTRA_NETWORK_INSPECT_NAMES: std::sync::OnceLock<Vec<String>> =
+    std::sync::OnceLock::new();
 pub static CLI_GLOBAL_NOOUT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
@@ -259,14 +296,20 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut rm_false = false;
     let mut read_only_false = false;
+    let mut pod_infra_false = false;
     let mut env_files: Vec<String> = Vec::new();
     let mut label_files: Vec<String> = Vec::new();
     let mut build_files: Vec<String> = Vec::new();
     let mut seen_first_net = false;
     let mut extra_nets = Vec::new();
+    let mut net_connect_aliases = Vec::new();
+    let mut net_inspect_names = Vec::new();
     let is_net_connect = argv
         .windows(2)
         .any(|w| w[0] == "network" && w[1] == "connect");
+    let is_net_inspect = argv
+        .windows(2)
+        .any(|w| w[0] == "network" && w[1] == "inspect");
     let subcommand_idx = podman_subcommand_index(&argv);
     let sub_name = argv.get(subcommand_idx).map(String::as_str).unwrap_or("");
     let sub2_name = argv
@@ -276,6 +319,18 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     if sub_name == "buildx" {
         if sub2_name == "version" {
             println!("buildah 1.36.0");
+            std::process::exit(0);
+        }
+        if sub2_name == "inspect" {
+            let go_arch = match std::env::consts::ARCH {
+                "x86_64" => "amd64",
+                "aarch64" => "arm64",
+                other => other,
+            };
+            println!(
+                "Name:          default\nDriver:        container\n\nNodes:\nName:      default\nEndpoint:  default\nStatus:    running\nPlatforms: linux/{}",
+                go_arch
+            );
             std::process::exit(0);
         }
         if sub2_name == "build" {
@@ -298,6 +353,8 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let is_run_or_create = sub_name == "run"
         || sub_name == "create"
         || (sub_name == "container" && (sub2_name == "run" || sub2_name == "create"));
+    let is_create_only = sub_name == "create" || (sub_name == "container" && sub2_name == "create");
+    let is_start = sub_name == "start" || (sub_name == "container" && sub2_name == "start");
     let is_exec = sub_name == "exec" || (sub_name == "container" && sub2_name == "exec");
     let mut seen_positional_after_sub = false;
     let sub_start = if sub_name == "container"
@@ -334,21 +391,104 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 i += 1;
                 continue;
             }
+            if a == "--ip" && i + 1 < argv.len() {
+                let _ = NETWORK_CONNECT_IP.set(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(ip) = a.strip_prefix("--ip=") {
+                let _ = NETWORK_CONNECT_IP.set(ip.to_string());
+                i += 1;
+                continue;
+            }
+            if a == "--ip6" && i + 1 < argv.len() {
+                let _ = NETWORK_CONNECT_IP6.set(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(ip6) = a.strip_prefix("--ip6=") {
+                let _ = NETWORK_CONNECT_IP6.set(ip6.to_string());
+                i += 1;
+                continue;
+            }
+            if a == "--alias" && i + 1 < argv.len() {
+                net_connect_aliases.push(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(al) = a.strip_prefix("--alias=") {
+                net_connect_aliases.push(al.to_string());
+                i += 1;
+                continue;
+            }
         }
-        if i >= subcommand_idx && (a == "--net" || a == "--network") && i + 1 < argv.len() {
-            if !seen_first_net {
-                seen_first_net = true;
+        if is_net_inspect && i > subcommand_idx + 1 {
+            if (a == "-f" || a == "--format") && i + 1 < argv.len() {
                 out.push(a.clone());
                 out.push(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if !a.starts_with('-') {
+                if net_inspect_names.is_empty() {
+                    net_inspect_names.push(a.clone());
+                    out.push(a.clone());
+                } else {
+                    net_inspect_names.push(a.clone());
+                }
+                i += 1;
+                continue;
+            }
+        }
+        if i >= subcommand_idx
+            && (a == "--net" || a == "--network")
+            && i + 1 < argv.len()
+            && !seen_positional_after_sub
+        {
+            let raw_val = &argv[i + 1];
+            if is_run_or_create && raw_val.contains(',') && !raw_val.contains(':') {
+                for part in raw_val.split(',') {
+                    let p = part.trim();
+                    if p.is_empty() {
+                        continue;
+                    }
+                    if !seen_first_net {
+                        seen_first_net = true;
+                        out.push(a.clone());
+                        out.push(p.to_string());
+                    } else {
+                        extra_nets.push(p.to_string());
+                    }
+                }
+            } else if !seen_first_net {
+                seen_first_net = true;
+                out.push(a.clone());
+                out.push(raw_val.clone());
             } else {
-                extra_nets.push(argv[i + 1].clone());
+                extra_nets.push(raw_val.clone());
             }
             i += 2;
             continue;
         }
-        if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) {
+        if i >= subcommand_idx
+            && (a.starts_with("--net=") || a.starts_with("--network="))
+            && !seen_positional_after_sub
+        {
             let val = a.split_once('=').map(|(_, v)| v).unwrap_or("");
-            if !seen_first_net {
+            if is_run_or_create && val.contains(',') && !val.contains(':') {
+                for part in val.split(',') {
+                    let p = part.trim();
+                    if p.is_empty() {
+                        continue;
+                    }
+                    if !seen_first_net {
+                        seen_first_net = true;
+                        out.push(format!("--network={}", p));
+                    } else {
+                        extra_nets.push(p.to_string());
+                    }
+                }
+            } else if !seen_first_net {
                 seen_first_net = true;
                 out.push(a.clone());
             } else {
@@ -378,6 +518,16 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 i += 1;
                 continue;
             }
+            if a == "--hooks-dir" && i + 1 < argv.len() {
+                let _ = GLOBAL_HOOKS_DIR.set(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(v) = a.strip_prefix("--hooks-dir=") {
+                let _ = GLOBAL_HOOKS_DIR.set(v.to_string());
+                i += 1;
+                continue;
+            }
             if a == "--runtime" && i + 1 < argv.len() {
                 let _ = GLOBAL_RUNTIME.set(argv[i + 1].clone());
                 i += 2;
@@ -393,6 +543,14 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 continue;
             }
             if a.starts_with("--pull-option=") {
+                i += 1;
+                continue;
+            }
+            if a == "--imagestore" && i + 1 < argv.len() {
+                i += 2;
+                continue;
+            }
+            if a.starts_with("--imagestore=") {
                 i += 1;
                 continue;
             }
@@ -414,17 +572,54 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         if i > sub_start
             && !seen_positional_after_sub
-            && a == "--no-hosts"
+            && (a == "--no-hosts" || a == "--no-hosts=true" || a == "--no-hosts=false")
             && (is_run_or_create
                 || sub_name == "build"
                 || (sub_name == "image" && sub2_name == "build")
                 || (sub_name == "pod" && sub2_name == "create"))
         {
-            let _ = RUN_NO_HOSTS.set(true);
+            if a == "--no-hosts=false" {
+                let _ = RUN_NO_HOSTS_EXPLICIT_FALSE.set(true);
+                let _ = RUN_NO_HOSTS.set(false);
+            } else {
+                let _ = RUN_NO_HOSTS.set(true);
+            }
             i += 1;
             continue;
         }
+        if i > sub_start && is_start {
+            if a == "--sig-proxy" || a.starts_with("--sig-proxy=") {
+                let _ = START_SIG_PROXY_EXPLICIT.set(true);
+            }
+        }
         if i > sub_start && (is_run_or_create || is_exec) && !seen_positional_after_sub {
+            if is_create_only {
+                let bin = if hide_remote {
+                    "podman-remote"
+                } else {
+                    "podman"
+                };
+                let verb = if sub_name == "container" {
+                    format!("container {}", sub2_name)
+                } else {
+                    sub_name.to_string()
+                };
+                if a == "-d" {
+                    eprintln!("Error: unknown shorthand flag: 'd' in -d");
+                    eprintln!("See '{} {} --help'", bin, verb);
+                    std::process::exit(125);
+                }
+                if a == "--detach" || a.starts_with("--detach=") {
+                    eprintln!("Error: unknown flag: --detach");
+                    eprintln!("See '{} {} --help'", bin, verb);
+                    std::process::exit(125);
+                }
+                if a == "--detach-keys" || a.starts_with("--detach-keys=") {
+                    eprintln!("Error: unknown flag: --detach-keys");
+                    eprintln!("See '{} {} --help'", bin, verb);
+                    std::process::exit(125);
+                }
+            }
             if a == "-h" && is_run_or_create {
                 if i + 1 >= argv.len() {
                     let bin = if hide_remote {
@@ -453,11 +648,21 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             }
             if (a == "--arch" || a == "--os") && is_run_or_create && i + 1 < argv.len() {
                 let _ = CLI_ARCH_OR_OS_SET.set(true);
+                if a == "--arch" {
+                    let _ = CLI_ARCH_VALUE.set(argv[i + 1].clone());
+                } else {
+                    let _ = CLI_OS_VALUE.set(argv[i + 1].clone());
+                }
                 i += 2;
                 continue;
             }
             if (a.starts_with("--arch=") || a.starts_with("--os=")) && is_run_or_create {
                 let _ = CLI_ARCH_OR_OS_SET.set(true);
+                if let Some(v) = a.strip_prefix("--arch=") {
+                    let _ = CLI_ARCH_VALUE.set(v.to_string());
+                } else if let Some(v) = a.strip_prefix("--os=") {
+                    let _ = CLI_OS_VALUE.set(v.to_string());
+                }
                 i += 1;
                 continue;
             }
@@ -513,93 +718,149 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             if !a.starts_with('-') {
                 // Check if previous token in `out` is a flag that takes a value on run/create/exec
                 let prev = out.last().map(String::as_str).unwrap_or("");
-                let prev_takes_val = matches!(
-                    prev,
-                    "-e" | "--env"
-                        | "-p"
-                        | "--publish"
-                        | "-v"
-                        | "--volume"
-                        | "-w"
-                        | "--workdir"
-                        | "-m"
-                        | "--memory"
-                        | "-l"
-                        | "--label"
-                        | "-u"
-                        | "--user"
-                        | "-a"
-                        | "--attach"
-                        | "-c"
-                        | "--cpu-shares"
-                        | "--name"
-                        | "--hostname"
-                        | "--network"
-                        | "--net"
-                        | "--pod"
-                        | "--entrypoint"
-                        | "--restart"
-                        | "--pull"
-                        | "--platform"
-                        | "--userns"
-                        | "--uidmap"
-                        | "--gidmap"
-                        | "--ipc"
-                        | "--pid"
-                        | "--uts"
-                        | "--cgroupns"
-                        | "--cgroup-parent"
-                        | "--log-driver"
-                        | "--log-opt"
-                        | "--security-opt"
-                        | "--ulimit"
-                        | "--sysctl"
-                        | "--add-host"
-                        | "--dns"
-                        | "--dns-search"
-                        | "--dns-option"
-                        | "--device"
-                        | "--tmpfs"
-                        | "--mount"
-                        | "--volumes-from"
-                        | "--cap-add"
-                        | "--cap-drop"
-                        | "--annotation"
-                        | "--group-add"
-                        | "--tz"
-                        | "--umask"
-                        | "--domainname"
-                        | "--stop-signal"
-                        | "--stop-timeout"
-                        | "--timeout"
-                        | "--shm-size"
-                        | "--cpus"
-                        | "--cpu-period"
-                        | "--cpu-quota"
-                        | "--cpuset-cpus"
-                        | "--cpuset-mems"
-                        | "--memory-swap"
-                        | "--memory-reservation"
-                        | "--memory-swappiness"
-                        | "--pids-limit"
-                        | "--oom-score-adj"
-                        | "--cidfile"
-                        | "--conmon-pidfile"
-                        | "--hooks-dir"
-                        | "--image-volume"
-                        | "--rootfs"
-                        | "--default-mounts-file"
-                        | "--secret"
-                        | "--hostuser"
-                        | "--group-entry"
-                        | "--unsetenv"
-                        | "--systemd"
-                        | "--preserve-fds"
-                        | "--preserve-fd"
-                        | "--authfile"
-                        | "--cert-dir"
-                        | "--creds"
-                );
+                let prev_takes_val = (is_run_or_create && matches!(prev, "-l" | "--label"))
+                    || matches!(
+                        prev,
+                        "-e" | "--env"
+                            | "--env-merge"
+                            | "-p"
+                            | "--publish"
+                            | "-v"
+                            | "--volume"
+                            | "-w"
+                            | "--workdir"
+                            | "-m"
+                            | "--memory"
+                            | "-u"
+                            | "--user"
+                            | "-a"
+                            | "--attach"
+                            | "-c"
+                            | "--cpu-shares"
+                            | "--name"
+                            | "--hostname"
+                            | "--network"
+                            | "--net"
+                            | "--pod"
+                            | "--entrypoint"
+                            | "--restart"
+                            | "--pull"
+                            | "--platform"
+                            | "--userns"
+                            | "--uidmap"
+                            | "--gidmap"
+                            | "--ipc"
+                            | "--pid"
+                            | "--uts"
+                            | "--cgroupns"
+                            | "--cgroup-parent"
+                            | "--log-driver"
+                            | "--log-opt"
+                            | "--security-opt"
+                            | "--ulimit"
+                            | "--sysctl"
+                            | "--add-host"
+                            | "--dns"
+                            | "--dns-search"
+                            | "--dns-option"
+                            | "--device"
+                            | "--cdi-spec-dir"
+                            | "--tmpfs"
+                            | "--mount"
+                            | "--volumes-from"
+                            | "--cap-add"
+                            | "--cap-drop"
+                            | "--annotation"
+                            | "--group-add"
+                            | "--tz"
+                            | "--umask"
+                            | "--domainname"
+                            | "--stop-signal"
+                            | "--stop-timeout"
+                            | "--timeout"
+                            | "--shm-size"
+                            | "--cpus"
+                            | "--cpu-period"
+                            | "--cpu-quota"
+                            | "--cpuset-cpus"
+                            | "--cpuset-mems"
+                            | "--memory-swap"
+                            | "--memory-reservation"
+                            | "--memory-swappiness"
+                            | "--pids-limit"
+                            | "--oom-score-adj"
+                            | "--cidfile"
+                            | "--wait"
+                            | "--conmon-pidfile"
+                            | "--hooks-dir"
+                            | "--image-volume"
+                            | "--rootfs"
+                            | "--default-mounts-file"
+                            | "--secret"
+                            | "--hostuser"
+                            | "--group-entry"
+                            | "--passwd-entry"
+                            | "--seccomp-policy"
+                            | "--subuidname"
+                            | "--subgidname"
+                            | "--signature-policy"
+                            | "--init-path"
+                            | "--hosts-file"
+                            | "--requires"
+                            | "--pidfile"
+                            | "--personality"
+                            | "--shm-size-systemd"
+                            | "--decryption-key"
+                            | "--cgroups"
+                            | "--cgroup-conf"
+                            | "--pod-id-file"
+                            | "--sdnotify"
+                            | "--health-cmd"
+                            | "--health-interval"
+                            | "--health-timeout"
+                            | "--health-retries"
+                            | "--health-start-period"
+                            | "--health-start-interval"
+                            | "--health-on-failure"
+                            | "--health-startup-cmd"
+                            | "--health-startup-interval"
+                            | "--health-startup-timeout"
+                            | "--health-startup-retries"
+                            | "--health-startup-success"
+                            | "--health-max-log-count"
+                            | "--health-max-log-size"
+                            | "--health-log-destination"
+                            | "--device-cgroup-rule"
+                            | "--device-read-bps"
+                            | "--device-write-bps"
+                            | "--device-read-iops"
+                            | "--device-write-iops"
+                            | "--blkio-weight"
+                            | "--blkio-weight-device"
+                            | "--unsetenv"
+                            | "--systemd"
+                            | "--preserve-fds"
+                            | "--preserve-fd"
+                            | "--authfile"
+                            | "--cert-dir"
+                            | "--creds"
+                            | "--rdt-class"
+                            | "--chrootdirs"
+                            | "--expose"
+                            | "--ip"
+                            | "--ip6"
+                            | "--mac-address"
+                            | "--link"
+                            | "--network-alias"
+                            | "--isolation"
+                            | "--gpus"
+                            | "--kernel-memory"
+                            | "--cpu-count"
+                            | "--cpu-percent"
+                            | "--io-maxbandwidth"
+                            | "--io-maxiops"
+                            | "--init-ctr"
+                    );
                 if !prev_takes_val {
                     seen_positional_after_sub = true;
                     if !env_files.is_empty() {
@@ -610,6 +871,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         out.push("--label-file".to_string());
                         out.push(label_files.drain(..).collect::<Vec<_>>().join("\0"));
                     }
+                    out.push(a.clone());
+                    out.push("--".to_string());
+                    i += 1;
+                    continue;
                 }
             }
         }
@@ -663,11 +928,18 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             continue;
         }
         if a == "--infra=false" {
-            let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
+            pod_infra_false = true;
+            if !argv[i + 1..]
+                .iter()
+                .any(|s| s == "--infra=true" || s == "--infra")
+            {
+                let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
+            }
             i += 1;
             continue;
         }
-        if a == "--infra=true" {
+        if a == "--infra=true" || a == "--infra" {
+            pod_infra_false = false;
             i += 1;
             continue;
         }
@@ -700,6 +972,16 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += skip;
             continue;
         }
+        if !seen_positional_after_sub && is_run_or_create {
+            out.extend(expand_combined_short_flags(a));
+            i += 1;
+            continue;
+        }
+        if seen_positional_after_sub && (is_run_or_create || is_exec) {
+            out.push(a.clone());
+            i += 1;
+            continue;
+        }
         out.extend(expand_combined_short_flags(a));
         i += 1;
     }
@@ -714,14 +996,26 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     if rm_false {
         let _ = RUN_RM_EXPLICIT_FALSE.set(true);
     }
+    if pod_infra_false {
+        let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
+    }
     if read_only_false {
         let _ = READ_ONLY_EXPLICIT_FALSE.set(true);
     }
     if build_files.len() > 1 {
         let _ = BUILD_EXTRA_FILES.set(build_files[1..].to_vec());
     }
+    if seen_first_net {
+        let _ = CLI_EXPLICIT_NETWORK.set(true);
+    }
     if !extra_nets.is_empty() {
         let _ = EXTRA_NETWORK_SPECS.set(extra_nets);
+    }
+    if !net_connect_aliases.is_empty() {
+        let _ = NETWORK_CONNECT_ALIASES.set(net_connect_aliases);
+    }
+    if net_inspect_names.len() > 1 {
+        let _ = EXTRA_NETWORK_INSPECT_NAMES.set(net_inspect_names[1..].to_vec());
     }
     if subcommand_idx == argv.len() && out.len() >= 2 && out[out.len() - 1] == "-v" {
         let _ = VERSION_SHORT_OUTPUT.set(true);

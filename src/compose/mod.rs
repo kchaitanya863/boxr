@@ -138,16 +138,74 @@ impl ComposeProject {
         let default_net_name = format!("{}_default", self.name);
         let mut created = Vec::new();
 
-        if net_store.find(&default_net_name).is_none() {
-            let _ = net_store.create(&default_net_name, None, None)?;
-        }
+        let apply_net_cfg =
+            |scoped_net: &str, cfg_opt: Option<&ComposeNetworkConfig>| -> Result<()> {
+                let cfg = cfg_opt.cloned().unwrap_or_default();
+                let driver = cfg.driver.as_deref().unwrap_or("bridge");
+                let first_pool = cfg.ipam.as_ref().and_then(|i| i.config.first());
+                let subnet = first_pool.and_then(|p| p.subnet.as_deref());
+                let gateway = first_pool.and_then(|p| p.gateway.as_deref());
+                let internal = cfg.internal.unwrap_or(false);
+                let attachable = cfg.attachable.unwrap_or(false);
+                let mut label_map = std::collections::HashMap::new();
+                if let Some(lbls) = &cfg.labels {
+                    for l in lbls.to_vec() {
+                        if let Some((k, v)) = l.split_once('=') {
+                            label_map.insert(k.to_string(), v.to_string());
+                        }
+                    }
+                }
+                if net_store.find(scoped_net).is_none() {
+                    let _ = net_store.create_with_options(
+                        scoped_net, driver, subnet, gateway, internal, attachable, label_map,
+                    )?;
+                }
+                let raw_opts = cfg.driver_opts_map();
+                let mut net_iface = None;
+                let mut norm_opts = std::collections::HashMap::new();
+                for (k, v) in raw_opts {
+                    if k == "com.docker.network.bridge.name" {
+                        net_iface = Some(v);
+                    } else if k == "com.docker.network.driver.mtu" {
+                        norm_opts.insert("mtu".to_string(), v);
+                    } else if k == "parent" && (driver == "macvlan" || driver == "ipvlan") {
+                        net_iface = Some(v);
+                    } else {
+                        norm_opts.insert(k, v);
+                    }
+                }
+                if net_iface.is_some() || !norm_opts.is_empty() || cfg.enable_ipv6.is_some() {
+                    let _ = net_store.configure_network_details(
+                        scoped_net,
+                        net_iface,
+                        if norm_opts.is_empty() {
+                            None
+                        } else {
+                            Some(norm_opts)
+                        },
+                        None,
+                        None,
+                        None,
+                        cfg.enable_ipv6,
+                    );
+                }
+                Ok(())
+            };
+
+        let def_cfg = self
+            .compose
+            .networks
+            .get("default")
+            .and_then(|o| o.as_ref());
+        apply_net_cfg(&default_net_name, def_cfg)?;
         created.push(default_net_name);
 
-        for net_name in self.compose.networks.keys() {
-            let scoped_net = format!("{}_{}", self.name, net_name);
-            if net_store.find(&scoped_net).is_none() {
-                let _ = net_store.create(&scoped_net, None, None)?;
+        for (net_name, cfg_opt) in &self.compose.networks {
+            if net_name == "default" {
+                continue;
             }
+            let scoped_net = format!("{}_{}", self.name, net_name);
+            apply_net_cfg(&scoped_net, cfg_opt.as_ref())?;
             created.push(scoped_net);
         }
         Ok(created)
@@ -193,6 +251,7 @@ impl ComposeProject {
         svc_name: &str,
         svc: &ServiceConfig,
         build: bool,
+        quiet: bool,
     ) -> Result<String> {
         if let Some(build_cfg) = &svc.build {
             if build || svc.image.is_none() {
@@ -210,7 +269,7 @@ impl ComposeProject {
                         add_host: Vec::new(),
                         memory: None,
                         shm_size: None,
-                        quiet: false,
+                        quiet,
                     })
                     .await?;
                 return Ok(record.reference);
@@ -233,10 +292,25 @@ impl ComposeProject {
         no_deps: bool,
     ) -> Result<()> {
         let order = self.services_for_up(services, no_deps)?;
-        println!(
-            "Starting compose project '{}' (service order: {:?})",
-            self.name, order
-        );
+        let c_store = ContainerStore::new();
+        let is_reup = order.iter().any(|svc_name| {
+            let svc = self.compose.services.get(svc_name).unwrap();
+            let cname = svc
+                .container_name
+                .clone()
+                .unwrap_or_else(|| format!("{}-{}-1", self.name, svc_name));
+            c_store.find(&cname).is_some()
+                || c_store
+                    .find(&format!("{}_{}_1", self.name, svc_name))
+                    .is_some()
+        });
+
+        if !is_reup {
+            println!(
+                "Starting compose project '{}' (service order: {:?})",
+                self.name, order
+            );
+        }
 
         // Ensure project networks (custom networks declared in compose file, plus default network)
         let _ = self.ensure_networks()?;
@@ -246,7 +320,7 @@ impl ComposeProject {
         // Helper to resolve the primary network name for a service
         let service_primary_network = |svc: &ServiceConfig| -> String {
             if let Some(nets) = &svc.networks {
-                if let Some(first) = nets.first() {
+                if let Some(first) = nets.network_names().first() {
                     return format!("{}_{}", self.name, first);
                 }
             }
@@ -256,17 +330,69 @@ impl ComposeProject {
         // Pre-allocate IPAM endpoints for all services so service discovery knows all service IPs
         for svc_name in &order {
             let svc = self.compose.services.get(svc_name).unwrap();
+            if svc.network_mode.is_some() {
+                continue;
+            }
             let container_name = svc
                 .container_name
                 .clone()
-                .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
+                .unwrap_or_else(|| format!("{}-{}-1", self.name, svc_name));
             let primary_net = service_primary_network(svc);
-            let _ = net_store.connect_container(&primary_net, &container_name, svc_name);
+            let mut aliases = vec![svc_name.clone()];
+            let mut ip_ov = None;
+            let mut ip6_ov = None;
+            let mut mac_ov = svc.mac_address.clone();
             if let Some(nets) = &svc.networks {
-                for net_name in nets {
+                for net_name in nets.network_names() {
                     let scoped_net = format!("{}_{}", self.name, net_name);
-                    let _ = net_store.connect_container(&scoped_net, &container_name, svc_name);
+                    let mut net_aliases = vec![svc_name.clone()];
+                    let mut net_ip = None;
+                    let mut net_ip6 = None;
+                    let mut net_mac = svc.mac_address.clone();
+                    if let Some(ep_cfg) = nets.endpoint_config(&net_name) {
+                        for a in &ep_cfg.aliases {
+                            if !net_aliases.contains(a) {
+                                net_aliases.push(a.clone());
+                            }
+                            if !aliases.contains(a) {
+                                aliases.push(a.clone());
+                            }
+                        }
+                        net_ip = ep_cfg.ipv4_address.clone();
+                        net_ip6 = ep_cfg.ipv6_address.clone();
+                        if ep_cfg.mac_address.is_some() {
+                            net_mac = ep_cfg.mac_address.clone();
+                        }
+                        if ip_ov.is_none() {
+                            ip_ov = net_ip.clone();
+                        }
+                        if ip6_ov.is_none() {
+                            ip6_ov = net_ip6.clone();
+                        }
+                        if mac_ov.is_none() {
+                            mac_ov = net_mac.clone();
+                        }
+                    }
+                    let _ = net_store.connect_container_with_details(
+                        &scoped_net,
+                        &container_name,
+                        &container_name,
+                        net_ip.as_deref(),
+                        net_ip6.as_deref(),
+                        net_mac.as_deref(),
+                        net_aliases,
+                    );
                 }
+            } else {
+                let _ = net_store.connect_container_with_details(
+                    &primary_net,
+                    &container_name,
+                    &container_name,
+                    ip_ov.as_deref(),
+                    ip6_ov.as_deref(),
+                    mac_ov.as_deref(),
+                    aliases,
+                );
             }
         }
 
@@ -294,30 +420,46 @@ impl ComposeProject {
             let container_name = svc
                 .container_name
                 .clone()
-                .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
+                .unwrap_or_else(|| format!("{}-{}-1", self.name, svc_name));
+
+            let existing = ContainerStore::new()
+                .find(&container_name)
+                .or_else(|| ContainerStore::new().find(&format!("{}_{}_1", self.name, svc_name)));
 
             let image_name = self
-                .resolve_service_image(root_dir, &svc_name, svc, build)
+                .resolve_service_image(root_dir, &svc_name, svc, build, is_reup)
                 .await?;
 
             let mut run_args =
                 self.build_service_run_args(&svc_name, svc, &container_name, &image_name, detach)?;
 
-            println!(
-                "Creating and starting service '{}' ({})",
-                svc_name, container_name
-            );
+            if let Some(ex) = existing {
+                let want_cmd = svc.command.as_ref().map(|c| c.to_vec()).unwrap_or_default();
+                let same_cmd = want_cmd.is_empty() || ex.command == want_cmd;
+                if same_cmd && matches!(ex.status, crate::storage::ContainerStatus::Running) {
+                    println!(" Container {}  Running", container_name);
+                    continue;
+                }
+                println!(" Container {}  Recreate", container_name);
+                let _ = crate::stop_container_with_home_and_timeout(
+                    &ex.id,
+                    None,
+                    Some(0),
+                    None,
+                    true,
+                    None,
+                );
+                let _ = crate::remove_container_quiet(&ex.id, true, false);
+                println!(" Container {}  Recreated", container_name);
+                println!(" Container {}  Starting", container_name);
+            } else if !is_reup {
+                println!(
+                    "Creating and starting service '{}' ({})",
+                    svc_name, container_name
+                );
+            }
 
             let svc_net = service_primary_network(svc);
-
-            // Attach to network
-            let _ = net_store.connect_container(&svc_net, &container_name, &svc_name);
-            if let Some(nets) = &svc.networks {
-                for net_name in nets {
-                    let scoped_net = format!("{}_{}", self.name, net_name);
-                    let _ = net_store.connect_container(&scoped_net, &container_name, &svc_name);
-                }
-            }
 
             #[cfg(target_os = "macos")]
             for (peer_svc, relay_port) in &mesh_ports {
@@ -331,7 +473,20 @@ impl ComposeProject {
                 }
             }
 
-            match crate::run_container(run_args).await {
+            let run_res = if is_reup {
+                crate::run_container_with_output(
+                    run_args,
+                    crate::CliOutputPolicy {
+                        noout: true,
+                        out: None,
+                    },
+                )
+                .await
+            } else {
+                crate::run_container(run_args).await
+            };
+
+            match run_res {
                 Ok(code) if code != 0 => {
                     return Err(anyhow!(
                         "Service '{}' in compose project '{}' exited with error code {}",
@@ -350,6 +505,71 @@ impl ComposeProject {
                 }
                 _ => {}
             }
+
+            if svc.network_mode.is_none() {
+                if let Some(created_c) = ContainerStore::new().find(&container_name) {
+                    if let Some(nets) = &svc.networks {
+                        for net_name in nets.network_names() {
+                            let scoped_net = format!("{}_{}", self.name, net_name);
+                            let mut net_aliases = vec![svc_name.clone()];
+                            let mut net_ip = None;
+                            let mut net_ip6 = None;
+                            let mut net_mac = svc.mac_address.clone();
+                            if let Some(ep_cfg) = nets.endpoint_config(&net_name) {
+                                for a in &ep_cfg.aliases {
+                                    if !net_aliases.contains(a) {
+                                        net_aliases.push(a.clone());
+                                    }
+                                }
+                                net_ip = ep_cfg.ipv4_address.clone();
+                                net_ip6 = ep_cfg.ipv6_address.clone();
+                                if ep_cfg.mac_address.is_some() {
+                                    net_mac = ep_cfg.mac_address.clone();
+                                }
+                            }
+                            if let Some(pre_ep) = net_store
+                                .find(&scoped_net)
+                                .and_then(|n| n.containers.get(&container_name).cloned())
+                            {
+                                if net_ip.is_none() && !pre_ep.ipv4_address.is_empty() {
+                                    net_ip = Some(pre_ep.ipv4_address);
+                                }
+                                if net_mac.is_none() && !pre_ep.mac_address.is_empty() {
+                                    net_mac = Some(pre_ep.mac_address);
+                                }
+                            }
+                            let _ = net_store.disconnect_container(&scoped_net, &container_name);
+                            let _ = net_store.connect_container_with_details(
+                                &scoped_net,
+                                &created_c.id,
+                                &container_name,
+                                net_ip.as_deref(),
+                                net_ip6.as_deref(),
+                                net_mac.as_deref(),
+                                net_aliases,
+                            );
+                            let _ =
+                                crate::network::refresh_bridge_hosts_for_network(&scoped_net, None);
+                        }
+                    } else {
+                        let _ = net_store.disconnect_container(&svc_net, &container_name);
+                        let _ = net_store.connect_container_with_details(
+                            &svc_net,
+                            &created_c.id,
+                            &container_name,
+                            None,
+                            None,
+                            svc.mac_address.as_deref(),
+                            vec![svc_name.clone()],
+                        );
+                        let _ = crate::network::refresh_bridge_hosts_for_network(&svc_net, None);
+                    }
+                }
+            }
+
+            if is_reup {
+                println!(" Container {}  Started", container_name);
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -360,14 +580,17 @@ impl ComposeProject {
             );
         }
 
-        println!("Project '{}' started successfully.", self.name);
+        if !is_reup {
+            println!("Project '{}' started successfully.", self.name);
+        }
         Ok(())
     }
 
     pub fn down(&self, remove_volumes: bool) -> Result<()> {
         println!("Stopping compose project '{}'...", self.name);
         let store = ContainerStore::new();
-        let prefix = format!("{}_", self.name);
+        let prefix_under = format!("{}_", self.name);
+        let prefix_dash = format!("{}-", self.name);
 
         let mut custom_names = HashSet::new();
         for (svc_name, svc) in &self.compose.services {
@@ -376,13 +599,20 @@ impl ComposeProject {
             }
             for num in 1..=20 {
                 custom_names.insert(format!("{}_{}_{}", self.name, svc_name, num));
+                custom_names.insert(format!("{}-{}-{}", self.name, svc_name, num));
             }
         }
 
         for c in store.list() {
             let matches_project = custom_names.contains(&c.name) || {
-                if let Some(rest) = c.name.strip_prefix(&prefix) {
+                if let Some(rest) = c.name.strip_prefix(&prefix_under) {
                     if let Some((svc, _num)) = rest.rsplit_once('_') {
+                        self.compose.services.contains_key(svc)
+                    } else {
+                        false
+                    }
+                } else if let Some(rest) = c.name.strip_prefix(&prefix_dash) {
+                    if let Some((svc, _num)) = rest.rsplit_once('-') {
                         self.compose.services.contains_key(svc)
                     } else {
                         false
@@ -416,15 +646,18 @@ impl ComposeProject {
         }
 
         for (svc_name, svc) in &self.compose.services {
-            let container_name = svc
-                .container_name
-                .clone()
-                .unwrap_or_else(|| format!("{}_{}_1", self.name, svc_name));
-            for pnet in &all_project_nets {
-                let _ = net_store.disconnect_container(pnet, &container_name);
-                let _ = net_store.disconnect_container(pnet, svc_name);
+            for container_name in [
+                svc.container_name
+                    .clone()
+                    .unwrap_or_else(|| format!("{}-{}-1", self.name, svc_name)),
+                format!("{}_{}_1", self.name, svc_name),
+            ] {
+                for pnet in &all_project_nets {
+                    let _ = net_store.disconnect_container(pnet, &container_name);
+                    let _ = net_store.disconnect_container(pnet, svc_name);
+                }
+                let _ = net_store.cleanup_container_endpoints(&container_name, svc_name);
             }
-            let _ = net_store.cleanup_container_endpoints(&container_name, svc_name);
         }
         for pnet in all_project_nets {
             let _ = net_store.remove_with_force(&pnet, true);
@@ -468,7 +701,8 @@ impl ComposeProject {
 
     pub fn ps(&self) -> Result<Vec<ContainerRecord>> {
         let store = ContainerStore::new();
-        let prefix = format!("{}_", self.name);
+        let prefix_under = format!("{}_", self.name);
+        let prefix_dash = format!("{}-", self.name);
 
         let mut custom_names = HashSet::new();
         for svc in self.compose.services.values() {
@@ -480,7 +714,11 @@ impl ComposeProject {
         let containers: Vec<ContainerRecord> = store
             .list()
             .into_iter()
-            .filter(|c| c.name.starts_with(&prefix) || custom_names.contains(&c.name))
+            .filter(|c| {
+                c.name.starts_with(&prefix_under)
+                    || c.name.starts_with(&prefix_dash)
+                    || custom_names.contains(&c.name)
+            })
             .collect();
         Ok(containers)
     }

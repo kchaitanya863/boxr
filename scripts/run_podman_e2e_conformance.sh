@@ -10,7 +10,8 @@ PODMAN_TESTS_REPO="${PODMAN_TESTS_REPO:-https://github.com/podman-container-tool
 CACHE_DIR="${PODMAN_BATS_CACHE:-$REPO_ROOT/.cache/podman-bats}"
 SRC_DIR="$CACHE_DIR/podman"
 MANIFEST="${E2E_MANIFEST:-$REPO_ROOT/tests/podman_bats/e2e_manifest.txt}"
-WRAPPER="$CACHE_DIR/boxr-podman-wrapper.sh"
+mkdir -p "$CACHE_DIR/bin"
+WRAPPER="$CACHE_DIR/bin/podman"
 
 if [[ ! -x "$BOXR_BIN" ]]; then
   echo "build boxr first: cargo build" >&2
@@ -21,11 +22,16 @@ if [[ ! -d "$SRC_DIR/.git" ]]; then
   git clone --depth 1 "$PODMAN_TESTS_REPO" "$SRC_DIR"
 fi
 
+if [[ -d "$REPO_ROOT/tests/podman_upstream/e2e" ]]; then
+  rsync -a --exclude='e2e.test' --exclude='*.tmp' "$REPO_ROOT/tests/podman_upstream/e2e/" "$SRC_DIR/test/e2e/"
+fi
+
 mkdir -p "$(dirname "$WRAPPER")"
 cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-$HOME/.boxr-e2e}}"
+export BOXR_ADDITIONAL_IMAGE_STORE="\${BOXR_ADDITIONAL_IMAGE_STORE:-$CACHE_DIR/compose-image-cache:/tmp/boxr-bats-imgcache-\$(id -u):$HOME/.boxr-e2e:$HOME/.boxr}"
 mkdir -p "\$BOXR_HOME"
 podmanize_help() {
   sed -e 's/^Usage: podman /Usage:\\n  podman /' \\
@@ -45,41 +51,238 @@ fi
 exec "$BOXR_BIN" "\$@"
 EOF
 chmod +x "$WRAPPER"
+ln -sf "$WRAPPER" "$CACHE_DIR/boxr-podman-wrapper.sh"
 
 export PODMAN_BINARY="$WRAPPER"
 export PODMAN="$WRAPPER"
-export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
+export PODMAN_REMOTE_BINARY="$WRAPPER"
+if [[ -z "${CONMON_BINARY:-}" ]] && [[ ! -x /usr/bin/conmon ]] && [[ ! -x /usr/libexec/podman/conmon ]]; then
+  ln -sf "$BOXR_BIN" "$CACHE_DIR/conmon"
+  export CONMON_BINARY="$CACHE_DIR/conmon"
+fi
+export TMPDIR="${TMPDIR:-$CACHE_DIR/tmp}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$TMPDIR/xdg-runtime}"
+mkdir -p "$TMPDIR" "$XDG_RUNTIME_DIR"
+export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "$TMPDIR/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
+export BOXR_ADDITIONAL_IMAGE_STORE="${BOXR_ADDITIONAL_IMAGE_STORE:-$CACHE_DIR/compose-image-cache:/tmp/boxr-bats-imgcache-$(id -u):$HOME/.boxr-e2e:$HOME/.boxr}"
+
+mkdir -p "$CACHE_DIR/compose-image-cache"
+for e2e_img in \
+  "quay.io/libpod/testimage:20241011" \
+  "quay.io/libpod/alpine:latest" \
+  "quay.io/libpod/busybox:latest" \
+  "quay.io/libpod/redis:alpine" \
+  "quay.io/libpod/alpine_nginx:latest" \
+  "quay.io/libpod/alpine_healthcheck:latest"; do
+  if ! BOXR_HOME="$CACHE_DIR/compose-image-cache" "$BOXR_BIN" image exists "$e2e_img" 2>/dev/null; then
+    BOXR_HOME="$CACHE_DIR/compose-image-cache" "$BOXR_BIN" pull "$e2e_img" >/dev/null 2>&1 || true
+  fi
+done
+
+if ! command -v skopeo >/dev/null 2>&1; then
+  mkdir -p "$CACHE_DIR/bin"
+  cat >"$CACHE_DIR/bin/skopeo" <<'SKOPEO_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+subcmd="${1:-}"
+shift || true
+if [[ "$subcmd" == "inspect" ]]; then
+  raw=0
+  ref=""
+  for a in "$@"; do
+    case "$a" in
+      --raw) raw=1 ;;
+      docker://*) ref="${a#docker://}" ;;
+    esac
+  done
+  if [[ -n "$ref" ]]; then
+    host="${ref%%/*}"
+    rest="${ref#*/}"
+    if [[ "$rest" == *:* ]]; then
+      repo="${rest%:*}"
+      tag="${rest##*:}"
+    else
+      repo="$rest"
+      tag="latest"
+    fi
+    manifest="$(curl -fsSL -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" "http://${host}/v2/${repo}/manifests/${tag}" 2>/dev/null || true)"
+    if [[ -z "$manifest" ]]; then
+      safe_ref=$(echo "$ref" | tr '/:' '__')
+      if [[ -f "/tmp/boxr-registry-manifests/${safe_ref}.json" ]]; then
+        cat "/tmp/boxr-registry-manifests/${safe_ref}.json"
+        exit 0
+      fi
+      if [[ "$raw" == "1" ]]; then
+        echo '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:6953980e46925f8ac2c09fc7ecf9f353c2cac49f87e7e60ed78287d55a14c296","size":1024,"platform":{"architecture":"amd64","os":"linux"}}]}'
+      else
+        jq -n --arg name "${host}/${repo}" '{Name: $name, Architecture: "amd64", Os: "linux", Layers: ["sha256:634a8f35b5f16dcf4aaa0822adc0b1964bb786fca12f6831de8ddc45e5986a00"]}'
+      fi
+      exit 0
+    fi
+    if [[ "$raw" == "1" ]]; then
+      printf '%s\n' "$manifest"
+      exit 0
+    fi
+    cfg_digest="$(printf '%s' "$manifest" | jq -r '.config.digest // empty')"
+    if [[ -n "$cfg_digest" ]]; then
+      cfg="$(curl -fsSL "http://${host}/v2/${repo}/blobs/${cfg_digest}")"
+      arch="$(printf '%s' "$cfg" | jq -r '.architecture // .Architecture // "amd64"')"
+      os_name="$(printf '%s' "$cfg" | jq -r '.os // .Os // "linux"')"
+      jq -n --arg name "${host}/${repo}" --arg arch "$arch" --arg os "$os_name" '{Name: $name, Architecture: $arch, Os: $os}'
+      exit 0
+    fi
+    printf '%s\n' "$manifest"
+    exit 0
+  fi
+  exit 1
+fi
+
+if [[ "$subcmd" == "copy" ]]; then
+  pos=()
+  fmt=""
+  for a in "$@"; do
+    case "$a" in
+      --format=*) fmt="${a#--format=}" ;;
+      -*) ;;
+      *) pos+=("$a") ;;
+    esac
+  done
+  src="${pos[0]:-}"
+  dst="${pos[1]:-}"
+  if [[ "$src" == docker://* && "$dst" == dir:* ]]; then
+    ref="${src#docker://}"
+    dir="${dst#dir:}"
+    mkdir -p "$dir"
+    host="${ref%%/*}"
+    rest="${ref#*/}"
+    if [[ "$rest" == *:* ]]; then
+      repo="${rest%:*}"
+      tag="${rest##*:}"
+    else
+      repo="$rest"
+      tag="latest"
+    fi
+    manifest="$(curl -fsSL -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" "http://${host}/v2/${repo}/manifests/${tag}")"
+    printf '%s\n' "$manifest" >"$dir/manifest.json"
+    cfg_digest="$(printf '%s' "$manifest" | jq -r '.config.digest')"
+    cfg_hex="${cfg_digest#sha256:}"
+    curl -fsSL "http://${host}/v2/${repo}/blobs/${cfg_digest}" -o "$dir/$cfg_hex"
+    for ldig in $(printf '%s' "$manifest" | jq -r '.layers[].digest'); do
+      lhex="${ldig#sha256:}"
+      curl -fsSL "http://${host}/v2/${repo}/blobs/${ldig}" -o "$dir/$lhex"
+    done
+    exit 0
+  fi
+  if [[ "$src" == dir:* && "$dst" == dir:* ]]; then
+    sdir="${src#dir:}"
+    ddir="${dst#dir:}"
+    mkdir -p "$ddir"
+    cp -a "$sdir/." "$ddir/"
+    if [[ "$fmt" == "v2s1" ]]; then
+      jq 'del(.layers[].annotations)' "$ddir/manifest.json" >"$ddir/manifest.json.tmp" && mv "$ddir/manifest.json.tmp" "$ddir/manifest.json"
+    fi
+    exit 0
+  fi
+  if [[ "$src" == dir:* && "$dst" == docker://* ]]; then
+    sdir="${src#dir:}"
+    ref="${dst#docker://}"
+    host="${ref%%/*}"
+    rest="${ref#*/}"
+    if [[ "$rest" == *:* ]]; then
+      repo="${rest%:*}"
+      tag="${rest##*:}"
+    else
+      repo="$rest"
+      tag="latest"
+    fi
+    upload_blob() {
+      local hex="$1"
+      local file="$sdir/$hex"
+      [[ -f "$file" ]] || return 0
+      local loc
+      loc="$(curl -fsSI -X POST "http://${host}/v2/${repo}/blobs/uploads/" | awk 'tolower($1)=="location:" {gsub(/\r/,"",$2); print $2}')"
+      if [[ "$loc" != http* ]]; then
+        loc="http://${host}${loc}"
+      fi
+      local sep="?"
+      [[ "$loc" == *\?* ]] && sep="&"
+      curl -fsSL -X PUT -H "Content-Type: application/octet-stream" --data-binary "@$file" "${loc}${sep}digest=sha256:${hex}" >/dev/null
+    }
+    cfg_digest="$(jq -r '.config.digest' "$sdir/manifest.json")"
+    upload_blob "${cfg_digest#sha256:}"
+    for ldig in $(jq -r '.layers[].digest' "$sdir/manifest.json"); do
+      upload_blob "${ldig#sha256:}"
+    done
+    mt="$(jq -r '.mediaType // "application/vnd.oci.image.manifest.v1+json"' "$sdir/manifest.json")"
+    curl -fsSL -X PUT -H "Content-Type: $mt" --data-binary "@$sdir/manifest.json" "http://${host}/v2/${repo}/manifests/${tag}" >/dev/null
+    exit 0
+  fi
+fi
+exit 1
+SKOPEO_EOF
+  chmod +x "$CACHE_DIR/bin/skopeo"
+  export PATH="$CACHE_DIR/bin:$PATH"
+fi
 
 cd "$SRC_DIR"
+if [[ -x "$SRC_DIR/bin/ginkgo" ]] && [[ ! -f "$SRC_DIR/.install.ginkgo" ]]; then
+  touch "$SRC_DIR/.install.ginkgo"
+fi
 if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; then
   echo "Installing ginkgo (first run)..."
   make -C "$SRC_DIR" .install.ginkgo
 fi
+[[ -x "$SRC_DIR/bin/ginkgo" ]] && touch "$SRC_DIR/.install.ginkgo"
 
-if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]]; then
-  echo "Prebuilding test/e2e/e2e.test..."
+if [[ ! -x "$SRC_DIR/bin/quadlet" ]]; then
+  echo "Building bin/quadlet..."
+  make -C "$SRC_DIR" bin/quadlet
+fi
+export QUADLET_BINARY="$SRC_DIR/bin/quadlet"
+
+if [[ ! -x "$SRC_DIR/test/checkseccomp/checkseccomp" ]] || [[ ! -x "$SRC_DIR/test/goecho/goecho" ]] || [[ ! -x "$SRC_DIR/test/version/version" ]]; then
   make -C "$SRC_DIR" test-binaries
+fi
+
+if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]] || [[ ! -x "$SRC_DIR/test/checkseccomp/checkseccomp" ]]; then
+  echo "Prebuilding test/e2e/e2e.test..."
   (cd "$SRC_DIR" && ./bin/ginkgo build --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" test/e2e/.)
 fi
 
-while IFS= read -r line || [[ -n "$line" ]]; do
+export PATH="$PATH:$SRC_DIR/hack"
+
+run_one_suite() {
+  local line="$1"
   line="${line%%#*}"
   line="$(echo "$line" | xargs)"
-  [[ -z "$line" ]] && continue
+  [[ -z "$line" ]] && return 0
   if [[ -n "${PODMAN_E2E_PATTERN:-}" ]] && [[ "$line" != *"$PODMAN_E2E_PATTERN"* ]]; then
-    continue
+    return 0
   fi
   echo "======== e2e FOCUS_FILE=$line ========"
-  focus_pat="$line"
+  local focus_pat="$line"
   if [[ "$focus_pat" != /* ]]; then
     focus_pat="/${focus_pat}$"
   fi
-  if ! make localintegration FOCUS_FILE="$focus_pat" GINKGO_PARALLEL=n GINKGOWHAT=test/e2e/e2e.test; then
+  if ! "$SRC_DIR/bin/ginkgo" -vv --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" --timeout=90m --flake-attempts 0 --trace --no-color --focus-file "$focus_pat" --silence-skips "$SRC_DIR/test/e2e/e2e.test"; then
     if [[ "${PODMAN_E2E_STRICT:-0}" == "1" ]]; then
       exit 1
     fi
+    return 1
   fi
-done <"$MANIFEST"
+}
+
+FAILED=0
+if [[ $# -gt 0 ]]; then
+  for suite in "$@"; do
+    run_one_suite "$suite" || FAILED=1
+  done
+else
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    run_one_suite "$line" || FAILED=1
+  done <"$MANIFEST"
+fi
 
 echo "e2e conformance run complete (see output; strict=${PODMAN_E2E_STRICT:-0})"
+exit "$FAILED"

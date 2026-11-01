@@ -80,8 +80,56 @@ pub struct PortMapping {
     pub protocol: String, // "tcp" or "udp"
 }
 
+/// Allocate an ephemeral host port that does not equal `exclude` or `0`,
+/// and does not collide with ports already allocated in this process.
+pub fn allocate_ephemeral_port_not(exclude: u16) -> u16 {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static USED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let used_mutex = USED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut used = used_mutex.lock().unwrap_or_else(|e| e.into_inner());
+
+    for _ in 0..64 {
+        if let Ok(l) = std::net::TcpListener::bind("127.0.0.1:0") {
+            if let Ok(addr) = l.local_addr() {
+                let p = addr.port();
+                if p != 0 && p != exclude && used.insert(p) {
+                    return p;
+                }
+            }
+        }
+    }
+    let mut cand = 32768 + (std::process::id() as u16 % 20000);
+    while cand == 0 || cand == exclude || !used.insert(cand) {
+        cand = cand.wrapping_add(1);
+        if cand < 1024 {
+            cand = 32768;
+        }
+    }
+    cand
+}
+
 /// Resolve a user-facing network flag to a NetworkStore name for bridge attachment.
 impl PortMapping {
+    fn allocate_ephemeral_port(avoid: u16) -> u16 {
+        for _ in 0..8 {
+            if let Ok(p) = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|l| l.local_addr())
+                .map(|a| a.port())
+            {
+                if p != avoid {
+                    return p;
+                }
+            }
+        }
+        let fallback = 32768 + ((std::process::id() as u16).wrapping_add(avoid) % 20000);
+        if fallback == avoid {
+            fallback.wrapping_add(1)
+        } else {
+            fallback
+        }
+    }
+
     fn parse_port_or_range(s: &str) -> Result<Vec<u16>> {
         if let Some((start, end)) = s.split_once('-') {
             let start = start.parse::<u16>()?;
@@ -112,9 +160,27 @@ impl PortMapping {
             if let Some((ip_raw, rem)) = rest.split_once("]:") {
                 let ip = ip_raw.trim().to_string();
                 let rem_parts: Vec<&str> = rem.split(':').collect();
-                if rem_parts.len() == 2 {
-                    let host_ports = Self::parse_port_or_range(rem_parts[0])?;
+                if rem_parts.len() == 1 {
+                    let container_ports = Self::parse_port_or_range(rem_parts[0])?;
+                    return Ok(container_ports
+                        .into_iter()
+                        .map(|c_port| Self {
+                            host_ip: Some(ip.clone()),
+                            host_port: allocate_ephemeral_port_not(c_port),
+                            container_port: c_port,
+                            protocol: proto.clone(),
+                        })
+                        .collect());
+                } else if rem_parts.len() == 2 {
                     let container_ports = Self::parse_port_or_range(rem_parts[1])?;
+                    let host_ports = if rem_parts[0].is_empty() {
+                        container_ports
+                            .iter()
+                            .map(|&cp| allocate_ephemeral_port_not(cp))
+                            .collect()
+                    } else {
+                        Self::parse_port_or_range(rem_parts[0])?
+                    };
                     if host_ports.len() != container_ports.len() {
                         return Err(anyhow!(
                             "host and container port ranges must have equal length: {}",
@@ -143,15 +209,22 @@ impl PortMapping {
                     .into_iter()
                     .map(|c_port| Self {
                         host_ip: None,
-                        host_port: c_port,
+                        host_port: allocate_ephemeral_port_not(c_port),
                         container_port: c_port,
                         protocol: proto.clone(),
                     })
                     .collect())
             }
             2 => {
-                let host_ports = Self::parse_port_or_range(parts[0])?;
                 let container_ports = Self::parse_port_or_range(parts[1])?;
+                let host_ports = if parts[0].trim().is_empty() {
+                    container_ports
+                        .iter()
+                        .map(|&cp| allocate_ephemeral_port_not(cp))
+                        .collect()
+                } else {
+                    Self::parse_port_or_range(parts[0])?
+                };
                 if host_ports.len() != container_ports.len() {
                     return Err(anyhow!(
                         "host and container port ranges must have equal length: {}",
@@ -163,16 +236,31 @@ impl PortMapping {
                     .zip(container_ports)
                     .map(|(h_port, c_port)| Self {
                         host_ip: None,
-                        host_port: h_port,
+                        host_port: if h_port == 0 {
+                            allocate_ephemeral_port_not(c_port)
+                        } else {
+                            h_port
+                        },
                         container_port: c_port,
                         protocol: proto.clone(),
                     })
                     .collect())
             }
             3 => {
-                let ip = parts[0].to_string();
-                let host_ports = Self::parse_port_or_range(parts[1])?;
+                let ip = if parts[0].is_empty() {
+                    None
+                } else {
+                    Some(parts[0].to_string())
+                };
                 let container_ports = Self::parse_port_or_range(parts[2])?;
+                let host_ports = if parts[1].trim().is_empty() {
+                    container_ports
+                        .iter()
+                        .map(|&cp| allocate_ephemeral_port_not(cp))
+                        .collect()
+                } else {
+                    Self::parse_port_or_range(parts[1])?
+                };
                 if host_ports.len() != container_ports.len() {
                     return Err(anyhow!(
                         "host and container port ranges must have equal length: {}",
@@ -183,8 +271,12 @@ impl PortMapping {
                     .into_iter()
                     .zip(container_ports)
                     .map(|(h_port, c_port)| Self {
-                        host_ip: Some(ip.clone()),
-                        host_port: h_port,
+                        host_ip: ip.clone(),
+                        host_port: if h_port == 0 {
+                            allocate_ephemeral_port_not(c_port)
+                        } else {
+                            h_port
+                        },
                         container_port: c_port,
                         protocol: proto.clone(),
                     })

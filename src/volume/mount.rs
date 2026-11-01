@@ -11,7 +11,14 @@ fn is_volume_mount_option_token(token: &str) -> bool {
             | "Z"
             | "O"
             | "U"
+            | "idmap"
+            | "copy"
             | "copyup"
+            | "nocopy"
+            | "nocreate"
+            | "cached"
+            | "delegated"
+            | "consistent"
             | "noexec"
             | "exec"
             | "nosuid"
@@ -24,8 +31,53 @@ fn is_volume_mount_option_token(token: &str) -> bool {
             | "rshared"
             | "slave"
             | "rslave"
-            | "nocopy"
-    )
+            | "unbindable"
+            | "runbindable"
+    ) || token.starts_with("idmap=")
+        || token.starts_with("upperdir=")
+        || token.starts_with("workdir=")
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VolumeExtraOptions {
+    pub idmap: bool,
+    pub nocopy: bool,
+    pub nocreate: bool,
+    pub overlay: bool,
+    pub overlay_upperdir: Option<String>,
+    pub overlay_workdir: Option<String>,
+    pub propagation: Option<String>,
+}
+
+pub fn parse_volume_extra_options(rest: &str) -> VolumeExtraOptions {
+    let mut out = VolumeExtraOptions::default();
+    let Some((path, opts_str)) = rest.split_once(':') else {
+        return out;
+    };
+    let first_opt = opts_str.split(',').next().unwrap_or("").trim();
+    if path.is_empty() || !path.starts_with('/') || !is_volume_mount_option_token(first_opt) {
+        return out;
+    }
+    for part in opts_str.split(',') {
+        let p = part.trim();
+        match p {
+            "idmap" => out.idmap = true,
+            "nocopy" => out.nocopy = true,
+            "nocreate" => out.nocreate = true,
+            "O" => out.overlay = true,
+            "shared" | "rshared" | "slave" | "rslave" | "private" | "rprivate" | "unbindable"
+            | "runbindable" => out.propagation = Some(p.to_string()),
+            _ if p.starts_with("idmap=") => out.idmap = true,
+            _ if p.starts_with("upperdir=") => {
+                out.overlay_upperdir = p.strip_prefix("upperdir=").map(|s| s.to_string());
+            }
+            _ if p.starts_with("workdir=") => {
+                out.overlay_workdir = p.strip_prefix("workdir=").map(|s| s.to_string());
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Destination path and mount flags from `dest:z,ro` / `dest:noexec` / `dest:U` style volume suffixes.
@@ -62,6 +114,22 @@ pub fn tmpfs_mount_data_from_volume_options(options: &HashMap<String, String>) -
             if piece.is_empty() {
                 continue;
             }
+            if matches!(
+                piece,
+                "nodev"
+                    | "dev"
+                    | "nosuid"
+                    | "suid"
+                    | "noexec"
+                    | "exec"
+                    | "ro"
+                    | "rw"
+                    | "relatime"
+                    | "noatime"
+                    | "strictatime"
+            ) {
+                continue;
+            }
             if piece.starts_with("size=") {
                 let size = piece.trim_start_matches("size=");
                 if size.ends_with('M') || size.ends_with('m') {
@@ -90,6 +158,20 @@ pub struct MountSpec {
     pub noexec: bool,
     #[serde(default)]
     pub chown_u: bool,
+    #[serde(default)]
+    pub idmap: bool,
+    #[serde(default)]
+    pub nocopy: bool,
+    #[serde(default)]
+    pub notmpcopyup: bool,
+    #[serde(default)]
+    pub overlay: bool,
+    #[serde(default)]
+    pub overlay_upperdir: Option<String>,
+    #[serde(default)]
+    pub overlay_workdir: Option<String>,
+    #[serde(default)]
+    pub propagation: Option<String>,
     /// When set, mount as tmpfs inside the container instead of bind-mounting `_data`.
     #[serde(default)]
     pub tmpfs_mount_data: Option<String>,
@@ -98,6 +180,26 @@ pub struct MountSpec {
     #[serde(default)]
     pub subpath: Option<String>,
     pub is_volume: bool,
+}
+
+fn split_mount_csv(m: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_quotes = false;
+    for ch in m.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch == ',' && !in_quotes {
+            tokens.push(cur.clone());
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
 }
 
 fn expand_path_glob(pattern: &str) -> Vec<PathBuf> {
@@ -149,34 +251,133 @@ pub fn parse_mount_flag(
         return Ok(Vec::new());
     }
 
-    let mut mount_type = "bind".to_string();
+    let mut mount_type = "volume".to_string();
     let mut source = String::new();
     let mut target = String::new();
     let mut subpath: Option<String> = None;
+    let mut propagation: Option<String> = None;
     let mut ro = false;
+    let mut ro_count = 0usize;
     let mut noexec = false;
     let mut noswap = false;
+    let mut chown_u = false;
+    let mut nocopy = false;
+    let mut nocreate = false;
+    let mut tmpcopyup_count = 0usize;
+    let mut notmpcopyup = false;
+    let mut propagation: Option<String> = None;
+    let mut volume_opts: HashMap<String, String> = HashMap::new();
+    let mut devpts_opts: Vec<String> = Vec::new();
 
-    for kv in m_trim.split(',') {
+    for kv in split_mount_csv(m_trim) {
         if let Some((k, v)) = kv.split_once('=') {
             match k.trim() {
                 "type" => mount_type = v.trim().to_string(),
                 "source" | "src" => source = v.trim().to_string(),
-                "target" | "destination" | "dst" => target = v.trim().to_string(),
+                "target" | "destination" | "dst" | "dest" => target = v.trim().to_string(),
                 "subpath" | "volume-subpath" => subpath = Some(v.trim().to_string()),
-                "readonly" | "ro" => ro = v.trim() != "false",
-                "rw" => ro = v.trim() == "false",
+                "uid" | "gid" | "mode" | "ptmxmode" | "newinstance" | "max" => {
+                    devpts_opts.push(format!("{}={}", k.trim(), v.trim()));
+                }
+                "readonly" | "ro" => {
+                    ro_count += 1;
+                    ro = v.trim() != "false";
+                }
+                "rw" => {
+                    ro_count += 1;
+                    ro = v.trim() == "false";
+                }
+                "U" | "chown" => match v.trim() {
+                    "true" => chown_u = true,
+                    "false" => chown_u = false,
+                    other => {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "'U' or 'chown' must be set to true or false, instead received {:?}: must provide an argument for option",
+                            other
+                        ));
+                    }
+                },
+                "bind-propagation" => {
+                    let pv = v.trim();
+                    if !matches!(
+                        pv,
+                        "shared"
+                            | "rshared"
+                            | "slave"
+                            | "rslave"
+                            | "private"
+                            | "rprivate"
+                            | "unbindable"
+                            | "runbindable"
+                    ) {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "invalid value \"bind-propagation={}\"",
+                            pv
+                        ));
+                    }
+                    propagation = Some(pv.to_string());
+                }
+                "volume-opt" => {
+                    if let Some((ok, ov)) = v.trim().split_once('=') {
+                        volume_opts.insert(ok.trim().to_string(), ov.trim().to_string());
+                    } else {
+                        volume_opts.insert(v.trim().to_string(), String::new());
+                    }
+                }
                 _ => {}
             }
         } else {
             match kv.trim() {
-                "readonly" | "ro" => ro = true,
-                "rw" => ro = false,
+                "readonly" | "ro" => {
+                    ro_count += 1;
+                    ro = true;
+                }
+                "rw" => {
+                    ro_count += 1;
+                    ro = false;
+                }
                 "noexec" => noexec = true,
                 "noswap" => noswap = true,
+                "U" | "chown" => chown_u = true,
+                "nocopy" | "volume-nocopy" => nocopy = true,
+                "nocreate" | "volume-nocreate" => nocreate = true,
+                "tmpcopyup" => {
+                    tmpcopyup_count += 1;
+                    notmpcopyup = false;
+                }
+                "notmpcopyup" => {
+                    tmpcopyup_count += 1;
+                    notmpcopyup = true;
+                }
+                "shared" | "rshared" | "slave" | "rslave" | "private" | "rprivate"
+                | "unbindable" | "runbindable" => {
+                    propagation = Some(kv.trim().to_string());
+                }
                 _ => {}
             }
         }
+    }
+
+    if ro_count > 1 {
+        crate::cli::usage_errors::exit_usage_error(
+            "cannot pass 'readonly', 'ro', or 'rw' mnt.Options more than once: must provide an argument for option",
+        );
+    }
+    if tmpcopyup_count > 1 {
+        crate::cli::usage_errors::exit_usage_error(
+            "cannot pass 'tmpcopyup' and 'notmpcopyup' mnt.Options more than once: must provide an argument for option",
+        );
+    }
+    if tmpcopyup_count > 0 && mount_type != "tmpfs" {
+        let opt_name = if notmpcopyup {
+            "notmpcopyup"
+        } else {
+            "tmpcopyup"
+        };
+        crate::cli::usage_errors::exit_usage_error(format!(
+            "\"{}\" option not supported for \"{}\" mount types",
+            opt_name, mount_type
+        ));
     }
 
     if mount_type != "bind"
@@ -224,11 +425,13 @@ pub fn parse_mount_flag(
                     destination: dest,
                     read_only: ro,
                     noexec,
-                    chown_u: false,
+                    chown_u,
+                    propagation: propagation.clone(),
                     tmpfs_mount_data: None,
                     volume_name: None,
                     subpath: None,
                     is_volume: false,
+                    ..Default::default()
                 });
             }
             if res.is_empty() {
@@ -243,16 +446,22 @@ pub fn parse_mount_flag(
             if target.is_empty() {
                 crate::cli::usage_errors::exit_usage_error("must set volume destination");
             }
-            let (src_path, vol_name) = if source.is_empty() {
-                let vol = vol_store.create(None, None)?;
-                (vol.mountpoint, Some(vol.name))
+            let vol = if source.is_empty() {
+                let opts = (!volume_opts.is_empty()).then_some(volume_opts);
+                vol_store.create_with_options(None, "local", None, "local", opts)?
             } else if let Some(vol) = vol_store.find(&source) {
-                (vol.mountpoint, Some(vol.name))
+                vol
+            } else if nocreate {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "volume {} does not exist",
+                    source
+                ));
             } else {
-                let vol = vol_store.create(Some(&source), None)?;
-                (vol.mountpoint, Some(vol.name))
+                let opts = (!volume_opts.is_empty()).then_some(volume_opts);
+                vol_store.create_with_options(Some(&source), "local", None, "local", opts)?
             };
-            let mut final_src = PathBuf::from(src_path);
+            let tmpfs_mount_data = tmpfs_mount_data_from_volume_options(&vol.options);
+            let mut final_src = PathBuf::from(&vol.mountpoint);
             if let Some(sp) = &subpath {
                 final_src = final_src.join(sp.trim_start_matches('/'));
             }
@@ -261,37 +470,46 @@ pub fn parse_mount_flag(
                 destination: target,
                 read_only: ro,
                 noexec,
-                chown_u: false,
-                tmpfs_mount_data: None,
-                volume_name: vol_name,
+                chown_u: chown_u || source.is_empty(),
+                nocopy,
+                propagation,
+                tmpfs_mount_data,
+                volume_name: Some(vol.name),
                 subpath,
                 is_volume: true,
+                ..Default::default()
+            }])
+        }
+        "image" => {
+            if target.is_empty() {
+                crate::cli::usage_errors::exit_usage_error("must set volume destination");
+            }
+            let img_store = crate::storage::ImageStore::new();
+            let Some(img_rec) = crate::find_image_with_shortname(&img_store, &source, None) else {
+                crate::cli::usage_errors::exit_usage_error(format!("{}: image not known", source));
+            };
+            let mut final_src = PathBuf::from(&img_rec.rootfs_path);
+            if let Some(sp) = &subpath {
+                final_src = final_src.join(sp.trim_start_matches('/'));
+            }
+            Ok(vec![MountSpec {
+                source: final_src,
+                destination: target,
+                read_only: ro,
+                noexec,
+                chown_u,
+                propagation,
+                tmpfs_mount_data: None,
+                volume_name: None,
+                subpath,
+                is_volume: false,
+                ..Default::default()
             }])
         }
         "artifact" => {
             let store = crate::artifact::ArtifactStore::new();
-            let Some(art) = store.find(&source) else {
-                let display_src = if source.contains(':') {
-                    source.clone()
-                } else {
-                    format!("{}:latest", source)
-                };
-                crate::cli::usage_errors::exit_usage_error(format!(
-                    "{}: artifact does not exist",
-                    display_src
-                ));
-            };
-            Ok(vec![MountSpec {
-                source: PathBuf::from(art.file_path),
-                destination: target,
-                read_only: true,
-                noexec,
-                chown_u: false,
-                tmpfs_mount_data: None,
-                volume_name: None,
-                subpath: None,
-                is_volume: false,
-            }])
+            store.mount_artifact_to_rootfs(m_trim, std::path::Path::new("/"), true)?;
+            Ok(Vec::new())
         }
         "ramfs" => {
             if target.is_empty() {
@@ -302,11 +520,14 @@ pub fn parse_mount_flag(
                 destination: target,
                 read_only: ro,
                 noexec,
-                chown_u: false,
+                chown_u,
+                notmpcopyup,
                 tmpfs_mount_data: Some("mode=755".to_string()),
                 volume_name: None,
                 subpath: None,
+                propagation,
                 is_volume: false,
+                ..Default::default()
             }])
         }
         "tmpfs" => {
@@ -318,11 +539,40 @@ pub fn parse_mount_flag(
                 destination: target,
                 read_only: ro,
                 noexec,
-                chown_u: false,
+                chown_u,
+                notmpcopyup,
                 tmpfs_mount_data: Some("mode=755".to_string()),
                 volume_name: None,
                 subpath: None,
+                propagation,
                 is_volume: false,
+                ..Default::default()
+            }])
+        }
+        "devpts" => {
+            if target.is_empty() {
+                crate::cli::usage_errors::exit_usage_error("must set volume destination");
+            }
+            if !devpts_opts.iter().any(|o| o.starts_with("newinstance")) {
+                devpts_opts.insert(0, "newinstance".to_string());
+            }
+            if !devpts_opts.iter().any(|o| o.starts_with("ptmxmode=")) {
+                devpts_opts.push("ptmxmode=0666".to_string());
+            }
+            if !devpts_opts.iter().any(|o| o.starts_with("mode=")) {
+                devpts_opts.push("mode=0620".to_string());
+            }
+            Ok(vec![MountSpec {
+                source: PathBuf::from("devpts"),
+                destination: target,
+                read_only: ro,
+                noexec,
+                chown_u,
+                tmpfs_mount_data: Some(devpts_opts.join(",")),
+                volume_name: None,
+                subpath: None,
+                is_volume: false,
+                ..Default::default()
             }])
         }
         _ => {
@@ -341,11 +591,13 @@ pub fn parse_mount_flag(
                 destination: target,
                 read_only: ro,
                 noexec,
-                chown_u: false,
+                chown_u,
+                propagation,
                 tmpfs_mount_data: None,
                 volume_name: None,
                 subpath: None,
                 is_volume: false,
+                ..Default::default()
             }])
         }
     }

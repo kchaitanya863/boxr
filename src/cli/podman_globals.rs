@@ -10,19 +10,25 @@ pub struct PodmanGlobalOptions {
     pub runroot: Option<PathBuf>,
     pub tmpdir: Option<PathBuf>,
     pub volumepath: Option<PathBuf>,
+    pub imagestore: Option<PathBuf>,
     pub storage_driver: Option<String>,
     pub storage_opts: Vec<String>,
     pub events_backend: Option<String>,
     pub cgroup_manager: Option<String>,
+    pub network_config_dir: Option<PathBuf>,
     pub debug: bool,
     pub raw_modules: Vec<String>,
     pub modules: Vec<PathBuf>,
     pub url: Option<String>,
     pub connection: Option<String>,
     pub remote: bool,
+    pub transient_store: bool,
     pub tls_ca: Option<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    pub tls_details: Option<String>,
+    pub pull_options: Vec<String>,
+    pub cdi_spec_dirs: Vec<PathBuf>,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -36,6 +42,16 @@ pub fn podman_global_options() -> PodmanGlobalOptions {
 }
 
 pub fn set_podman_global_options(opts: PodmanGlobalOptions) {
+    if let Some(ref r) = opts.root {
+        unsafe {
+            std::env::set_var("BOXR_HOME", r);
+        }
+    }
+    if let Some(ref nd) = opts.network_config_dir {
+        unsafe {
+            std::env::set_var("BOXR_NETWORK_CONFIG_DIR", nd);
+        }
+    }
     if let Ok(mut guard) = PARSED_GLOBALS.lock() {
         *guard = Some(opts);
     }
@@ -46,12 +62,14 @@ const VALUE_FLAGS: &[&str] = &[
     "--runroot",
     "--tmpdir",
     "--volumepath",
+    "--imagestore",
     "--storage-driver",
     "--storage-opt",
     "--pull-option",
     "--module",
     "--conmon",
     "--network-config-dir",
+    "--cdi-spec-dir",
     "--cgroup-manager",
     "--events-backend",
     "--runtime",
@@ -65,7 +83,9 @@ const VALUE_FLAGS: &[&str] = &[
     "--tls-ca",
     "--tls-cert",
     "--tls-key",
+    "--tls-details",
     "--ssh",
+    "--cdi-spec-dir",
 ];
 
 fn is_global_value_flag(token: &str) -> bool {
@@ -103,10 +123,41 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 }
             }
         }
-        if a == "--debug" || a == "-D" {
+        if a == "--debug" || a == "-D" || a == "--log-level=debug" {
             opts.debug = true;
             i += 1;
             continue;
+        }
+        if a == "--log-level" {
+            if i + 1 < argv.len() && argv[i + 1] == "debug" {
+                opts.debug = true;
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--tls-details=") {
+            opts.tls_details = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-details" {
+            if i + 1 < argv.len() {
+                opts.tls_details = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--pull-option=") {
+            opts.pull_options.push(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--pull-option" {
+            if i + 1 < argv.len() {
+                opts.pull_options.push(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
         }
         if let Some(v) = a.strip_prefix("--root=") {
             opts.root = Some(PathBuf::from(v));
@@ -152,6 +203,18 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
         if a == "--volumepath" {
             if i + 1 < argv.len() {
                 opts.volumepath = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--imagestore=") {
+            opts.imagestore = Some(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--imagestore" {
+            if i + 1 < argv.len() {
+                opts.imagestore = Some(PathBuf::from(&argv[i + 1]));
                 i += 2;
                 continue;
             }
@@ -204,8 +267,30 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 continue;
             }
         }
+        if let Some(v) = a.strip_prefix("--network-config-dir=") {
+            opts.network_config_dir = Some(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--network-config-dir" {
+            if i + 1 < argv.len() {
+                opts.network_config_dir = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
         if a == "--remote" || a == "-r" {
             opts.remote = true;
+            i += 1;
+            continue;
+        }
+        if a == "--transient-store" || a == "--transient-store=true" {
+            opts.transient_store = true;
+            i += 1;
+            continue;
+        }
+        if a == "--transient-store=false" {
+            opts.transient_store = false;
             i += 1;
             continue;
         }
@@ -276,6 +361,30 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 continue;
             }
         }
+        if let Some(v) = a.strip_prefix("--network-config-dir=") {
+            opts.network_config_dir = Some(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--network-config-dir" {
+            if i + 1 < argv.len() {
+                opts.network_config_dir = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--cdi-spec-dir=") {
+            opts.cdi_spec_dirs.push(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--cdi-spec-dir" {
+            if i + 1 < argv.len() {
+                opts.cdi_spec_dirs.push(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
         i += 1;
     }
     opts
@@ -291,13 +400,14 @@ fn strip_globals_after_subcommand(sub: &str) -> bool {
             | "system"
             | "volume"
             | "pull"
+            | "kube"
+            | "play"
             | "push"
             | "load"
             | "save"
             | "tag"
             | "rmi"
             | "image"
-            | "unshare"
             | "rm"
             | "stop"
             | "start"
@@ -333,6 +443,8 @@ pub fn should_strip_global_flag_at(argv: &[String], i: usize, subcommand_idx: us
         || a.starts_with("--transient-store=")
         || a == "--pull-option"
         || a.starts_with("--pull-option=")
+        || a == "--imagestore"
+        || a.starts_with("--imagestore=")
     {
         return true;
     }

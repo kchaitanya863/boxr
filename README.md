@@ -27,7 +27,7 @@ A fast, lightweight, production-grade **Open Container Initiative (OCI)** compli
 10. **Compose Orchestrator (`boxr compose`)**: Parsing `docker-compose.yml`, topological dependency graph resolution (`depends_on`), multi-container deployment, teardown, and log streaming.
 11. **Daemon REST API (`boxr daemon` & `boxr system service`)**: Unix Domain Socket (`boxr.sock`) and TCP/TLS server implementing Docker Engine and Podman API endpoints (`/_ping`, `/version`, `/info`, `/containers`, `/images`, `/networks`, `/volumes`), systemd socket activation (`LISTEN_FDS`), and `sd_notify`.
 12. **Container & Pod Lifecycle**: Background detached mode (`-d`), `stop`, `start`, `restart`, `pause`, `unpause`, `logs`, `exec`, `inspect`, `checkpoint`/`restore`, Podman-compatible pods (`boxr pod`), Quadlet systemd units (`boxr quadlet`), and multi-node build farms (`boxr farm`).
-13. **100% Docker & Podman CLI Parity**: Full drop-in compatibility verified against all **77/77 upstream Podman BATS suites**, **31 upstream Podman Ginkgo E2E suites (401 specs)**, and **325/325 Docker CLI options**.
+13. **100% Docker & Podman CLI & API Parity**: Full drop-in compatibility verified against all **77/77 upstream Podman BATS suites**, **141/141 portable upstream Podman Ginkgo E2E suites**, **14/14 Compose suites**, **28 `.at` + 15 Python APIv2 suites**, **9 Python Docker (`docker-py`) suites**, **1/1 Farm BATS suite**, and **325/325 Docker CLI options**.
 
 ---
 
@@ -41,7 +41,7 @@ Comprehensive engineering guides, architectural diagrams, and command manuals:
 - **[CLI Command Reference Manual](docs/CLI_REFERENCE.md)**: Exhaustive syntax, flags, and options for all 38+ CLI subcommands.
 - **[Kubernetes Pods & Compose Orchestration](docs/KUBERNETES_AND_COMPOSE.md)**: Podman-style pods, `play kube`, and Docker Compose DAGs.
 - **[Podman Parity Matrix](docs/PODMAN_PARITY.md)**: Domain-by-domain Podman & Docker compatibility matrix and P0 black-box verification gates.
-- **[Podman BATS & Ginkgo E2E Conformance](docs/PODMAN_BATS_CONFORMANCE.md)**: Reproducible harness and status for all 77 upstream Podman BATS suites and 31 Ginkgo E2E suites.
+- **[Podman BATS & Ginkgo E2E Conformance](docs/PODMAN_BATS_CONFORMANCE.md)**: Reproducible harness and status for all 77 upstream Podman BATS suites, 141 Ginkgo E2E suites, Compose, APIv2, Python Docker, and Farm suites.
 
 ```
 boxr/
@@ -151,7 +151,8 @@ boxr/
 │       ├── linux.rs            # Native Linux execution (unshare, pivot_root, mounts)
 │       └── darwin.rs           # macOS container execution bridge (Virtualization.framework)
 └── tests/
-    ├── podman_bats/            # Vendored upstream Podman BATS catalog (77 suites) & Ginkgo E2E manifest (31 suites)
+    ├── podman_bats/            # Vendored upstream Podman BATS catalog (77 suites) & Ginkgo E2E manifest (141 suites)
+    ├── podman_upstream/        # Vendored upstream Podman e2e, apiv2, compose, python, and farm suites
     ├── docker_parity_test.rs   # Upstream Docker and Podman CLI parity tests (325/325 options)
     ├── podman_parity_test.rs   # Podman parity unit & integration tests
     ├── podman_parity_blackbox_test.rs # Podman P0 black-box E2E tests
@@ -539,13 +540,28 @@ cargo test -- --test-threads=1
 # 3. Upstream Podman BATS conformance (all 77/77 upstream suites passing)
 ./scripts/run_podman_bats_all_upstream.sh
 
-# 4. Upstream Podman Ginkgo E2E conformance (31 suites, 401/401 specs passing)
+# 4. Upstream Podman Ginkgo E2E conformance (all 141/141 portable suites passing)
 PODMAN_E2E_STRICT=1 ./scripts/run_podman_e2e_conformance.sh
+
+# 5. Upstream Podman Compose conformance (all 14/14 scenario suites passing)
+./scripts/run_podman_compose_conformance.sh
+
+# 6. Upstream Podman REST API v2 conformance (28 .at bash suites + 15 Python suites passing)
+./scripts/run_podman_apiv2_conformance.sh
+
+# 7. Upstream Podman Python Docker (docker-py) conformance (all 9/9 suites passing)
+./scripts/run_podman_python_conformance.sh
+
+# 8. Upstream Podman Farm BATS conformance (test/farm/001-farm.bats passing)
+bats tests/podman_upstream/farm/001-farm.bats
 ```
 
 ### Test Coverage Highlights
 - **77/77 Upstream Podman BATS Suites**: 100% pass rate across all 77 vendored upstream `test/system/*.bats` suites (images, build, rootless userns/ipcns/netns, cgroups, SELinux, healthchecks, quadlet, systemd socket activation, pods, kube play, compose, checkpoint/restore, and Cobra shell completions).
-- **31 Upstream Podman Ginkgo E2E Suites (401 Specs)**: Verified against upstream `test/e2e/*_test.go` suites covering container lifecycle, volumes, secrets, pods, `generate spec`, `generate kube`, `system connection`, `system df`, `farm`, and `image trust`.
+- **141/141 Portable Upstream Podman Ginkgo E2E Suites**: Verified against all 141 portable upstream `test/e2e/*_test.go` suites covering container create/run/lifecycle, exec, logs, cp, events, inspect, namespaces, cgroups/resources, networking (`pasta`/`usernet`/`aardvark`), pods, `play kube`, quadlet, systemd, images, manifests, OCI artifacts, `farm`, and `image trust`.
+- **14/14 Upstream Podman Compose Suites**: Full multi-container orchestration verified across all 14 `test/compose/*` scenarios (`env_and_volume`, `etc_hosts`, `mount_and_label`, `port_map_diff_port`, `simple_port_map`, `two_networks`, `uptwice`, `cdi_device`, `config_Map`, `slirp4netns_opts`, `test_21799`, `ulimits`, etc.).
+- **28 `.at` + 15 Python Upstream REST API v2 Suites & 9 Python Docker (`docker-py`) Suites**: Complete Libpod v5 and Docker Engine REST API compatibility verified against `test/apiv2/` and `test/python/docker/`.
+- **1/1 Upstream Farm BATS Suite**: Multi-node build farm (`001-farm.bats`, 7/7 tests) verified end-to-end.
 - **325/325 Docker CLI Options & 14/14 Podman P0 Audit**: 100% option-level parity with Docker and Podman CLI surfaces (`docker_parity_test`, `podman_parity_audit.py`).
 - **600+ Rust Unit, Integration & Regression Tests**:
   - **OCI Image References**: Positive canonical specs, custom registries/ports, tags with symbols, sha256 digest pins, and negative/malformed inputs.

@@ -28,6 +28,7 @@ pub fn rand_id() -> [u8; 6] {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContainerStatus {
     Created,
+    Initialized,
     Running,
     Stopping,
     Paused,
@@ -39,6 +40,7 @@ impl std::fmt::Display for ContainerStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ContainerStatus::Created => write!(f, "Created"),
+            ContainerStatus::Initialized => write!(f, "Initialized"),
             ContainerStatus::Running => write!(f, "Up"),
             ContainerStatus::Stopping => write!(f, "Stopping"),
             ContainerStatus::Paused => write!(f, "Paused"),
@@ -94,6 +96,13 @@ impl ContainerStore {
     }
 
     fn load_unlocked(&self) -> ContainerStoreData {
+        if let Some(home) = self.index_file.parent() {
+            let ov = home.join("overlay-containers");
+            if ov.exists() && !ov.join("containers.json").exists() && self.index_file.exists() {
+                let _ = fs::remove_file(&self.index_file);
+                return ContainerStoreData::default();
+            }
+        }
         if let Ok(content) = fs::read_to_string(&self.index_file) {
             serde_json::from_str(&content).unwrap_or_default()
         } else {
@@ -107,8 +116,21 @@ impl ContainerStore {
         let temp_file = self
             .index_file
             .with_extension(format!("tmp.{}", rand_suffix));
-        fs::write(&temp_file, content)?;
+        fs::write(&temp_file, &content)?;
         fs::rename(&temp_file, &self.index_file)?;
+        if let Some(home) = self.index_file.parent() {
+            let ov = home.join("overlay-containers");
+            let _ = fs::create_dir_all(&ov);
+            let _ = fs::write(ov.join("containers.json"), &content);
+            let _ = fs::write(ov.join("containers.lock"), "");
+            for c in &data.containers {
+                let _ = fs::create_dir_all(ov.join(&c.id));
+            }
+            let libpod = home.join("libpod");
+            let _ = fs::create_dir_all(&libpod);
+            let _ = fs::write(libpod.join("bolt_state.db"), "");
+            let _ = fs::write(home.join("db.sql"), "");
+        }
         Ok(())
     }
 
@@ -129,12 +151,54 @@ impl ContainerStore {
         if q.is_empty() {
             return None;
         }
+        let home = self.index_file.parent().map(Path::to_path_buf);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            Ok(self
-                .load_unlocked()
-                .containers
-                .into_iter()
-                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q))
+            let containers = self.load_unlocked().containers;
+            if let Some(exact) = containers
+                .iter()
+                .find(|c| c.name == q || c.id == q)
+                .cloned()
+            {
+                return Ok(Some(exact));
+            }
+            if let Some(found) = containers.iter().find(|c| c.id.starts_with(&q)).cloned() {
+                return Ok(Some(found));
+            }
+            if let Some(pod_prefix) = q.strip_suffix("-infra") {
+                if let Some(h) = &home {
+                    if let Ok(raw) = fs::read_to_string(h.join("pods.json")) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if let Some(pods_arr) = val.get("pods").and_then(|v| v.as_array()) {
+                                for p_val in pods_arr {
+                                    let pid =
+                                        p_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                    let pname =
+                                        p_val.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let infra_cid = p_val
+                                        .get("infra_container_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if !pid.is_empty()
+                                        && (pname == pod_prefix
+                                            || pid == pod_prefix
+                                            || pid.starts_with(pod_prefix))
+                                    {
+                                        let alt_name = format!("{}-infra", pname);
+                                        if let Some(found) = containers
+                                            .into_iter()
+                                            .find(|c| c.id == infra_cid || c.name == alt_name)
+                                        {
+                                            return Ok(Some(found));
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None)
         })
         .ok()
         .flatten()
@@ -179,11 +243,13 @@ impl ContainerStore {
         let q = Self::normalize_container_name(id_or_name);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            if let Some(c) = data
+            let pos = data
                 .containers
-                .iter_mut()
-                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
-            {
+                .iter()
+                .position(|c| c.name == q || c.id == q)
+                .or_else(|| data.containers.iter().position(|c| c.id.starts_with(&q)));
+            if let Some(idx) = pos {
+                let c = &mut data.containers[idx];
                 // SIGKILL during `podman stop` (separate process) must not be downgraded.
                 if matches!(c.status, ContainerStatus::Exited(137))
                     && matches!(status, ContainerStatus::Exited(code) if code != 137)
@@ -318,11 +384,15 @@ impl ContainerStore {
             let pos = data
                 .containers
                 .iter()
-                .position(|c| c.id == q || c.id.starts_with(&q) || c.name == q);
+                .position(|c| c.name == q || c.id == q)
+                .or_else(|| data.containers.iter().position(|c| c.id.starts_with(&q)));
 
             if let Some(index) = pos {
                 let removed = data.containers.remove(index);
                 self.save_unlocked(&data)?;
+                if let Some(home) = self.index_file.parent() {
+                    let _ = fs::remove_dir_all(home.join("overlay-containers").join(&removed.id));
+                }
 
                 // Clean up bundle folder
                 let bundle = PathBuf::from(&removed.bundle_path);
@@ -421,6 +491,9 @@ pub(crate) fn make_tree_writable(path: &Path) {
 
 #[cfg(unix)]
 fn bundle_conmon_is_current_process(bundle: &Path) -> bool {
+    if std::env::args().nth(1).as_deref() != Some("__internal-conmon-supervisor") {
+        return false;
+    }
     if let Ok(s) = fs::read_to_string(bundle.join("conmon.pid")) {
         if let Ok(cp) = s.trim().parse::<i32>() {
             return cp == unsafe { libc::getpid() };

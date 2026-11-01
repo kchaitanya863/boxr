@@ -59,6 +59,11 @@ apply_vendored_upstream() {
     --include='build-systemd-image' \
     --exclude='*' \
     "$vendored/" "$SRC_DIR/test/system/"
+  local vendored_farm="$REPO_ROOT/tests/podman_upstream/farm"
+  if [[ -d "$vendored_farm" ]]; then
+    mkdir -p "$SRC_DIR/test/farm"
+    rsync -a "$vendored_farm/" "$SRC_DIR/test/farm/"
+  fi
 }
 
 apply_boxr_patches() {
@@ -200,6 +205,20 @@ run_manifest() {
   mkdir -p "$buildah_stub_dir"
   install -m 0755 "$REPO_ROOT/tests/podman_bats/buildah-stub.sh" "$buildah_stub_dir/buildah"
   install -m 0755 "$REPO_ROOT/tests/podman_bats/skopeo-stub.sh" "$buildah_stub_dir/skopeo"
+  ln -sf "$WRAPPER" "$buildah_stub_dir/podman"
+  cat >"$buildah_stub_dir/ssh" <<EOF
+#!/usr/bin/env bash
+args=()
+for a in "\$@"; do
+  if [[ "\$a" == "podman" ]]; then
+    args+=("$WRAPPER")
+  else
+    args+=("\$a")
+  fi
+done
+exec /usr/bin/ssh "\${args[@]}"
+EOF
+  chmod +x "$buildah_stub_dir/ssh"
   export PATH="$buildah_stub_dir:$PATH"
   export BOXR_BIN="$BOXR_BIN"
 
