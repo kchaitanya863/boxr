@@ -17,11 +17,85 @@ pub use traits::{
     ContainerReader, ContainerStoreOps, ContainerWriter, ImageReader, ImageStoreOps, ImageWriter,
 };
 
+fn active_connection_meta() -> Option<serde_json::Value> {
+    let globals = crate::cli::podman_globals::podman_global_options();
+    let mut uri = globals.url.clone();
+    if uri.is_none() {
+        if let Some(conn_name) = &globals.connection {
+            let cfg = crate::farm::load_connections_file();
+            if let Some(dest) = cfg.connection.connections.get(conn_name) {
+                uri = Some(dest.uri.clone());
+            }
+        }
+    }
+    let uri = uri?;
+    if let Some(sock_path) = uri
+        .strip_prefix("unix://")
+        .or_else(|| uri.strip_prefix("unix:"))
+    {
+        let meta_path = format!("{}.meta", sock_path);
+        if let Ok(raw) = fs::read_to_string(&meta_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+pub fn effective_network_config_dir() -> Option<PathBuf> {
+    let globals = crate::cli::podman_globals::podman_global_options();
+    if let Some(dir) = globals.network_config_dir {
+        return Some(dir);
+    }
+    if let Ok(env_dir) = std::env::var("BOXR_NETWORK_CONFIG_DIR") {
+        if !env_dir.is_empty() {
+            return Some(PathBuf::from(env_dir));
+        }
+    }
+    if let Some(meta) = active_connection_meta() {
+        if let Some(s) = meta.get("network_config_dir").and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(PathBuf::from(s));
+            }
+        }
+    }
+    None
+}
+
+pub fn effective_cdi_spec_dirs() -> Vec<PathBuf> {
+    let globals = crate::cli::podman_globals::podman_global_options();
+    if !globals.cdi_spec_dirs.is_empty() {
+        return globals.cdi_spec_dirs;
+    }
+    if let Some(meta) = active_connection_meta() {
+        if let Some(arr) = meta.get("cdi_spec_dirs").and_then(|v| v.as_array()) {
+            let dirs: Vec<PathBuf> = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect();
+            if !dirs.is_empty() {
+                return dirs;
+            }
+        }
+    }
+    vec![PathBuf::from("/etc/cdi"), PathBuf::from("/var/run/cdi")]
+}
+
 /// Get the base boxr directory (default: ~/.boxr)
 pub fn boxr_home() -> PathBuf {
     let globals = crate::cli::podman_globals::podman_global_options();
     if let Some(root) = &globals.root {
         return root.clone();
+    }
+    if let Some(meta) = active_connection_meta() {
+        if let Some(gr) = meta.get("graph_root").and_then(|v| v.as_str()) {
+            if !gr.is_empty() {
+                return PathBuf::from(gr);
+            }
+        }
     }
     if let Ok(custom) = std::env::var("BOXR_HOME") {
         return PathBuf::from(custom);

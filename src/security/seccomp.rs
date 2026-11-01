@@ -13,17 +13,56 @@ pub struct SeccompSyscall {
     pub action: String,
 }
 
-/// Apply the default seccomp BPF filter inside the container process.
+/// Apply a custom seccomp JSON profile if present, or the default seccomp BPF filter.
 #[cfg(target_os = "linux")]
-pub fn apply_default_seccomp() -> anyhow::Result<()> {
+pub fn apply_seccomp_from_profile(profile_path: Option<&str>) -> anyhow::Result<()> {
     use seccompiler::{BpfProgram, SeccompAction, SeccompFilter, TargetArch};
     use std::collections::BTreeMap;
     use std::convert::TryInto;
 
-    let blocked = SeccompRule::default_filter().syscalls[0].names.clone();
+    let mut blocked = SeccompRule::default_filter().syscalls[0].names.clone();
+    if let Some(p) = profile_path {
+        if p == "unconfined" {
+            return Ok(());
+        }
+        let raw_opt = if p.trim_start().starts_with('{') {
+            Some(p.to_string())
+        } else {
+            std::fs::read_to_string(p).ok()
+        };
+        if let Some(raw) = raw_opt {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(syscalls) = val.get("syscalls").and_then(|s| s.as_array()) {
+                    for sc in syscalls {
+                        let action = sc.get("action").and_then(|a| a.as_str()).unwrap_or("");
+                        if action == "SCMP_ACT_ERRNO" || action == "SCMP_ACT_KILL" {
+                            if let Some(names) = sc.get("names").and_then(|n| n.as_array()) {
+                                for n in names {
+                                    if let Some(ns) = n.as_str() {
+                                        blocked.push(ns.to_string());
+                                    }
+                                }
+                            }
+                            if let Some(name) = sc.get("name").and_then(|n| n.as_str()) {
+                                blocked.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut filter_map: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
     for name in blocked {
-        if let Some(nr) = syscall_name_to_nr(&name) {
+        if name == "link" || name == "linkat" {
+            #[cfg(target_arch = "x86_64")]
+            filter_map.insert(libc::SYS_link as i64, vec![]);
+            filter_map.insert(libc::SYS_linkat as i64, vec![]);
+        } else if name == "symlink" || name == "symlinkat" {
+            #[cfg(target_arch = "x86_64")]
+            filter_map.insert(libc::SYS_symlink as i64, vec![]);
+            filter_map.insert(libc::SYS_symlinkat as i64, vec![]);
+        } else if let Some(nr) = syscall_name_to_nr(&name) {
             filter_map.insert(nr as i64, vec![]);
         }
     }
@@ -45,6 +84,17 @@ pub fn apply_default_seccomp() -> anyhow::Result<()> {
 
     seccompiler::apply_filter(&bpf)?;
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn apply_seccomp_from_profile(_profile_path: Option<&str>) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Apply the default seccomp BPF filter inside the container process.
+#[cfg(target_os = "linux")]
+pub fn apply_default_seccomp() -> anyhow::Result<()> {
+    apply_seccomp_from_profile(None)
 }
 
 #[cfg(not(target_os = "linux"))]

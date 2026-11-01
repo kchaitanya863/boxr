@@ -310,14 +310,13 @@ fn apply_spec_namespace_joins(spec: &Spec, pre_joined: NamespaceJoinState) -> Na
     let mut state = pre_joined;
     if let Some(linux) = &spec.linux {
         for ns in &linux.namespaces {
-            if ns.ns_type == "user" {
+            if ns.ns_type == "user" || ns.ns_type == "pid" {
                 continue;
             }
             let already = match ns.ns_type.as_str() {
                 "ipc" => state.ipc,
                 "uts" => state.uts,
                 "net" | "network" => state.net,
-                "pid" => state.pid,
                 "cgroup" | "cgroupns" => state.cgroup,
                 _ => false,
             };
@@ -332,7 +331,6 @@ fn apply_spec_namespace_joins(spec: &Spec, pre_joined: NamespaceJoinState) -> Na
                         "ipc" => state.ipc = true,
                         "uts" => state.uts = true,
                         "net" | "network" => state.net = true,
-                        "pid" => state.pid = true,
                         "cgroup" | "cgroupns" => state.cgroup = true,
                         _ => {}
                     }
@@ -344,7 +342,6 @@ fn apply_spec_namespace_joins(spec: &Spec, pre_joined: NamespaceJoinState) -> Na
         for (key, ns, slot) in [
             ("boxr.ipc", "ipc", &mut state.ipc),
             ("boxr.uts", "uts", &mut state.uts),
-            ("boxr.pid", "pid", &mut state.pid),
             ("boxr.cgroupns", "cgroup", &mut state.cgroup),
             ("boxr.network", "net", &mut state.net),
         ] {
@@ -370,6 +367,48 @@ fn apply_spec_namespace_joins(spec: &Spec, pre_joined: NamespaceJoinState) -> Na
         }
     }
     state
+}
+
+fn apply_spec_pid_namespace_join(
+    spec: &Spec,
+    pid_fd: Option<&std::fs::File>,
+    state: &mut NamespaceJoinState,
+) {
+    if state.pid {
+        return;
+    }
+    if let Some(f) = pid_fd {
+        if setns(f, CloneFlags::CLONE_NEWPID).is_ok() {
+            state.pid = true;
+            return;
+        }
+    }
+    if let Some(linux) = &spec.linux {
+        for ns in &linux.namespaces {
+            if ns.ns_type == "pid" {
+                if let Some(path) = ns.path.as_deref() {
+                    if setns_file_path(path, "pid", CloneFlags::CLONE_NEWPID) {
+                        state.pid = true;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(val) = spec.annotations.as_ref().and_then(|a| a.get("boxr.pid")) {
+        if let Some(ns_path) = val.strip_prefix("ns:") {
+            if setns_file_path(ns_path, "pid", CloneFlags::CLONE_NEWPID) {
+                state.pid = true;
+            }
+        } else if let Some(target) = val
+            .strip_prefix("container:")
+            .or_else(|| val.strip_prefix("container://"))
+        {
+            if join_namespace_for_container_target(target, "pid") {
+                state.pid = true;
+            }
+        }
+    }
 }
 
 fn join_network_namespace_for_spec(spec: &Spec, joined: &mut NamespaceJoinState) {
@@ -437,7 +476,7 @@ fn prepare_bind_mount_target(
 ) -> std::path::PathBuf {
     let clean_dest = destination.trim_start_matches('/');
     let target = rootfs.join(clean_dest);
-    if source.is_file() {
+    if source.exists() && !source.is_dir() {
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -986,9 +1025,15 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
             fs::write(path, conmon_pid.to_string())?;
         }
     }
+    let mut custom_log_path: Option<PathBuf> = None;
     if let Ok(spec_str) = fs::read_to_string(bundle_path.join("config.json")) {
         if let Ok(spec) = serde_json::from_str::<Spec>(&spec_str) {
             if let Some(ann) = &spec.annotations {
+                if let Some(lp) = ann.get("boxr.log_path") {
+                    if !lp.is_empty() {
+                        custom_log_path = Some(PathBuf::from(lp));
+                    }
+                }
                 let mode = ann
                     .get("boxr.sdnotify_mode")
                     .map(|s| s.as_str())
@@ -1020,7 +1065,7 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string();
-    let k8s_log_path = bundle_path.join(format!("{container_id}-ctr.log"));
+    let k8s_log_path = custom_log_path.unwrap_or_else(|| bundle_path.join(format!("{container_id}-ctr.log")));
 
     let conmon_bin = bundle_path.join("conmon");
     let mut cmd = std::process::Command::new(&conmon_bin);
@@ -2016,11 +2061,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         ns_join.uts = true;
                     }
                 }
-                if let Some(pid_fd) = &target_ns_fds.pid {
-                    if !ns_join.pid && setns(pid_fd, CloneFlags::CLONE_NEWPID).is_ok() {
-                        ns_join.pid = true;
-                    }
-                }
+                let deferred_pid_fd = target_ns_fds.pid;
                 if requires_netns && !ns_join.net {
                     if let Err(e) = unshare(CloneFlags::CLONE_NEWNET) {
                         eprintln!("Failed to unshare network namespace: {:?}", e);
@@ -2040,7 +2081,6 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     }
                     join_network_namespace_for_spec(&spec, &mut ns_join);
                 }
-                drop(target_ns_fds);
 
                 // If using pasta, notify parent that netns has been unshared so pasta can attach
                 if use_pasta {
@@ -2054,81 +2094,192 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 let mut tap_worker_pid = None;
                 let mut fwd_helper_pid = None;
                 let mut _extra_tap_files = Vec::new();
-                if network_mode.should_use_native_usernet() && !ns_join.net {
+                if network_mode.should_use_native_usernet()
+                    && !ns_join.net
+                    && !bundle_path.join("network_disconnected").exists()
+                {
                     use crate::network::usernet::engine::platform;
                     use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
+                    let net_ifaces_path = bundle_path.join("network_interfaces.json");
+                    let has_explicit_ifaces_file = net_ifaces_path.exists();
                     let net_ifaces: Vec<(String, String, String)> =
-                        fs::read_to_string(bundle_path.join("network_interfaces.json"))
+                        fs::read_to_string(&net_ifaces_path)
                             .ok()
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default();
-                    let primary_ifname = net_ifaces
-                        .first()
-                        .map(|(ifn, _, _)| ifn.as_str())
-                        .unwrap_or("eth0");
-                    if let Ok(tap_file) = platform::create_tap_device(primary_ifname) {
-                        let _ = platform::configure_container_netns(
-                            primary_ifname,
-                            DEFAULT_CONTAINER_IP,
-                            DEFAULT_GATEWAY_IP,
-                        );
-                        if let Some((_, ip_str, _)) = net_ifaces.first() {
-                            if ip_str != "10.0.2.15" && !ip_str.is_empty() {
-                                let _ = std::process::Command::new("ip")
-                                    .args([
-                                        "addr",
-                                        "add",
-                                        &format!("{}/24", ip_str),
-                                        "brd",
-                                        "+",
-                                        "dev",
-                                        primary_ifname,
-                                    ])
-                                    .status();
+                    let extra_ifaces_meta: std::collections::HashMap<String, (String, String)> =
+                        fs::read_to_string(bundle_path.join("network_interfaces_extra.json"))
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+                    if !has_explicit_ifaces_file || !net_ifaces.is_empty() {
+                        let primary_ifname = net_ifaces
+                            .first()
+                            .map(|(ifn, _, _)| ifn.as_str())
+                            .unwrap_or("eth0");
+                        if let Ok(tap_file) = platform::create_tap_device(primary_ifname) {
+                            let _ = std::process::Command::new("ip")
+                                .args(["link", "set", "lo", "up"])
+                                .output();
+                            if let Some((v6_cidr, mac_addr)) = extra_ifaces_meta.get(primary_ifname)
+                            {
+                                if !mac_addr.is_empty() {
+                                    let _ = std::process::Command::new("ip")
+                                        .args([
+                                            "link",
+                                            "set",
+                                            "dev",
+                                            primary_ifname,
+                                            "address",
+                                            mac_addr,
+                                        ])
+                                        .output();
+                                }
+                                if !v6_cidr.is_empty() {
+                                    let _ = std::process::Command::new("ip")
+                                        .args(["link", "set", primary_ifname, "up"])
+                                        .output();
+                                    let _ = std::process::Command::new("ip")
+                                        .args([
+                                            "-6",
+                                            "addr",
+                                            "add",
+                                            v6_cidr,
+                                            "dev",
+                                            primary_ifname,
+                                            "nodad",
+                                        ])
+                                        .output();
+                                }
                             }
-                        }
-                        for (ifn, ip_str, _) in net_ifaces.iter().skip(1) {
-                            if let Ok(tf) = platform::create_tap_device(ifn) {
+                            if let Some((_, ip_str, gw_str)) = net_ifaces.first() {
                                 if !ip_str.is_empty() {
+                                    let cidr = if ip_str.contains('/') {
+                                        ip_str.clone()
+                                    } else {
+                                        format!("{}/24", ip_str)
+                                    };
                                     let _ = std::process::Command::new("ip")
                                         .args([
                                             "addr",
                                             "add",
-                                            &format!("{}/24", ip_str),
+                                            &cidr,
                                             "brd",
                                             "+",
                                             "dev",
-                                            ifn,
+                                            primary_ifname,
                                         ])
-                                        .status();
+                                        .output();
                                 }
                                 let _ = std::process::Command::new("ip")
-                                    .args(["link", "set", ifn, "up"])
-                                    .status();
-                                _extra_tap_files.push(tf);
-                            }
-                        }
-                        // Fork background TAP engine worker before unsharing PID namespace
-                        match unsafe { fork() } {
-                            Ok(ForkResult::Child) => {
-                                platform::run_tap_network_loop(
-                                    bundle_path,
-                                    tap_file,
-                                    &ports,
-                                    host_netns_for_tap,
+                                    .args(["link", "set", primary_ifname, "up"])
+                                    .output();
+                                if gw_str.contains(':') {
+                                    let _ = std::process::Command::new("ip")
+                                        .args([
+                                            "-6",
+                                            "route",
+                                            "add",
+                                            "default",
+                                            "via",
+                                            gw_str.as_str(),
+                                            "dev",
+                                            primary_ifname,
+                                        ])
+                                        .output();
+                                } else if !ip_str.is_empty() {
+                                    let gw = if !gw_str.is_empty() {
+                                        gw_str.as_str()
+                                    } else {
+                                        "10.0.2.2"
+                                    };
+                                    let _ = std::process::Command::new("ip")
+                                        .args([
+                                            "route",
+                                            "add",
+                                            "default",
+                                            "via",
+                                            gw,
+                                            "dev",
+                                            primary_ifname,
+                                        ])
+                                        .output();
+                                }
+                            } else {
+                                let _ = platform::configure_container_netns(
+                                    primary_ifname,
+                                    DEFAULT_CONTAINER_IP,
+                                    DEFAULT_GATEWAY_IP,
                                 );
-                                std::process::exit(0);
                             }
-                            Ok(ForkResult::Parent { child: tap_child }) => {
-                                tap_worker_pid = Some(tap_child);
+                            for (ifn, ip_str, _) in net_ifaces.iter().skip(1) {
+                                if let Ok(tf) = platform::create_tap_device(ifn) {
+                                    if let Some((v6_cidr, mac_addr)) = extra_ifaces_meta.get(ifn) {
+                                        if !mac_addr.is_empty() {
+                                            let _ = std::process::Command::new("ip")
+                                                .args(["link", "set", "dev", ifn, "address", mac_addr])
+                                                .output();
+                                        }
+                                        if !v6_cidr.is_empty() {
+                                            let _ = std::process::Command::new("ip")
+                                                .args(["link", "set", ifn, "up"])
+                                                .output();
+                                            let _ = std::process::Command::new("ip")
+                                                .args(["-6", "addr", "add", v6_cidr, "dev", ifn, "nodad"])
+                                                .output();
+                                        }
+                                    }
+                                    if !ip_str.is_empty() {
+                                        let cidr = if ip_str.contains('/') {
+                                            ip_str.clone()
+                                        } else {
+                                            format!("{}/24", ip_str)
+                                        };
+                                        let _ = std::process::Command::new("ip")
+                                            .args([
+                                                "addr",
+                                                "add",
+                                                &cidr,
+                                                "brd",
+                                                "+",
+                                                "dev",
+                                                ifn,
+                                            ])
+                                            .output();
+                                    }
+                                    let _ = std::process::Command::new("ip")
+                                        .args(["link", "set", ifn, "up"])
+                                        .output();
+                                    _extra_tap_files.push(tf);
+                                }
                             }
-                            Err(_) => {}
+                            // Fork background TAP engine worker before unsharing PID namespace
+                            match unsafe { fork() } {
+                                Ok(ForkResult::Child) => {
+                                    platform::run_tap_network_loop(
+                                        bundle_path,
+                                        tap_file,
+                                        &ports,
+                                        host_netns_for_tap,
+                                    );
+                                    std::process::exit(0);
+                                }
+                                Ok(ForkResult::Parent { child: tap_child }) => {
+                                    let _ = fs::write(
+                                        bundle_path.join("tap_worker.pid"),
+                                        tap_child.as_raw().to_string(),
+                                    );
+                                    tap_worker_pid = Some(tap_child);
+                                }
+                                Err(_) => {}
+                            }
                         }
                     }
                 }
                 // Fork port-forward helper inside the container netns for any published
-                // ports when pasta is not handling forwarding.
-                if !ports.is_empty()
+                // ports and peer container TCP connections when pasta is not handling forwarding.
+                if requires_netns
+                    && !ns_join.net
                     && (!use_pasta || network_mode != crate::network::pasta::NetworkMode::Pasta)
                 {
                     match unsafe { fork() } {
@@ -2144,7 +2295,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     }
                 }
 
-                // Now unshare container namespaces: PID, Mount, UTS, IPC
+                // Now join target PID namespace (after tap_worker and fwd_helper are forked)
+                // or unshare container namespaces: PID, Mount, UTS, IPC
+                apply_spec_pid_namespace_join(&spec, deferred_pid_fd.as_ref(), &mut ns_join);
+                drop(deferred_pid_fd);
                 let mut flags = CloneFlags::CLONE_NEWNS;
                 let pid_host = spec
                     .annotations
@@ -2479,13 +2633,23 @@ pub fn ensure_rootless_pause_process() -> Option<i32> {
                     let comm = std::fs::read_to_string(proc_dir.join("comm")).unwrap_or_default();
                     let comm_trim = comm.trim();
                     if comm_trim == "podman pause" || comm_trim == "catatonit" {
-                        return Some(pid);
+                        let pause_mnt = std::fs::read_link(proc_dir.join("ns/mnt")).ok();
+                        let self_mnt = std::fs::read_link("/proc/self/ns/mnt").ok();
+                        if pause_mnt.is_some() && pause_mnt != self_mnt {
+                            return Some(pid);
+                        }
+                        unsafe {
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                        let _ =
+                            waitpid(nix::unistd::Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG));
+                    } else {
+                        eprintln!(
+                            "pause.pid file refers to PID {} which is not a pause process, Removing {}",
+                            pid,
+                            pause_file.display()
+                        );
                     }
-                    eprintln!(
-                        "pause.pid file refers to PID {} which is not a pause process, Removing {}",
-                        pid,
-                        pause_file.display()
-                    );
                 }
             }
         }
@@ -2536,7 +2700,19 @@ pub fn ensure_rootless_pause_process() -> Option<i32> {
     if let Ok(child) = cmd.spawn() {
         let pid = child.id() as i32;
         let _ = std::fs::write(&pause_file, pid.to_string());
-        for _ in 0..25 {
+        if join_pid.is_none() {
+            for _ in 0..50 {
+                if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                    let trimmed = comm.trim();
+                    if trimmed == "boxr-pause-map" || trimmed == "podman pause" {
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let _ = crate::security::RootlessUserConfig::setup_child_mappings(pid);
+        }
+        for _ in 0..50 {
             if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
                 if comm.trim() == "podman pause" {
                     break;
@@ -2550,23 +2726,56 @@ pub fn ensure_rootless_pause_process() -> Option<i32> {
 }
 
 pub fn run_internal_pause(args: &[String]) -> Result<i32> {
-    unsafe {
-        libc::prctl(libc::PR_SET_NAME, b"podman pause\0".as_ptr());
-    }
     if let Some(pid_str) = args.first() {
         if let Ok(target_pid) = pid_str.parse::<i32>() {
             if let Ok(user_f) = std::fs::File::open(format!("/proc/{target_pid}/ns/user")) {
                 let _ = nix::sched::setns(user_f, CloneFlags::CLONE_NEWUSER);
             }
+            become_effective_container_root();
+            let _ = unshare(CloneFlags::CLONE_NEWNS);
+            let _ = mount(
+                None::<&str>,
+                "/",
+                None::<&str>,
+                MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                None::<&str>,
+            );
         }
     } else {
         let euid = unsafe { libc::geteuid() };
         let egid = unsafe { libc::getegid() };
-        if unshare(CloneFlags::CLONE_NEWUSER).is_ok() {
-            let _ = std::fs::write("/proc/self/setgroups", "deny");
-            let _ = std::fs::write("/proc/self/uid_map", format!("0 {euid} 1\n"));
-            let _ = std::fs::write("/proc/self/gid_map", format!("0 {egid} 1\n"));
+        if unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS).is_ok() {
+            unsafe {
+                libc::prctl(libc::PR_SET_NAME, b"boxr-pause-map\0".as_ptr());
+            }
+            let mut mapped = false;
+            for _ in 0..40 {
+                if let Ok(uid_map) = std::fs::read_to_string("/proc/self/uid_map") {
+                    if !uid_map.trim().is_empty() {
+                        mapped = true;
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if !mapped {
+                let _ = std::fs::write("/proc/self/setgroups", "deny");
+                let _ = std::fs::write("/proc/self/uid_map", format!("0 {euid} 1\n"));
+                let _ = std::fs::write("/proc/self/gid_map", format!("0 {egid} 1\n"));
+            }
+            become_effective_container_root();
+            crate::security::RootlessUserConfig::try_enable_setgroups_after_mapping();
+            let _ = mount(
+                None::<&str>,
+                "/",
+                None::<&str>,
+                MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                None::<&str>,
+            );
         }
+    }
+    unsafe {
+        libc::prctl(libc::PR_SET_NAME, b"podman pause\0".as_ptr());
     }
     loop {
         std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -2622,8 +2831,10 @@ pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
                 drop(child_sock);
                 let mut buf = [0u8; 5];
                 parent_sock.read_exact(&mut buf)?;
-                crate::security::RootlessUserConfig::setup_child_mappings(child.as_raw())?;
-                parent_sock.write_all(b"done")?;
+                if &buf == b"ready" {
+                    crate::security::RootlessUserConfig::setup_child_mappings(child.as_raw())?;
+                    parent_sock.write_all(b"done")?;
+                }
                 if rootless_netns {
                     let mut net_buf = [0u8; 5];
                     if parent_sock.read_exact(&mut net_buf).is_ok() {
@@ -2655,10 +2866,40 @@ pub fn run_unshare_cli(args: &[String], suppress_stdout: bool) -> Result<i32> {
                 if suppress_stdout {
                     redirect_stdout_to_dev_null();
                 }
-                unshare(CloneFlags::CLONE_NEWUSER)?;
-                child_sock.write_all(b"ready")?;
-                let mut buf = [0u8; 4];
-                child_sock.read_exact(&mut buf)?;
+                let saved_cwd = std::env::current_dir().ok();
+                let mut joined_pause = false;
+                if let Some(ppid) = pause_pid {
+                    if let (Ok(user_f), Ok(mnt_f)) = (
+                        std::fs::File::open(format!("/proc/{ppid}/ns/user")),
+                        std::fs::File::open(format!("/proc/{ppid}/ns/mnt")),
+                    ) {
+                        if nix::sched::setns(user_f, CloneFlags::CLONE_NEWUSER).is_ok()
+                            && nix::sched::setns(mnt_f, CloneFlags::CLONE_NEWNS).is_ok()
+                        {
+                            if let Some(ref cwd) = saved_cwd {
+                                let _ = std::env::set_current_dir(cwd);
+                            }
+                            become_effective_container_root();
+                            joined_pause = true;
+                        }
+                    }
+                }
+                if joined_pause {
+                    child_sock.write_all(b"pause")?;
+                } else {
+                    unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)?;
+                    child_sock.write_all(b"ready")?;
+                    let mut buf = [0u8; 4];
+                    child_sock.read_exact(&mut buf)?;
+                    become_effective_container_root();
+                    let _ = mount(
+                        None::<&str>,
+                        "/",
+                        None::<&str>,
+                        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                        None::<&str>,
+                    );
+                }
                 if rootless_netns {
                     let _ = unshare(CloneFlags::CLONE_NEWNET);
                     child_sock.write_all(b"netok")?;
@@ -2799,7 +3040,15 @@ fn bundle_process_umask(bundle_path: &Path) -> Option<u32> {
     let config_path = bundle_path.join("config.json");
     let content = fs::read_to_string(config_path).ok()?;
     let spec: Spec = serde_json::from_str(&content).ok()?;
-    spec.process.umask
+    if let Some(u) = spec.process.umask {
+        return Some(u);
+    }
+    if let Some(umask_str) = spec.annotations.as_ref().and_then(|a| a.get("boxr.umask")) {
+        if let Ok(mask) = u32::from_str_radix(umask_str.trim(), 8) {
+            return Some(mask);
+        }
+    }
+    None
 }
 
 fn lookup_passwd_ids(rootfs: &Path, name: &str) -> Option<(u32, u32)> {
@@ -2945,10 +3194,8 @@ fn exec_run_worker_in_holder_context(
             f.as_raw_fd()
         })
     });
-    if let Some(u) = job.umask {
-        unsafe {
-            libc::umask(u as libc::mode_t);
-        }
+    unsafe {
+        libc::umask(job.umask.unwrap_or(0o022) as libc::mode_t);
     }
     for e in &job.env {
         if let Some((k, v)) = e.split_once('=') {
@@ -3311,7 +3558,10 @@ fn apply_exec_user_credentials(creds: &ExecCredentials, init_pid: i32, bundle_pa
         .and_then(|bp| fs::read_to_string(bp.join("config.json")).ok())
         .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
         .and_then(|sp| sp.annotations)
-        .is_some_and(|a| a.get("boxr.userns").map(|v| v.as_str()) == Some("keep-id"));
+        .is_some_and(|a| {
+            a.get("boxr.userns")
+                .is_some_and(|v| v == "keep-id" || v.starts_with("keep-id:"))
+        });
     if is_keep_id && creds.uid != 0 {
         unsafe {
             let _ = libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0);
@@ -3828,10 +4078,8 @@ fn exec_in_bundle_via_setns(
             }
             let _ = entered_mnt;
             let command = command.to_vec();
-            if let Some(u) = umask {
-                unsafe {
-                    libc::umask(u as libc::mode_t);
-                }
+            unsafe {
+                libc::umask(umask.unwrap_or(0o022) as libc::mode_t);
             }
             let drop_nonpriv_cap =
                 std::env::var("BOXR_EXEC_NONPRIV_DROP_CAP").ok().as_deref() == Some("1");
@@ -4033,15 +4281,42 @@ fn userns_mapping_mode_from_spec(spec: &Spec) -> crate::security::UsernsMappingM
     match userns {
         Some("keep-id") => crate::security::UsernsMappingMode {
             keep_id: true,
+            keep_id_uid: None,
+            keep_id_gid: None,
             nomap: false,
         },
+        Some(u) if u.starts_with("keep-id:") => {
+            let mut uid_opt = None;
+            let mut gid_opt = None;
+            if let Some(opts) = u.strip_prefix("keep-id:") {
+                for kv in opts.split(',') {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        match k.trim() {
+                            "uid" => uid_opt = v.trim().parse::<u32>().ok(),
+                            "gid" => gid_opt = v.trim().parse::<u32>().ok(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            crate::security::UsernsMappingMode {
+                keep_id: true,
+                keep_id_uid: uid_opt,
+                keep_id_gid: gid_opt,
+                nomap: false,
+            }
+        }
         Some("nomap") | Some("auto") => crate::security::UsernsMappingMode {
             keep_id: false,
+            keep_id_uid: None,
+            keep_id_gid: None,
             nomap: true,
         },
         Some(u) if u.starts_with("auto:") && !u.starts_with("auto:uidmapping=") => {
             crate::security::UsernsMappingMode {
                 keep_id: false,
+                keep_id_uid: None,
+                keep_id_gid: None,
                 nomap: true,
             }
         }
@@ -4436,6 +4711,22 @@ fn run_container_child(
         )
         .is_ok(),
     };
+    if let Some(pl) = spec.annotations.as_ref().and_then(|a| a.get("boxr.pids_limit")) {
+        let desired = if pl.trim() == "-1" { "max" } else { pl.trim() };
+        let current_ok = fs::read_to_string(cg_path.join("pids.max"))
+            .map(|s| s.trim() == desired)
+            .unwrap_or(false);
+        if !current_ok {
+            let _ = mount(
+                Some("tmpfs"),
+                &cg_path,
+                Some("tmpfs"),
+                MsFlags::empty(),
+                Some("mode=755"),
+            );
+            let _ = fs::write(cg_path.join("pids.max"), format!("{}\n", desired));
+        }
+    }
     if sysfs_mounted {
         let ro = MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY;
         let _ = mount(None::<&str>, &sys_path, None::<&str>, ro, None::<&str>);
@@ -5024,6 +5315,24 @@ fn run_container_child(
         }
     }
 
+    let pre_pivot_seccomp: Option<String> = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.security_opt"))
+        .and_then(|sec_json| serde_json::from_str::<Vec<String>>(sec_json).ok())
+        .and_then(|sec_list| {
+            sec_list
+                .into_iter()
+                .find_map(|item| item.strip_prefix("seccomp=").map(String::from))
+        })
+        .map(|v| {
+            if v == "unconfined" {
+                "unconfined".to_string()
+            } else {
+                fs::read_to_string(&v).unwrap_or(v)
+            }
+        });
+
     // Setup pivot_root
     let oldroot_path = rootfs.join(".oldroot");
     let _ = fs::create_dir_all(&oldroot_path);
@@ -5260,8 +5569,8 @@ fn run_container_child(
 
     #[cfg(target_os = "linux")]
     if let Some(linux) = &spec.linux {
-        if linux.seccomp.is_some() {
-            let _ = crate::security::apply_default_seccomp();
+        if linux.seccomp.is_some() || pre_pivot_seccomp.is_some() {
+            let _ = crate::security::apply_seccomp_from_profile(pre_pivot_seccomp.as_deref());
         }
     }
 

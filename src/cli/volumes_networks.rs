@@ -158,16 +158,17 @@ pub struct NetworkSubcommands {
 #[derive(clap::Subcommand, Debug)]
 pub enum NetworkAction {
     Create {
+        #[arg(default_value = "")]
         name: String,
         /// Driver to manage the Network (default "bridge")
         #[arg(short = 'd', long = "driver", default_value = "bridge")]
         driver: String,
         /// Subnet in CIDR format
         #[arg(long = "subnet")]
-        subnet: Option<String>,
+        subnet: Vec<String>,
         /// IPv4 or IPv6 Gateway for the master subnet
         #[arg(long = "gateway")]
-        gateway: Option<String>,
+        gateway: Vec<String>,
         /// Restrict external access to the network
         #[arg(long = "internal")]
         internal: bool,
@@ -191,7 +192,13 @@ pub enum NetworkAction {
         ingress: bool,
         /// Allocate container ip from a sub-range
         #[arg(long = "ip-range")]
-        ip_range: Option<String>,
+        ip_range: Vec<String>,
+        /// Static routes to add to the network
+        #[arg(long = "route")]
+        route: Vec<String>,
+        /// Do not fail if the network already exists
+        #[arg(long = "ignore")]
+        ignore: bool,
         /// IP Address Management Driver
         #[arg(long = "ipam-driver")]
         ipam_driver: Option<String>,
@@ -219,8 +226,10 @@ pub enum NetworkAction {
     Inspect {
         #[arg(short = 'f', long = "format")]
         format: Option<String>,
+        #[arg(default_value = "")]
         name: String,
     },
+    #[command(alias = "remove")]
     Rm {
         #[arg(short = 'f', long = "force")]
         force: bool,

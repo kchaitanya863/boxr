@@ -26,6 +26,7 @@ cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-$HOME/.boxr-e2e}}"
+export BOXR_ADDITIONAL_IMAGE_STORE="\${BOXR_ADDITIONAL_IMAGE_STORE:-$CACHE_DIR/compose-image-cache:/tmp/boxr-bats-imgcache-\$(id -u):$HOME/.boxr-e2e:$HOME/.boxr}"
 mkdir -p "\$BOXR_HOME"
 podmanize_help() {
   sed -e 's/^Usage: podman /Usage:\\n  podman /' \\
@@ -48,8 +49,25 @@ chmod +x "$WRAPPER"
 
 export PODMAN_BINARY="$WRAPPER"
 export PODMAN="$WRAPPER"
-export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
+export TMPDIR="${TMPDIR:-$CACHE_DIR/tmp}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$TMPDIR/xdg-runtime}"
+mkdir -p "$TMPDIR" "$XDG_RUNTIME_DIR"
+export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "$TMPDIR/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
+export BOXR_ADDITIONAL_IMAGE_STORE="${BOXR_ADDITIONAL_IMAGE_STORE:-$CACHE_DIR/compose-image-cache:/tmp/boxr-bats-imgcache-$(id -u):$HOME/.boxr-e2e:$HOME/.boxr}"
+
+mkdir -p "$CACHE_DIR/compose-image-cache"
+for e2e_img in \
+  "quay.io/libpod/testimage:20241011" \
+  "quay.io/libpod/alpine:latest" \
+  "quay.io/libpod/busybox:latest" \
+  "quay.io/libpod/redis:alpine" \
+  "quay.io/libpod/alpine_nginx:latest" \
+  "quay.io/libpod/alpine_healthcheck:latest"; do
+  if ! BOXR_HOME="$CACHE_DIR/compose-image-cache" "$BOXR_BIN" image exists "$e2e_img" 2>/dev/null; then
+    BOXR_HOME="$CACHE_DIR/compose-image-cache" "$BOXR_BIN" pull "$e2e_img" >/dev/null 2>&1 || true
+  fi
+done
 
 cd "$SRC_DIR"
 if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; then
@@ -57,7 +75,7 @@ if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; th
   make -C "$SRC_DIR" .install.ginkgo
 fi
 
-if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]]; then
+if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]] || [[ ! -x "$SRC_DIR/test/goecho/goecho" ]]; then
   echo "Prebuilding test/e2e/e2e.test..."
   make -C "$SRC_DIR" test-binaries
   (cd "$SRC_DIR" && ./bin/ginkgo build --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" test/e2e/.)
@@ -75,7 +93,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$focus_pat" != /* ]]; then
     focus_pat="/${focus_pat}$"
   fi
-  if ! make localintegration FOCUS_FILE="$focus_pat" GINKGO_PARALLEL=n GINKGOWHAT=test/e2e/e2e.test; then
+  if ! make ginkgo-run TAGS="grpcnotrace exclude_graphdriver_btrfs seccomp" FOCUS_FILE="$focus_pat" GINKGO_PARALLEL=n GINKGOWHAT=test/e2e/e2e.test; then
     if [[ "${PODMAN_E2E_STRICT:-0}" == "1" ]]; then
       exit 1
     fi

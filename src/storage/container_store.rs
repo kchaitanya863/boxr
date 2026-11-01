@@ -129,12 +129,55 @@ impl ContainerStore {
         if q.is_empty() {
             return None;
         }
+        let home = self.index_file.parent().map(Path::to_path_buf);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            Ok(self
-                .load_unlocked()
-                .containers
-                .into_iter()
-                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q))
+            let containers = self.load_unlocked().containers;
+            if let Some(found) = containers
+                .iter()
+                .find(|c| c.id == q || c.id.starts_with(&q) || c.name == q)
+                .cloned()
+            {
+                return Ok(Some(found));
+            }
+            if let Some(pod_prefix) = q.strip_suffix("-infra") {
+                if let Some(h) = &home {
+                    if let Ok(raw) = fs::read_to_string(h.join("pods.json")) {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            if let Some(pods_arr) = val.get("pods").and_then(|v| v.as_array()) {
+                                for p_val in pods_arr {
+                                    let pid = p_val
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let pname = p_val
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let infra_cid = p_val
+                                        .get("infra_container_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if !pid.is_empty()
+                                        && (pname == pod_prefix
+                                            || pid == pod_prefix
+                                            || pid.starts_with(pod_prefix))
+                                    {
+                                        let alt_name = format!("{}-infra", pname);
+                                        if let Some(found) = containers
+                                            .into_iter()
+                                            .find(|c| c.id == infra_cid || c.name == alt_name)
+                                        {
+                                            return Ok(Some(found));
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(None)
         })
         .ok()
         .flatten()

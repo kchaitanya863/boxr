@@ -87,6 +87,7 @@ pub fn tee_k8s_stream_with_tty<R: Read>(
 #[derive(Debug, Clone)]
 pub struct K8sLogEntry {
     pub timestamp: DateTime<FixedOffset>,
+    pub is_stderr: bool,
     pub partial: bool,
     pub payload: Vec<u8>,
 }
@@ -249,6 +250,7 @@ fn parse_k8s_log_line(line: &[u8]) -> Option<K8sLogEntry> {
                     .ok()?;
                 return Some(K8sLogEntry {
                     timestamp,
+                    is_stderr: stream == "stderr",
                     partial,
                     payload,
                 });
@@ -474,7 +476,7 @@ pub fn resolve_container_log_path(
 }
 
 pub fn is_k8s_log_path(path: &Path) -> bool {
-    path.to_string_lossy().contains("-ctr.log")
+    path.to_string_lossy().contains("-ctr.log") || path.to_string_lossy().ends_with("/ctr.log")
 }
 
 pub fn read_log_output(
@@ -569,6 +571,25 @@ pub fn stream_k8s_container_logs(
     };
 
     if !follow {
+        let entries = filter_k8s_entries_opts(read_k8s_log_entries(path)?, since, until);
+        if entries.iter().any(|e| e.is_stderr) && since.is_none() && until.is_none() && tail.is_none() && !timestamps {
+            let stdout_entries: Vec<K8sLogEntry> = entries.iter().filter(|e| !e.is_stderr).cloned().collect();
+            let stderr_entries: Vec<K8sLogEntry> = entries.iter().filter(|e| e.is_stderr).cloned().collect();
+            let out_text = format_log_lines(&expand_embedded_newlines(reconstruct_k8s_lines(&stdout_entries)));
+            let err_text = format_log_lines(&expand_embedded_newlines(reconstruct_k8s_lines(&stderr_entries)));
+            if !out_text.is_empty() {
+                let _ = write_log_text_opts(&out_text, false, false);
+            }
+            if !err_text.is_empty() {
+                let mut err = std::io::stderr();
+                let _ = err.write_all(err_text.as_bytes());
+                if !err_text.ends_with('\n') {
+                    let _ = err.write_all(b"\n");
+                }
+                let _ = err.flush();
+            }
+            return Ok(());
+        }
         let text = read_log_output_opts(path, since, until, tail, timestamps)?;
         return write_log_text_opts(&text, false, false);
     }

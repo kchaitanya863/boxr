@@ -298,9 +298,16 @@ pub struct PodLsArgs {
     pub no_trunc: bool,
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
-
     #[arg(short = 'n', long = "noheading")]
     pub noheading: bool,
+    #[arg(long = "ctr-names")]
+    pub ctr_names: bool,
+    #[arg(long = "ctr-ids")]
+    pub ctr_ids: bool,
+    #[arg(long = "ctr-status")]
+    pub ctr_status: bool,
+    #[arg(long = "ns")]
+    pub ns: bool,
 
     #[arg(value_name = "POD")]
     pub pods: Vec<String>,
@@ -575,6 +582,12 @@ pub enum PodAction {
     Top(PodTopArgs),
     /// Display a live stream of pod resource usage statistics
     Stats {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
+        #[arg(long = "no-reset")]
+        no_reset: bool,
         #[arg(long = "no-stream")]
         no_stream: bool,
         #[arg(long = "format")]
@@ -590,10 +603,49 @@ pub enum PodAction {
     Exists { pod: String },
     /// Clone a pod and its containers
     Clone {
+        /// New pod name
+        #[arg(short = 'n', long = "name")]
+        name: Option<String>,
+        /// Start the cloned pod
+        #[arg(long = "start")]
+        start: bool,
+        /// Destroy the original pod
+        #[arg(long = "destroy")]
+        destroy: bool,
+        /// Volumes to mount in the cloned pod
+        #[arg(short = 'v', long = "volume")]
+        volumes: Vec<String>,
+        /// Size of /dev/shm
+        #[arg(long = "shm-size")]
+        shm_size: Option<String>,
+        /// UTS namespace for the cloned pod
+        #[arg(long = "uts")]
+        uts: Option<String>,
+        /// PID namespace for the cloned pod
+        #[arg(long = "pid")]
+        pid: Option<String>,
+        /// IPC namespace for the cloned pod
+        #[arg(long = "ipc")]
+        ipc: Option<String>,
+        /// User namespace for the cloned pod
+        #[arg(long = "userns")]
+        userns: Option<String>,
+        /// Hostname for the cloned pod
+        #[arg(long = "hostname")]
+        hostname: Option<String>,
+        /// Labels for the cloned pod
+        #[arg(short = 'l', long = "label")]
+        labels: Vec<String>,
+        /// CPU limit for the cloned pod
+        #[arg(long = "cpus")]
+        cpus: Option<String>,
+        /// Memory limit for the cloned pod
+        #[arg(short = 'm', long = "memory")]
+        memory: Option<String>,
         /// Source pod name or ID
         source: String,
-        /// Target pod name
-        target: String,
+        /// Target pod name (optional positional)
+        target: Option<String>,
     },
     /// Fetch logs for all containers in a pod
     Logs(PodLogsArgs),

@@ -69,7 +69,7 @@ impl UserNetEngine {
     }
 
     fn is_outbound_ipv4(&self, ip: &Ipv4Header) -> bool {
-        ip.src_ip == self.container_ip
+        ip.dst_ip != ip.src_ip
             && ip.dst_ip != self.container_ip
             && ip.dst_ip != self.gateway_ip
             && ip.dst_ip != self.dns_ip
@@ -504,6 +504,7 @@ pub mod platform {
     }
 
     const TUNSETIFF: libc::c_ulong = 0x400454ca;
+    const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
     const IFF_TAP: libc::c_short = 0x0002;
     const IFF_NO_PI: libc::c_short = 0x1000;
 
@@ -542,24 +543,45 @@ pub mod platform {
         Ok(tun_file)
     }
 
+    pub fn create_persistent_tap_device(dev_name: &str) -> Result<()> {
+        let f = create_tap_device(dev_name)?;
+        unsafe {
+            let _ = libc::ioctl(f.as_raw_fd(), TUNSETPERSIST as _, 1);
+        }
+        Ok(())
+    }
+
+    pub fn destroy_tap_device(dev_name: &str) {
+        if let Ok(f) = create_tap_device(dev_name) {
+            unsafe {
+                let _ = libc::ioctl(f.as_raw_fd(), TUNSETPERSIST as _, 0);
+            }
+            drop(f);
+        }
+        let ip_bin = ip_command();
+        let _ = Command::new(ip_bin)
+            .args(["link", "delete", dev_name])
+            .output();
+    }
+
     /// Configure IP address, netmask, MTU, and default gateway inside the container network namespace
     pub fn configure_container_netns(ifname: &str, ip: Ipv4Addr, gateway: Ipv4Addr) -> Result<()> {
         // Bring loopback up
         let ip_bin = ip_command();
         let _ = Command::new(ip_bin)
             .args(["link", "set", "lo", "up"])
-            .status();
+            .output();
 
         // Assign IP address to TAP device
         let ip_cidr = format!("{}/24", ip);
         let _ = Command::new(ip_bin)
             .args(["addr", "add", &ip_cidr, "brd", "+", "dev", ifname])
-            .status();
+            .output();
 
         // Bring TAP interface up
         let _ = Command::new(ip_bin)
             .args(["link", "set", ifname, "up"])
-            .status();
+            .output();
 
         // Set default route via gateway
         let _ = Command::new(ip_bin)
@@ -572,7 +594,7 @@ pub mod platform {
                 "dev",
                 ifname,
             ])
-            .status();
+            .output();
 
         Ok(())
     }

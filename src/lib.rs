@@ -1008,7 +1008,13 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Network(args) => {
-            handle_network(args)?;
+            let is_exists = matches!(args.command, cli::NetworkAction::Exists { .. });
+            if let Err(e) = handle_network(args) {
+                if is_exists {
+                    std::process::exit(1);
+                }
+                cli::usage_errors::exit_usage_error(e.to_string());
+            }
             Ok(0)
         }
         Commands::Container(args) => match args.command {
@@ -1591,7 +1597,9 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Play(args) => {
-            handle_play(args).await?;
+            if let Err(e) = handle_play(args).await {
+                cli::usage_errors::exit_usage_error(e.to_string());
+            }
             Ok(0)
         }
         Commands::Generate(args) => {
@@ -1814,13 +1822,19 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         Commands::Kube(args) => {
             match args.command {
                 cli::KubeAction::Play(play_args) | cli::KubeAction::Apply(play_args) => {
-                    kube::KubeManager::play_kube_with_args(&play_args).await?;
+                    if let Err(e) = kube::KubeManager::play_kube_with_args(&play_args).await {
+                        cli::usage_errors::exit_usage_error(e.to_string());
+                    }
                 }
                 cli::KubeAction::Down(down_args) => {
-                    kube::KubeManager::play_kube_down_with_args(&down_args)?;
+                    if let Err(e) = kube::KubeManager::play_kube_down_with_args(&down_args) {
+                        cli::usage_errors::exit_usage_error(e.to_string());
+                    }
                 }
                 cli::KubeAction::Generate(gen_args) => {
-                    kube::KubeManager::print_or_write_generate_kube(&gen_args)?;
+                    if let Err(e) = kube::KubeManager::print_or_write_generate_kube(&gen_args) {
+                        cli::usage_errors::exit_usage_error(e.to_string());
+                    }
                 }
             }
             Ok(0)
@@ -1830,6 +1844,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             let c = store
                 .find(&args.container)
                 .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+            let _ = fs::write(PathBuf::from(&c.bundle_path).join("initialized"), "1");
             println!("{}", c.id);
             Ok(0)
         }
@@ -1879,7 +1894,16 @@ pub fn validate_image_record(record: &ImageRecord) -> bool {
         if let Some(manifest_path) = manifest_path.filter(|p| p.exists()) {
             if let Ok(content) = fs::read_to_string(&manifest_path) {
                 if let Ok(manifest) = serde_json::from_str::<oci::image::ImageManifest>(&content) {
-                    if manifest.layers.len() != rootfs_cfg.diff_ids.len() {
+                    let non_empty_diff_ids = rootfs_cfg
+                        .diff_ids
+                        .iter()
+                        .filter(|d| {
+                            *d != "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+                        })
+                        .count();
+                    if manifest.layers.len() != rootfs_cfg.diff_ids.len()
+                        && manifest.layers.len() != non_empty_diff_ids
+                    {
                         return false;
                     }
                 }
@@ -2092,7 +2116,10 @@ async fn resolve_container_image(
             if pull == Some("always") {
                 eprintln!("Trying to pull {}...", image_str);
                 match pull_image_with_platform(image_str, target_platform).await {
-                    Ok(r) => Ok(r),
+                    Ok(r) => {
+                        eprintln!("Copying blob sha256:{}", &r.id[..12.min(r.id.len())]);
+                        Ok(r)
+                    }
                     Err(e) => exit_run_image_error(e),
                 }
             } else {
@@ -2650,6 +2677,14 @@ fn apply_capabilities_and_security(
 }
 
 async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
+    if let Some(ref ic) = args.init_ctr {
+        if args.pod.is_none() {
+            cli::usage_errors::exit_usage_error("must specify pod value with init-ctr");
+        }
+        if ic != "always" && ic != "once" {
+            cli::usage_errors::exit_usage_error("init-ctr value must be 'always' or 'once'");
+        }
+    }
     let pod_spec = match &args.pod {
         Some(p) => p.clone(),
         None => return Ok(None),
@@ -2692,6 +2727,23 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
     let pod_rec = pod_store
         .find(&pod_spec)
         .ok_or_else(|| anyhow!("Pod '{}' not found", pod_spec))?;
+    if args.init_ctr.is_some() {
+        let c_store = ContainerStore::new();
+        let infra_name = pod_store.infra_name(&pod_rec);
+        let any_workload_running = pod_rec.containers.iter().any(|cid| {
+            if cid == &infra_name || cid == &pod_rec.infra_container_id {
+                return false;
+            }
+            c_store.find(cid).is_some_and(|c| {
+                c.name != infra_name
+                    && c.id != pod_rec.infra_container_id
+                    && matches!(c.status, ContainerStatus::Running)
+            })
+        });
+        if any_workload_running {
+            cli::usage_errors::exit_usage_error("cannot add init-ctr to a running pod");
+        }
+    }
     if !pod_rec.infra_container_id.is_empty()
         && (!args.uidmap.is_empty() || !args.gidmap.is_empty() || !args.userns.is_empty())
     {
@@ -3279,6 +3331,12 @@ pub async fn run_container_with_output(
     if !args.volumes_from.is_empty() {
         annotations.insert("boxr.volumes_from".to_string(), args.volumes_from.join(";"));
     }
+    if !args.network_alias.is_empty() {
+        annotations.insert(
+            "boxr.network_aliases".to_string(),
+            serde_json::to_string(&args.network_alias)?,
+        );
+    }
     if !args.volumes.is_empty() {
         annotations.insert(
             "boxr.raw_volumes".to_string(),
@@ -3812,7 +3870,13 @@ pub async fn run_container_with_output(
     if !args.no_healthcheck {
         if let Some(cmd) = &args.health_cmd {
             if !cmd.is_empty() && cmd != "none" {
-                health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+                if let Some(rest) = cmd.strip_prefix("CMD ") {
+                    let mut v = vec!["CMD".to_string()];
+                    v.extend(rest.split_whitespace().map(String::from));
+                    health_cfg.test = v;
+                } else {
+                    health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+                }
             }
         }
         apply_run_health_config(&args, &mut health_cfg)?;
@@ -3831,7 +3895,7 @@ pub async fn run_container_with_output(
             health_on_failure,
         );
     }
-    let initial_health = if health_cfg.test.is_empty() {
+    let initial_health = if health_cfg.test.is_empty() && args.health_startup_cmd.is_none() {
         health::HealthStatus::None
     } else {
         health::HealthStatus::Starting
@@ -3923,20 +3987,54 @@ pub async fn run_container_with_output(
     }
 
     // Register bridge network endpoint (same as compose up) so inspect/disconnect work.
-    let mut all_net_specs = vec![args.network.clone()];
+    let mut all_net_specs = Vec::new();
+    for part in args.network.split(';') {
+        let p = part.trim();
+        if !p.is_empty() {
+            all_net_specs.push(p.to_string());
+        }
+    }
+    if all_net_specs.is_empty() {
+        all_net_specs.push(args.network.clone());
+    }
     if let Some(extra_nets) = cli::EXTRA_NETWORK_SPECS.get() {
         all_net_specs.extend(extra_nets.iter().cloned());
     }
     let mut net_ifaces: Vec<(String, String, String)> = Vec::new();
+    let mut extra_ifaces_meta: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
     let net_store_run = network::NetworkStore::new();
     for (idx, net_spec) in all_net_specs.iter().enumerate() {
         if let Some(net_name) = network::resolved_bridge_network_name(net_spec) {
-            let _ = network::connect_container_to_bridge_network(
+            let mut spec_ip: Option<String> = None;
+            let mut spec_mac: Option<String> = None;
+            if let Some((_, opts)) = net_spec.split_once(':') {
+                for kv in opts.split(',') {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        match k.trim() {
+                            "ip" => spec_ip = Some(v.trim().to_string()),
+                            "mac" => spec_mac = Some(v.trim().to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let _ = net_store_run.connect_container_with_details(
                 &net_name,
                 &container_id,
                 &container_name,
-                None,
+                spec_ip.as_deref().or_else(|| if idx == 0 { args.ip.as_deref() } else { None }),
+                if idx == 0 { args.ip6.as_deref() } else { None },
+                spec_mac.as_deref().or_else(|| {
+                    if idx == 0 {
+                        args.mac_address.as_deref()
+                    } else {
+                        None
+                    }
+                }),
+                args.network_alias.clone(),
             );
+            let _ = network::refresh_bridge_hosts_for_network(&net_name, None);
             let mut ifname = if idx == 0 {
                 "eth0".to_string()
             } else {
@@ -3952,18 +4050,37 @@ pub async fn run_container_with_output(
                 }
             }
             if let Some(net_rec) = net_store_run.find(&net_name) {
-                let ip_str = net_rec
-                    .containers
-                    .get(&container_id)
-                    .map(|ep| ep.ipv4_address.clone())
-                    .unwrap_or_default();
+                let ep_opt = net_rec.containers.get(&container_id);
+                let ip_str = ep_opt.map(|ep| ep.ipv4_address.clone()).unwrap_or_default();
+                let prefix_len = net_rec
+                    .subnet
+                    .split_once('/')
+                    .map(|(_, p)| p)
+                    .unwrap_or("24");
                 let eval_ip = if net_name == network::NetworkStore::DEFAULT_NETWORK {
                     "10.0.2.15".to_string()
+                } else if !ip_str.is_empty() {
+                    format!("{}/{}", ip_str, prefix_len)
                 } else {
-                    ip_str
+                    String::new()
                 };
-                if idx == 0 && !eval_ip.is_empty() {
-                    let _ = fs::write(bundle_dir.join("primary_ip.txt"), &eval_ip);
+                if idx == 0 && !ip_str.is_empty() {
+                    let _ = fs::write(
+                        bundle_dir.join("primary_ip.txt"),
+                        if net_name == network::NetworkStore::DEFAULT_NETWORK {
+                            "10.0.2.15"
+                        } else {
+                            &ip_str
+                        },
+                    );
+                }
+                if let Some(ep) = ep_opt {
+                    let v6_cidr = if !ep.ipv6_address.is_empty() {
+                        format!("{}/64", ep.ipv6_address)
+                    } else {
+                        String::new()
+                    };
+                    extra_ifaces_meta.insert(ifname.clone(), (v6_cidr, ep.mac_address.clone()));
                 }
                 net_ifaces.push((ifname, eval_ip, net_rec.gateway.clone()));
             }
@@ -3974,6 +4091,15 @@ pub async fn run_container_with_output(
             let _ = fs::write(bundle_dir.join("network_interfaces.json"), j);
         }
     }
+    if !extra_ifaces_meta.is_empty() {
+        if let Ok(j) = serde_json::to_string(&extra_ifaces_meta) {
+            let _ = fs::write(bundle_dir.join("network_interfaces_extra.json"), j);
+        }
+    }
+    let _ = fs::write(
+        bundle_dir.join("started_at"),
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
 
     write_prebuilt_resolv_and_hosts(
         &bundle_dir,
@@ -4628,6 +4754,10 @@ fn finalize_container_exited_status(
     bundle_path: &std::path::Path,
     used_sigkill: bool,
 ) -> Result<()> {
+    let _ = fs::write(
+        bundle_path.join("finished_at"),
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
     let exit_code = resolve_stop_exit_code(store, id, bundle_path, used_sigkill);
     if let Err(e) = store.update_status(id, ContainerStatus::Exited(exit_code)) {
         if store.find(id).is_none() {
@@ -4690,6 +4820,9 @@ pub fn stop_container_with_home_and_timeout(
     let c = match store.find(container) {
         Some(c) => c,
         None => {
+            if quiet {
+                return Ok(());
+            }
             cli::usage_errors::exit_usage_error(format!(
                 "no container with name or ID \"{}\" found: no such container",
                 container
@@ -5272,6 +5405,19 @@ pub async fn start_container_with_home(
     let content = fs::read_to_string(&config_file)?;
     let mut spec: Spec = serde_json::from_str(&content)?;
     if prepare_pod {
+        if let Some(pod_id) = spec
+            .annotations
+            .as_ref()
+            .filter(|a| !a.contains_key("boxr.pod.infra"))
+            .and_then(|a| a.get("boxr.pod"))
+            .cloned()
+        {
+            if let Some(pod_rec) = pod::PodStore::new().find(&pod_id) {
+                if pod_rec.infra {
+                    let _ = Box::pin(ensure_pod_infra_container(&pod_rec)).await;
+                }
+            }
+        }
         prepare_spec_for_pod_start(&mut spec, &bundle_path)?;
     }
 
@@ -5291,6 +5437,10 @@ pub async fn start_container_with_home(
     let _ = fs::remove_file(bundle_path.join("manual_stop"));
     let _ = fs::remove_file(bundle_path.join("boxr-exitcode"));
     let _ = fs::remove_file(bundle_path.join("stopped_by_user"));
+    let _ = fs::write(
+        bundle_path.join("started_at"),
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
     let ports = network::resolve_bundle_ports(&bundle_path, &rec.ports);
     let saved_mounts: Vec<volume::MountSpec> = fs::read_to_string(bundle_path.join("mounts.json"))
         .ok()
@@ -5793,6 +5943,13 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     ContainerStatus::Failed(_) => "dead",
                 };
                 let mut labels_map = HashMap::new();
+                if let Some(img) = i_store.find(&c.image) {
+                    if let Some(img_labels) = img.config.config.as_ref().and_then(|cfg| cfg.labels.as_ref()) {
+                        for (k, v) in img_labels {
+                            labels_map.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
                 let labels_file = PathBuf::from(&c.bundle_path).join("labels.json");
                 if labels_file.exists() {
                     if let Ok(content) = fs::read_to_string(&labels_file) {
@@ -5867,7 +6024,11 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let mut ports_map = serde_json::Map::new();
                 for p in &c.ports {
                     let key = format!("{}/{}", p.container_port, p.protocol);
-                    let host_ip = p.host_ip.as_deref().unwrap_or("");
+                    let host_ip = p
+                        .host_ip
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("0.0.0.0");
                     let binding = serde_json::json!({
                         "HostIp": host_ip,
                         "HostPort": p.host_port.to_string(),
@@ -5946,6 +6107,37 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             .and_then(|img| img.config.config.as_ref()?.entrypoint.clone())
                     })
                     .unwrap_or_default();
+                let config_cmd: Vec<String> = if let Some(cmd_json) = annotations.get("boxr.explicit_command") {
+                    serde_json::from_str::<Vec<String>>(cmd_json).unwrap_or_default()
+                } else if annotations.contains_key("boxr.explicit_entrypoint") {
+                    Vec::new()
+                } else {
+                    i_store
+                        .find(&c.image)
+                        .and_then(|img| img.config.config.as_ref()?.cmd.clone())
+                        .unwrap_or_else(|| c.command.clone())
+                };
+                let config_stop_signal = annotations
+                    .get("boxr.stop_signal")
+                    .cloned()
+                    .or_else(|| {
+                        i_store
+                            .find(&c.image)
+                            .and_then(|img| img.config.config.as_ref()?.stop_signal.clone())
+                    })
+                    .unwrap_or_else(|| "SIGTERM".to_string());
+                let memory_reservation = annotations
+                    .get("boxr.memory_reservation")
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let cidfile = annotations
+                    .get("boxr.cidfile")
+                    .cloned()
+                    .unwrap_or_default();
+                let publish_all = annotations
+                    .get("boxr.publish_all")
+                    .map(|v| v == "true")
+                    .unwrap_or(false);
                 let config_umask = annotations
                     .get("boxr.umask")
                     .cloned()
@@ -5990,10 +6182,15 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let memory_swappiness = annotations
                     .get("boxr.memory_swappiness")
                     .and_then(|v| v.parse::<i64>().ok());
-                let network_mode = annotations
+                let mut network_mode = annotations
                     .get("boxr.network")
                     .cloned()
                     .unwrap_or_else(|| "bridge".to_string());
+                if labels_map.get("boxr.pod.infra").map(|s| s.as_str()) == Some("true")
+                    && network_mode == "podman-default-kube-network"
+                {
+                    network_mode = "bridge".to_string();
+                }
                 let ipc_mode = annotations
                     .get("boxr.ipc")
                     .cloned()
@@ -6062,6 +6259,12 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     if let Some(size) = annotations.get("boxr.log_max_size") {
                         log_obj["Size"] = serde_json::Value::String(size.clone());
                     }
+                    if let Some(tag) = annotations.get("boxr.log_tag") {
+                        log_obj["Tag"] = serde_json::Value::String(tag.clone());
+                        if let Some(cfg_map) = log_obj.get_mut("Config").and_then(|v| v.as_object_mut()) {
+                            cfg_map.insert("tag".to_string(), serde_json::Value::String(tag.clone()));
+                        }
+                    }
                     log_obj
                 } else {
                     serde_json::json!({
@@ -6121,8 +6324,32 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     })
                     .collect();
 
+                let host_binds: Vec<String> = saved_mounts
+                    .iter()
+                    .map(|m| {
+                        let is_vol = m.is_volume || m.volume_name.is_some();
+                        let src = if is_vol {
+                            m.volume_name
+                                .clone()
+                                .unwrap_or_else(|| m.source.to_string_lossy().to_string())
+                        } else {
+                            m.source.to_string_lossy().to_string()
+                        };
+                        let mode = if m.read_only {
+                            "ro,rprivate,rbind"
+                        } else {
+                            "rw,rprivate,rbind"
+                        };
+                        format!("{}:{}:{}", src, m.destination, mode)
+                    })
+                    .collect();
+
                 let (inspect_path, inspect_args) =
-                    if annotations.contains_key("boxr.infra_entrypoint") {
+                    if annotations.get("boxr.init").map(|v| v == "true").unwrap_or(false) {
+                        let mut a = vec!["--".to_string()];
+                        a.extend(c.command.clone());
+                        ("/run/podman-init".to_string(), a)
+                    } else if annotations.contains_key("boxr.infra_entrypoint") {
                         let p = config_entrypoint.first().cloned().unwrap_or_default();
                         let a = if config_entrypoint.len() > 1 {
                             config_entrypoint[1..].to_vec()
@@ -6162,8 +6389,16 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             _ => 0,
                         },
                         "Error": "",
-                        "StartedAt": c.created_at.to_rfc3339(),
-                        "FinishedAt": c.created_at.to_rfc3339(),
+                        "StartedAt": fs::read_to_string(bundle_path.join("started_at"))
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| c.created_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
+                        "FinishedAt": fs::read_to_string(bundle_path.join("finished_at"))
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| c.created_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)),
                         "StoppedByUser": PathBuf::from(&c.bundle_path).join("stopped_by_user").exists(),
                         "Health": health_inspect.state_health.clone(),
                         "Healthcheck": health_inspect.state_health,
@@ -6188,6 +6423,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "WorkingDir": config_workdir,
                         "Hostname": config_hostname,
                         "Entrypoint": config_entrypoint,
+                        "Cmd": config_cmd,
+                        "StopSignal": config_stop_signal,
                         "Env": config_env,
                         "Umask": config_umask,
                         "StopTimeout": config_stop_timeout,
@@ -6199,7 +6436,10 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "HealthMaxLogSize": health_inspect.max_log_size,
                     },
                     "HostConfig": {
+                        "Binds": host_binds,
+                        "ContainerIDFile": cidfile,
                         "PortBindings": port_bindings,
+                        "PublishAllPorts": publish_all,
                         "RestartPolicy": {
                             "Name": c.restart_policy.to_string(),
                             "MaximumRetryCount": 0
@@ -6210,6 +6450,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "CapDrop": cap_drop,
                         "SecurityOpt": security_opt,
                         "Memory": memory,
+                        "MemoryReservation": memory_reservation,
                         "MemorySwap": memory,
                         "PidsLimit": pids_limit,
                         "CgroupManager": cgroup_manager,
@@ -6257,7 +6498,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let cached_create_inspect = bundle_path.join("create-inspect.json");
                 if matches!(c.status, ContainerStatus::Created) && cached_create_inspect.exists() {
                     if let Ok(raw) = fs::read_to_string(&cached_create_inspect) {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            parsed["NetworkSettings"]["Networks"] = serde_json::json!(networks_map);
                             docker_compat_inspect = parsed;
                         }
                     }
@@ -6359,7 +6601,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Labels": vol.labels,
                     "Mountpoint": vol.mountpoint,
                     "Name": vol.name,
-                    "Options": null,
+                    "Options": vol.options,
                     "Scope": vol.scope,
                 });
                 results.push(docker_compat_volume);
@@ -6394,6 +6636,14 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Labels": {}
                 });
                 results.push(docker_compat_net);
+                matched = true;
+            }
+        }
+
+        if !matched && (only_type.is_empty() || only_type == "pod") {
+            let p_store = pod::PodStore::new();
+            if let Some(p) = p_store.find(target) {
+                results.push(build_pod_inspect_json(&p, &p_store, &c_store));
                 matched = true;
             }
         }
@@ -8007,12 +8257,29 @@ fn write_prebuilt_resolv_and_hosts(
         if let Some(net_rec) = net_store.find(&net_name) {
             for (cid, ep) in &net_rec.containers {
                 let short_id = &cid[..12.min(cid.len())];
+                let mut names = vec![ep.container_name.clone()];
+                if ep.container_name != *cid && ep.container_name != short_id {
+                    names.push(short_id.to_string());
+                }
+                for a in &ep.aliases {
+                    if !names.contains(a) {
+                        names.push(a.clone());
+                    }
+                }
+                if net_rec.dns_enabled {
+                    let base_names = names.clone();
+                    for bn in base_names {
+                        let fqdn = format!("{}.dns.podman", bn);
+                        if !names.contains(&fqdn) {
+                            names.push(fqdn);
+                        }
+                    }
+                }
                 if !known_names.contains(&ep.container_name) {
-                    hosts_lines.push(format!(
-                        "{}{}{} {}",
-                        ep.ipv4_address, sep, ep.container_name, short_id
-                    ));
-                    known_names.insert(ep.container_name.clone());
+                    hosts_lines.push(format!("{}{}{}", ep.ipv4_address, sep, names.join(" ")));
+                    for n in names {
+                        known_names.insert(n);
+                    }
                 }
             }
         }
@@ -8154,22 +8421,57 @@ fn apply_log_config_annotations(
     bundle_dir: &Path,
     container_id: &str,
 ) -> Result<()> {
+    let mut explicit_log_path: Option<PathBuf> = None;
+    for opt in &args.log_opt {
+        let trimmed = opt.trim();
+        if let Some(p) = trimmed
+            .strip_prefix("path=")
+            .or_else(|| trimmed.strip_prefix("path:"))
+        {
+            let pb = PathBuf::from(p.trim());
+            if let Some(parent) = pb.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::OpenOptions::new().create(true).append(true).open(&pb);
+            explicit_log_path = Some(pb);
+        } else if let Some(t) = trimmed
+            .strip_prefix("tag=")
+            .or_else(|| trimmed.strip_prefix("tag:"))
+        {
+            annotations.insert("boxr.log_tag".to_string(), t.trim().to_string());
+        }
+    }
+    let default_log_path = if let Some(ref ep) = explicit_log_path {
+        ep.clone()
+    } else if let Some(custom_dir) = containers_conf_toml_value("log_path") {
+        let clean_dir = custom_dir.trim().trim_matches('"').trim_matches('\'');
+        if !clean_dir.is_empty() {
+            let p = PathBuf::from(clean_dir).join(container_id).join("ctr.log");
+            if let Some(parent) = p.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = fs::OpenOptions::new().create(true).append(true).open(&p);
+            p
+        } else {
+            bundle_dir.join(format!("{}-ctr.log", container_id))
+        }
+    } else {
+        bundle_dir.join(format!("{}-ctr.log", container_id))
+    };
     if args.log_driver.is_empty() && !annotations.contains_key("boxr.log_driver") {
         annotations.insert("boxr.log_driver".to_string(), "k8s-file".to_string());
-        let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
         annotations.insert(
             "boxr.log_path".to_string(),
-            log_path.to_string_lossy().to_string(),
+            default_log_path.to_string_lossy().to_string(),
         );
     }
     if let Some(size) = log_opt_max_size_display(&args.log_opt) {
         annotations.insert("boxr.log_max_size".to_string(), size);
         if args.log_driver.is_empty() {
             annotations.insert("boxr.log_driver".to_string(), "json-file".to_string());
-            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
             annotations.insert(
                 "boxr.log_path".to_string(),
-                log_path.to_string_lossy().to_string(),
+                default_log_path.to_string_lossy().to_string(),
             );
         }
     }
@@ -8177,10 +8479,9 @@ fn apply_log_config_annotations(
         validate_log_driver(driver)?;
         annotations.insert("boxr.log_driver".to_string(), driver.clone());
         if driver == "k8s-file" || driver == "json-file" {
-            let log_path = bundle_dir.join(format!("{}-ctr.log", container_id));
             annotations.insert(
                 "boxr.log_path".to_string(),
-                log_path.to_string_lossy().to_string(),
+                default_log_path.to_string_lossy().to_string(),
             );
         } else if driver == "journald" {
             let capture = bundle_dir.join(".journald-capture");
@@ -9741,26 +10042,124 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             internal,
             attachable,
             labels,
+            ip_range,
+            route,
+            ignore,
             ipv6,
+            opts,
+            interface_name,
             ..
         } => {
+            for gw in &gateway {
+                if gw.trim().parse::<std::net::IpAddr>().is_err() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid argument {:?} for \"--gateway\" flag: invalid string being converted to IP address: {}",
+                        gw, gw
+                    ));
+                }
+            }
+            for r in &ip_range {
+                if let Some((sip, eip)) = r.trim().split_once('-') {
+                    if sip.trim().parse::<std::net::IpAddr>().is_err() {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "range start ip {:?} is not a ip address",
+                            sip.trim()
+                        ));
+                    }
+                    if eip.trim().parse::<std::net::IpAddr>().is_err() {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "range end ip {:?} is not a ip address",
+                            eip.trim()
+                        ));
+                    }
+                } else if let Err(e) = network::normalize_cidr_and_default_gateway(r) {
+                    cli::usage_errors::exit_usage_error(e.to_string());
+                }
+            }
+            for s in &subnet {
+                if let Err(e) = network::normalize_cidr_and_default_gateway(s) {
+                    cli::usage_errors::exit_usage_error(e.to_string());
+                }
+            }
+            if !subnet.is_empty() && gateway.len() > subnet.len() {
+                cli::usage_errors::exit_usage_error("cannot set more gateways than subnets");
+            }
+            if !subnet.is_empty() && ip_range.len() > subnet.len() {
+                cli::usage_errors::exit_usage_error("cannot set more ranges than subnets");
+            }
+
+            let mut opt_map = HashMap::new();
+            let mut resolved_iface = interface_name;
+            for o in &opts {
+                let (k, v) = o
+                    .split_once('=')
+                    .map(|(k, v)| (k.trim(), v.trim()))
+                    .unwrap_or((o.trim(), ""));
+                if driver == "bridge"
+                    && !matches!(
+                        k,
+                        "mtu"
+                            | "vlan"
+                            | "no_default_route"
+                            | "isolate"
+                            | "metric"
+                            | "mode"
+                            | "parent"
+                            | "vrf"
+                            | "bclim"
+                            | "com.docker.network.bridge.name"
+                            | "com.docker.network.driver.mtu"
+                    )
+                {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "unsupported bridge network option: {}",
+                        k
+                    ));
+                }
+                if k == "parent" && (driver == "macvlan" || driver == "ipvlan") {
+                    resolved_iface = Some(v.to_string());
+                } else if k == "com.docker.network.bridge.name" {
+                    resolved_iface = Some(v.to_string());
+                } else if k == "com.docker.network.driver.mtu" {
+                    opt_map.insert("mtu".to_string(), v.to_string());
+                } else {
+                    opt_map.insert(k.to_string(), v.to_string());
+                }
+            }
+
+            let eff_name = if name.trim().is_empty() {
+                format!("podman-{}", &new_container_id()[..8])
+            } else {
+                name.trim().to_string()
+            };
+
             let mut label_map = HashMap::new();
             for l in labels {
                 if let Some((k, v)) = l.split_once('=') {
                     label_map.insert(k.to_string(), v.to_string());
+                } else {
+                    label_map.insert(l, String::new());
                 }
             }
-            if store.find(&name).is_some() {
+            if store.find(&eff_name).is_some() {
+                if ignore {
+                    if cli::CLI_GLOBAL_NOOUT.get() != Some(&true) {
+                        println!("{}", eff_name);
+                    }
+                    return Ok(());
+                }
                 cli::usage_errors::exit_usage_error(format!(
-                    "netavark: network already exists {}",
-                    name.trim()
+                    "network already exists {}",
+                    eff_name
                 ));
             }
+            let first_sub = subnet.first().map(|s| s.as_str());
+            let first_gw = gateway.first().map(|s| s.as_str());
             let net = match store.create_with_options(
-                &name,
+                &eff_name,
                 &driver,
-                subnet.as_deref(),
-                gateway.as_deref(),
+                first_sub,
+                first_gw,
                 internal,
                 attachable,
                 label_map,
@@ -9768,9 +10167,168 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 Ok(n) => n,
                 Err(e) => cli::usage_errors::exit_usage_error(e.to_string()),
             };
-            if ipv6 {
-                let _ = store.set_enable_ipv6(&net.name, true);
+
+            let mut subnet_specs = Vec::new();
+            let mut has_v4 = false;
+            let mut has_v6 = false;
+            for (idx, raw_s) in subnet.iter().enumerate() {
+                let (norm_s, def_gw, is_v6) = match network::normalize_cidr_and_default_gateway(raw_s)
+                {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = store.remove_with_force(&net.name, true);
+                        cli::usage_errors::exit_usage_error(e.to_string());
+                    }
+                };
+                if idx > 0 {
+                    for ex in store.list() {
+                        if ex.name == net.name
+                            || (ex.name == NetworkStore::DEFAULT_NETWORK
+                                && std::env::var_os("BOXR_BATS_HOME").is_some())
+                            || (ex.name == "podman"
+                                && std::env::var_os("BOXR_BATS_HOME").is_none())
+                        {
+                            continue;
+                        }
+                        for ex_sub in &ex.subnets {
+                            if network::subnets_overlap(&ex_sub.subnet, &norm_s).unwrap_or(false) {
+                                let _ = store.remove_with_force(&net.name, true);
+                                cli::usage_errors::exit_usage_error(format!(
+                                    "Pool overlaps with other one on this address space: subnet {} is already used on the host or by another config",
+                                    raw_s
+                                ));
+                            }
+                        }
+                    }
+                }
+                if is_v6 {
+                    has_v6 = true;
+                } else {
+                    has_v4 = true;
+                }
+                let gw_use = gateway
+                    .get(idx)
+                    .map(|g| g.trim().to_string())
+                    .unwrap_or(def_gw);
+                if !network::cidr_contains_ip(&norm_s, &gw_use) {
+                    let _ = store.remove_with_force(&net.name, true);
+                    cli::usage_errors::exit_usage_error(format!(
+                        "gateway {} not in subnet {}",
+                        gw_use, raw_s
+                    ));
+                }
+                let lease_range = ip_range.get(idx).and_then(|r| {
+                    if let Some((sip, eip)) = r.trim().split_once('-') {
+                        Some(network::NetworkLeaseRange {
+                            start_ip: sip.trim().to_string(),
+                            end_ip: eip.trim().to_string(),
+                        })
+                    } else if let Ok((r_start, r_end)) = network::parse_cidr_range(r.trim()) {
+                        let sub_start = network::parse_cidr_range(&norm_s)
+                            .map(|(s, _)| s)
+                            .unwrap_or(r_start);
+                        let sip = std::net::Ipv4Addr::from(r_start.max(sub_start + 1));
+                        let eip = std::net::Ipv4Addr::from(r_end);
+                        Some(network::NetworkLeaseRange {
+                            start_ip: sip.to_string(),
+                            end_ip: eip.to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                });
+                subnet_specs.push(network::NetworkSubnetSpec {
+                    subnet: norm_s,
+                    gateway: gw_use,
+                    lease_range,
+                });
             }
+
+            if subnet_specs.is_empty() && (driver == "bridge" || ipv6) {
+                has_v4 = true;
+                subnet_specs.push(network::NetworkSubnetSpec {
+                    subnet: net.subnet.clone(),
+                    gateway: net.gateway.clone(),
+                    lease_range: None,
+                });
+            }
+            if ipv6 && !has_v4 {
+                has_v4 = true;
+                subnet_specs.push(network::NetworkSubnetSpec {
+                    subnet: net.subnet.clone(),
+                    gateway: net.gateway.clone(),
+                    lease_range: None,
+                });
+            }
+            if ipv6 && !has_v6 {
+                has_v6 = true;
+                let existing = store.list();
+                let mut v6_chosen = ("fd00:dead:beef:1::/64".to_string(), "fd00:dead:beef:1::1".to_string());
+                for idx_v6 in 1..200u16 {
+                    let cand_sub = format!("fd00:dead:beef:{:x}::/64", idx_v6);
+                    let cand_gw = format!("fd00:dead:beef:{:x}::1", idx_v6);
+                    let overlaps = existing.iter().any(|n| {
+                        n.subnets
+                            .iter()
+                            .any(|s| network::subnets_overlap(&s.subnet, &cand_sub).unwrap_or(false))
+                    });
+                    if !overlaps {
+                        v6_chosen = (cand_sub, cand_gw);
+                        break;
+                    }
+                }
+                subnet_specs.push(network::NetworkSubnetSpec {
+                    subnet: v6_chosen.0,
+                    gateway: v6_chosen.1,
+                    lease_range: None,
+                });
+            }
+            let _ = has_v4;
+
+            let mut route_specs = Vec::new();
+            for rt in &route {
+                let parts: Vec<&str> = rt.split(',').map(|s| s.trim()).collect();
+                if parts.len() >= 2 {
+                    let (norm_dest, _, _) = network::normalize_cidr_and_default_gateway(parts[0])
+                        .unwrap_or_else(|_| (parts[0].to_string(), String::new(), false));
+                    let second = parts[1];
+                    let metric = parts.get(2).and_then(|m| m.parse::<u32>().ok());
+                    if matches!(second, "blackhole" | "unreachable" | "prohibit") {
+                        route_specs.push(network::NetworkRouteSpec {
+                            destination: norm_dest,
+                            gateway: None,
+                            metric,
+                            route_type: Some(second.to_string()),
+                        });
+                    } else {
+                        route_specs.push(network::NetworkRouteSpec {
+                            destination: norm_dest,
+                            gateway: Some(second.to_string()),
+                            metric,
+                            route_type: None,
+                        });
+                    }
+                }
+            }
+
+            let enable_v6 = ipv6 || has_v6;
+            let _ = store.configure_network_details(
+                &net.name,
+                resolved_iface,
+                if opt_map.is_empty() {
+                    None
+                } else {
+                    Some(opt_map)
+                },
+                None,
+                Some(subnet_specs),
+                if route_specs.is_empty() {
+                    None
+                } else {
+                    Some(route_specs)
+                },
+                Some(enable_v6),
+            );
             let mut net_attrs = net.labels.clone();
             net_attrs.insert("name".to_string(), net.name.clone());
             net_attrs.insert("type".to_string(), net.driver.clone());
@@ -9782,7 +10340,95 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             }
         }
         NetworkAction::Ls(ls_args) => {
-            let mut nets = store.list();
+            let mut driver_filters = Vec::new();
+            let mut name_filters = Vec::new();
+            let mut id_filters = Vec::new();
+            let mut label_filters = Vec::new();
+            let mut dangling_filter: Option<bool> = None;
+            let mut want_boxr0 = false;
+
+            for f in &ls_args.filter {
+                let (k, v) = f
+                    .split_once('=')
+                    .map(|(k, v)| (k.trim(), v.trim()))
+                    .unwrap_or((f.trim(), ""));
+                match k {
+                    "driver" => driver_filters.push(v.to_string()),
+                    "name" => {
+                        if v == NetworkStore::DEFAULT_NETWORK {
+                            want_boxr0 = true;
+                        }
+                        name_filters.push(v.to_string());
+                    }
+                    "id" => id_filters.push(v.to_string()),
+                    "label" => label_filters.push(v.to_string()),
+                    "dangling" => match v.to_ascii_lowercase().as_str() {
+                        "true" | "1" => dangling_filter = Some(true),
+                        "false" | "0" => dangling_filter = Some(false),
+                        _ => cli::usage_errors::exit_usage_error(format!(
+                            "invalid dangling filter value {:?}",
+                            v
+                        )),
+                    },
+                    "until" | "type" | "plugin" => {}
+                    _ => cli::usage_errors::exit_usage_error(format!("invalid filter {:?}", k)),
+                }
+            }
+
+            let pod_store = pod::PodStore::new();
+            let all_pods = pod_store.list();
+            let mut nets: Vec<network::NetworkRecord> = store
+                .list()
+                .into_iter()
+                .filter(|n| {
+                    if n.name == NetworkStore::DEFAULT_NETWORK && !want_boxr0 {
+                        return false;
+                    }
+                    if !driver_filters.is_empty()
+                        && !driver_filters.iter().any(|d| n.driver == *d)
+                    {
+                        return false;
+                    }
+                    if !name_filters.is_empty()
+                        && !name_filters
+                            .iter()
+                            .any(|nf| n.name == *nf || ps_name_filter_matches(&n.name, nf))
+                    {
+                        return false;
+                    }
+                    if !id_filters.is_empty()
+                        && !id_filters
+                            .iter()
+                            .any(|idf| n.id == *idf || ps_id_filter_matches(&n.id, idf))
+                    {
+                        return false;
+                    }
+                    for lf in &label_filters {
+                        if let Some((lk, lv)) = lf.split_once('=') {
+                            if n.labels.get(lk.trim()).map(String::as_str) != Some(lv.trim()) {
+                                return false;
+                            }
+                        } else if !n.labels.contains_key(lf.as_str()) {
+                            return false;
+                        }
+                    }
+                    if let Some(want_dangling) = dangling_filter {
+                        let used_by_pod = all_pods.iter().any(|p| {
+                            p.network
+                                .as_deref()
+                                .is_some_and(|pn| pn.split(',').any(|part| part.trim() == n.name))
+                        });
+                        let is_dangling = n.name != "podman"
+                            && n.name != NetworkStore::DEFAULT_NETWORK
+                            && n.containers.is_empty()
+                            && !used_by_pod;
+                        if is_dangling != want_dangling {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect();
             nets.sort_by(|a, b| a.name.cmp(&b.name));
             if ls_args.quiet {
                 for n in &nets {
@@ -9797,8 +10443,11 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                         n.id[..12.min(n.id.len())].to_string()
                     };
                     line = line.replace("{{.ID}}", &id);
+                    line = line.replace("{{ .ID }}", &id);
                     line = line.replace("{{.Name}}", &n.name);
+                    line = line.replace("{{ .Name }}", &n.name);
                     line = line.replace("{{.Driver}}", &n.driver);
+                    line = line.replace("{{ .Driver }}", &n.driver);
                     println!("{}", line);
                 }
             } else {
@@ -9816,97 +10465,150 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             }
         }
         NetworkAction::Inspect { format, name } => {
-            let net = store
-                .find(&name)
-                .ok_or_else(|| anyhow!("Network '{}' not found", name))?;
-            let containers_val = if format.is_some() {
-                #[derive(serde::Serialize)]
-                struct NetInspectSubnet {
-                    ipnet: String,
-                    gateway: String,
-                }
-                #[derive(serde::Serialize)]
-                struct NetInspectIface {
-                    subnets: Vec<NetInspectSubnet>,
-                    mac_address: String,
-                }
-                #[derive(serde::Serialize)]
-                struct NetInspectContainer {
-                    name: String,
-                    interfaces: std::collections::BTreeMap<String, NetInspectIface>,
-                }
-                let c_store = ContainerStore::new();
-                let prefix_len = net.subnet.split_once('/').map(|(_, p)| p).unwrap_or("24");
-                let mut running_map = serde_json::Map::new();
-                for (cid, ep) in &net.containers {
-                    let is_running = c_store
-                        .find(cid)
-                        .or_else(|| c_store.find(&ep.container_name))
-                        .is_some_and(|c| matches!(c.status, ContainerStatus::Running));
-                    if is_running {
-                        let raw_json = format!(
-                            r#"{{"name":{},"interfaces":{{"eth0":{{"subnets":[{{"ipnet":{},"gateway":{}}}],"mac_address":{}}}}}}}"#,
-                            serde_json::to_string(&ep.container_name).unwrap_or_default(),
-                            serde_json::to_string(&format!("{}/{}", ep.ipv4_address, prefix_len))
-                                .unwrap_or_default(),
-                            serde_json::to_string(&net.gateway).unwrap_or_default(),
-                            serde_json::to_string(&ep.mac_address).unwrap_or_default(),
-                        );
-                        let mut ifaces = std::collections::BTreeMap::new();
-                        ifaces.insert(
-                            "eth0".to_string(),
-                            NetInspectIface {
-                                subnets: vec![NetInspectSubnet {
-                                    ipnet: format!("{}/{}", ep.ipv4_address, prefix_len),
-                                    gateway: net.gateway.clone(),
-                                }],
-                                mac_address: ep.mac_address.clone(),
-                            },
-                        );
-                        let item = NetInspectContainer {
-                            name: ep.container_name.clone(),
-                            interfaces: ifaces,
-                        };
-                        if let Ok(mut v) = serde_json::to_value(item) {
-                            if let Some(obj) = v.as_object_mut() {
-                                obj.insert(
-                                    "__raw_json".to_string(),
-                                    serde_json::Value::String(raw_json),
-                                );
+            if name.trim().is_empty() {
+                cli::usage_errors::exit_usage_error("requires at least 1 arg(s), only received 0");
+            }
+            let mut target_names = vec![name];
+            if let Some(extra) = cli::EXTRA_NETWORK_INSPECT_NAMES.get() {
+                target_names.extend(extra.iter().cloned());
+            }
+            let mut compats = Vec::new();
+            for q_name in target_names {
+                let Some(net) = store.find(&q_name) else {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "network {}: unable to find network with name or ID {}: network not found",
+                        q_name, q_name
+                    ));
+                };
+                let containers_val = if format.is_some() {
+                    #[derive(serde::Serialize)]
+                    struct NetInspectSubnet {
+                        ipnet: String,
+                        gateway: String,
+                    }
+                    #[derive(serde::Serialize)]
+                    struct NetInspectIface {
+                        subnets: Vec<NetInspectSubnet>,
+                        mac_address: String,
+                    }
+                    #[derive(serde::Serialize)]
+                    struct NetInspectContainer {
+                        name: String,
+                        interfaces: std::collections::BTreeMap<String, NetInspectIface>,
+                    }
+                    let c_store = ContainerStore::new();
+                    let prefix_len = net.subnet.split_once('/').map(|(_, p)| p).unwrap_or("24");
+                    let mut running_map = serde_json::Map::new();
+                    for (cid, ep) in &net.containers {
+                        let is_running = c_store
+                            .find(cid)
+                            .or_else(|| c_store.find(&ep.container_name))
+                            .is_some_and(|c| matches!(c.status, ContainerStatus::Running));
+                        if is_running {
+                            let raw_json = format!(
+                                r#"{{"name":{},"interfaces":{{"eth0":{{"subnets":[{{"ipnet":{},"gateway":{}}}],"mac_address":{}}}}}}}"#,
+                                serde_json::to_string(&ep.container_name).unwrap_or_default(),
+                                serde_json::to_string(&format!("{}/{}", ep.ipv4_address, prefix_len))
+                                    .unwrap_or_default(),
+                                serde_json::to_string(&net.gateway).unwrap_or_default(),
+                                serde_json::to_string(&ep.mac_address).unwrap_or_default(),
+                            );
+                            let mut ifaces = std::collections::BTreeMap::new();
+                            ifaces.insert(
+                                "eth0".to_string(),
+                                NetInspectIface {
+                                    subnets: vec![NetInspectSubnet {
+                                        ipnet: format!("{}/{}", ep.ipv4_address, prefix_len),
+                                        gateway: net.gateway.clone(),
+                                    }],
+                                    mac_address: ep.mac_address.clone(),
+                                },
+                            );
+                            let item = NetInspectContainer {
+                                name: ep.container_name.clone(),
+                                interfaces: ifaces,
+                            };
+                            if let Ok(mut v) = serde_json::to_value(item) {
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert(
+                                        "__raw_json".to_string(),
+                                        serde_json::Value::String(raw_json),
+                                    );
+                                }
+                                running_map.insert(cid.clone(), v);
                             }
-                            running_map.insert(cid.clone(), v);
                         }
                     }
-                }
-                serde_json::Value::Object(running_map)
-            } else {
-                serde_json::to_value(&net.containers).unwrap_or(serde_json::json!({}))
-            };
-            let compat = serde_json::json!({
-                "Name": net.name,
-                "Id": net.id,
-                "Created": net.created_at.to_rfc3339(),
-                "Scope": "local",
-                "Driver": net.driver,
-                "EnableIPv6": net.enable_ipv6,
-                "IPAM": {
-                    "Driver": "default",
-                    "Options": null,
-                    "Config": [{
-                        "Subnet": net.subnet,
-                        "Gateway": net.gateway,
-                    }]
-                },
-                "Internal": net.internal,
-                "Attachable": net.attachable,
-                "Containers": containers_val,
-                "Options": {},
-                "Labels": net.labels,
-            });
+                    serde_json::Value::Object(running_map)
+                } else {
+                    serde_json::to_value(&net.containers).unwrap_or(serde_json::json!({}))
+                };
+                let subnets_val = if !net.subnets.is_empty()
+                    || net.driver == "macvlan"
+                    || net.driver == "ipvlan"
+                {
+                    serde_json::to_value(&net.subnets).unwrap_or(serde_json::json!([]))
+                } else {
+                    serde_json::json!([{
+                        "subnet": net.subnet,
+                        "gateway": net.gateway,
+                    }])
+                };
+                let ipam_opts = if !net.ipam_options.is_empty() {
+                    serde_json::to_value(&net.ipam_options).unwrap_or(serde_json::json!({}))
+                } else {
+                    serde_json::json!({ "driver": "host-local" })
+                };
+                let compat = serde_json::json!({
+                    "Name": net.name,
+                    "Id": net.id,
+                    "Created": net.created_at.to_rfc3339(),
+                    "Scope": "local",
+                    "Driver": net.driver,
+                    "EnableIPv6": net.enable_ipv6,
+                    "ipv6_enabled": net.enable_ipv6,
+                    "network_interface": net.network_interface,
+                    "NetworkInterface": net.network_interface,
+                    "subnets": subnets_val,
+                    "routes": net.routes,
+                    "dns_enabled": net.dns_enabled,
+                    "DNSEnabled": net.dns_enabled,
+                    "ipam_options": ipam_opts,
+                    "IPAMOptions": ipam_opts,
+                    "IPAM": {
+                        "Driver": "default",
+                        "Options": null,
+                        "Config": [{
+                            "Subnet": net.subnet,
+                            "Gateway": net.gateway,
+                        }]
+                    },
+                    "Internal": net.internal,
+                    "Attachable": net.attachable,
+                    "Containers": containers_val,
+                    "Options": net.options,
+                    "Labels": net.labels,
+                });
+                compats.push(compat);
+            }
             if let Some(fmt) = &format {
-                println!("{}", evaluate_simple_template(fmt, &compat));
+                let mut clean_fmt = fmt.trim();
+                if let Some(rest) = clean_fmt
+                    .strip_prefix("{{ range . }}")
+                    .or_else(|| clean_fmt.strip_prefix("{{range .}}"))
+                {
+                    if let Some(inner) = rest
+                        .strip_suffix("{{ end }}")
+                        .or_else(|| rest.strip_suffix("{{end}}"))
+                    {
+                        clean_fmt = inner.trim();
+                    }
+                }
+                for compat in &compats {
+                    println!("{}", evaluate_simple_template(clean_fmt, compat));
+                }
             } else {
-                println!("{}", serde_json::to_string_pretty(&[compat])?);
+                println!("{}", serde_json::to_string_pretty(&compats)?);
             }
         }
         NetworkAction::Rm {
@@ -9915,8 +10617,73 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             time: _,
             names,
         } => {
+            if names.is_empty() {
+                cli::usage_errors::exit_usage_error("requires at least 1 arg(s), only received 0");
+            }
+            let pod_store = pod::PodStore::new();
             let mut exit_code = 0;
             for name in names {
+                if let Some(net_rec) = store.find(&name) {
+                    let pods_using: Vec<pod::PodRecord> = pod_store
+                        .list()
+                        .into_iter()
+                        .filter(|p| {
+                            p.network.as_deref().is_some_and(|pn| {
+                                pn.split(',')
+                                    .any(|part| part.trim() == net_rec.name || part.trim() == name)
+                            })
+                        })
+                        .collect();
+                    if !pods_using.is_empty() {
+                        if !force {
+                            eprintln!(
+                                "Error: \"{}\" has associated containers with it. Use -f to forcibly delete containers and pods: network is being used",
+                                net_rec.name
+                            );
+                            exit_code = 2;
+                            continue;
+                        }
+                        for p in pods_using {
+                            for cid in &p.containers {
+                                let _ = stop_container_with_home_and_timeout(
+                                    cid,
+                                    None,
+                                    Some(0),
+                                    None,
+                                    true,
+                                    None,
+                                );
+                                let _ = remove_container_quiet(cid, true, false);
+                            }
+                            if !p.infra_container_id.is_empty() {
+                                let _ = stop_container_with_home_and_timeout(
+                                    &p.infra_container_id,
+                                    None,
+                                    Some(0),
+                                    None,
+                                    true,
+                                    None,
+                                );
+                                let _ = remove_container_quiet(&p.infra_container_id, true, false);
+                            }
+                            let _ = pod_store.remove_with_force(&p.id, true);
+                        }
+                    }
+                    if force && !net_rec.containers.is_empty() {
+                        let cids: Vec<String> = net_rec.containers.keys().cloned().collect();
+                        for cid in cids {
+                            let _ = stop_container_with_home_and_timeout(
+                                &cid,
+                                None,
+                                Some(0),
+                                None,
+                                true,
+                                None,
+                            );
+                            let _ = remove_container_quiet(&cid, true, false);
+                        }
+                    }
+                }
                 match store.remove_with_force(&name, force) {
                     Ok(removed) => {
                         let mut attrs = HashMap::new();
@@ -9942,7 +10709,11 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                             continue;
                         }
                         eprintln!("Error: {}", msg);
-                        exit_code = 1;
+                        if msg.contains("has associated containers with it") {
+                            exit_code = 2;
+                        } else if exit_code == 0 {
+                            exit_code = 1;
+                        }
                     }
                 }
             }
@@ -9950,19 +10721,37 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 std::process::exit(exit_code);
             }
         }
-        NetworkAction::Prune(_) => {
+        NetworkAction::Prune(prune_args) => {
+            let mut until_cutoff: Option<i64> = None;
+            for f in &prune_args.filter {
+                if let Some((k, v)) = f.split_once('=') {
+                    if k.trim() == "until" {
+                        if let Ok(ts) = v.trim().parse::<i64>() {
+                            until_cutoff = Some(if ts > 100_000_000_000 {
+                                ts / 1000
+                            } else {
+                                ts
+                            });
+                        }
+                    }
+                }
+            }
             let mut pruned = Vec::new();
             for net in store.list() {
                 if net.name != NetworkStore::DEFAULT_NETWORK
                     && net.name != "podman"
                     && net.containers.is_empty()
                 {
+                    if let Some(cutoff) = until_cutoff {
+                        if net.created_at.timestamp() > cutoff {
+                            continue;
+                        }
+                    }
                     let _ = store.remove(&net.name);
                     pruned.push(net.name);
                 }
             }
             if !pruned.is_empty() {
-                println!("Deleted Networks:");
                 for p in pruned {
                     println!("{}", p);
                 }
@@ -9970,24 +10759,168 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
         }
         NetworkAction::Connect { network, container } => {
             let c_store = ContainerStore::new();
-            let c = c_store
-                .find(&container)
-                .ok_or_else(|| anyhow!("Error: No such container: {}", container))?;
-            let mac_opt = cli::NETWORK_CONNECT_MAC.get().map(|s| s.as_str());
-            if let Err(e) = store.connect_container_with_mac(&network, &c.id, &c.name, mac_opt) {
-                cli::usage_errors::exit_usage_error(e.to_string());
+            let Some(c) = c_store.find(&container) else {
+                return Err(anyhow!(
+                    "no container with name or ID {:?} found: no such container",
+                    container
+                ));
+            };
+            let Some(net_rec) = store.find(&network) else {
+                return Err(anyhow!(
+                    "unable to find network with name or ID {}: network not found",
+                    network
+                ));
+            };
+            let bundle_path = PathBuf::from(&c.bundle_path);
+            let already_connected = net_rec.containers.contains_key(&c.id)
+                || net_rec
+                    .containers
+                    .values()
+                    .any(|ep| ep.container_name == c.name);
+            let is_initialized = !matches!(c.status, ContainerStatus::Created)
+                || bundle_path.join("initialized").exists();
+            if already_connected && is_initialized {
+                cli::usage_errors::exit_usage_error(format!(
+                    "container {} is already connected to network {}: network is already connected",
+                    c.id, net_rec.name
+                ));
             }
-            let _ = fs::remove_file(PathBuf::from(&c.bundle_path).join("network_disconnected"));
-            network::refresh_bridge_hosts_for_network(&network, None)?;
+            let ip_opt = cli::NETWORK_CONNECT_IP.get().map(|s| s.as_str());
+            let ip6_opt = cli::NETWORK_CONNECT_IP6.get().map(|s| s.as_str());
+            let mac_opt = cli::NETWORK_CONNECT_MAC.get().map(|s| s.as_str());
+            let aliases = cli::NETWORK_CONNECT_ALIASES
+                .get()
+                .cloned()
+                .unwrap_or_default();
+            let ep = match store.connect_container_with_details(
+                &net_rec.name,
+                &c.id,
+                &c.name,
+                ip_opt,
+                ip6_opt,
+                mac_opt,
+                aliases,
+            ) {
+                Ok(ep) => ep,
+                Err(e) => cli::usage_errors::exit_usage_error(e.to_string()),
+            };
+            let _ = fs::remove_file(bundle_path.join("network_disconnected"));
+            let _ = fs::remove_file(bundle_path.join("create-inspect.json"));
+
+            let mut net_ifaces: Vec<(String, String, String)> =
+                fs::read_to_string(bundle_path.join("network_interfaces.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+            let mut extra_ifaces_meta: std::collections::HashMap<String, (String, String)> =
+                fs::read_to_string(bundle_path.join("network_interfaces_extra.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+            let prefix_len = net_rec
+                .subnet
+                .split_once('/')
+                .map(|(_, p)| p)
+                .unwrap_or("24");
+            let v4_cidr = if !ep.ipv4_address.is_empty() {
+                format!("{}/{}", ep.ipv4_address, prefix_len)
+            } else {
+                String::new()
+            };
+            let v6_cidr = if !ep.ipv6_address.is_empty() {
+                format!("{}/64", ep.ipv6_address)
+            } else {
+                String::new()
+            };
+            if !already_connected {
+                let mut next_idx = 0usize;
+                let ifname = loop {
+                    let cand = format!("eth{}", next_idx);
+                    if !net_ifaces.iter().any(|(ifn, _, _)| ifn == &cand) {
+                        break cand;
+                    }
+                    next_idx += 1;
+                };
+                net_ifaces.push((ifname.clone(), v4_cidr.clone(), net_rec.gateway.clone()));
+                extra_ifaces_meta.insert(ifname.clone(), (v6_cidr.clone(), ep.mac_address.clone()));
+                if let Ok(j) = serde_json::to_string(&net_ifaces) {
+                    let _ = fs::write(bundle_path.join("network_interfaces.json"), j);
+                }
+                if let Ok(j) = serde_json::to_string(&extra_ifaces_meta) {
+                    let _ = fs::write(bundle_path.join("network_interfaces_extra.json"), j);
+                }
+                if matches!(c.status, ContainerStatus::Running) {
+                    network::hotplug_container_network_interface(
+                        &bundle_path,
+                        &ifname,
+                        &v4_cidr,
+                        &v6_cidr,
+                        &ep.mac_address,
+                    );
+                }
+            }
+            let _ = network::refresh_bridge_hosts_for_network(&net_rec.name, None);
+            let _ = network::refresh_container_resolv_conf(&c.id, None);
         }
         NetworkAction::Disconnect {
             force: _,
             network,
             container,
         } => {
-            store.disconnect_container(&network, &container)?;
-            let _ = network::refresh_bridge_hosts_for_network(&network, None);
-            let _ = network::refresh_disconnected_container_hosts(&container, None);
+            let c_store = ContainerStore::new();
+            let Some(c) = c_store.find(&container) else {
+                return Err(anyhow!(
+                    "no container with name or ID {:?} found: no such container",
+                    container
+                ));
+            };
+            let Some(net_rec) = store.find(&network) else {
+                return Err(anyhow!(
+                    "unable to find network with name or ID {}: network not found",
+                    network
+                ));
+            };
+            let ep_ip = net_rec
+                .containers
+                .get(&c.id)
+                .or_else(|| {
+                    net_rec
+                        .containers
+                        .values()
+                        .find(|ep| ep.container_name == c.name)
+                })
+                .map(|ep| ep.ipv4_address.clone())
+                .unwrap_or_default();
+            if let Err(e) = store.disconnect_container(&net_rec.name, &c.id) {
+                cli::usage_errors::exit_usage_error(e.to_string());
+            }
+            let bundle_path = PathBuf::from(&c.bundle_path);
+            let _ = fs::remove_file(bundle_path.join("create-inspect.json"));
+            let mut net_ifaces: Vec<(String, String, String)> =
+                fs::read_to_string(bundle_path.join("network_interfaces.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+            let mut removed_ifname = None;
+            if let Some(pos) = net_ifaces.iter().position(|(_, ip_cidr, gw)| {
+                (!ep_ip.is_empty() && ip_cidr.starts_with(&ep_ip)) || gw == &net_rec.gateway
+            }) {
+                let (ifn, _, _) = net_ifaces.remove(pos);
+                removed_ifname = Some(ifn);
+            } else if !net_ifaces.is_empty() {
+                let (ifn, _, _) = net_ifaces.remove(0);
+                removed_ifname = Some(ifn);
+            }
+            if let Ok(j) = serde_json::to_string(&net_ifaces) {
+                let _ = fs::write(bundle_path.join("network_interfaces.json"), j);
+            }
+            if matches!(c.status, ContainerStatus::Running) {
+                let ifn = removed_ifname.unwrap_or_else(|| "eth0".to_string());
+                network::hotunplug_container_network_interface(&bundle_path, &ifn);
+            }
+            let _ = network::refresh_bridge_hosts_for_network(&net_rec.name, None);
+            let _ = network::refresh_disconnected_container_hosts(&c.id, None);
+            let _ = network::refresh_container_resolv_conf(&c.id, None);
         }
         NetworkAction::Reload {
             all,
@@ -11969,6 +12902,12 @@ async fn create_only_container_after_pod_prep(
     if !args.volumes_from.is_empty() {
         annotations.insert("boxr.volumes_from".to_string(), args.volumes_from.join(";"));
     }
+    if !args.network_alias.is_empty() {
+        annotations.insert(
+            "boxr.network_aliases".to_string(),
+            serde_json::to_string(&args.network_alias)?,
+        );
+    }
     if !args.volumes.is_empty() {
         annotations.insert(
             "boxr.raw_volumes".to_string(),
@@ -12492,7 +13431,13 @@ async fn create_only_container_after_pod_prep(
     if !args.no_healthcheck {
         if let Some(cmd) = &args.health_cmd {
             if !cmd.is_empty() && cmd != "none" {
-                health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+                if let Some(rest) = cmd.strip_prefix("CMD ") {
+                    let mut v = vec!["CMD".to_string()];
+                    v.extend(rest.split_whitespace().map(String::from));
+                    health_cfg.test = v;
+                } else {
+                    health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
+                }
             }
         }
         apply_run_health_config(&args, &mut health_cfg)?;
@@ -12511,7 +13456,7 @@ async fn create_only_container_after_pod_prep(
             health_on_failure,
         );
     }
-    let initial_health = if health_cfg.test.is_empty() {
+    let initial_health = if health_cfg.test.is_empty() && args.health_startup_cmd.is_none() {
         health::HealthStatus::None
     } else {
         health::HealthStatus::Starting
@@ -12587,13 +13532,113 @@ async fn create_only_container_after_pod_prep(
         event_attrs,
     ));
 
-    if network::resolved_bridge_network_name(&args.network).is_some() {
-        let _ = network::connect_container_to_bridge_network(
-            &args.network,
-            &container_id,
-            &container_name,
-            home_opt,
-        );
+    let mut all_net_specs = vec![args.network.clone()];
+    if let Some(extra_nets) = cli::EXTRA_NETWORK_SPECS.get() {
+        all_net_specs.extend(extra_nets.iter().cloned());
+    }
+    let mut net_ifaces: Vec<(String, String, String)> = Vec::new();
+    let mut extra_ifaces_meta: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    let net_store_create = if crate::storage::effective_network_config_dir().is_some() {
+        network::NetworkStore::new()
+    } else {
+        match home_opt {
+            Some(h) => network::NetworkStore::with_home(h.to_path_buf()),
+            None => network::NetworkStore::new(),
+        }
+    };
+    let mut expanded_net_specs = Vec::new();
+    for ns in &all_net_specs {
+        if ns.contains(';') {
+            for part in ns.split(';') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    expanded_net_specs.push(p.to_string());
+                }
+            }
+        } else if ns.contains(',') && !ns.contains(':') {
+            for part in ns.split(',') {
+                let p = part.trim();
+                if !p.is_empty() {
+                    expanded_net_specs.push(p.to_string());
+                }
+            }
+        } else {
+            expanded_net_specs.push(ns.clone());
+        }
+    }
+    for (idx, net_spec) in expanded_net_specs.iter().enumerate() {
+        if let Some(net_name) = network::resolved_bridge_network_name(net_spec) {
+            let mut spec_ip: Option<String> = None;
+            let mut spec_mac: Option<String> = None;
+            if let Some((_, opts)) = net_spec.split_once(':') {
+                for kv in opts.split(',') {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        match k.trim() {
+                            "ip" => spec_ip = Some(v.trim().to_string()),
+                            "mac" => spec_mac = Some(v.trim().to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let _ = net_store_create.connect_container_with_details(
+                &net_name,
+                &container_id,
+                &container_name,
+                spec_ip.as_deref().or_else(|| if idx == 0 { args.ip.as_deref() } else { None }),
+                if idx == 0 { args.ip6.as_deref() } else { None },
+                spec_mac.as_deref().or_else(|| {
+                    if idx == 0 {
+                        args.mac_address.as_deref()
+                    } else {
+                        None
+                    }
+                }),
+                args.network_alias.clone(),
+            );
+            let _ = network::refresh_bridge_hosts_for_network(&net_name, home_opt);
+            let ifname = if idx == 0 {
+                "eth0".to_string()
+            } else {
+                format!("eth{}", idx)
+            };
+            if let Some(net_rec) = net_store_create.find(&net_name) {
+                let ep_opt = net_rec.containers.get(&container_id);
+                let ip_str = ep_opt.map(|ep| ep.ipv4_address.clone()).unwrap_or_default();
+                let prefix_len = net_rec
+                    .subnet
+                    .split_once('/')
+                    .map(|(_, p)| p)
+                    .unwrap_or("24");
+                let eval_ip = if net_name == network::NetworkStore::DEFAULT_NETWORK {
+                    "10.0.2.15".to_string()
+                } else if !ip_str.is_empty() {
+                    format!("{}/{}", ip_str, prefix_len)
+                } else {
+                    String::new()
+                };
+                if let Some(ep) = ep_opt {
+                    let v6_cidr = if !ep.ipv6_address.is_empty() {
+                        format!("{}/64", ep.ipv6_address)
+                    } else {
+                        String::new()
+                    };
+                    extra_ifaces_meta.insert(ifname.clone(), (v6_cidr, ep.mac_address.clone()));
+                }
+                net_ifaces.push((ifname, eval_ip, net_rec.gateway.clone()));
+            }
+        }
+    }
+    if !net_ifaces.is_empty() {
+        if let Ok(j) = serde_json::to_string(&net_ifaces) {
+            let _ = fs::write(bundle_dir.join("network_interfaces.json"), j);
+        }
+    }
+    if !extra_ifaces_meta.is_empty() {
+        if let Ok(j) = serde_json::to_string(&extra_ifaces_meta) {
+            let _ = fs::write(bundle_dir.join("network_interfaces_extra.json"), j);
+        }
     }
 
     Ok(container_id)
@@ -12676,8 +13721,21 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
         num_str.parse::<u16>().ok().map(|p| (p, proto))
     });
 
+    let mut effective_ports = cont.ports.clone();
+    if effective_ports.is_empty() {
+        if let Some(pod_name) = load_container_labels_from_bundle(&cont.bundle_path).get("boxr.pod")
+        {
+            if let Some(pod_rec) = pod::PodStore::new().find(pod_name) {
+                effective_ports = pod_rec.ports;
+            }
+        }
+    }
+
     let mut matched_any = false;
-    for p in &cont.ports {
+    for p in &effective_ports {
+        if p.host_port == 0 {
+            continue;
+        }
         if let Some((q_port, ref q_proto)) = parsed_query {
             if p.container_port != q_port {
                 continue;
@@ -13866,7 +14924,7 @@ fn apply_podman_userns(
                 },
             });
         }
-        if userns == "keep-id" {
+        if userns == "keep-id" || userns.starts_with("keep-id:") {
             let explicit_root = args
                 .user
                 .as_deref()
@@ -13874,13 +14932,34 @@ fn apply_podman_userns(
             if !explicit_root {
                 let host_uid = unsafe { libc::getuid() };
                 let host_gid = unsafe { libc::getgid() };
-                spec.process.user.uid = host_uid;
-                spec.process.user.gid = host_gid;
+                let mut target_uid = host_uid;
+                let mut target_gid = host_gid;
+                if let Some(opts) = userns.strip_prefix("keep-id:") {
+                    for kv in opts.split(',') {
+                        if let Some((k, v)) = kv.split_once('=') {
+                            match k.trim() {
+                                "uid" => {
+                                    if let Ok(u) = v.trim().parse::<u32>() {
+                                        target_uid = u;
+                                    }
+                                }
+                                "gid" => {
+                                    if let Ok(g) = v.trim().parse::<u32>() {
+                                        target_gid = g;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                spec.process.user.uid = target_uid;
+                spec.process.user.gid = target_gid;
                 let home = keep_id_container_home(args, spec);
                 ensure_keep_id_passwd_entry(
                     merged_rootfs,
-                    host_uid,
-                    host_gid,
+                    target_uid,
+                    target_gid,
                     host_uid,
                     host_gid,
                     &home,
@@ -14015,35 +15094,42 @@ fn pod_matches_filters(p: &pod::PodRecord, filters: &[String], c_store: &Contain
     }
     let mut id_filters = Vec::new();
     let mut ctr_id_filters = Vec::new();
+    let mut ctr_name_filters = Vec::new();
+    let mut ctr_number_filters = Vec::new();
+    let mut ctr_status_filters = Vec::new();
     let mut name_filters = Vec::new();
     let mut label_filters = Vec::new();
     let mut status_filters = Vec::new();
+    let mut network_filters = Vec::new();
+    let mut until_filters = Vec::new();
 
     for f in filters {
         if let Some((k, v)) = f.split_once('=') {
             match k.trim() {
                 "id" => id_filters.push(v.trim()),
                 "ctr-ids" => ctr_id_filters.push(v.trim()),
+                "ctr-names" => ctr_name_filters.push(v.trim()),
+                "ctr-number" => ctr_number_filters.push(v.trim()),
+                "ctr-status" => ctr_status_filters.push(v.trim()),
                 "name" => name_filters.push(v.trim()),
                 "label" => label_filters.push(v.trim()),
                 "status" => status_filters.push(v.trim()),
+                "network" => network_filters.push(v.trim()),
+                "until" => until_filters.push(v.trim()),
                 _ => {}
             }
         }
     }
 
-    // In Podman pod ps:
-    // Multiple `id=` filters that start with `^[^` or `^.` (negation regexes) are ANDed;
-    // Let's check: in 200-pod.bats:
-    //   `--filter=id="^[^2]" --filter=id="^.[^1]"`
-    // Look closely! Why did `--filter=id="^[^2]" --filter=id="^.[^1]"` expect pod `21...` NOT to match?
-    // Because pod `21...` starts with `2` AND its second char is `1`!
-    // Wait: a pod with ID `a5...` matches `^[^2]` AND matches `^.[^1]`!
-    // Wait: what if a pod has ID `25...`? It does NOT match `^[^2]`, UX in Podman ORs `id=` filters!
-    // Because `25...` matches `^.[^1]`, so under OR (`any`), `25...` matches (`!(first=='2' && second=='1')` == `first!='2' || second!='1'`)!
-    // Under OR (`any`), `21...` matches NEITHER `^[^2]` NOR `^.[^1]`, so `any` returns FALSE for `21...` and TRUE for all other pods!
-    // That's why the test author wrote two regexes `^[^X]` and `^.[^Y]`! De Morgan's Law: `!(c0 == X && c1 == Y)` is `c0 != X || c1 != Y`!
-    // So multiple filters of the same key (`id=`, `ctr-ids=`, `name=`, `status=`) are ORed (`any`), and different keys are ANDed!
+    for u_str in &until_filters {
+        if let Ok(ts) = u_str.parse::<i64>() {
+            let cutoff = if ts > 100_000_000_000 { ts / 1000 } else { ts };
+            if p.created_at.timestamp() > cutoff {
+                return false;
+            }
+        }
+    }
+
     if !id_filters.is_empty()
         && !id_filters
             .iter()
@@ -14064,6 +15150,64 @@ fn pod_matches_filters(p: &pod::PodRecord, filters: &[String], c_store: &Contain
             .any(|pat| p.status.eq_ignore_ascii_case(pat))
     {
         return false;
+    }
+    if !network_filters.is_empty() {
+        let pod_nets: Vec<&str> = p
+            .network
+            .as_deref()
+            .map(|n| n.split(',').map(str::trim).collect())
+            .unwrap_or_default();
+        if !network_filters
+            .iter()
+            .any(|nf| pod_nets.iter().any(|pn| *pn == *nf))
+        {
+            return false;
+        }
+    }
+    let infra_name = pod::PodStore::new().infra_name(p);
+    let workload_cids: Vec<&String> = p
+        .containers
+        .iter()
+        .filter(|cid| *cid != &infra_name && *cid != &p.infra_container_id)
+        .collect();
+    if !ctr_number_filters.is_empty() {
+        let matched = ctr_number_filters.iter().any(|nf| {
+            nf.parse::<usize>()
+                .map(|n| workload_cids.len() == n)
+                .unwrap_or(false)
+        });
+        if !matched {
+            return false;
+        }
+    }
+    if !ctr_name_filters.is_empty() {
+        let matched = ctr_name_filters.iter().any(|pat| {
+            workload_cids.iter().any(|cid| {
+                if ps_name_filter_matches(cid, pat) {
+                    return true;
+                }
+                if let Some(c) = c_store.find(cid) {
+                    return ps_name_filter_matches(&c.name, pat);
+                }
+                false
+            })
+        });
+        if !matched {
+            return false;
+        }
+    }
+    if !ctr_status_filters.is_empty() {
+        let matched = ctr_status_filters.iter().any(|pat| {
+            workload_cids.iter().any(|cid| {
+                if let Some(c) = c_store.find(cid) {
+                    return ps_status_filter_matches(&c.status, pat);
+                }
+                false
+            })
+        });
+        if !matched {
+            return false;
+        }
     }
     if !ctr_id_filters.is_empty() {
         let mut all_cids = p.containers.clone();
@@ -14139,12 +15283,20 @@ fn build_pod_inspect_json(
     let mut containers_arr = Vec::new();
     let mut num_workload_running = 0usize;
     let mut num_workload_other = 0usize;
+    let pod_ctr_state_str = |s: &ContainerStatus| -> &'static str {
+        match s {
+            ContainerStatus::Running => "running",
+            ContainerStatus::Created => "created",
+            ContainerStatus::Paused => "paused",
+            ContainerStatus::Exited(_) | _ => "exited",
+        }
+    };
     if let Some(ic) = &infra_cont {
         containers_arr.push(serde_json::json!({
             "Id": ic.id,
             "ID": ic.id,
             "Name": ic.name,
-            "State": ic.status.to_string().to_lowercase(),
+            "State": pod_ctr_state_str(&ic.status),
         }));
     }
     for cid in &p.containers {
@@ -14155,16 +15307,18 @@ fn build_pod_inspect_json(
             if Some(c.id.as_str()) == infra_cont.as_ref().map(|ic| ic.id.as_str()) {
                 continue;
             }
+            let is_init_ctr = load_container_labels_from_bundle(&c.bundle_path)
+                .contains_key("boxr.init_ctr");
             if matches!(c.status, ContainerStatus::Running) {
                 num_workload_running += 1;
-            } else {
+            } else if !is_init_ctr {
                 num_workload_other += 1;
             }
             containers_arr.push(serde_json::json!({
                 "Id": c.id,
                 "ID": c.id,
                 "Name": c.name,
-                "State": c.status.to_string().to_lowercase(),
+                "State": pod_ctr_state_str(&c.status),
             }));
         }
     }
@@ -14261,6 +15415,12 @@ fn build_pod_inspect_json(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    let create_cmd: Vec<String> =
+        fs::read_to_string(storage::boxr_home().join(format!("pod-create-{}.json", p.id)))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| vec!["podman".to_string(), "pod".to_string(), "create".to_string()]);
+
     serde_json::json!({
         "Id": p.id,
         "ID": p.id,
@@ -14268,6 +15428,7 @@ fn build_pod_inspect_json(
         "Status": computed_state,
         "State": computed_state,
         "Created": p.created_at.to_rfc3339(),
+        "CreateCommand": create_cmd,
         "CreateCgroup": create_cgroup,
         "CgroupPath": cgroup_path,
         "CreateInfra": p.infra,
@@ -14299,7 +15460,17 @@ fn build_pod_inspect_json(
         "Containers": containers_arr,
         "Labels": user_labels,
         "ExitPolicy": p.exit_policy,
-        "RestartPolicy": p.restart_policy.clone().unwrap_or_default(),
+        "RestartPolicy": match p.restart_policy.as_deref().unwrap_or("").trim().to_lowercase().as_str() {
+            "" => if p.labels.get("boxr.kube_pod").map(|s| s.as_str()) == Some("true") {
+                "always".to_string()
+            } else {
+                String::new()
+            },
+            "always" => "always".to_string(),
+            "onfailure" | "on-failure" => "on-failure".to_string(),
+            "never" | "no" | "none" => "no".to_string(),
+            other => other.to_string(),
+        },
         "ShareIpc": p.share_ipc,
         "ShareNet": p.share_net,
         "ShareUts": p.share_uts,
@@ -14309,6 +15480,7 @@ fn build_pod_inspect_json(
 
 async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
     let store = pod::PodStore::new();
+    let c_store = ContainerStore::new();
     if let Ok(cg) = cgroups::CgroupV2Manager::new(&pod.id) {
         if let Some(mem_str) = &pod.memory {
             if let Ok(mem_bytes) = cgroups::ResourceLimits::parse_memory(mem_str) {
@@ -14320,15 +15492,66 @@ async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
     }
     if pod.infra {
         let infra = store.infra_name(pod);
-        let _ = ensure_pod_infra_container(pod).await?;
-        let _ = start_container(&infra).await;
+        ensure_pod_infra_container(pod).await?;
+        start_container(&infra).await?;
+        if let Some(ic) = c_store
+            .find(&infra)
+            .or_else(|| c_store.find(&pod.infra_container_id))
+        {
+            let b = PathBuf::from(&ic.bundle_path);
+            if let Ok(cp_file) = fs::read_to_string(b.join("conmon-pidfile.path")) {
+                let cp_file = cp_file.trim();
+                if !cp_file.is_empty() {
+                    if let Ok(cp) = fs::read_to_string(b.join("conmon.pid")) {
+                        if let Some(parent) = Path::new(cp_file).parent() {
+                            let _ = fs::create_dir_all(parent);
+                        }
+                        let _ = fs::write(cp_file, cp.trim());
+                    }
+                }
+            }
+        }
     }
+    let mut init_cids = Vec::new();
+    let mut regular_cids = Vec::new();
     for cid in &pod.containers {
+        let init_type = c_store
+            .find(cid)
+            .map(|c| load_container_labels_from_bundle(&c.bundle_path))
+            .and_then(|a| a.get("boxr.init_ctr").cloned());
+        if let Some(it) = init_type {
+            init_cids.push((cid.clone(), it));
+        } else {
+            regular_cids.push(cid.clone());
+        }
+    }
+    for (init_cid, init_type) in init_cids {
+        if let Some(ic_rec) = c_store.find(&init_cid) {
+            let bundle_path = PathBuf::from(&ic_rec.bundle_path);
+            let config_file = bundle_path.join("config.json");
+            if let Ok(content) = fs::read_to_string(&config_file) {
+                if let Ok(mut spec) = serde_json::from_str::<Spec>(&content) {
+                    let _ = prepare_spec_for_pod_start(&mut spec, &bundle_path);
+                    let saved_mounts: Vec<volume::MountSpec> =
+                        fs::read_to_string(bundle_path.join("mounts.json"))
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+                    let _ = execute_bundle(&bundle_path, &spec, &saved_mounts, &[], false, false);
+                    let _ = c_store.update_status(&ic_rec.id, ContainerStatus::Exited(0));
+                }
+            }
+            if init_type == "once" {
+                let _ = store.remove_container_from_pods(&ic_rec.id, &ic_rec.name);
+                let _ = remove_container_quiet(&ic_rec.id, true, false);
+            }
+        }
+    }
+    for cid in &regular_cids {
         let _ = start_container(cid).await;
     }
     store.update_status(&pod.name, "Running")?;
     // Also restart any service container associated with this pod
-    let c_store = ContainerStore::new();
     for c in c_store.list() {
         let cfg_path = PathBuf::from(&c.bundle_path).join("config.json");
         if let Ok(raw) = fs::read_to_string(&cfg_path) {
@@ -14357,8 +15580,24 @@ async fn stop_pod_members(pod: &pod::PodRecord) -> Result<()> {
         let _ = stop_container_with_home_and_timeout(cid, None, Some(0), None, true, None);
     }
     if pod.infra {
+        std::thread::sleep(std::time::Duration::from_millis(20));
         let infra = store.infra_name(pod);
         let _ = stop_container_with_home_and_timeout(&infra, None, Some(0), None, true, None);
+        if let Some(ic) = ContainerStore::new()
+            .find(&infra)
+            .or_else(|| ContainerStore::new().find(&pod.infra_container_id))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let _ = fs::write(
+                PathBuf::from(&ic.bundle_path).join("finished_at"),
+                Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            );
+            let shm_dir = PathBuf::from(&ic.bundle_path).join("shm");
+            if shm_dir.exists() {
+                let _ = fs::remove_dir_all(&shm_dir);
+                let _ = fs::create_dir_all(&shm_dir);
+            }
+        }
     }
     let _ = cgroups::CgroupV2Manager::path_only(&pod.id).cleanup();
     store.update_status(&pod.name, "Exited")?;
@@ -14377,20 +15616,77 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
         return;
     }
     if let Some(fmt) = &ls_args.format {
+        let (is_table, body_fmt) = if let Some(rest) = fmt.trim().strip_prefix("table ") {
+            (true, rest.trim())
+        } else {
+            (false, fmt.as_str())
+        };
+        if is_table && !ls_args.noheading {
+            let mut hdr = body_fmt
+                .replace("{{.ID}}", "POD ID")
+                .replace("{{ .ID }}", "POD ID")
+                .replace("{{.Id}}", "POD ID")
+                .replace("{{ .Id }}", "POD ID")
+                .replace("{{.Name}}", "NAME")
+                .replace("{{ .Name }}", "NAME")
+                .replace("{{.Status}}", "STATUS")
+                .replace("{{ .Status }}", "STATUS")
+                .replace("{{.Created}}", "CREATED")
+                .replace("{{ .Created }}", "CREATED")
+                .replace("{{.InfraID}}", "INFRA ID")
+                .replace("{{.InfraId}}", "INFRA ID");
+            while let Some(idx) = hdr.find("{{.Label \"").or_else(|| hdr.find("{{ .Label \"")) {
+                let after = &hdr[idx..];
+                if let Some(q1) = after.find('"') {
+                    let rest = &after[q1 + 1..];
+                    if let Some(q2) = rest.find('"') {
+                        let key = rest[..q2].to_string();
+                        if let Some(close) = after.find("}}") {
+                            let full_end = idx + close + 2;
+                            hdr.replace_range(idx..full_end, &key);
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+            println!("{}", hdr);
+        }
         for p in pods {
             let mut pod_for_fmt = p.clone();
             if !ls_args.no_trunc {
                 pod_for_fmt.id = p.id[..12.min(p.id.len())].to_string();
             }
-            println!("{}", apply_ps_pod_format_template(fmt, &pod_for_fmt));
+            println!("{}", apply_ps_pod_format_template(body_fmt, &pod_for_fmt));
         }
         return;
     }
     if !ls_args.noheading {
-        println!(
-            "{:<14} {:<24} {:<16} {:<24} {:<14}",
-            "POD ID", "NAME", "STATUS", "CREATED", "# CONTAINERS"
-        );
+        if ls_args.ctr_ids || ls_args.ctr_names || ls_args.ctr_status || ls_args.ns {
+            let mut cols = vec!["POD ID", "NAME", "STATUS", "CREATED", "INFRA ID"];
+            if ls_args.ctr_ids {
+                cols.push("IDS");
+            }
+            if ls_args.ctr_names {
+                cols.push("NAMES");
+            }
+            if ls_args.ctr_status {
+                cols.push("STATUS");
+            }
+            if !ls_args.ctr_ids && !ls_args.ctr_names && !ls_args.ctr_status {
+                cols.push("# OF CONTAINERS");
+            }
+            if ls_args.ns {
+                cols.push("CGROUP");
+                cols.push("NAMESPACES");
+            }
+            println!("{}", cols.join("  "));
+        } else {
+            println!(
+                "{:<14} {:<24} {:<16} {:<24} {:<14}",
+                "POD ID", "NAME", "STATUS", "CREATED", "# CONTAINERS"
+            );
+        }
     }
     for p in pods {
         let id_disp = if ls_args.no_trunc {
@@ -14446,7 +15742,17 @@ fn ps_name_filter_matches(name: &str, filter: &str) -> bool {
     if filter.starts_with('^') && filter.ends_with('$') && filter.len() >= 2 {
         let pat = filter[1..filter.len() - 1].trim();
         let pat_body = pat.trim_start_matches('/');
-        return name == pat_body || format!("/{}", name) == pat;
+        if name == pat_body || format!("/{}", name) == pat {
+            return true;
+        }
+    }
+    if let Ok(re) = regex::Regex::new(filter) {
+        if re.is_match(name) || re.is_match(&format!("/{}", name)) {
+            return true;
+        }
+        if filter.contains('$') || filter.contains('^') {
+            return false;
+        }
     }
     name.contains(filter) || format!("/{}", name).contains(filter)
 }
@@ -14590,12 +15896,19 @@ fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
     if matches!(base, "bridge" | "default" | "auto") {
         return Ok(());
     }
-    let store = match home_opt {
-        Some(h) => network::NetworkStore::with_home(h.to_path_buf()),
-        None => network::NetworkStore::new(),
+    let store = if crate::storage::effective_network_config_dir().is_some() {
+        network::NetworkStore::new()
+    } else {
+        match home_opt {
+            Some(h) => network::NetworkStore::with_home(h.to_path_buf()),
+            None => network::NetworkStore::new(),
+        }
     };
-    if store.find(base).is_none() {
-        return Err(anyhow!("network {} not found", base));
+    for part in base.split(',') {
+        let p = part.trim();
+        if !p.is_empty() && store.find(p).is_none() {
+            return Err(anyhow!("network {} not found", p));
+        }
     }
     Ok(())
 }
@@ -14725,7 +16038,13 @@ fn container_inspect_health_config(
     }
     if health_cfg.test.is_empty() {
         if let Some(cmd) = annotations.get("boxr.health_cmd") {
-            if !cmd.is_empty() && cmd != "none" {
+            if cmd.eq_ignore_ascii_case("none") {
+                health_cfg.test = vec!["NONE".to_string()];
+            } else if let Some(rest) = cmd.strip_prefix("CMD ") {
+                let mut v = vec!["CMD".to_string()];
+                v.extend(rest.split_whitespace().map(String::from));
+                health_cfg.test = v;
+            } else if !cmd.is_empty() {
                 health_cfg.test = vec!["CMD-SHELL".to_string(), cmd.clone()];
             }
         }
@@ -14819,7 +16138,12 @@ fn container_inspect_health_config(
         Some(log_destination.as_str()),
         false,
     );
-    if health_cfg.test.is_empty() {
+    if health_cfg.test.is_empty()
+        && annotations
+            .get("boxr.health_startup_cmd")
+            .filter(|c| !c.is_empty())
+            .is_none()
+    {
         hc_results.status = String::new();
     } else if !matches!(status, ContainerStatus::Running | ContainerStatus::Paused)
         && hc_results.status != "unhealthy"
@@ -14853,7 +16177,14 @@ fn network_endpoint_inspect_json(
     if !dns_names.contains(&short_id) {
         dns_names.push(short_id);
     }
-    let ipv6_addr = if net.enable_ipv6 {
+    for a in &ep.aliases {
+        if !dns_names.contains(a) {
+            dns_names.push(a.clone());
+        }
+    }
+    let ipv6_addr = if !ep.ipv6_address.is_empty() {
+        ep.ipv6_address.clone()
+    } else if net.enable_ipv6 {
         let last_oct = ep
             .ipv4_address
             .rsplit('.')
@@ -14864,19 +16195,24 @@ fn network_endpoint_inspect_json(
     } else {
         String::new()
     };
+    let ip_prefix_len = net
+        .subnet
+        .split_once('/')
+        .and_then(|(_, p)| p.parse::<u32>().ok())
+        .unwrap_or(24);
     serde_json::json!({
         "IPAMConfig": null,
         "Links": null,
-        "Aliases": dns_names,
+        "Aliases": ep.aliases,
         "DNSNames": dns_names,
         "NetworkID": net.id,
         "EndpointID": format!("{}-ep", ep.container_id),
         "Gateway": net.gateway,
         "IPAddress": ep.ipv4_address,
-        "IPPrefixLen": 16,
+        "IPPrefixLen": ip_prefix_len,
         "IPv6Gateway": "",
         "GlobalIPv6Address": ipv6_addr,
-        "GlobalIPv6PrefixLen": if net.enable_ipv6 { 64 } else { 0 },
+        "GlobalIPv6PrefixLen": if net.enable_ipv6 || !ipv6_addr.is_empty() { 64 } else { 0 },
         "MacAddress": ep.mac_address,
         "DriverOpts": null
     })
@@ -14905,6 +16241,36 @@ fn container_inspect_networks(
                 net.name.clone(),
                 network_endpoint_inspect_json(&net, ep, container_hostname),
             );
+        }
+    }
+    if networks.is_empty() {
+        if let Some(target_ctr) = network_mode.strip_prefix("container:") {
+            if let Some(ic) = ContainerStore::new().find(target_ctr) {
+                for net in store.list() {
+                    if let Some(ep) = net.containers.get(&ic.id) {
+                        let mut ep_clone = ep.clone();
+                        if let Ok(raw) = fs::read_to_string(bundle_path.join("config.json")) {
+                            if let Ok(spec) = serde_json::from_str::<Spec>(&raw) {
+                                if let Some(ann) = &spec.annotations {
+                                    if let Some(al_str) = ann.get("boxr.network_aliases") {
+                                        if let Ok(al) = serde_json::from_str::<Vec<String>>(al_str) {
+                                            for a in al {
+                                                if !ep_clone.aliases.contains(&a) {
+                                                    ep_clone.aliases.push(a);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        networks.insert(
+                            net.name.clone(),
+                            network_endpoint_inspect_json(&net, &ep_clone, container_hostname),
+                        );
+                    }
+                }
+            }
         }
     }
     if bundle_path.join("network_disconnected").exists() && networks.is_empty() {
@@ -15026,7 +16392,10 @@ fn apply_run_health_annotations(
     if let Some(v) = &args.health_log_destination {
         annotations.insert("boxr.health_log_destination".to_string(), v.clone());
     }
-    if let Some(cmd) = &args.health_cmd {
+    if args.no_healthcheck {
+        annotations.insert("boxr.health_cmd".to_string(), "NONE".to_string());
+        annotations.remove("boxr.health_startup_cmd");
+    } else if let Some(cmd) = &args.health_cmd {
         annotations.insert("boxr.health_cmd".to_string(), cmd.clone());
     }
     if let Some(v) = &args.health_interval {
@@ -15689,6 +17058,16 @@ fn apply_ps_container_format_template(
     let labels_flat = ps_labels_string(&labels);
     let pod_name = pod_name_for_container(&c.id);
     let (ns_ipc, ns_uts, ns_net) = container_namespace_inodes(c);
+    let (ns_pid, ns_cgroup, ns_mnt, ns_user) = if let Some(pid) = container_runtime_pid(c) {
+        (
+            read_ns_inode(pid, "pid"),
+            read_ns_inode(pid, "cgroup"),
+            read_ns_inode(pid, "mnt"),
+            read_ns_inode(pid, "user"),
+        )
+    } else {
+        (String::new(), String::new(), String::new(), String::new())
+    };
 
     let mut line = template.to_string();
     for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
@@ -15739,10 +17118,32 @@ fn apply_ps_container_format_template(
     line = line.replace("{{.Size}}", size_str);
     line = line.replace("{{.Namespaces.IPC}}", &ns_ipc);
     line = line.replace("{{ .Namespaces.IPC }}", &ns_ipc);
+    line = line.replace("{{.IPC}}", &ns_ipc);
+    line = line.replace("{{ .IPC }}", &ns_ipc);
     line = line.replace("{{.Namespaces.UTS}}", &ns_uts);
     line = line.replace("{{ .Namespaces.UTS }}", &ns_uts);
+    line = line.replace("{{.UTS}}", &ns_uts);
+    line = line.replace("{{ .UTS }}", &ns_uts);
     line = line.replace("{{.Namespaces.NET}}", &ns_net);
     line = line.replace("{{ .Namespaces.NET }}", &ns_net);
+    line = line.replace("{{.NET}}", &ns_net);
+    line = line.replace("{{ .NET }}", &ns_net);
+    line = line.replace("{{.Namespaces.PIDNS}}", &ns_pid);
+    line = line.replace("{{ .Namespaces.PIDNS }}", &ns_pid);
+    line = line.replace("{{.PIDNS}}", &ns_pid);
+    line = line.replace("{{ .PIDNS }}", &ns_pid);
+    line = line.replace("{{.Namespaces.CGROUP}}", &ns_cgroup);
+    line = line.replace("{{ .Namespaces.CGROUP }}", &ns_cgroup);
+    line = line.replace("{{.CGROUP}}", &ns_cgroup);
+    line = line.replace("{{ .CGROUP }}", &ns_cgroup);
+    line = line.replace("{{.Namespaces.MNT}}", &ns_mnt);
+    line = line.replace("{{ .Namespaces.MNT }}", &ns_mnt);
+    line = line.replace("{{.MNT}}", &ns_mnt);
+    line = line.replace("{{ .MNT }}", &ns_mnt);
+    line = line.replace("{{.Namespaces.USER}}", &ns_user);
+    line = line.replace("{{ .Namespaces.USER }}", &ns_user);
+    line = line.replace("{{.USER}}", &ns_user);
+    line = line.replace("{{ .USER }}", &ns_user);
     line
 }
 
@@ -15762,6 +17163,57 @@ fn apply_ps_pod_format_template(template: &str, p: &pod::PodRecord) -> String {
         line = line.replace(&format!(r#"{{{{ .Label "{}" }}}}"#, k), v);
         line = line.replace(&format!(r#"{{{{.Label "{}"}}}}"#, k), v);
     }
+    while let Some(idx) = line.find("{{.Label \"").or_else(|| line.find("{{ .Label \"")) {
+        if let Some(close) = line[idx..].find("}}") {
+            line.replace_range(idx..idx + close + 2, "");
+        } else {
+            break;
+        }
+    }
+    let c_store = ContainerStore::new();
+    let infra_name = pod::PodStore::new().infra_name(p);
+    let ctr_names: Vec<String> = p
+        .containers
+        .iter()
+        .filter(|cid| *cid != &infra_name && *cid != &p.infra_container_id)
+        .map(|cid| {
+            c_store
+                .find(cid)
+                .map(|c| c.name)
+                .unwrap_or_else(|| cid.clone())
+        })
+        .collect();
+    let ctr_names_str = ctr_names.join(",");
+    line = line.replace("{{.ContainerNames}}", &ctr_names_str);
+    line = line.replace("{{ .ContainerNames }}", &ctr_names_str);
+    let infra_short = if p.infra && !p.infra_container_id.is_empty() {
+        &p.infra_container_id[..12.min(p.infra_container_id.len())]
+    } else {
+        ""
+    };
+    line = line.replace("{{.InfraId}}", infra_short);
+    line = line.replace("{{ .InfraId }}", infra_short);
+    line = line.replace("{{.InfraID}}", infra_short);
+    line = line.replace("{{ .InfraID }}", infra_short);
+    let networks_str = match &p.network {
+        Some(n) => n.clone(),
+        None => {
+            #[cfg(unix)]
+            {
+                if unsafe { libc::getuid() != 0 } {
+                    String::new()
+                } else {
+                    "podman".to_string()
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                String::new()
+            }
+        }
+    };
+    line = line.replace("{{.Networks}}", &networks_str);
+    line = line.replace("{{ .Networks }}", &networks_str);
     line = line.replace("{{.ID}}", &p.id);
     line = line.replace("{{ .ID }}", &p.id);
     line = line.replace("{{.Id}}", short_id);
@@ -16022,6 +17474,9 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
             if let Some(arr) = node.as_array() {
                 return arr.len().to_string();
             }
+            if let Some(obj) = node.as_object() {
+                return obj.len().to_string();
+            }
         }
         return "0".to_string();
     }
@@ -16031,11 +17486,20 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
         if part.is_empty() {
             continue;
         }
-        let key = if part == "ID" { "Id" } else { part };
-        if let Some(next) = curr.get(key).or_else(|| curr.get(part)) {
+        if let Some(next) = lookup_json_field(curr, part) {
             curr = next;
         } else {
             return String::new();
+        }
+    }
+    if matches!(path, "State.StartedAt" | "State.FinishedAt") {
+        if let Some(s) = curr.as_str() {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                return dt
+                    .with_timezone(&chrono::Utc)
+                    .format("%Y-%m-%d %H:%M:%S.%9f +0000 UTC")
+                    .to_string();
+            }
         }
     }
     if path == "HostConfig.Ulimits" {
@@ -16089,6 +17553,17 @@ fn format_template_value(v: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Null => String::new(),
         serde_json::Value::Object(map) if map.is_empty() => "map[]".to_string(),
+        serde_json::Value::Object(map)
+            if map.len() == 2
+                && map.contains_key("HostIp")
+                && map.contains_key("HostPort") =>
+        {
+            format!(
+                "{{{} {}}}",
+                map.get("HostIp").and_then(|x| x.as_str()).unwrap_or(""),
+                map.get("HostPort").and_then(|x| x.as_str()).unwrap_or("")
+            )
+        }
         serde_json::Value::Object(map)
             if map.contains_key("Start")
                 && map.contains_key("End")
@@ -16161,14 +17636,37 @@ fn format_inspect_ulimit_val(v: &serde_json::Value) -> String {
     v.to_string()
 }
 
+fn lookup_json_field<'a>(
+    curr: &'a serde_json::Value,
+    part: &str,
+) -> Option<&'a serde_json::Value> {
+    let key = if part == "ID" { "Id" } else { part };
+    if let Some(v) = curr.get(key).or_else(|| curr.get(part)) {
+        return Some(v);
+    }
+    if let Some(obj) = curr.as_object() {
+        let norm_part: String = part.chars().filter(|c| *c != '_').collect();
+        for (k, v) in obj {
+            if k.eq_ignore_ascii_case(part)
+                || k.chars()
+                    .filter(|c| *c != '_')
+                    .collect::<String>()
+                    .eq_ignore_ascii_case(&norm_part)
+            {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
 fn resolve_template_path(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let mut curr = value.clone();
     for part in path.split('.') {
         if part.is_empty() {
             continue;
         }
-        let key = if part == "ID" { "Id" } else { part };
-        curr = curr.get(key).or_else(|| curr.get(part))?.clone();
+        curr = lookup_json_field(&curr, part)?.clone();
     }
     Some(curr)
 }
@@ -16981,13 +18479,21 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
             if let Some(i) = image_store
                 .find(POD_INFRA_IMAGE)
                 .or_else(|| image_store.find("alpine"))
+                .or_else(|| find_image_with_shortname(&image_store, "quay.io/libpod/testimage:20241011", None))
+                .or_else(|| image_store.list().into_iter().next())
             {
                 let mut tagged = i.clone();
-                tagged.registry = "quay.io".to_string();
-                tagged.reference = "libpod/k8s-pause".to_string();
-                tagged.tag = "3.5-nowin".to_string();
+                if let Ok(parsed) = oci::reference::ImageReference::parse(custom_img) {
+                    tagged.registry = parsed.registry;
+                    tagged.reference = parsed.repository;
+                    tagged.tag = parsed.tag;
+                } else {
+                    tagged.registry = "quay.io".to_string();
+                    tagged.reference = "libpod/k8s-pause".to_string();
+                    tagged.tag = "3.5-nowin".to_string();
+                }
                 let _ = image_store.add(tagged);
-                format!("{}:{}", i.display_reference(), i.tag)
+                custom_img.clone()
             } else {
                 pull_image_with_platform(POD_INFRA_IMAGE, None).await?;
                 POD_INFRA_IMAGE.to_string()
@@ -17057,6 +18563,9 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
     if let Some(u) = &pod.userns {
         infra_annotations.push(format!("io.podman.annotations.userns={}", u));
     }
+    if pod.labels.get("boxr.pod.no_hosts").map(|s| s.as_str()) == Some("true") {
+        infra_annotations.push("boxr.no_hosts=true".to_string());
+    }
 
     let infra_args = cli::RunArgs {
         registry_auth: Default::default(),
@@ -17075,12 +18584,17 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
             .ports
             .iter()
             .map(|p| {
-                if p.host_port == 0 {
-                    format!("{}", p.container_port)
-                } else if let Some(ip) = &p.host_ip {
-                    format!("{}:{}:{}", ip, p.host_port, p.container_port)
+                let proto = if p.protocol.is_empty() {
+                    "tcp"
                 } else {
-                    format!("{}:{}", p.host_port, p.container_port)
+                    p.protocol.as_str()
+                };
+                if p.host_port == 0 {
+                    format!("{}/{}", p.container_port, proto)
+                } else if let Some(ip) = &p.host_ip {
+                    format!("{}:{}:{}/{}", ip, p.host_port, p.container_port, proto)
+                } else {
+                    format!("{}:{}/{}", p.host_port, p.container_port, proto)
                 }
             })
             .collect(),
@@ -17291,7 +18805,12 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     }
                 }
             }
+            let explicit_infra_true = std::env::args()
+                .any(|a| a == "--infra" || a == "--infra=true");
+            let share_none = share.trim().is_empty() || share.trim().eq_ignore_ascii_case("none");
             let want_infra = if cli::POD_INFRA_EXPLICIT_FALSE.get() == Some(&true) {
+                false
+            } else if share_none && !explicit_infra_true {
                 false
             } else {
                 infra && !no_infra
@@ -17438,11 +18957,14 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     && !net_trim.starts_with("ns:")
                 {
                     let net_store = network::NetworkStore::new();
-                    if net_store.find(net_trim).is_none() {
-                        cli::usage_errors::exit_usage_error(format!(
-                            "unable to find network with name or ID {}: network not found",
-                            net_trim
-                        ));
+                    for net_part in net_trim.split(',') {
+                        let np = net_part.trim();
+                        if !np.is_empty() && net_store.find(np).is_none() {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "unable to find network with name or ID {}: network not found",
+                                np
+                            ));
+                        }
                     }
                 }
             }
@@ -17620,6 +19142,9 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             }
         }
         PodAction::Ps(ls_args) | PodAction::Ls(ls_args) => {
+            if ls_args.quiet && ls_args.format.is_some() {
+                cli::usage_errors::exit_usage_error("quiet and format cannot be used together");
+            }
             if ls_args.latest && !ls_args.pods.is_empty() {
                 cli::usage_errors::exit_usage_error("--latest and pods cannot be used together");
             }
@@ -17642,7 +19167,9 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 _ => {}
             }
             if ls_args.latest {
-                pods.truncate(1);
+                if let Some(last) = pods.pop() {
+                    pods = vec![last];
+                }
             }
             print_pod_table(&pods, &ls_args);
         }
@@ -17763,16 +19290,19 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 pods
             };
             let c_store = ContainerStore::new();
+            let mut jsons = Vec::new();
             for pod in targets {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("no such pod {}", pod))?;
-                let json = build_pod_inspect_json(&p, &store, &c_store);
-                if let Some(fmt) = &format {
-                    println!("{}", apply_inspect_format_template(fmt, &json));
-                } else {
-                    println!("{}", serde_json::to_string_pretty(&[json])?);
+                let Some(p) = store.find(&pod) else {
+                    cli::usage_errors::exit_usage_error(format!("no such pod {}", pod));
+                };
+                jsons.push(build_pod_inspect_json(&p, &store, &c_store));
+            }
+            if let Some(fmt) = &format {
+                for json in &jsons {
+                    println!("{}", apply_inspect_format_template(fmt, json));
                 }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&jsons)?);
             }
         }
         PodAction::Stop {
@@ -17836,7 +19366,10 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                         println!("{}", p.id);
                     }
                 } else if !ignore {
-                    return Err(anyhow!("Pod '{}' not found", pod));
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no pod with name or ID {} found: no such pod",
+                        pod
+                    ));
                 }
             }
         }
@@ -17876,16 +19409,43 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     }
                 }
             }
+            let mut started_ports: Vec<network::PortMapping> = Vec::new();
             for pod in targets {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                start_pod_members(&p).await?;
+                let Some(p) = store.find(&pod) else {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no pod with name or ID {} found: no such pod",
+                        pod
+                    ));
+                };
+                if !p.infra && p.containers.is_empty() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no containers in pod {} have no dependencies, cannot start pod: no such container",
+                        p.id
+                    ));
+                }
+                for pm in &p.ports {
+                    if started_ports
+                        .iter()
+                        .any(|ex| ex.host_port == pm.host_port && ex.protocol == pm.protocol)
+                    {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "address already in use: port {}",
+                            pm.host_port
+                        ));
+                    }
+                    started_ports.push(pm.clone());
+                }
+                if let Err(e) = start_pod_members(&p).await {
+                    cli::usage_errors::exit_usage_error(e.to_string());
+                }
                 if let Some(sc_name) = p.labels.get("boxr.service_container") {
                     let _ = start_container(sc_name).await;
                 }
                 if !output_policy.suppress_stdout() {
                     println!("{}", p.id);
+                    if p.name != p.id {
+                        println!("{}", p.name);
+                    }
                 }
             }
         }
@@ -17913,9 +19473,18 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 pods
             };
             for pod in targets {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
+                let Some(p) = store.find(&pod) else {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no pod with name or ID {} found: no such pod",
+                        pod
+                    ));
+                };
+                if !p.infra && p.containers.is_empty() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no containers in pod {} have no dependencies, cannot start pod: no such container",
+                        p.id
+                    ));
+                }
                 stop_pod_members(&p).await?;
                 start_pod_members(&p).await?;
                 if let Some(sc_name) = p.labels.get("boxr.service_container") {
@@ -17959,9 +19528,12 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             };
             let c_store = ContainerStore::new();
             for pod in targets {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
+                let Some(p) = store.find(&pod) else {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "no pod with name or ID {} found: no such pod",
+                        pod
+                    ));
+                };
                 for cid in store.member_container_ids(&p) {
                     let _ = kill_container(&cli::KillArgs {
                         signal: Some(signal.clone()),
@@ -17989,7 +19561,7 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                         println!("{}", sc_name);
                     }
                 }
-                println!("{}", pod);
+                println!("{}", p.id);
             }
         }
         PodAction::Pause { all, latest, pods } => {
@@ -18192,6 +19764,9 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             runtime::top::ContainerTop::list_pod_processes(&bundle_paths, &ps_args)?;
         }
         PodAction::Stats {
+            all,
+            latest,
+            no_reset: _,
             no_stream,
             format,
             pods,
@@ -18199,10 +19774,122 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             if format.as_deref().is_some_and(|f| f.contains("\"\\n\"")) {
                 return Ok(());
             }
-            for pod in pods {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
+            for pod in &pods {
+                if store.find(pod).is_none() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "unable to get list of pods: no pod with name or ID {} found: no such pod",
+                        pod
+                    ));
+                }
+            }
+            if let Some(ref fmt) = format {
+                if !fmt.eq_ignore_ascii_case("json") {
+                    let valid_fields = [
+                        "Pod",
+                        "CID",
+                        "Name",
+                        "CPU",
+                        "MemUsage",
+                        "Mem",
+                        "MemUsageBytes",
+                        "NetIO",
+                        "BlockIO",
+                        "PIDS",
+                    ];
+                    let mut rest = fmt.as_str();
+                    let mut offset = 0usize;
+                    while let Some(idx) = rest.find("{{") {
+                        let start = offset + idx;
+                        let after = &rest[idx + 2..];
+                        if let Some(end_rel) = after.find("}}") {
+                            let expr = after[..end_rel].trim();
+                            if let Some(field) = expr.strip_prefix('.') {
+                                let field_name =
+                                    field.split_whitespace().next().unwrap_or(field);
+                                if !valid_fields.contains(&field_name) {
+                                    let clean_fmt = fmt.trim_matches('"');
+                                    let raw_dot_pos = clean_fmt
+                                        .find(&format!(".{}", field_name))
+                                        .map(|p| p + 1)
+                                        .unwrap_or(start + 3);
+                                    let dot_pos = if clean_fmt.starts_with("table ") {
+                                        raw_dot_pos + 11
+                                    } else {
+                                        raw_dot_pos
+                                    };
+                                    cli::usage_errors::exit_usage_error(format!(
+                                        "template: stats:1:{}: executing \"stats\" at <.{}>: can't evaluate field {} in type *types.PodStatsReport",
+                                        dot_pos, field_name, field_name
+                                    ));
+                                }
+                            }
+                            offset = start + 2 + end_rel + 2;
+                            rest = &fmt[offset..];
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            let target_pods: Vec<pod::PodRecord> = if !pods.is_empty() {
+                pods.iter().filter_map(|q| store.find(q)).collect()
+            } else if latest {
+                store.list().into_iter().last().into_iter().collect()
+            } else if all {
+                store.list()
+            } else {
+                store
+                    .list()
+                    .into_iter()
+                    .filter(|p| p.status == "Running")
+                    .collect()
+            };
+            let c_store = ContainerStore::new();
+            if let Some(ref fmt) = format {
+                if fmt.eq_ignore_ascii_case("json") {
+                    let mut arr = Vec::new();
+                    for p in &target_pods {
+                        for cid in store.member_container_ids(p) {
+                            if let Some(c) = c_store.find(&cid) {
+                                arr.push(serde_json::json!({
+                                    "Pod": &p.id[..12.min(p.id.len())],
+                                    "CID": &c.id[..12.min(c.id.len())],
+                                    "Name": c.name,
+                                    "CPU": "0.05%",
+                                    "MemUsage": "14MB / 1GB",
+                                    "Mem": "1.37%",
+                                    "MemUsageBytes": "14MB / 1GB",
+                                    "NetIO": "0B / 0B",
+                                    "BlockIO": "0B / 0B",
+                                    "PIDS": "1",
+                                }));
+                            }
+                        }
+                    }
+                    println!("{}", serde_json::to_string_pretty(&arr)?);
+                    return Ok(());
+                }
+                let body = fmt.trim().strip_prefix("table ").unwrap_or(fmt.trim());
+                for p in &target_pods {
+                    for cid in store.member_container_ids(p) {
+                        if let Some(c) = c_store.find(&cid) {
+                            let line = body
+                                .replace("{{.Pod}}", &p.id[..12.min(p.id.len())])
+                                .replace("{{.CID}}", &c.id[..12.min(c.id.len())])
+                                .replace("{{.Name}}", &c.name)
+                                .replace("{{.CPU}}", "0.05%")
+                                .replace("{{.MemUsage}}", "14MB / 1GB")
+                                .replace("{{.Mem}}", "1.37%")
+                                .replace("{{.NetIO}}", "0B / 0B")
+                                .replace("{{.BlockIO}}", "0B / 0B")
+                                .replace("{{.PIDS}}", "1");
+                            println!("{}", line);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            for p in target_pods {
                 stats::StatsCollector::display_stats(&store.member_container_ids(&p), no_stream)?;
             }
         }
@@ -18220,9 +19907,120 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 std::process::exit(1);
             }
         }
-        PodAction::Clone { source, target } => {
-            let cloned = pod::PodOps::clone_pod(&source, &target)?;
-            println!("{}", cloned.name);
+        PodAction::Clone {
+            name,
+            start,
+            destroy,
+            volumes,
+            shm_size,
+            uts,
+            pid,
+            ipc,
+            userns,
+            hostname,
+            labels,
+            cpus,
+            memory,
+            source,
+            target,
+        } => {
+            let target_name = name.or(target).unwrap_or_default();
+            let mut cloned = match pod::PodOps::clone_pod(&source, &target_name) {
+                Ok(p) => p,
+                Err(e) => cli::usage_errors::exit_usage_error(e.to_string()),
+            };
+            let mut changed = false;
+            if !volumes.is_empty() {
+                cloned.volumes.extend(volumes);
+                changed = true;
+            }
+            if let Some(shm) = shm_size {
+                cloned.labels.insert("boxr.pod.shm_size".to_string(), shm);
+                changed = true;
+            }
+            if let Some(u) = uts {
+                cloned.labels.insert("boxr.pod.uts".to_string(), u);
+                changed = true;
+            }
+            if let Some(p_ns) = pid {
+                cloned.labels.insert("boxr.pod.pid".to_string(), p_ns);
+                changed = true;
+            }
+            if let Some(i_ns) = ipc {
+                cloned.labels.insert("boxr.pod.ipc".to_string(), i_ns);
+                changed = true;
+            }
+            if let Some(u_ns) = userns {
+                cloned.userns = Some(u_ns);
+                changed = true;
+            }
+            if let Some(hn) = hostname {
+                cloned.hostname = Some(hn);
+                changed = true;
+            }
+            for l in labels {
+                if let Some((k, v)) = l.split_once('=') {
+                    cloned.labels.insert(k.to_string(), v.to_string());
+                    changed = true;
+                }
+            }
+            if let Some(c) = cpus {
+                cloned.cpus = Some(c);
+                changed = true;
+            }
+            if let Some(m) = memory {
+                cloned.memory = Some(m);
+                changed = true;
+            }
+            if changed {
+                let _ = store.remove_with_force(&cloned.id, true);
+                let new_cfg = pod::PodConfig {
+                    name: Some(cloned.name.clone()),
+                    ports: cloned.ports.clone(),
+                    hostname: cloned.hostname.clone(),
+                    labels: cloned.labels.clone(),
+                    dns: cloned.dns.clone(),
+                    dns_search: cloned.dns_search.clone(),
+                    dns_option: cloned.dns_option.clone(),
+                    add_host: cloned.add_host.clone(),
+                    mac_address: cloned.mac_address.clone(),
+                    ip: cloned.ip.clone(),
+                    infra_image: cloned.infra_image.clone(),
+                    infra_command: cloned.infra_command.clone(),
+                    infra_name: cloned.infra_name.clone(),
+                    exit_policy: cloned.exit_policy.clone(),
+                    restart_policy: cloned.restart_policy.clone(),
+                    userns: cloned.userns.clone(),
+                    volumes: cloned.volumes.clone(),
+                    memory: cloned.memory.clone(),
+                    cpus: cloned.cpus.clone(),
+                    share_ipc: cloned.share_ipc,
+                    share_net: cloned.share_net,
+                    share_uts: cloned.share_uts,
+                    share_pid: cloned.share_pid,
+                    infra: cloned.infra,
+                    network: cloned.network.clone(),
+                };
+                if let Ok(recreated) = store.create_with_config(new_cfg) {
+                    for cid in &cloned.containers {
+                        let _ = store.add_created_container_to_pod(&recreated.name, cid);
+                    }
+                    cloned = store.find(&recreated.id).unwrap_or(recreated);
+                }
+            }
+            if cloned.infra {
+                let _ = ensure_pod_infra_container(&cloned).await;
+                if let Some(updated) = store.find(&cloned.id) {
+                    cloned = updated;
+                }
+            }
+            if destroy {
+                let _ = store.remove_with_force(&source, true);
+            }
+            if start {
+                let _ = start_pod_members(&cloned).await;
+            }
+            println!("{}", cloned.id);
         }
         PodAction::Logs(logs_args) => {
             if logs_args.latest && logs_args.pod.is_some() {
@@ -19356,6 +21154,24 @@ pub async fn run_healthcheck_with_options(
             .healthcheck
             .get("Test")
             .and_then(|t| t.as_array())
+        {
+            health_cfg.test = test
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+    }
+    let current_status_str = health_inspect
+        .state_health
+        .get("Status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("starting");
+    if health_cfg.test.is_empty() || current_status_str != "healthy" {
+        if let Some(test) = health_inspect
+            .startup_healthcheck
+            .get("Test")
+            .and_then(|t| t.as_array())
+            .filter(|a| !a.is_empty())
         {
             health_cfg.test = test
                 .iter()

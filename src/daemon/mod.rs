@@ -67,7 +67,10 @@ pub fn create_router(state: DaemonState) -> Router {
     Router::new()
         .route("/_ping", get(ping))
         .route("/libpod/_ping", get(ping))
-        .route("/v1.45/libpod/_ping", get(ping))
+        .route("/{version}/libpod/_ping", get(ping))
+        .route("/{version}/_ping", get(ping))
+        .route("/libpod/play/kube", post(play_kube_endpoint).delete(down_kube_endpoint))
+        .route("/{version}/libpod/play/kube", post(play_kube_endpoint).delete(down_kube_endpoint))
         .route("/version", get(version))
         .route("/v1.45/version", get(version))
         .route("/info", get(info))
@@ -356,13 +359,24 @@ pub async fn run_podman_system_service(
         );
     }
 
+    let globals = crate::cli::podman_globals::podman_global_options();
     let mut state_meta = serde_json::json!({
         "uri": resolved_uri,
-        "graph_root": crate::cli::podman_globals::podman_global_options()
+        "graph_root": globals
             .root
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| crate::storage::boxr_home().display().to_string()),
+        "network_config_dir": globals
+            .network_config_dir
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        "cdi_spec_dirs": globals
+            .cdi_spec_dirs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<String>>(),
         "tls": tls_cert.is_some() && tls_key.is_some(),
         "mtls": tls_client_ca.is_some(),
         "tls_ca": tls_client_ca.unwrap_or(""),
@@ -573,6 +587,100 @@ pub async fn start_daemon(socket_path: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn play_kube_endpoint(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let tmp_path = std::env::temp_dir().join(format!(
+        "boxr-kube-api-{}.yaml",
+        hex::encode(crate::storage::container_store::rand_id())
+    ));
+    if fs::write(&tmp_path, &body).is_err() {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "message": "failed to write temp yaml" })),
+        );
+    }
+    let start = params
+        .get("start")
+        .map(|s| !s.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
+    let mut args = crate::cli::KubePlayArgs {
+        file: tmp_path.to_string_lossy().to_string(),
+        start,
+        ..Default::default()
+    };
+    if let Some(net) = params.get("network") {
+        args.network.push(net.clone());
+    }
+    let before_pods: std::collections::HashSet<String> = crate::pod::PodStore::new()
+        .list()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let res = crate::kube::KubeManager::play_kube_with_args(&args).await;
+    let _ = fs::remove_file(&tmp_path);
+    match res {
+        Ok(()) => {
+            let pods: Vec<serde_json::Value> = crate::pod::PodStore::new()
+                .list()
+                .into_iter()
+                .filter(|p| !before_pods.contains(&p.id))
+                .map(|p| {
+                    serde_json::json!({
+                        "ID": p.id,
+                        "Containers": p.containers,
+                    })
+                })
+                .collect();
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "Pods": pods,
+                    "RmReport": [],
+                    "Secrets": [],
+                    "StopReport": [],
+                    "Volumes": [],
+                })),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "message": e.to_string() })),
+        ),
+    }
+}
+
+async fn down_kube_endpoint(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let tmp_path = std::env::temp_dir().join(format!(
+        "boxr-kube-down-api-{}.yaml",
+        hex::encode(crate::storage::container_store::rand_id())
+    ));
+    let _ = fs::write(&tmp_path, &body);
+    let force = params
+        .get("force")
+        .map(|s| s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let _ = crate::kube::KubeManager::play_kube_down_str_with_force(
+        &tmp_path.to_string_lossy(),
+        force,
+    );
+    let _ = fs::remove_file(&tmp_path);
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "Pods": [],
+            "RmReport": [],
+            "Secrets": [],
+            "StopReport": [],
+            "Volumes": [],
+        })),
+    )
 }
 
 #[cfg(test)]

@@ -15,52 +15,62 @@ fn append_volume_tree<W: io::Write>(
     vol_uid: Option<u32>,
     vol_gid: Option<u32>,
 ) -> Result<()> {
-    let apply_owner = |path: &Path, name: &Path, tar: &mut tar::Builder<W>| -> Result<()> {
-        if let (Some(u), Some(g)) = (vol_uid, vol_gid) {
-            let mut f = File::open(path)?;
-            let meta = f.metadata()?;
-            let mut hdr = tar::Header::new_gnu();
-            hdr.set_metadata(&meta);
-            hdr.set_uid(u as u64);
-            hdr.set_gid(g as u64);
-            if let Ok(m) = fs::symlink_metadata(mountpoint) {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-                    let root_mode = m.mode() & 0o7777;
-                    if root_mode != 0o777 && root_mode != 0o755 {
-                        hdr.set_mode(((meta.permissions().mode() & 0o777) & !0o777) | root_mode);
+    tar.follow_symlinks(false);
+    fn walk_dir<W: io::Write>(
+        tar: &mut tar::Builder<W>,
+        root: &Path,
+        cur: &Path,
+        vol_uid: Option<u32>,
+        vol_gid: Option<u32>,
+    ) -> Result<()> {
+        for entry in fs::read_dir(cur)? {
+            let entry = entry?;
+            let path = entry.path();
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() {
+                if let Ok(target) = fs::read_link(&path) {
+                    let mut hdr = tar::Header::new_gnu();
+                    hdr.set_entry_type(tar::EntryType::Symlink);
+                    hdr.set_size(0);
+                    hdr.set_mode(0o777);
+                    hdr.set_cksum();
+                    let _ = tar.append_link(&mut hdr, rel, &target);
+                }
+            } else if meta.is_dir() {
+                tar.append_dir(rel, &path)?;
+                walk_dir(tar, root, &path, vol_uid, vol_gid)?;
+            } else if meta.is_file() {
+                if let (Some(u), Some(g)) = (vol_uid, vol_gid) {
+                    let mut f = File::open(&path)?;
+                    let mut hdr = tar::Header::new_gnu();
+                    hdr.set_metadata(&meta);
+                    hdr.set_uid(u as u64);
+                    hdr.set_gid(g as u64);
+                    if let Ok(m) = fs::symlink_metadata(root) {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                            let root_mode = m.mode() & 0o7777;
+                            if root_mode != 0o777 && root_mode != 0o755 {
+                                hdr.set_mode(
+                                    ((meta.permissions().mode() & 0o777) & !0o777) | root_mode,
+                                );
+                            }
+                        }
                     }
+                    hdr.set_cksum();
+                    tar.append_data(&mut hdr, rel, &mut f)?;
+                } else {
+                    tar.append_path_with_name(&path, rel)?;
                 }
             }
-            hdr.set_cksum();
-            tar.append_data(&mut hdr, name, &mut f)?;
-        } else {
-            tar.append_path_with_name(path, name)?;
         }
         Ok(())
-    };
-    for entry in fs::read_dir(mountpoint)? {
-        let path = entry?.path();
-        if path.is_file() {
-            let name = PathBuf::from(path.file_name().unwrap_or_default());
-            apply_owner(&path, &name, tar)?;
-        } else if path.is_dir() {
-            let prefix = path.file_name().map(|n| n.to_owned()).unwrap_or_default();
-            for sub in fs::read_dir(&path)? {
-                let subpath = sub?.path();
-                if subpath.is_file() {
-                    let rel = PathBuf::from(format!(
-                        "{}/{}",
-                        prefix.to_string_lossy(),
-                        subpath.file_name().unwrap_or_default().to_string_lossy()
-                    ));
-                    apply_owner(&subpath, &rel, tar)?;
-                }
-            }
-        }
     }
-    Ok(())
+    walk_dir(tar, mountpoint, mountpoint, vol_uid, vol_gid)
 }
 
 impl VolumeOps {
@@ -140,7 +150,26 @@ impl VolumeOps {
                         root_mode = Some(mode);
                     }
                 }
-                let _ = entry.unpack_in(&mountpoint);
+                let is_symlink = entry.header().entry_type().is_symlink();
+                let rel_path_opt = entry.path().ok().map(|p| p.into_owned());
+                let link_target_opt = entry
+                    .link_name()
+                    .ok()
+                    .flatten()
+                    .map(|p| p.into_owned());
+                if entry.unpack_in(&mountpoint).unwrap_or(false) == false && is_symlink {
+                    if let (Some(rel_path), Some(link_target)) = (rel_path_opt, link_target_opt) {
+                        let dst = mountpoint.join(&rel_path);
+                        if let Some(p) = dst.parent() {
+                            let _ = fs::create_dir_all(p);
+                        }
+                        let _ = fs::remove_file(&dst);
+                        #[cfg(unix)]
+                        {
+                            let _ = std::os::unix::fs::symlink(&link_target, &dst);
+                        }
+                    }
+                }
             }
         }
         #[cfg(unix)]

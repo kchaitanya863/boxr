@@ -23,6 +23,8 @@ pub struct PodmanGlobalOptions {
     pub tls_ca: Option<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    pub network_config_dir: Option<PathBuf>,
+    pub cdi_spec_dirs: Vec<PathBuf>,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -36,6 +38,16 @@ pub fn podman_global_options() -> PodmanGlobalOptions {
 }
 
 pub fn set_podman_global_options(opts: PodmanGlobalOptions) {
+    if let Some(ref r) = opts.root {
+        unsafe {
+            std::env::set_var("BOXR_HOME", r);
+        }
+    }
+    if let Some(ref nd) = opts.network_config_dir {
+        unsafe {
+            std::env::set_var("BOXR_NETWORK_CONFIG_DIR", nd);
+        }
+    }
     if let Ok(mut guard) = PARSED_GLOBALS.lock() {
         *guard = Some(opts);
     }
@@ -52,6 +64,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--module",
     "--conmon",
     "--network-config-dir",
+    "--cdi-spec-dir",
     "--cgroup-manager",
     "--events-backend",
     "--runtime",
@@ -276,6 +289,30 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 continue;
             }
         }
+        if let Some(v) = a.strip_prefix("--network-config-dir=") {
+            opts.network_config_dir = Some(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--network-config-dir" {
+            if i + 1 < argv.len() {
+                opts.network_config_dir = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--cdi-spec-dir=") {
+            opts.cdi_spec_dirs.push(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--cdi-spec-dir" {
+            if i + 1 < argv.len() {
+                opts.cdi_spec_dirs.push(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
         i += 1;
     }
     opts
@@ -291,6 +328,8 @@ fn strip_globals_after_subcommand(sub: &str) -> bool {
             | "system"
             | "volume"
             | "pull"
+            | "kube"
+            | "play"
             | "push"
             | "load"
             | "save"

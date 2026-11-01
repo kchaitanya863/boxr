@@ -257,7 +257,9 @@ impl ImageBuilder {
                             .unwrap_or_else(|| "/".to_string());
                         current_rootfs.join(cur.trim_start_matches('/')).join(dir)
                     };
-                    fs::create_dir_all(&dest)?;
+                    if dest.symlink_metadata().is_err() {
+                        fs::create_dir_all(&dest)?;
+                    }
                     current_config.working_dir = Some(dir.clone());
                     cache_key = format!("{}_workdir_{}", cache_key, dir);
                 }

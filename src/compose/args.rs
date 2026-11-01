@@ -6,10 +6,62 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
+pub(crate) fn resolve_cdi_device_mounts(device_id: &str) -> Vec<String> {
+    let mut mounts = Vec::new();
+    let Some((kind, dev_name)) = device_id.split_once('=') else {
+        return mounts;
+    };
+    for dir in crate::storage::effective_cdi_spec_dirs() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let val: serde_json::Value = if let Ok(v) = serde_json::from_str(&raw) {
+                v
+            } else if let Ok(v) = serde_yaml::from_str(&raw) {
+                v
+            } else {
+                continue;
+            };
+            if val.get("kind").and_then(|k| k.as_str()) != Some(kind) {
+                continue;
+            }
+            if let Some(devs) = val.get("devices").and_then(|d| d.as_array()) {
+                for dev in devs {
+                    if dev.get("name").and_then(|n| n.as_str()) == Some(dev_name) {
+                        if let Some(m_arr) = dev
+                            .get("containerEdits")
+                            .and_then(|ce| ce.get("mounts"))
+                            .and_then(|m| m.as_array())
+                        {
+                            for m in m_arr {
+                                let hp = m.get("hostPath").and_then(|s| s.as_str()).unwrap_or("");
+                                let cp =
+                                    m.get("containerPath").and_then(|s| s.as_str()).unwrap_or("");
+                                if !hp.is_empty() && !cp.is_empty() {
+                                    mounts.push(format!("{}:{}", hp, cp));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    mounts
+}
+
 impl ComposeProject {
     pub fn build_service_run_args(
         &self,
-        _svc_name: &str,
+        svc_name: &str,
         svc: &ServiceConfig,
         container_name: &str,
         image_name: &str,
@@ -49,34 +101,66 @@ impl ComposeProject {
                 }
             }
         }
-        let net_store = NetworkStore::new();
-        let svc_net = svc
-            .networks
-            .as_ref()
-            .and_then(|nets| nets.first())
-            .map(|n| format!("{}_{}", self.name, n))
-            .unwrap_or_else(|| format!("{}_default", self.name));
-
-        let mut attached_nets = vec![svc_net.clone()];
-        if let Some(nets) = &svc.networks {
-            for net_name in nets {
-                attached_nets.push(format!("{}_{}", self.name, net_name));
+        if let Some(deploy) = &svc.deploy {
+            if let Some(res) = &deploy.resources {
+                if let Some(reservations) = &res.reservations {
+                    if let Some(devs) = &reservations.devices {
+                        for d in devs {
+                            for id in &d.device_ids {
+                                for m in resolve_cdi_device_mounts(id) {
+                                    if !vol_vec.contains(&m) {
+                                        vol_vec.push(m);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        let default_net = format!("{}_default", self.name);
-        if !attached_nets.contains(&default_net) {
-            attached_nets.push(default_net);
+
+        let net_store = NetworkStore::new();
+        let net_names = svc
+            .networks
+            .as_ref()
+            .map(|n| n.network_names())
+            .unwrap_or_default();
+        let svc_net = if let Some(ref nm) = svc.network_mode {
+            nm.clone()
+        } else if let Some(first) = net_names.first() {
+            format!("{}_{}", self.name, first)
+        } else {
+            format!("{}_default", self.name)
+        };
+
+        let mut attached_nets = Vec::new();
+        if svc.network_mode.is_none() {
+            attached_nets.push(svc_net.clone());
+            for net_name in &net_names {
+                attached_nets.push(format!("{}_{}", self.name, net_name));
+            }
+            if net_names.is_empty() {
+                let default_net = format!("{}_default", self.name);
+                if !attached_nets.contains(&default_net) {
+                    attached_nets.push(default_net);
+                }
+            }
+            attached_nets.sort();
+            attached_nets.dedup();
         }
-        attached_nets.sort();
-        attached_nets.dedup();
 
         let mut add_host = Vec::new();
         for anet in &attached_nets {
             if let Some(net) = net_store.find(anet) {
                 for (_, ep) in &net.containers {
-                    add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
-                    if ep.container_id != ep.container_name {
-                        add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+                    if !ep.ipv4_address.is_empty() {
+                        add_host.push(format!("{}:{}", ep.container_name, ep.ipv4_address));
+                        if ep.container_id != ep.container_name {
+                            add_host.push(format!("{}:{}", ep.container_id, ep.ipv4_address));
+                        }
+                        for alias in &ep.aliases {
+                            add_host.push(format!("{}:{}", alias, ep.ipv4_address));
+                        }
                     }
                 }
             }
@@ -84,10 +168,59 @@ impl ComposeProject {
         add_host.sort();
         add_host.dedup();
 
+        let mut ip_override = None;
+        let mut ip6_override = None;
+        let mut mac_override = svc.mac_address.clone();
+        let mut aliases = vec![svc_name.to_string()];
+        if let Some(nets_cfg) = &svc.networks {
+            for net_name in &net_names {
+                if let Some(ep_cfg) = nets_cfg.endpoint_config(net_name) {
+                    if ip_override.is_none() && ep_cfg.ipv4_address.is_some() {
+                        ip_override = ep_cfg.ipv4_address.clone();
+                    }
+                    if ip6_override.is_none() && ep_cfg.ipv6_address.is_some() {
+                        ip6_override = ep_cfg.ipv6_address.clone();
+                    }
+                    if mac_override.is_none() && ep_cfg.mac_address.is_some() {
+                        mac_override = ep_cfg.mac_address.clone();
+                    }
+                    for a in &ep_cfg.aliases {
+                        if !aliases.contains(a) {
+                            aliases.push(a.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let labels_vec = svc.labels.as_ref().map(|l| l.to_vec()).unwrap_or_default();
+        let security_opt_vec = svc.security_opt.clone().unwrap_or_default();
+        let no_healthcheck = svc.healthcheck.as_ref().is_some_and(|h| {
+            h.disable
+                || h.test
+                    .as_ref()
+                    .is_some_and(|t| t.to_vec().first().is_some_and(|s| s == "NONE"))
+        });
+        let health_cmd = if no_healthcheck {
+            None
+        } else {
+            svc.healthcheck
+                .as_ref()
+                .and_then(|h| h.test.as_ref())
+                .map(|t| {
+                    let v = t.to_vec();
+                    if v.first().is_some_and(|s| s == "CMD" || s == "CMD-SHELL") {
+                        v[1..].join(" ")
+                    } else {
+                        v.join(" ")
+                    }
+                })
+        };
+
         Ok(RunArgs {
             registry_auth: Default::default(),
-            interactive: false,
-            tty: false,
+            interactive: svc.stdin_open.unwrap_or(false),
+            tty: svc.tty.unwrap_or(false),
             detach,
             rm: false,
             rmi: false,
@@ -102,7 +235,7 @@ impl ComposeProject {
             image_volume: None,
             memory: None,
             kernel_memory: None,
-            labels: Vec::new(),
+            labels: labels_vec,
             dns: Vec::new(),
             cidfile: None,
             conmon_pidfile: None,
@@ -110,7 +243,7 @@ impl ComposeProject {
             pids_limit: None,
             rootless: true,
             restart: svc.restart.clone().unwrap_or_else(|| "no".to_string()),
-            health_cmd: None,
+            health_cmd,
             secret: Vec::new(),
             health_startup_cmd: None,
             health_startup_interval: None,
@@ -125,13 +258,20 @@ impl ComposeProject {
             network: svc_net,
             disable_content_trust: false,
             gpus: None,
-            entrypoint: None,
+            entrypoint: svc
+                .entrypoint
+                .as_ref()
+                .and_then(|e| e.to_vec().into_iter().next()),
             tz: Vec::new(),
             env_file: None,
             user: None,
             hostuser: Vec::new(),
             group_entry: Vec::new(),
-            hostname: Some(_svc_name.to_string()),
+            hostname: Some(
+                svc.hostname
+                    .clone()
+                    .unwrap_or_else(|| svc_name.to_string()),
+            ),
             no_hostname: false,
             add_host,
             shm_size: None,
@@ -142,8 +282,8 @@ impl ComposeProject {
             read_only_tmpfs: None,
             init: false,
             tmpfs: Vec::new(),
-            devices: Vec::new(),
-            security_opt: Vec::new(),
+            devices: svc.devices.clone().unwrap_or_default(),
+            security_opt: security_opt_vec,
             cpu_shares: None,
             cpuset_cpus: None,
             memory_swap: None,
@@ -153,7 +293,7 @@ impl ComposeProject {
             expose: Vec::new(),
             sysctl: Vec::new(),
             stop_timeout: None,
-            stop_signal: None,
+            stop_signal: svc.stop_signal.clone(),
             annotations: Vec::new(),
             ulimits: Vec::new(),
             hooks_dir: None,
@@ -172,11 +312,11 @@ impl ComposeProject {
             io_maxbandwidth: None,
             io_maxiops: None,
             publish_all: false,
-            ip: None,
-            ip6: None,
-            mac_address: None,
+            ip: ip_override,
+            ip6: ip6_override,
+            mac_address: mac_override,
             link: Vec::new(),
-            network_alias: Vec::new(),
+            network_alias: aliases,
             mount: Vec::new(),
             health_interval: None,
             health_timeout: None,
@@ -184,7 +324,7 @@ impl ComposeProject {
             health_start_period: None,
             health_on_failure: None,
             health_start_interval: None,
-            no_healthcheck: false,
+            no_healthcheck,
             attach: Vec::new(),
             preserve_fds: None,
             preserve_fd: Vec::new(),

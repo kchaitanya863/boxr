@@ -51,6 +51,8 @@ pub async fn remove_network(
         Err(e) => {
             let msg = e.to_string().to_lowercase();
             if msg.contains("active endpoints")
+                || msg.contains("associated containers")
+                || msg.contains("being used")
                 || msg.contains("default bridge")
                 || msg.contains("in use")
             {

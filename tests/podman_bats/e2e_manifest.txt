@@ -29,5 +29,23 @@ pod_rm_test.go
 pod_pause_test.go
 pod_top_test.go
 port_test.go
+network_connect_disconnect_test.go
+network_create_test.go
+network_test.go
+play_kube_test.go
+pod_clone_test.go
+pod_infra_container_test.go
+pod_initcontainers_test.go
+pod_inspect_test.go
+pod_kill_test.go
+pod_pod_namespaces_test.go
+pod_prune_test.go
+pod_ps_test.go
+pod_restart_test.go
+pod_start_test.go
+pod_stats_test.go
+pod_stop_test.go
+volume_inspect_test.go
+volume_plugin_test.go
 
 

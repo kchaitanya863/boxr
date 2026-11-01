@@ -1,7 +1,7 @@
 use super::store::NetworkEndpoint;
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// Open/Closed: IP allocation strategy
 pub trait IpAllocator: Send + Sync {
@@ -49,13 +49,146 @@ pub fn parse_cidr_range(subnet_str: &str) -> Result<(u32, u32)> {
     Ok((base_u32, bcast_u32))
 }
 
+pub fn parse_ipv6_cidr_range(subnet_str: &str) -> Result<(u128, u128)> {
+    let (ip_part, mask_part) = subnet_str
+        .split_once('/')
+        .ok_or_else(|| anyhow!("invalid CIDR address: {}", subnet_str))?;
+    let base_ip: Ipv6Addr = ip_part
+        .parse()
+        .map_err(|_| anyhow!("invalid CIDR address: {}", subnet_str))?;
+    let prefix_len: u32 = mask_part
+        .parse()
+        .map_err(|_| anyhow!("invalid CIDR address: {}", subnet_str))?;
+    if prefix_len > 128 {
+        return Err(anyhow!("invalid CIDR address: {}", subnet_str));
+    }
+    let mask_u128 = if prefix_len == 0 {
+        0
+    } else {
+        (!0u128) << (128 - prefix_len)
+    };
+    let base_u128 = u128::from(base_ip) & mask_u128;
+    let end_u128 = base_u128 | (!mask_u128);
+    Ok((base_u128, end_u128))
+}
+
+pub fn normalize_cidr_and_default_gateway(cidr_str: &str) -> Result<(String, String, bool)> {
+    let trimmed = cidr_str.trim();
+    let (ip_part, mask_part) = trimmed
+        .split_once('/')
+        .ok_or_else(|| anyhow!("invalid CIDR address: {}", trimmed))?;
+    if ip_part.contains(':') {
+        let ip: Ipv6Addr = ip_part
+            .parse()
+            .map_err(|_| anyhow!("invalid CIDR address: {}", trimmed))?;
+        let prefix: u32 = mask_part
+            .parse()
+            .map_err(|_| anyhow!("invalid CIDR address: {}", trimmed))?;
+        if prefix > 128 {
+            return Err(anyhow!("invalid CIDR address: {}", trimmed));
+        }
+        let mask = if prefix == 0 {
+            0
+        } else {
+            (!0u128) << (128 - prefix)
+        };
+        let net_u128 = u128::from(ip) & mask;
+        let net_ip = Ipv6Addr::from(net_u128);
+        let gw_ip = Ipv6Addr::from(net_u128 | 1);
+        Ok((format!("{}/{}", net_ip, prefix), gw_ip.to_string(), true))
+    } else {
+        let ip: Ipv4Addr = ip_part
+            .parse()
+            .map_err(|_| anyhow!("invalid CIDR address: {}", trimmed))?;
+        let prefix: u32 = mask_part
+            .parse()
+            .map_err(|_| anyhow!("invalid CIDR address: {}", trimmed))?;
+        if prefix > 32 {
+            return Err(anyhow!("invalid CIDR address: {}", trimmed));
+        }
+        let mask = if prefix == 0 {
+            0
+        } else {
+            (!0u32) << (32 - prefix)
+        };
+        let net_u32 = u32::from(ip) & mask;
+        let net_ip = Ipv4Addr::from(net_u32);
+        let gw_ip = Ipv4Addr::from(net_u32 | 1);
+        Ok((format!("{}/{}", net_ip, prefix), gw_ip.to_string(), false))
+    }
+}
+
+pub fn cidr_contains_ip(cidr_str: &str, ip_str: &str) -> bool {
+    let Ok(ip) = ip_str.trim().parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            if cidr_str.contains(':') {
+                return false;
+            }
+            if let Ok((start, end)) = parse_cidr_range(cidr_str) {
+                let u = u32::from(v4);
+                u >= start && u <= end
+            } else {
+                false
+            }
+        }
+        IpAddr::V6(v6) => {
+            if !cidr_str.contains(':') {
+                return false;
+            }
+            if let Ok((start, end)) = parse_ipv6_cidr_range(cidr_str) {
+                let u = u128::from(v6);
+                u >= start && u <= end
+            } else {
+                false
+            }
+        }
+    }
+}
+
 pub fn subnets_overlap(sub1: &str, sub2: &str) -> Result<bool> {
-    if sub1.contains(':') || sub2.contains(':') {
-        return Ok(sub1.trim() == sub2.trim());
+    let is_v6_1 = sub1.contains(':');
+    let is_v6_2 = sub2.contains(':');
+    if is_v6_1 != is_v6_2 {
+        return Ok(false);
+    }
+    if is_v6_1 {
+        let (start1, end1) = parse_ipv6_cidr_range(sub1)?;
+        let (start2, end2) = parse_ipv6_cidr_range(sub2)?;
+        return Ok(start1 <= end2 && start2 <= end1);
     }
     let (start1, end1) = parse_cidr_range(sub1)?;
     let (start2, end2) = parse_cidr_range(sub2)?;
     Ok(start1 <= end2 && start2 <= end1)
+}
+
+pub fn allocate_ipv6_in_subnet(
+    subnet_str: &str,
+    gateway_str: &str,
+    existing: &HashMap<String, NetworkEndpoint>,
+) -> Result<String> {
+    let (base_u128, end_u128) = parse_ipv6_cidr_range(subnet_str)?;
+    let gw_opt = gateway_str.parse::<Ipv6Addr>().ok().map(u128::from);
+    let used: Vec<u128> = existing
+        .values()
+        .filter_map(|e| e.ipv6_address.parse::<Ipv6Addr>().ok())
+        .map(u128::from)
+        .collect();
+    for step in 2u128..10000u128 {
+        let cand = base_u128.saturating_add(step);
+        if cand > end_u128 {
+            break;
+        }
+        if Some(cand) != gw_opt && !used.contains(&cand) {
+            return Ok(Ipv6Addr::from(cand).to_string());
+        }
+    }
+    Err(anyhow!(
+        "No available IPv6 addresses in subnet {}",
+        subnet_str
+    ))
 }
 
 pub fn allocate_ip_in_subnet_after(
