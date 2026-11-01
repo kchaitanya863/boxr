@@ -553,7 +553,7 @@ impl RegistryPusher {
                 crate::events::EventManager::record(crate::events::ContainerEvent::new(
                     "image",
                     "push",
-                    &format!("sha256:{}", full_id),
+                    &full_id,
                     dest,
                     HashMap::new(),
                 ));
@@ -610,7 +610,7 @@ impl RegistryPusher {
         crate::events::EventManager::record(crate::events::ContainerEvent::new(
             "image",
             "push",
-            &format!("sha256:{}", image.id),
+            &image.full_hex_id(),
             &dest_label,
             HashMap::new(),
         ));

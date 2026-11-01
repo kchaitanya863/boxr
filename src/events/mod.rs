@@ -47,9 +47,13 @@ impl ContainerEvent {
                     let err_msg = self.attributes.get("error").cloned().unwrap_or_default();
                     return format!("{} image pull-error  {} {}", ts, self.actor_name, err_msg);
                 }
+                let clean_id = self
+                    .actor_id
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&self.actor_id);
                 return format!(
                     "{} image {} {} {}",
-                    ts, self.action, self.actor_id, self.actor_name
+                    ts, self.action, clean_id, self.actor_name
                 );
             }
             "volume" => {
@@ -137,7 +141,6 @@ impl ContainerEvent {
                 attrs_str.push(format!("{}={}", k, v));
             }
         }
-        attrs_str.sort();
         let attrs_formatted = if attrs_str.is_empty() {
             "".to_string()
         } else {

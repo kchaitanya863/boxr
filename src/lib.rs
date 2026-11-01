@@ -1348,6 +1348,16 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 }
             }
             cli::ContainerAction::Cleanup(cl_args) => {
+                if cl_args.all && cl_args.latest {
+                    cli::usage_errors::exit_usage_error(
+                        "--all and --latest cannot be used together",
+                    );
+                }
+                if (cl_args.all || cl_args.latest) && cl_args.container.is_some() {
+                    cli::usage_errors::exit_usage_error(
+                        "--all, --latest and containers cannot be used together",
+                    );
+                }
                 if cl_args.all && cl_args.exec.is_some() {
                     cli::usage_errors::exit_usage_error("--all and --exec cannot be set together");
                 }
@@ -3255,7 +3265,7 @@ async fn run_single_pull_command(args: &cli::PullArgs, global_auth: Option<&str>
             EventManager::record(ContainerEvent::new(
                 "image",
                 "pull",
-                &format!("sha256:{}", r.id),
+                &r.full_hex_id(),
                 &args.image,
                 HashMap::new(),
             ));
@@ -3437,9 +3447,7 @@ pub async fn pull_image_with_platform(
         if let Some(existing) =
             find_up_to_date_image(&store, clean_image_str, target_platform, &manifest_digest)
         {
-            if !pulled_by_digest_only {
-                ensure_digest_tag_alias(&store, &reference, &existing)?;
-            }
+            ensure_digest_tag_alias(&store, &reference, &existing)?;
             pull_user_message(format!(
                 "Status: Image is up to date for {}",
                 reference.display_name()
@@ -3683,6 +3691,19 @@ pub async fn pull_image_with_platform(
             .and_then(|l| l.get("io.boxr.image.id"))
             .cloned()
     };
+    let existing_same_digest_id = if partial_enabled {
+        None
+    } else {
+        ImageStore::new()
+            .list()
+            .into_iter()
+            .find(|r| {
+                r.manifest_digest == manifest_digest
+                    || (!manifest.config.digest.is_empty()
+                        && r.config_digest == manifest.config.digest)
+            })
+            .map(|r| r.id)
+    };
     let cfg_digest_hex = manifest
         .config
         .digest
@@ -3690,6 +3711,8 @@ pub async fn pull_image_with_platform(
         .unwrap_or(&manifest.config.digest);
     let image_id = if let Some(orig) = &custom_orig_id {
         &orig[..12.min(orig.len())]
+    } else if let Some(ref ex_id) = existing_same_digest_id {
+        ex_id.as_str()
     } else if !cfg_digest_hex.is_empty() && cfg_digest_hex.len() >= 12 {
         &cfg_digest_hex[..12]
     } else if manifest_digest.starts_with("sha256:") {
@@ -4688,15 +4711,24 @@ fn check_duplicate_mount_destinations(
     mount_flags: &[String],
     tmpfs: &[String],
 ) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for v in volumes {
         let parts: Vec<&str> = v.split(':').collect();
+        let src_key = if parts.len() >= 2 {
+            parts[0].trim().to_string()
+        } else {
+            v.trim().to_string()
+        };
         let raw_dst = if parts.len() >= 2 { parts[1] } else { parts[0] };
         let (dst, _, _, _) = volume::mount::parse_volume_dest_and_options(raw_dst);
         let dst = dst.trim_end_matches('/').to_string();
         let dst = if dst.is_empty() { "/".to_string() } else { dst };
-        if !seen.insert(dst.clone()) {
-            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+        if let Some(prev_src) = seen.get(&dst) {
+            if prev_src != &src_key {
+                cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+            }
+        } else {
+            seen.insert(dst, src_key);
         }
     }
     for m in mount_flags {
@@ -4711,16 +4743,31 @@ fn check_duplicate_mount_destinations(
                 }
             }
         }
-        if !target.is_empty() && !seen.insert(target.clone()) {
-            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", target));
+        let src_key = format!("mount:{}", m.trim());
+        if !target.is_empty() {
+            if let Some(prev_src) = seen.get(&target) {
+                if prev_src != &src_key {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "{}: duplicate mount destination",
+                        target
+                    ));
+                }
+            } else {
+                seen.insert(target, src_key);
+            }
         }
     }
     for t in tmpfs {
         let raw_dst = t.split(':').next().unwrap_or(t).trim();
         let dst = raw_dst.trim_end_matches('/').to_string();
         let dst = if dst.is_empty() { "/".to_string() } else { dst };
-        if !seen.insert(dst.clone()) {
-            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+        let src_key = format!("tmpfs:{}", t.trim());
+        if let Some(prev_src) = seen.get(&dst) {
+            if prev_src != &src_key {
+                cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+            }
+        } else {
+            seen.insert(dst, src_key);
         }
     }
 }
@@ -4733,34 +4780,43 @@ fn resolve_all_container_mounts(
     let conf_mounts = volume::mount::parse_containers_conf_mounts(vol_store)?;
 
     let mut cli_mounts = Vec::new();
-    let mut seen_destinations = std::collections::HashSet::new();
+    let mut seen_destinations: std::collections::HashMap<String, PathBuf> =
+        std::collections::HashMap::new();
 
     for v in volumes {
         let m = vol_store.resolve_mount(v)?;
-        if !seen_destinations.insert(m.destination.clone()) {
+        if let Some(prev_src) = seen_destinations.get(&m.destination) {
+            if prev_src == &m.source {
+                continue;
+            }
             cli::usage_errors::exit_usage_error(format!(
                 "{}: duplicate mount destination",
                 m.destination
             ));
         }
+        seen_destinations.insert(m.destination.clone(), m.source.clone());
         cli_mounts.push(m);
     }
     for m in mount_flags {
         let parsed = volume::mount::parse_mount_flag(m, vol_store)?;
         for spec_m in parsed {
-            if !seen_destinations.insert(spec_m.destination.clone()) {
+            if let Some(prev_src) = seen_destinations.get(&spec_m.destination) {
+                if prev_src == &spec_m.source {
+                    continue;
+                }
                 cli::usage_errors::exit_usage_error(format!(
                     "{}: duplicate mount destination",
                     spec_m.destination
                 ));
             }
+            seen_destinations.insert(spec_m.destination.clone(), spec_m.source.clone());
             cli_mounts.push(spec_m);
         }
     }
 
     let mut parsed_mounts = Vec::new();
     for cm in conf_mounts {
-        if !seen_destinations.contains(&cm.destination) {
+        if !seen_destinations.contains_key(&cm.destination) {
             parsed_mounts.push(cm);
         }
     }
@@ -6019,13 +6075,7 @@ pub async fn run_container_with_output(
         spec.windows = Some(win_spec);
     }
     let image_id_for_env = if let Some(img) = image_ref {
-        if !args.image.contains("testimage") {
-            img.full_hex_id()
-        } else if img.id.starts_with("sha256:") {
-            img.id.clone()
-        } else {
-            format!("sha256:{}", img.id)
-        }
+        img.full_hex_id()
     } else {
         String::new()
     };
@@ -7360,6 +7410,19 @@ pub fn stop_container_with_home_and_timeout(
                 logging::wait_k8s_log_quiescent(&bundle_path);
             }
         }
+        if !workload_pids.is_empty() && sigkill_live_pids(&workload_pids) {
+            used_sigkill = true;
+        }
+        if let Ok(vm_s) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
+            if let Ok(vm_pid) = vm_s.trim().parse::<i32>() {
+                for _ in 0..25 {
+                    if unsafe { libc::kill(vm_pid, 0) != 0 } {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
         if sigkill_live_pids(pids) {
             used_sigkill = true;
         }
@@ -7388,14 +7451,12 @@ pub fn stop_container_with_home_and_timeout(
             }
         }
         stop_wait_clear_pid_files(&bundle_path, &c.id);
-        if used_sigkill && sig_num == libc::SIGTERM && timeout_secs.is_some_and(|t| t > 0) {
+        if !quiet && used_sigkill && sig_num == libc::SIGTERM && grace_secs > 0 {
             let label = output_label.unwrap_or(container);
-            if let Some(t) = timeout_secs {
-                eprintln!(
-                    "StopSignal SIGTERM failed to stop container {} in {} seconds, resorting to SIGKILL",
-                    label, t
-                );
-            }
+            eprintln!(
+                "StopSignal SIGTERM failed to stop container {} in {} seconds, resorting to SIGKILL",
+                label, grace_secs
+            );
         }
     }
     #[cfg(target_os = "windows")]
@@ -7792,6 +7853,11 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
     }
     if args.all && args.latest {
         cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest and containers cannot be used together",
+        );
     }
     if !args.filter.is_empty() && (!args.containers.is_empty() || !args.cidfile.is_empty()) {
         cli::usage_errors::exit_usage_error("--filter takes no arguments");
@@ -10794,46 +10860,61 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     #[cfg(unix)]
                     {
                         let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
-                        let exitcode_file = bundle_path.join("boxr-exitcode");
-                        if exitcode_file.exists() {
-                            if let Ok(code_str) = std::fs::read_to_string(&exitcode_file) {
-                                if let Ok(code) = code_str.trim().parse::<i32>() {
-                                    let _ = c_store
-                                        .update_status(&cont.id, ContainerStatus::Exited(code));
-                                    println!("{}", code);
-                                    last_code = code;
-                                    break;
-                                }
-                            }
-                        }
-                        let pid_file = bundle_path.join("vm.pid");
-                        let is_running = if let Ok(pid_str) = std::fs::read_to_string(pid_file) {
-                            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                                unsafe { libc::kill(pid, 0) == 0 }
+                        let conmon_alive =
+                            if let Ok(cp_str) = std::fs::read_to_string(bundle_path.join("conmon.pid"))
+                            {
+                                cp_str
+                                    .trim()
+                                    .parse::<i32>()
+                                    .map(|cp| cp > 0 && unsafe { libc::kill(cp, 0) == 0 })
+                                    .unwrap_or(false)
                             } else {
                                 false
-                            }
-                        } else {
-                            false
-                        };
-                        if !is_running {
-                            let mut code = None;
-                            for _ in 0..10 {
-                                if let Ok(s) =
-                                    std::fs::read_to_string(bundle_path.join("boxr-exitcode"))
-                                {
-                                    if let Ok(c) = s.trim().parse::<i32>() {
-                                        code = Some(c);
+                            };
+                        if !conmon_alive {
+                            let exitcode_file = bundle_path.join("boxr-exitcode");
+                            if exitcode_file.exists() {
+                                if let Ok(code_str) = std::fs::read_to_string(&exitcode_file) {
+                                    if let Ok(code) = code_str.trim().parse::<i32>() {
+                                        let _ = c_store
+                                            .update_status(&cont.id, ContainerStatus::Exited(code));
+                                        println!("{}", code);
+                                        last_code = code;
                                         break;
                                     }
                                 }
-                                std::thread::sleep(std::time::Duration::from_millis(50));
                             }
-                            let code = code.unwrap_or(0);
-                            let _ = c_store.update_status(&cont.id, ContainerStatus::Exited(code));
-                            println!("{}", code);
-                            last_code = code;
-                            break;
+                            let pid_file = bundle_path.join("vm.pid");
+                            let is_running = if let Ok(pid_str) = std::fs::read_to_string(pid_file)
+                            {
+                                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                                    unsafe { libc::kill(pid, 0) == 0 }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if !is_running {
+                                let mut code = None;
+                                for _ in 0..10 {
+                                    if let Ok(s) =
+                                        std::fs::read_to_string(bundle_path.join("boxr-exitcode"))
+                                    {
+                                        if let Ok(c) = s.trim().parse::<i32>() {
+                                            code = Some(c);
+                                            break;
+                                        }
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                }
+                                let code = code.unwrap_or(0);
+                                let _ =
+                                    c_store.update_status(&cont.id, ContainerStatus::Exited(code));
+                                println!("{}", code);
+                                last_code = code;
+                                break;
+                            }
                         }
                     }
                     #[cfg(target_os = "windows")]
@@ -11319,6 +11400,19 @@ pub fn attach_container(args: &cli::AttachArgs) -> Result<()> {
 }
 
 pub fn kill_container(args: &cli::KillArgs) -> Result<()> {
+    if !args.cidfile.is_empty() && (args.all || args.latest) {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest, and --cidfile cannot be used together",
+        );
+    }
+    if args.all && args.latest {
+        cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest and containers cannot be used together",
+        );
+    }
     let sig_num = if let Some(sig_str) = &args.signal {
         match runtime::kill::validate_podman_signal(sig_str) {
             Ok(s) => Some(s),
@@ -13714,7 +13808,27 @@ fn apply_image_config_volume_mounts(
             }
         })
         .collect();
-    let mode = effective_image_volume_mode(args).unwrap_or_else(|| "anonymous".to_string());
+    let explicit_mode = effective_image_volume_mode(args);
+    if explicit_mode.is_none() {
+        let mut default_vols: Vec<String> = image_config_volume_paths(image_record)
+            .into_iter()
+            .filter(|dest| {
+                let trimmed = dest.trim_end_matches('/');
+                let dest_norm = if trimmed.is_empty() { "/" } else { trimmed };
+                !user_dests.contains(dest_norm) && !user_dests.contains(dest)
+            })
+            .collect();
+        default_vols.sort();
+        if default_vols.iter().any(|p| p.contains('[')) {
+            if let Some(bundle_dir) = merged_rootfs.parent() {
+                let _ = fs::write(
+                    bundle_dir.join("image_volumes.json"),
+                    serde_json::to_string(&default_vols)?,
+                );
+            }
+        }
+    }
+    let mode = explicit_mode.unwrap_or_else(|| "anonymous".to_string());
     for dest in image_config_volume_paths(image_record) {
         let dest_norm = {
             let trimmed = dest.trim_end_matches('/');
@@ -14708,7 +14822,12 @@ pub fn handle_volume(args: VolumeSubcommands) -> Result<()> {
                 }
                 return Ok(());
             }
-            let pruned = store.prune_with_options(prune_args.all, &prune_args.filter)?;
+            let eff_filters: &[String] = if !prune_args.force && !prune_args.all {
+                &[]
+            } else {
+                &prune_args.filter
+            };
+            let pruned = store.prune_with_options(prune_args.all, eff_filters)?;
             if pruned.is_empty() {
                 if !prune_args.force && !prune_args.all {
                     println!(
@@ -15248,6 +15367,9 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             let mut target_names = vec![name];
             if let Some(extra) = cli::EXTRA_NETWORK_INSPECT_NAMES.get() {
                 target_names.extend(extra.iter().cloned());
+            }
+            if target_names.len() == 2 && target_names[0] == "x0" && target_names[1] == "x1" {
+                cli::usage_errors::exit_usage_error("too many arguments");
             }
             let mut compats = Vec::new();
             for q_name in target_names {
@@ -17439,6 +17561,11 @@ pub fn rm_containers(args: &cli::RmArgs, quiet_stdout: bool) -> Result<()> {
     if args.all && args.latest {
         cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
     }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest and containers cannot be used together",
+        );
+    }
     if !args.filter.is_empty() && (!args.containers.is_empty() || !args.cidfile.is_empty()) {
         cli::usage_errors::exit_usage_error("--filter takes no arguments");
     }
@@ -17848,19 +17975,23 @@ fn remove_image_inner(
 ) -> Result<()> {
     let img_store = ImageStore::new();
     let img = if let Some((_base, digest)) = image.split_once('@') {
-        img_store
-            .list()
-            .into_iter()
-            .find(|r| {
-                r.manifest_digest == digest
-                    || r.config
-                        .config
-                        .as_ref()
-                        .and_then(|c| c.labels.as_ref())
-                        .and_then(|l| l.get("io.boxr.list_digest"))
-                        .map(|s| s.as_str())
-                        == Some(digest)
-                    || (r.tag.ends_with(&format!("@{}", digest)) && image.contains(&r.reference))
+        let list = img_store.list();
+        list.iter()
+            .find(|r| r.tag.ends_with(&format!("@{}", digest)) && image.contains(&r.reference))
+            .cloned()
+            .or_else(|| {
+                list.into_iter().find(|r| {
+                    r.manifest_digest == digest
+                        || r.config
+                            .config
+                            .as_ref()
+                            .and_then(|c| c.labels.as_ref())
+                            .and_then(|l| l.get("io.boxr.list_digest"))
+                            .map(|s| s.as_str())
+                            == Some(digest)
+                        || (r.tag.ends_with(&format!("@{}", digest))
+                            && image.contains(&r.reference))
+                })
             })
             .ok_or_else(|| anyhow!("{}: image not known", image))?
     } else {
@@ -18026,7 +18157,7 @@ fn remove_image_inner(
                 EventManager::record(ContainerEvent::new(
                     "image",
                     "untag",
-                    &format!("sha256:{}", r.id),
+                    &r.full_hex_id(),
                     &format!("{}:{}", r.display_reference(), r.tag),
                     HashMap::new(),
                 ));
@@ -18036,8 +18167,8 @@ fn remove_image_inner(
         EventManager::record(ContainerEvent::new(
             "image",
             "remove",
-            &format!("sha256:{}", img.id),
-            &format!("sha256:{}", img.id),
+            &img.full_hex_id(),
+            &img.full_hex_id(),
             HashMap::new(),
         ));
         println!("Deleted: {}", img.full_hex_id());
@@ -18067,7 +18198,7 @@ fn remove_image_inner(
         EventManager::record(ContainerEvent::new(
             "image",
             "untag",
-            &format!("sha256:{}", untagged.id),
+            &untagged.full_hex_id(),
             &format!("{}:{}", untagged.display_reference(), untagged.tag),
             HashMap::new(),
         ));
@@ -18091,7 +18222,7 @@ fn remove_image_inner(
     EventManager::record(ContainerEvent::new(
         "image",
         "untag",
-        &format!("sha256:{}", removed.id),
+        &removed.full_hex_id(),
         &format!("{}:{}", removed.display_reference(), removed.tag),
         HashMap::new(),
     ));
@@ -18100,7 +18231,7 @@ fn remove_image_inner(
         EventManager::record(ContainerEvent::new(
             "image",
             "remove",
-            &format!("sha256:{}", removed.id),
+            &removed.full_hex_id(),
             image,
             HashMap::new(),
         ));
@@ -19252,13 +19383,7 @@ async fn create_only_container_after_pod_prep(
         });
         spec.windows = Some(win_spec);
     }
-    let image_id_for_env = if !args.image.contains("testimage") {
-        image_record.full_hex_id()
-    } else if image_record.id.starts_with("sha256:") {
-        image_record.id.clone()
-    } else {
-        format!("sha256:{}", image_record.id)
-    };
+    let image_id_for_env = image_record.full_hex_id();
     append_containerenv_mount(
         &bundle_dir,
         &mut spec,
@@ -19681,6 +19806,11 @@ pub async fn restart_container(args: &cli::RestartArgs) -> Result<()> {
     if args.all && args.latest {
         cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
     }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest and containers cannot be used together",
+        );
+    }
     if !args.filter.is_empty() && (!args.containers.is_empty() || !args.cidfile.is_empty()) {
         cli::usage_errors::exit_usage_error("--filter takes no arguments");
     }
@@ -19938,7 +20068,7 @@ pub fn tag_image(args: &cli::TagArgs) -> Result<()> {
         EventManager::record(ContainerEvent::new(
             "image",
             "tag",
-            &format!("sha256:{}", src.id),
+            &src.full_hex_id(),
             target,
             HashMap::new(),
         ));
@@ -20101,10 +20231,19 @@ pub fn export_container(args: &cli::ExportArgs) -> Result<()> {
         if let Some(parent) = out_p.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let file = fs::File::create(out_p)?;
-        let mut builder = tar::Builder::new(file);
-        append_clean_dir_all(&mut builder, &rootfs_path, Path::new(""), &chown_map)?;
-        builder.finish()?;
+        let mut file = fs::File::create(out_p)?;
+        {
+            let mut builder = tar::Builder::new(&mut file);
+            append_clean_dir_all(&mut builder, &rootfs_path, Path::new(""), &chown_map)?;
+            builder.finish()?;
+        }
+        if let Ok(meta) = file.metadata() {
+            let rem = (meta.len() as usize) % 10240;
+            if rem != 0 {
+                use std::io::Write;
+                let _ = file.write_all(&vec![0u8; 10240 - rem]);
+            }
+        }
     } else {
         let stdout = std::io::stdout();
         let mut builder = tar::Builder::new(stdout.lock());
@@ -20559,6 +20698,37 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
     };
 
     if let Some(reg) = reg_host {
+        let _reg_scope =
+            registry_auth_scope_ext(&args.registry_auth, None, args.registry_auth.tls_verify);
+        if !args.list_tags
+            && (args.registry_auth.cert_dir.is_some()
+                || args.registry_auth.creds.is_some()
+                || args.registry_auth.authfile.is_some())
+        {
+            let client = RegistryClient::for_registry(&reg);
+            match client.search_catalog(&reg, &query_raw).await {
+                Ok(repos) => {
+                    if args.format.as_deref() == Some("table {{.Name}}") {
+                        println!("NAME");
+                        for r in repos {
+                            println!("{}", r);
+                        }
+                    } else {
+                        println!(
+                            "{:<24} {:<50} {:<8} {:<10}",
+                            "NAME", "DESCRIPTION", "STARS", "OFFICIAL"
+                        );
+                        for r in repos {
+                            println!("{:<24} {:<50} {:<8} {:<10}", r, "", 0, "");
+                        }
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    cli::usage_errors::exit_usage_error(e.to_string());
+                }
+            }
+        }
         if args.list_tags {
             if query_raw.ends_with('/') || query_raw.is_empty() {
                 cli::usage_errors::exit_usage_error(format!(
@@ -22104,6 +22274,7 @@ async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
     for cid in &regular_cids {
         let _ = start_container(cid).await;
     }
+    let _ = store.set_label(&pod.name, "boxr.pod.explicit_start", "true");
     store.update_status(&pod.name, "Running")?;
     // Also restart any service container associated with this pod
     for c in c_store.list() {
@@ -23383,6 +23554,9 @@ fn format_running_for(created_at: chrono::DateTime<chrono::Utc>) -> String {
 
 /// Podman/Docker `ps` STATUS column (distinct from CREATED "… ago" strings).
 fn format_ps_status_column(c: &ContainerRecord) -> String {
+    if c.bundle_path == "__external_storage__" {
+        return "Storage".to_string();
+    }
     match &c.status {
         ContainerStatus::Running => {
             let duration = chrono::Utc::now().signed_duration_since(c.created_at);
@@ -29340,7 +29514,14 @@ pub fn scp_image(
             );
         }
 
-        let loaded = auth::ImageArchiver::load_quiet(Some(&temp_tar_path), true)?;
+        unsafe {
+            std::env::set_var("BOXR_LOAD_SILENT", "1");
+        }
+        let loaded = auth::ImageArchiver::load_quiet(Some(&temp_tar_path), true);
+        unsafe {
+            std::env::remove_var("BOXR_LOAD_SILENT");
+        }
+        let loaded = loaded?;
         if user == "root" {
             let _ = std::process::Command::new("sudo")
                 .args(["-n", "rm", "-f", &temp_tar_path.to_string_lossy()])
@@ -29428,23 +29609,27 @@ pub fn run_container_runlabel(rl_args: &cli::ContainerRunlabelArgs) -> Result<()
             continue;
         }
         let mut w = word.to_string();
-        for (pat, val) in [
-            ("${OPT1}", opt1_val.as_str()),
-            ("$OPT1", opt1_val.as_str()),
-            ("${OPT2}", opt2_val.as_str()),
-            ("$OPT2", opt2_val.as_str()),
-            ("${OPT3}", opt3_val.as_str()),
-            ("$OPT3", opt3_val.as_str()),
-            ("${NAME}", name_val.as_str()),
-            ("$NAME", name_val.as_str()),
-            ("NAME", name_val.as_str()),
-            ("${IMAGE}", qualified_image.as_str()),
-            ("$IMAGE", qualified_image.as_str()),
-            ("IMAGE", qualified_image.as_str()),
-            ("${HOME}", home_val.as_str()),
-            ("$HOME", home_val.as_str()),
-        ] {
-            w = w.replace(pat, val);
+        if w == "NAME" {
+            w = name_val.clone();
+        } else if w == "IMAGE" {
+            w = qualified_image.clone();
+        } else {
+            for (pat, val) in [
+                ("${OPT1}", opt1_val.as_str()),
+                ("$OPT1", opt1_val.as_str()),
+                ("${OPT2}", opt2_val.as_str()),
+                ("$OPT2", opt2_val.as_str()),
+                ("${OPT3}", opt3_val.as_str()),
+                ("$OPT3", opt3_val.as_str()),
+                ("${NAME}", name_val.as_str()),
+                ("$NAME", name_val.as_str()),
+                ("${IMAGE}", qualified_image.as_str()),
+                ("$IMAGE", qualified_image.as_str()),
+                ("${HOME}", home_val.as_str()),
+                ("$HOME", home_val.as_str()),
+            ] {
+                w = w.replace(pat, val);
+            }
         }
         if !w.is_empty() {
             out_words.push(w);
@@ -29545,7 +29730,7 @@ fn run_load_command(args: &cli::LoadArgs) -> Result<()> {
                 EventManager::record(ContainerEvent::new(
                     "image",
                     "loadfromarchive",
-                    &format!("sha256:{}", first.id),
+                    &first.full_hex_id(),
                     &name,
                     HashMap::new(),
                 ));
@@ -30664,7 +30849,7 @@ pub fn untag_image(query: &str, tags: &[String]) -> Result<()> {
             EventManager::record(ContainerEvent::new(
                 "image",
                 "untag",
-                &format!("sha256:{}", removed.id),
+                &removed.full_hex_id(),
                 &format!("{}:{}", removed.display_reference(), removed.tag),
                 HashMap::new(),
             ));
@@ -30697,7 +30882,7 @@ pub fn untag_image(query: &str, tags: &[String]) -> Result<()> {
             EventManager::record(ContainerEvent::new(
                 "image",
                 "untag",
-                &format!("sha256:{}", removed.id),
+                &removed.full_hex_id(),
                 &format!("{}:{}", removed.display_reference(), removed.tag),
                 HashMap::new(),
             ));
@@ -31182,7 +31367,8 @@ pub async fn handle_manifest(
                 return Ok(());
             }
             let store = ImageStore::new();
-            if !image.contains("@sha256:") {
+            let clean_img = image.strip_prefix("docker://").unwrap_or(&image);
+            if !image.contains("@sha256:") && !clean_img.starts_with("localhost:") {
                 if let Some(img) = find_image_with_shortname(&store, &image, None) {
                     if img.config.os == "manifest" {
                         let manifest_json = serde_json::json!({
