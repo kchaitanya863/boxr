@@ -498,12 +498,16 @@ fn prepare_bind_mount_target(
 ) -> std::path::PathBuf {
     let clean_dest = destination.trim_start_matches('/');
     let target = rootfs.join(clean_dest);
-    if source.exists() && !source.is_dir() {
+    let src_is_non_dir = (source.exists() && !source.is_dir())
+        || source.symlink_metadata().is_ok_and(|m| !m.is_dir());
+    if src_is_non_dir {
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        if target.is_dir() {
+        if target.is_dir() && !target.is_symlink() {
             let _ = fs::remove_dir(&target);
+        } else if !target.exists() && target.symlink_metadata().is_ok() {
+            let _ = fs::remove_file(&target);
         }
         if !target.exists() {
             let _ = fs::File::create(&target);
@@ -1052,6 +1056,16 @@ fn wait_for_detached_conmon_start(bundle_path: &Path, supervisor: &mut Child) ->
 }
 
 #[cfg(unix)]
+fn container_sdnotify_dir(bundle_path: &Path) -> PathBuf {
+    let cid = bundle_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("default");
+    let short = &cid[..12.min(cid.len())];
+    PathBuf::from(format!("/tmp/boxr-sdn-{}", short))
+}
+
+#[cfg(unix)]
 fn send_sd_notify(socket_path: &str, msg: &str) {
     use std::os::unix::net::UnixDatagram;
     if socket_path.is_empty() {
@@ -1110,7 +1124,56 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                 if let Some(sock) = ann.get("boxr.sdnotify_socket") {
                     if mode == "conmon" {
                         send_sd_notify(sock, &format!("MAINPID={}\nREADY=1", conmon_pid));
-                    } else if mode == "container" || mode == "healthy" {
+                    } else if mode == "container" {
+                        send_sd_notify(sock, &format!("MAINPID={}", conmon_pid));
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            use std::os::unix::net::UnixDatagram;
+                            let notify_dir = container_sdnotify_dir(bundle_path);
+                            let _ = fs::create_dir_all(&notify_dir);
+                            let _ =
+                                fs::set_permissions(&notify_dir, fs::Permissions::from_mode(0o777));
+                            let proxy_path = notify_dir.join("notify.sock");
+                            let _ = fs::remove_file(&proxy_path);
+                            if let Ok(proxy_sock) = UnixDatagram::bind(&proxy_path) {
+                                let _ = fs::set_permissions(
+                                    &proxy_path,
+                                    fs::Permissions::from_mode(0o777),
+                                );
+                                let host_sock = sock.clone();
+                                let bp = bundle_path.to_path_buf();
+                                thread::spawn(move || {
+                                    let mut buf = [0u8; 4096];
+                                    while let Ok(n) = proxy_sock.recv(&mut buf) {
+                                        if n == 0 {
+                                            continue;
+                                        }
+                                        let msg = String::from_utf8_lossy(&buf[..n]).to_string();
+                                        if msg.contains("READY=1") {
+                                            let _ = fs::write(bp.join("sdnotify-ready"), "1");
+                                        }
+                                        if !host_sock.is_empty()
+                                            && host_sock != proxy_path.to_string_lossy()
+                                            && !host_sock.ends_with("/notify/notify.sock")
+                                        {
+                                            let filtered_lines: Vec<&str> = msg
+                                                .lines()
+                                                .filter(|l| !l.starts_with("BARRIER="))
+                                                .collect();
+                                            if !filtered_lines.is_empty() {
+                                                let mut out_msg = filtered_lines.join("\n");
+                                                if msg.ends_with('\n') {
+                                                    out_msg.push('\n');
+                                                }
+                                                send_sd_notify(&host_sock, &out_msg);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    } else if mode == "healthy" {
                         send_sd_notify(sock, &format!("MAINPID={}", conmon_pid));
                     }
                 }
@@ -1352,13 +1415,18 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                 }
                 status
             };
-            let exit_code = status.code().unwrap_or(1);
+            let mut exit_code = status.code().unwrap_or(1);
             let still_current_conmon = fs::read_to_string(bundle_path.join("conmon.pid"))
                 .ok()
                 .and_then(|s| s.trim().parse::<i32>().ok())
                 == Some(conmon_pid);
             if !still_current_conmon {
                 return Ok(exit_code);
+            }
+            if let Ok(svc_ec) = fs::read_to_string(bundle_path.join("service-exitcode")) {
+                if let Ok(parsed_ec) = svc_ec.trim().parse::<i32>() {
+                    exit_code = parsed_ec;
+                }
             }
             let _ = fs::write(bundle_path.join("boxr-exitcode"), exit_code.to_string());
             let mut systemd_stop_ok = false;
@@ -1373,21 +1441,18 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                         {
                             systemd_stop_ok = true;
                         }
-                        if let Some(sock) = ann.get("boxr.sdnotify_socket") {
-                            let mode = ann
-                                .get("boxr.sdnotify_mode")
-                                .map(|s| s.as_str())
-                                .unwrap_or("conmon");
-                            if mode != "ignore" || ann.contains_key("boxr.kube_service_container") {
-                                send_sd_notify(sock, "STOPPING=1");
-                            }
-                        }
                     }
                 }
             }
             if container_id.is_empty()
                 || !crate::detached_container_process_exited(&container_id, bundle_path, exit_code)
             {
+                if let Ok(svc_ec) = fs::read_to_string(bundle_path.join("service-exitcode")) {
+                    if let Ok(parsed_ec) = svc_ec.trim().parse::<i32>() {
+                        exit_code = parsed_ec;
+                        let _ = fs::write(bundle_path.join("boxr-exitcode"), exit_code.to_string());
+                    }
+                }
                 let _ = fs::remove_file(bundle_path.join("conmon.pid"));
                 flush_deferred_bundle_rmdir(bundle_path);
                 return Ok(if systemd_stop_ok { 0 } else { exit_code });
@@ -1665,7 +1730,9 @@ pub fn execute_bundle(
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            if !container_id.is_empty() && std::env::var_os("INVOCATION_ID").is_none() {
+            let in_container_service =
+                has_sdnotify || std::env::var_os("PODMAN_SYSTEMD_UNIT").is_some();
+            if !container_id.is_empty() && !in_container_service {
                 let stop_timeout_arg = _spec
                     .annotations
                     .as_ref()
@@ -1788,6 +1855,7 @@ pub fn execute_bundle(
             .stdin(std::process::Stdio::null())
             .stdout(log_file)
             .stderr(err_file);
+        scrub_conmon_parent_env(&mut cmd);
 
         if _spec.process.terminal {
             if let Some((master_fd, slave_name)) = open_detach_pty() {
@@ -1865,6 +1933,7 @@ pub fn execute_bundle(
         let io_policy = bundle_io_policy(_spec, bundle_path);
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("__internal-trampoline").arg(bundle_path);
+        scrub_conmon_parent_env(&mut cmd);
 
         if uses_capture_logging(&io_policy) {
             let log_path = capture_log_path(&io_policy, bundle_path);
@@ -2076,6 +2145,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
     #[cfg(unix)]
     unsafe {
         libc::setsid();
+        std::env::remove_var("NOTIFY_SOCKET");
     }
 
     if args.is_empty() {
@@ -2088,27 +2158,37 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
     }
     let spec_content = fs::read_to_string(&spec_path)?;
     let spec: Spec = serde_json::from_str(&spec_content)?;
-    if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::for_bundle(bundle_path) {
-        let mut limits = crate::cgroups::ResourceLimits::default();
-        if let Some(res) = spec.linux.as_ref().and_then(|l| l.resources.as_ref()) {
-            if let Some(mem) = &res.memory {
-                limits.memory_max_bytes = mem.limit;
-                limits.memory_reservation_bytes = mem.reservation;
-                limits.memory_swap_max_bytes = mem.swap;
-                limits.memory_swappiness = mem.swappiness;
+    let skip_cgroup_migration = spec.annotations.as_ref().is_some_and(|a| {
+        matches!(
+            a.get("boxr.cgroups")
+                .or_else(|| a.get("boxr.cgroups_mode"))
+                .map(|s| s.as_str()),
+            Some("disabled") | Some("no-conmon")
+        )
+    });
+    if !skip_cgroup_migration {
+        if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::for_bundle(bundle_path) {
+            let mut limits = crate::cgroups::ResourceLimits::default();
+            if let Some(res) = spec.linux.as_ref().and_then(|l| l.resources.as_ref()) {
+                if let Some(mem) = &res.memory {
+                    limits.memory_max_bytes = mem.limit;
+                    limits.memory_reservation_bytes = mem.reservation;
+                    limits.memory_swap_max_bytes = mem.swap;
+                    limits.memory_swappiness = mem.swappiness;
+                }
+                if let Some(cpu) = &res.cpu {
+                    limits.cpu_shares = cpu.shares;
+                    limits.cpu_quota_us = cpu.quota;
+                    limits.cpu_period_us = cpu.period;
+                    limits.cpuset_cpus = cpu.cpus.clone();
+                    limits.cpuset_mems = cpu.mems.clone();
+                }
+                if let Some(pids) = &res.pids {
+                    limits.pids_max = Some(pids.limit);
+                }
             }
-            if let Some(cpu) = &res.cpu {
-                limits.cpu_shares = cpu.shares;
-                limits.cpu_quota_us = cpu.quota;
-                limits.cpu_period_us = cpu.period;
-                limits.cpuset_cpus = cpu.cpus.clone();
-                limits.cpuset_mems = cpu.mems.clone();
-            }
-            if let Some(pids) = &res.pids {
-                limits.pids_max = Some(pids.limit);
-            }
+            let _ = cgroup_mgr.add_process_with_limits(std::process::id() as i32, Some(&limits));
         }
-        let _ = cgroup_mgr.add_process_with_limits(std::process::id() as i32, Some(&limits));
     }
     if let Some(adj) = spec.process.oom_score_adj {
         let _ = fs::write("/proc/self/oom_score_adj", adj.to_string());
@@ -2159,12 +2239,14 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
     }) {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&abs_rootfs, fs::Permissions::from_mode(0o777));
+        let _ = fs::set_permissions(bundle_path, fs::Permissions::from_mode(0o777));
         let mut cur_anc = abs_rootfs.parent();
         while let Some(p) = cur_anc {
             if p == Path::new("/") || p == Path::new("/tmp") {
                 break;
             }
-            let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o755));
+            let mode = if p == bundle_path { 0o777 } else { 0o755 };
+            let _ = fs::set_permissions(p, fs::Permissions::from_mode(mode));
             cur_anc = p.parent();
         }
         for sub in ["etc", "dev", "proc", "sys", "run", "tmp", "var/tmp"] {
@@ -2265,80 +2347,86 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     mapping_res.context("Failed to setup rootless UID/GID mappings")?;
                 }
 
-                if let Ok(cg_txt) = fs::read_to_string(format!("/proc/{}/cgroup", child.as_raw())) {
-                    if let Some(rel) = cg_txt.lines().find_map(|l| l.strip_prefix("0::")) {
-                        let cur_cg = PathBuf::from("/sys/fs/cgroup")
-                            .join(rel.trim().trim_start_matches('/'));
-                        if cur_cg.exists() {
-                            if let Ok(cgroup_mgr) =
-                                crate::cgroups::CgroupV2Manager::for_bundle(bundle_path)
-                            {
-                                let is_default_boxr = cgroup_mgr
-                                    .cgroup_path()
-                                    .parent()
-                                    .and_then(|p| p.file_name())
-                                    .and_then(|n| n.to_str())
-                                    == Some("boxr");
-                                let (parent_cg, sup_cg, target_cg) = if is_default_boxr {
-                                    (
-                                        cur_cg.clone(),
-                                        cur_cg.join("supervisor"),
-                                        cur_cg.join("payload"),
-                                    )
-                                } else {
-                                    let p = cgroup_mgr
+                if !skip_cgroup_migration {
+                    if let Ok(cg_txt) =
+                        fs::read_to_string(format!("/proc/{}/cgroup", child.as_raw()))
+                    {
+                        if let Some(rel) = cg_txt.lines().find_map(|l| l.strip_prefix("0::")) {
+                            let cur_cg = PathBuf::from("/sys/fs/cgroup")
+                                .join(rel.trim().trim_start_matches('/'));
+                            if cur_cg.exists() {
+                                if let Ok(cgroup_mgr) =
+                                    crate::cgroups::CgroupV2Manager::for_bundle(bundle_path)
+                                {
+                                    let is_default_boxr = cgroup_mgr
                                         .cgroup_path()
                                         .parent()
-                                        .unwrap_or(&cur_cg)
-                                        .to_path_buf();
-                                    (
-                                        p.clone(),
-                                        p.join("supervisor"),
-                                        cgroup_mgr.cgroup_path().to_path_buf(),
-                                    )
-                                };
-                                let _ = fs::create_dir_all(&sup_cg);
-                                let _ = fs::create_dir_all(&target_cg);
-                                let _ = fs::write(
-                                    sup_cg.join("cgroup.procs"),
-                                    std::process::id().to_string(),
-                                );
-                                let _ = fs::write(
-                                    sup_cg.join("cgroup.procs"),
-                                    child.as_raw().to_string(),
-                                );
-                                for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
-                                    let _ =
-                                        fs::write(parent_cg.join("cgroup.subtree_control"), ctl);
-                                }
-                                let _ = fs::write(
-                                    bundle_path.join("container.cgroup"),
-                                    target_cg.to_string_lossy().as_bytes(),
-                                );
-                                if let Some(res) =
-                                    spec.linux.as_ref().and_then(|l| l.resources.as_ref())
-                                {
-                                    let mut limits = crate::cgroups::ResourceLimits::default();
-                                    if let Some(mem) = &res.memory {
-                                        limits.memory_max_bytes = mem.limit;
-                                        limits.memory_reservation_bytes = mem.reservation;
-                                        limits.memory_swap_max_bytes = mem.swap;
-                                        limits.memory_swappiness = mem.swappiness;
-                                    }
-                                    if let Some(cpu) = &res.cpu {
-                                        limits.cpu_shares = cpu.shares;
-                                        limits.cpu_quota_us = cpu.quota;
-                                        limits.cpu_period_us = cpu.period;
-                                        limits.cpuset_cpus = cpu.cpus.clone();
-                                        limits.cpuset_mems = cpu.mems.clone();
-                                    }
-                                    if let Some(pids) = &res.pids {
-                                        limits.pids_max = Some(pids.limit);
-                                    }
-                                    let target_mgr = crate::cgroups::CgroupV2Manager::from_path(
-                                        target_cg.clone(),
+                                        .and_then(|p| p.file_name())
+                                        .and_then(|n| n.to_str())
+                                        == Some("boxr");
+                                    let (parent_cg, sup_cg, target_cg) = if is_default_boxr {
+                                        (
+                                            cur_cg.clone(),
+                                            cur_cg.join("supervisor"),
+                                            cur_cg.join("payload"),
+                                        )
+                                    } else {
+                                        let p = cgroup_mgr
+                                            .cgroup_path()
+                                            .parent()
+                                            .unwrap_or(&cur_cg)
+                                            .to_path_buf();
+                                        (
+                                            p.clone(),
+                                            p.join("supervisor"),
+                                            cgroup_mgr.cgroup_path().to_path_buf(),
+                                        )
+                                    };
+                                    let _ = fs::create_dir_all(&sup_cg);
+                                    let _ = fs::create_dir_all(&target_cg);
+                                    let _ = fs::write(
+                                        sup_cg.join("cgroup.procs"),
+                                        std::process::id().to_string(),
                                     );
-                                    let _ = target_mgr.apply_limits(&limits);
+                                    let _ = fs::write(
+                                        sup_cg.join("cgroup.procs"),
+                                        child.as_raw().to_string(),
+                                    );
+                                    for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                                        let _ = fs::write(
+                                            parent_cg.join("cgroup.subtree_control"),
+                                            ctl,
+                                        );
+                                    }
+                                    let _ = fs::write(
+                                        bundle_path.join("container.cgroup"),
+                                        target_cg.to_string_lossy().as_bytes(),
+                                    );
+                                    if let Some(res) =
+                                        spec.linux.as_ref().and_then(|l| l.resources.as_ref())
+                                    {
+                                        let mut limits = crate::cgroups::ResourceLimits::default();
+                                        if let Some(mem) = &res.memory {
+                                            limits.memory_max_bytes = mem.limit;
+                                            limits.memory_reservation_bytes = mem.reservation;
+                                            limits.memory_swap_max_bytes = mem.swap;
+                                            limits.memory_swappiness = mem.swappiness;
+                                        }
+                                        if let Some(cpu) = &res.cpu {
+                                            limits.cpu_shares = cpu.shares;
+                                            limits.cpu_quota_us = cpu.quota;
+                                            limits.cpu_period_us = cpu.period;
+                                            limits.cpuset_cpus = cpu.cpus.clone();
+                                            limits.cpuset_mems = cpu.mems.clone();
+                                        }
+                                        if let Some(pids) = &res.pids {
+                                            limits.pids_max = Some(pids.limit);
+                                        }
+                                        let target_mgr = crate::cgroups::CgroupV2Manager::from_path(
+                                            target_cg.clone(),
+                                        );
+                                        let _ = target_mgr.apply_limits(&limits);
+                                    }
                                 }
                             }
                         }
@@ -6398,11 +6486,45 @@ fn run_container_child(
         }
     }
 
+    let notify_src = container_sdnotify_dir(bundle_path);
+    if notify_src.exists() {
+        let notify_dst = rootfs.join("run/notify");
+        let _ = fs::create_dir_all(&notify_dst);
+        let _ = mount(
+            Some(&notify_src),
+            &notify_dst,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        );
+    }
+
     // Mount external volumes/binds
     let canon_rootfs = rootfs.canonicalize()?;
     let idmap_user_binds = userns_idmapped_bind_mounts(spec);
     let bundle_dir_for_ovl = rootfs.parent().unwrap_or(rootfs);
     for (idx, m) in mounts.iter().enumerate() {
+        if m.no_dereference
+            && fs::symlink_metadata(&m.source)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false)
+        {
+            let clean_dest = m.destination.trim_start_matches('/');
+            let target = rootfs.join(clean_dest);
+            let link_target = fs::read_link(&m.source)?;
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if target.symlink_metadata().is_ok() {
+                if target.is_dir() && !target.is_symlink() {
+                    let _ = fs::remove_dir_all(&target);
+                } else {
+                    let _ = fs::remove_file(&target);
+                }
+            }
+            std::os::unix::fs::symlink(&link_target, &target)?;
+            continue;
+        }
         let target = prepare_bind_mount_target(rootfs, &m.destination, &m.source);
         if let Ok(canon_target) = target.canonicalize() {
             if !canon_target.starts_with(&canon_rootfs) {
@@ -7411,6 +7533,15 @@ fn run_container_child(
                 unsafe {
                     std::env::set_var("container_uuid", uuid);
                 }
+            }
+        }
+        if ann
+            .get("boxr.sdnotify_mode")
+            .is_some_and(|m| m == "container")
+            && ann.contains_key("boxr.sdnotify_socket")
+        {
+            unsafe {
+                std::env::set_var("NOTIFY_SOCKET", "/run/notify/notify.sock");
             }
         }
     }

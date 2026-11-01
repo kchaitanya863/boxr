@@ -179,6 +179,8 @@ pub struct MountSpec {
     pub volume_name: Option<String>,
     #[serde(default)]
     pub subpath: Option<String>,
+    #[serde(default)]
+    pub no_dereference: bool,
     pub is_volume: bool,
 }
 
@@ -213,7 +215,7 @@ fn expand_path_glob(pattern: &str) -> Vec<PathBuf> {
             for p in &mut current {
                 p.push(part);
             }
-            current.retain(|p| p.exists());
+            current.retain(|p| p.exists() || p.symlink_metadata().is_ok());
         } else {
             let re_str = format!(
                 "^{}$",
@@ -263,6 +265,7 @@ pub fn parse_mount_flag(
     let mut chown_u = false;
     let mut nocopy = false;
     let mut nocreate = false;
+    let mut no_dereference = false;
     let mut tmpcopyup_count = 0usize;
     let mut notmpcopyup = false;
     let mut propagation: Option<String> = None;
@@ -286,6 +289,9 @@ pub fn parse_mount_flag(
                 "rw" => {
                     ro_count += 1;
                     ro = v.trim() == "false";
+                }
+                "no-dereference" | "copy-symlink" => {
+                    no_dereference = v.trim() != "false";
                 }
                 "U" | "chown" => match v.trim() {
                     "true" => chown_u = true,
@@ -341,6 +347,7 @@ pub fn parse_mount_flag(
                 "U" | "chown" => chown_u = true,
                 "nocopy" | "volume-nocopy" => nocopy = true,
                 "nocreate" | "volume-nocreate" => nocreate = true,
+                "no-dereference" | "copy-symlink" => no_dereference = true,
                 "tmpcopyup" => {
                     tmpcopyup_count += 1;
                     notmpcopyup = false;
@@ -430,6 +437,7 @@ pub fn parse_mount_flag(
                     tmpfs_mount_data: None,
                     volume_name: None,
                     subpath: None,
+                    no_dereference,
                     is_volume: false,
                     ..Default::default()
                 });
@@ -580,7 +588,7 @@ pub fn parse_mount_flag(
                 crate::cli::usage_errors::exit_usage_error("must set volume destination");
             }
             let src_p = PathBuf::from(&source);
-            if mount_type == "bind" && !src_p.exists() {
+            if mount_type == "bind" && !src_p.exists() && src_p.symlink_metadata().is_err() {
                 crate::cli::usage_errors::exit_usage_error(format!(
                     "statfs {}: no such file or directory",
                     source
@@ -596,6 +604,7 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: None,
                 volume_name: None,
                 subpath: None,
+                no_dereference,
                 is_volume: false,
                 ..Default::default()
             }])

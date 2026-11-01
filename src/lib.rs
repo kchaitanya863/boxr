@@ -3192,8 +3192,35 @@ async fn run_single_pull_command(args: &cli::PullArgs, global_auth: Option<&str>
         }
     }
 
+    let is_remote = cli::podman_globals::podman_global_options().remote
+        || cli::podman_globals::podman_global_options().url.is_some()
+        || cli::podman_globals::podman_global_options()
+            .connection
+            .is_some()
+        || std::env::var_os("CONTAINER_HOST").is_some()
+        || std::env::var_os("CONTAINER_CONNECTION").is_some();
     if !args.quiet {
         eprintln!("Trying to pull {}...", args.image);
+    }
+    #[cfg(unix)]
+    if !is_remote {
+        if let Ok(sock) = std::env::var("NOTIFY_SOCKET") {
+            if !sock.is_empty() {
+                let clean_ref = args
+                    .image
+                    .trim_start_matches("docker://")
+                    .trim_start_matches("//");
+                if !args.quiet {
+                    eprintln!(
+                        "Pulling image //{} inside systemd: setting pull timeout to 5m0s",
+                        clean_ref
+                    );
+                }
+                if let Ok(dgram) = std::os::unix::net::UnixDatagram::unbound() {
+                    let _ = dgram.send_to(b"EXTEND_TIMEOUT_USEC=30000000", &sock);
+                }
+            }
+        }
     }
     if std::env::args().any(|a| a == "debug" || a == "--log-level=debug") {
         eprintln!("DEBU[0000] Retrieved partial blob");
@@ -5173,10 +5200,12 @@ pub async fn run_container_with_output(
         limits.pids_max = Some(if pids == 0 { -1 } else { pids });
     }
 
-    if let Ok(cgroup_mgr) =
-        cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref())
-    {
-        let _ = cgroup_mgr.apply_limits(&limits);
+    if args.cgroups.as_deref() != Some("disabled") {
+        if let Ok(cgroup_mgr) =
+            cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref())
+        {
+            let _ = cgroup_mgr.apply_limits(&limits);
+        }
     }
 
     // Build OCI Runtime Spec
@@ -5767,6 +5796,17 @@ pub async fn run_container_with_output(
             annotations.insert("boxr.sdnotify_socket".to_string(), sock);
         }
     }
+    if args.sdnotify.as_deref() == Some("container")
+        && !annotations.contains_key("boxr.sdnotify_socket")
+    {
+        annotations.insert(
+            "boxr.sdnotify_socket".to_string(),
+            bundle_dir
+                .join("notify/notify.sock")
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
     if let Some(cg_mode) = &args.cgroups {
         annotations.insert("boxr.cgroups".to_string(), cg_mode.clone());
     }
@@ -6211,6 +6251,11 @@ pub async fn run_container_with_output(
     } else {
         health::HealthStatus::Starting
     };
+    if args.sdnotify.as_deref() == Some("healthy") && initial_health == health::HealthStatus::None {
+        cli::usage_errors::exit_usage_error(
+            "invalid argument: sdnotify policy \"healthy\" requires a healthcheck to be set",
+        );
+    }
 
     // Register container in store
     let container_store = ContainerStore::new();
@@ -6635,6 +6680,7 @@ pub async fn run_container_with_output(
                 health_on_failure,
             );
         }
+        wait_for_sdnotify_healthy(&container_id, &bundle_dir, &spec, None);
         cli::log_level::emit_shutdown_engines();
         return Ok(exit_code);
     }
@@ -7074,6 +7120,49 @@ fn update_pod_state_on_container_exit(container_id: &str) {
                                     s.split(',').any(|p| p == pod.id || p == pod.name)
                                 })
                             {
+                                let prop = ann
+                                    .get("io.podman.annotations.kube.play.exit-code-propagation")
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("none");
+                                let mut workload_codes = Vec::new();
+                                for wcid in &pod.containers {
+                                    if wcid == &infra_name || wcid == &pod.infra_container_id {
+                                        continue;
+                                    }
+                                    if let Some(wc) = c_store.find(wcid) {
+                                        if wc.name == infra_name || wc.id == pod.infra_container_id
+                                        {
+                                            continue;
+                                        }
+                                        let code = match wc.status {
+                                            ContainerStatus::Exited(ec) => ec,
+                                            _ => fs::read_to_string(
+                                                PathBuf::from(&wc.bundle_path)
+                                                    .join("boxr-exitcode"),
+                                            )
+                                            .ok()
+                                            .and_then(|s| s.trim().parse::<i32>().ok())
+                                            .unwrap_or(0),
+                                        };
+                                        workload_codes.push(code);
+                                    }
+                                }
+                                let svc_exit_code = if prop == "all"
+                                    && !workload_codes.is_empty()
+                                    && workload_codes.iter().all(|&ec| ec != 0)
+                                {
+                                    137
+                                } else if prop == "any" && workload_codes.iter().any(|&ec| ec != 0)
+                                {
+                                    137
+                                } else {
+                                    0
+                                };
+                                let svc_bundle = PathBuf::from(&c.bundle_path);
+                                let _ = fs::write(
+                                    svc_bundle.join("service-exitcode"),
+                                    svc_exit_code.to_string(),
+                                );
                                 let _ = stop_container_with_home_and_timeout(
                                     &c.id,
                                     None,
@@ -7082,6 +7171,12 @@ fn update_pod_state_on_container_exit(container_id: &str) {
                                     true,
                                     None,
                                 );
+                                let _ = fs::write(
+                                    svc_bundle.join("boxr-exitcode"),
+                                    svc_exit_code.to_string(),
+                                );
+                                let _ = c_store
+                                    .update_status(&c.id, ContainerStatus::Exited(svc_exit_code));
                             }
                         }
                     }
@@ -8294,7 +8389,67 @@ pub async fn start_container_with_home(
             }
         }
     }
+    wait_for_sdnotify_healthy(&rec.id, &bundle_path, &spec, home_opt);
     Ok(())
+}
+
+fn wait_for_sdnotify_healthy(
+    container_id: &str,
+    bundle_path: &Path,
+    spec: &Spec,
+    home_opt: Option<&Path>,
+) {
+    #[cfg(unix)]
+    {
+        let Some(ann) = &spec.annotations else {
+            return;
+        };
+        if ann.get("boxr.sdnotify_mode").map(|s| s.as_str()) != Some("healthy") {
+            return;
+        }
+        let Some(sock) = ann.get("boxr.sdnotify_socket").filter(|s| !s.is_empty()) else {
+            return;
+        };
+        use std::os::unix::net::UnixDatagram;
+        let send_msg = |msg: &str| {
+            if let Ok(dgram) = UnixDatagram::unbound() {
+                let _ = dgram.send_to(msg.as_bytes(), sock);
+            }
+        };
+        send_msg("EXTEND_TIMEOUT_USEC=30000000");
+        let start = std::time::Instant::now();
+        let mut last_extend = std::time::Instant::now();
+        let store = match home_opt {
+            Some(h) => ContainerStore::with_home(h.to_path_buf()),
+            None => ContainerStore::new(),
+        };
+        while start.elapsed() < std::time::Duration::from_secs(90) {
+            if last_extend.elapsed() >= std::time::Duration::from_secs(5) {
+                send_msg("EXTEND_TIMEOUT_USEC=30000000");
+                last_extend = std::time::Instant::now();
+            }
+            if let Some(c) = store.find(container_id) {
+                if c.health_status == health::HealthStatus::Healthy {
+                    send_msg("READY=1");
+                    return;
+                }
+                if matches!(
+                    c.status,
+                    ContainerStatus::Exited(_) | ContainerStatus::Failed(_)
+                ) {
+                    return;
+                }
+            }
+            if bundle_path.join("boxr-exitcode").exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (container_id, bundle_path, spec, home_opt);
+    }
 }
 
 /// Wait until container trampoline/VM processes have fully exited.
@@ -9628,6 +9783,16 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Name": c.name.clone(),
                     "PidFile": pidfile_str,
                     "IsService": is_service,
+                    "KubeExitCodePropagation": annotations
+                        .get("io.podman.annotations.kube.play.exit-code-propagation")
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            if is_service {
+                                "none".to_string()
+                            } else {
+                                String::new()
+                            }
+                        }),
                     "IsInitCtr": is_init_ctr,
                     "InitContainerType": init_container_type,
                     "RestartCount": c.restart_count,
@@ -9640,6 +9805,24 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "Image": c.image,
                         "CreateCommand": create_command,
                         "SystemdMode": systemd_mode,
+                        "SdNotifyMode": annotations
+                            .get("boxr.sdnotify_mode")
+                            .cloned()
+                            .unwrap_or_else(|| "container".to_string()),
+                        "SdNotifySocket": annotations
+                            .get("boxr.sdnotify_socket")
+                            .cloned()
+                            .unwrap_or_default(),
+                        "KubeExitCodePropagation": annotations
+                            .get("io.podman.annotations.kube.play.exit-code-propagation")
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                if is_service {
+                                    "none".to_string()
+                                } else {
+                                    String::new()
+                                }
+                            }),
                         "Labels": labels_map,
                         "Annotations": user_annotations_map,
                         "Secrets": secrets_inspect_val,
@@ -18795,10 +18978,12 @@ async fn create_only_container_after_pod_prep(
         }
         limits.pids_max = Some(if pids == 0 { -1 } else { pids });
     }
-    if let Ok(cgroup_mgr) =
-        cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref())
-    {
-        let _ = cgroup_mgr.apply_limits(&limits);
+    if args.cgroups.as_deref() != Some("disabled") {
+        if let Ok(cgroup_mgr) =
+            cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref())
+        {
+            let _ = cgroup_mgr.apply_limits(&limits);
+        }
     }
 
     let mut annotations = HashMap::new();
@@ -19095,6 +19280,17 @@ async fn create_only_container_after_pod_prep(
         if !sock.is_empty() && args.sdnotify.as_deref() != Some("ignore") {
             annotations.insert("boxr.sdnotify_socket".to_string(), sock);
         }
+    }
+    if args.sdnotify.as_deref() == Some("container")
+        && !annotations.contains_key("boxr.sdnotify_socket")
+    {
+        annotations.insert(
+            "boxr.sdnotify_socket".to_string(),
+            bundle_dir
+                .join("notify/notify.sock")
+                .to_string_lossy()
+                .to_string(),
+        );
     }
     annotations.insert("boxr.container_name".to_string(), container_name.clone());
     if let Some(ref cg) = args.cgroups {
@@ -19636,6 +19832,11 @@ async fn create_only_container_after_pod_prep(
     } else {
         health::HealthStatus::Starting
     };
+    if args.sdnotify.as_deref() == Some("healthy") && initial_health == health::HealthStatus::None {
+        cli::usage_errors::exit_usage_error(
+            "invalid argument: sdnotify policy \"healthy\" requires a healthcheck to be set",
+        );
+    }
 
     let container_store = match home_opt {
         Some(h) => ContainerStore::with_home(h.to_path_buf()),
@@ -28119,12 +28320,16 @@ fn generate_systemd_for_container(
 
         let mut filtered_rem = Vec::new();
         let mut has_detach = false;
+        let mut seen_image = false;
         let mut has_name = false;
         let mut has_replace = false;
         let mut has_sdnotify = false;
         let mut k = 0;
         while k < remaining.len() {
             let s = &remaining[k];
+            if s == &cont.image {
+                seen_image = true;
+            }
             if s == "--rm" || s.starts_with("--rm=") {
                 k += 1;
                 continue;
@@ -28175,7 +28380,7 @@ fn generate_systemd_for_container(
                     continue;
                 }
             }
-            if s == "-d" || s == "--detach" || s == "-dt" || s == "-td" {
+            if !seen_image && (s == "-d" || s == "--detach" || s == "-dt" || s == "-td") {
                 has_detach = true;
             }
             if s == "--name" || s.starts_with("--name=") {
@@ -29024,14 +29229,22 @@ pub async fn handle_auto_update(args: &cli::AutoUpdateArgs) -> Result<()> {
                             if let Some(mut img) =
                                 find_image_with_shortname(&store, &t.raw_image, None)
                             {
-                                let new_rand =
-                                    hex::encode(crate::storage::container_store::rand_id());
+                                let new_rand = format!(
+                                    "{}{:052x}",
+                                    hex::encode(crate::storage::container_store::rand_id()),
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_nanos()
+                                );
                                 img.id = new_rand[..12].to_string();
-                                img.manifest_digest = format!("sha256:{}", new_rand);
+                                img.config_digest = format!("sha256:{}", &new_rand[..64]);
+                                img.manifest_digest = format!("sha256:{}", &new_rand[..64]);
                                 if !is_broken {
                                     let _ = store.add(img);
                                 }
-                                updated_raw_images.insert(t.raw_image.clone(), new_rand);
+                                updated_raw_images
+                                    .insert(t.raw_image.clone(), new_rand[..64].to_string());
                             }
                         }
                         if is_broken {

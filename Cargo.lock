@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "boxr"
-version = "0.1.64"
+version = "0.1.67"
 dependencies = [
  "anyhow",
  "axum",
