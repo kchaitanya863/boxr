@@ -511,6 +511,15 @@ fn positional_args(argv: &[String]) -> Vec<&str> {
 }
 
 fn print_extra_positional_error(argv: &[String]) {
+    if argv.iter().any(|a| a == "attach") {
+        let cmd_str = if argv.windows(2).any(|w| w[0] == "container" && w[1] == "attach") {
+            "podman container attach"
+        } else {
+            "podman attach"
+        };
+        eprintln!("Error: `{}` accepts at most one argument", cmd_str);
+        return;
+    }
     let positionals = positional_args(argv);
     if positionals.len() >= 2 {
         let verb = positionals[positionals.len() - 2];

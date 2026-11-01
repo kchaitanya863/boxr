@@ -198,7 +198,7 @@ impl PortMapping {
             }
             2 => {
                 let container_ports = Self::parse_port_or_range(parts[1])?;
-                let host_ports = if parts[0].is_empty() {
+                let host_ports = if parts[0].trim().is_empty() {
                     container_ports
                         .iter()
                         .map(|&cp| allocate_ephemeral_port_not(cp))
@@ -230,7 +230,7 @@ impl PortMapping {
                     Some(parts[0].to_string())
                 };
                 let container_ports = Self::parse_port_or_range(parts[2])?;
-                let host_ports = if parts[1].is_empty() {
+                let host_ports = if parts[1].trim().is_empty() {
                     container_ports
                         .iter()
                         .map(|&cp| allocate_ephemeral_port_not(cp))

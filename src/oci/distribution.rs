@@ -1534,12 +1534,6 @@ impl RegistryClient {
             }
         }
 
-        if manifest.layers.is_empty() {
-            return Err(anyhow!(
-                "Registry returned a manifest with no layers (possible attestation artifact)"
-            ));
-        }
-
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(&body_bytes)));
         Ok((manifest, digest, body_bytes.to_vec()))
     }
@@ -1592,8 +1586,32 @@ impl RegistryClient {
                 {
                     Ok(resp) if resp.status().is_success() => {
                         let body_bytes = resp.bytes().await?.to_vec();
-                        let config: ImageConfig = serde_json::from_slice(&body_bytes)
+                        let mut config: ImageConfig = serde_json::from_slice(&body_bytes)
                             .context("Failed to parse image config JSON")?;
+                        if config
+                            .config
+                            .as_ref()
+                            .and_then(|c| c.healthcheck.as_ref())
+                            .is_none()
+                        {
+                            if let Ok(raw_val) =
+                                serde_json::from_slice::<serde_json::Value>(&body_bytes)
+                            {
+                                if let Some(cc) = raw_val.get("container_config") {
+                                    if let Ok(exec_cfg) = serde_json::from_value::<
+                                        crate::oci::image::ExecutionConfig,
+                                    >(cc.clone())
+                                    {
+                                        if let Some(hc) = exec_cfg.healthcheck {
+                                            config
+                                                .config
+                                                .get_or_insert_with(Default::default)
+                                                .healthcheck = Some(hc);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         return Ok((config, body_bytes));
                     }
                     Ok(resp) => {

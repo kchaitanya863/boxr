@@ -22,8 +22,23 @@ pub struct StatsArgs {
     #[arg(long = "no-stream")]
     pub no_stream: bool,
 
-    #[arg(short = 'a', long = "all")]
+    #[arg(
+        short = 'a',
+        long = "all",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub all: bool,
+
+    #[arg(long = "no-reset")]
+    pub no_reset: bool,
+
+    #[arg(short = 'i', long = "interval", allow_hyphen_values = true)]
+    pub interval: Option<i64>,
 
     #[arg(long = "format")]
     pub format: Option<String>,
@@ -306,6 +321,15 @@ pub struct PodLsArgs {
     #[arg(short = 'n', long = "noheading")]
     pub noheading: bool,
 
+    #[arg(long = "ctr-names")]
+    pub ctr_names: bool,
+    #[arg(long = "ctr-ids")]
+    pub ctr_ids: bool,
+    #[arg(long = "ctr-status")]
+    pub ctr_status: bool,
+    #[arg(long = "ns")]
+    pub ns: bool,
+
     #[arg(value_name = "POD")]
     pub pods: Vec<String>,
 }
@@ -579,6 +603,12 @@ pub enum PodAction {
     Top(PodTopArgs),
     /// Display a live stream of pod resource usage statistics
     Stats {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
+        #[arg(long = "no-reset")]
+        no_reset: bool,
         #[arg(long = "no-stream")]
         no_stream: bool,
         #[arg(long = "format")]
@@ -776,6 +806,9 @@ pub struct PodLogsArgs {
     /// Act on the latest pod
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
+    /// Output the containers with different colors in the log
+    #[arg(long = "color")]
+    pub color: bool,
 }
 
 #[derive(Args, Debug, Clone)]

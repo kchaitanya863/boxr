@@ -384,14 +384,35 @@ impl ContainerCopy {
         }
 
         let err_prefix = target.abs_container_path.trim_end_matches('/');
-        Self::copy_item(
+        if let Err(e) = Self::copy_item(
             src_path,
             src_arg,
             &target.host_path,
             dest_container_arg,
             err_prefix,
             overwrite,
-        )?;
+        ) {
+            #[cfg(target_os = "linux")]
+            if e.to_string().contains("Permission denied") {
+                let code = crate::runtime::linux::run_unshare_cli(
+                    &[
+                        "cp".to_string(),
+                        "-a".to_string(),
+                        src_path.to_string_lossy().to_string(),
+                        target.host_path.to_string_lossy().to_string(),
+                    ],
+                    true,
+                )
+                .unwrap_or(1);
+                if code != 0 {
+                    return Err(e);
+                }
+            } else {
+                return Err(e);
+            }
+            #[cfg(not(target_os = "linux"))]
+            return Err(e);
+        }
 
         #[cfg(target_os = "linux")]
         if target.is_tmpfs_mount {

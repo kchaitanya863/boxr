@@ -535,7 +535,8 @@ impl ImageStore {
                 let is_local_to_store = rootfs.starts_with(store_root)
                     && !removed
                         .rootfs_path
-                        .starts_with("/var/tmp/boxr-e2e-tar-cache");
+                        .starts_with("/var/tmp/boxr-e2e-tar-cache")
+                    && !removed.rootfs_path.starts_with("/tmp/boxr-e2e-tar-cache");
                 if !is_shared && is_local_to_store {
                     if rootfs.exists() {
                         #[cfg(unix)]
@@ -706,8 +707,9 @@ impl ImageStore {
                     .config
                     .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
                 if !run_args.is_empty() {
-                    exec.entrypoint = Some(run_args);
-                    exec.cmd = None;
+                    if exec.entrypoint.as_ref().is_none_or(|e| e.is_empty()) {
+                        exec.cmd = Some(run_args);
+                    }
                 }
                 let masked: Vec<String> = spec
                     .annotations

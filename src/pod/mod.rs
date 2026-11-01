@@ -531,10 +531,18 @@ impl PodStore {
                     .map(|c| matches!(c.status, ContainerStatus::Running))
                     .unwrap_or(false);
 
-                if !any_running
+                let should_prune = !any_running
                     && !infra_running
-                    && !matches!(p.status.as_str(), "Running" | "Created")
-                {
+                    && (!matches!(p.status.as_str(), "Running" | "Created")
+                        || (!p.infra && !p.containers.is_empty()));
+                if should_prune {
+                    for cid in &p.containers {
+                        let _ = c_store.remove(cid);
+                    }
+                    if !p.infra_container_id.is_empty() {
+                        let _ = c_store.remove(&p.infra_container_id);
+                    }
+                    let _ = c_store.remove(&format!("{}-infra", p.name));
                     pruned.push(p.name.clone());
                     infra_to_remove.push((p.infra_container_id.clone(), format!("{}-infra", p.name)));
                     false

@@ -211,7 +211,7 @@ impl NetworkStore {
         if q.is_empty() {
             return None;
         }
-        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+        let found = crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let nets = self.load_unlocked().networks;
             if let Some(found) = nets
                 .iter()
@@ -226,7 +226,92 @@ impl NetworkStore {
             Ok(None)
         })
         .ok()
-        .flatten()
+        .flatten();
+        if found.is_some() {
+            return found;
+        }
+        if let Some(dir) = crate::cli::podman_globals::podman_global_options().network_config_dir {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if ext != "json" && ext != "conflist" {
+                        continue;
+                    }
+                    let Ok(raw) = fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                        continue;
+                    };
+                    let name = val
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let id = val
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(name);
+                    if name == q || id == q || (!id.is_empty() && id.starts_with(q)) {
+                        let driver = val
+                            .get("driver")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                val.get("plugins")
+                                    .and_then(|p| p.as_array())
+                                    .and_then(|a| a.first())
+                                    .and_then(|p| p.get("type"))
+                                    .and_then(|v| v.as_str())
+                            })
+                            .unwrap_or("bridge")
+                            .to_string();
+                        let subnet = val
+                            .get("subnets")
+                            .and_then(|s| s.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|s| s.get("subnet"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("10.88.0.0/16")
+                            .to_string();
+                        let gateway = val
+                            .get("subnets")
+                            .and_then(|s| s.as_array())
+                            .and_then(|a| a.first())
+                            .and_then(|s| s.get("gateway"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("10.88.0.1")
+                            .to_string();
+                        let internal = val
+                            .get("internal")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let enable_ipv6 = val
+                            .get("ipv6_enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        return Some(NetworkRecord {
+                            id: id.to_string(),
+                            name: name.to_string(),
+                            driver,
+                            subnet: subnet.clone(),
+                            gateway: gateway.clone(),
+                            internal,
+                            attachable: false,
+                            enable_ipv6,
+                            last_allocated_ip: None,
+                            labels: HashMap::new(),
+                            dns_servers: Vec::new(),
+                            subnets: vec![(subnet, gateway)],
+                            disable_dns: false,
+                            ipam_driver: String::new(),
+                            created_at: Utc::now(),
+                            containers: HashMap::new(),
+                        });
+                    }
+                }
+            }
+        }
+        None
     }
 
     pub fn create(
