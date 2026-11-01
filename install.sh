@@ -8,9 +8,49 @@ set -e
 #   curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | sh
 #
 # Advanced options:
-#   curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | DRY_RUN=1 sh
+#   curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | sh -s -- --version v0.1.68
 #   curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | VERSION=v0.1.68 sh
+#   curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | DRY_RUN=1 sh
 #   curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | BOXR_INSTALL_DIR=/usr/local/bin sh
+
+# Parse command line flags
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -v|--version)
+            VERSION="$2"
+            shift 2
+            ;;
+        --version=*)
+            VERSION="${1#*=}"
+            shift
+            ;;
+        -d|--dir|--install-dir)
+            BOXR_INSTALL_DIR="$2"
+            shift 2
+            ;;
+        --install-dir=*)
+            BOXR_INSTALL_DIR="${1#*=}"
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: install.sh [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  -v, --version <TAG>      Specify version to install (e.g. 'v0.1.68' or '0.1.65')"
+            echo "  -d, --install-dir <DIR>  Target installation directory (default: /usr/local/bin or ~/.boxr/bin)"
+            echo "      --dry-run            Simulate installation without downloading or modifying files"
+            echo "  -h, --help               Show this help message"
+            exit 0
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 
 echo "=========================================="
 echo "          Installing boxr 📦             "

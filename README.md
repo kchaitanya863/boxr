@@ -176,12 +176,20 @@ Install precompiled `boxr` binaries, shell completions, and environment PATH con
 
 - **Linux & macOS**:
   ```bash
+  # Install latest release automatically:
   curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | sh
+
+  # Install a specific version:
+  curl -fsSL https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.sh | sh -s -- -v 0.1.68
   ```
 
 - **Windows PowerShell**:
   ```powershell
+  # Install latest release automatically:
   irm https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.ps1 | iex
+
+  # Install a specific version:
+  $env:VERSION="0.1.68"; irm https://raw.githubusercontent.com/kchaitanya863/boxr/main/install.ps1 | iex
   ```
 
 #### Homebrew (macOS & Linux)
