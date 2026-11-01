@@ -1240,6 +1240,7 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         }
         loop {
             let _ = fs::remove_file(bundle_path.join("cgroup-ready"));
+            let _ = fs::remove_file(bundle_path.join("boxr-exitcode"));
             let pty_pair = if wants_pty {
                 open_detach_pty_pair()
             } else {
@@ -1282,10 +1283,6 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                         thread::sleep(Duration::from_millis(10));
                     }
                 });
-            } else if !container_id.is_empty() {
-                if let Ok(cgroup_mgr) = crate::cgroups::CgroupV2Manager::new(&container_id) {
-                    let _ = cgroup_mgr.add_process(child_pid);
-                }
             }
             let status = if detach && (file_log || journald) {
                 if let Some(parent) = k8s_log_path.parent() {
@@ -1779,7 +1776,7 @@ pub fn execute_bundle(
             None
         };
         let status = cmd.status().context("run conmon supervisor (foreground)")?;
-        return Ok(status.code().unwrap_or(1));
+        return Ok(exit_status_code(&status, bundle_path));
     }
 
     if detach {
@@ -1923,7 +1920,7 @@ pub fn execute_bundle(
             if let Some(h) = h_err {
                 let _ = h.join();
             }
-            Ok(status.code().unwrap_or(1))
+            Ok(exit_status_code(&status, bundle_path))
         } else {
             configure_stdio(&mut cmd, &io_policy, bundle_path)?;
             let preserve = read_preserve_fds(bundle_path);
@@ -1932,9 +1929,28 @@ pub fn execute_bundle(
                 .spawn()
                 .context("Failed to execute container trampoline process")?;
             let status = wait_foreground_child_with_sigproxy(&mut child, bundle_path, sig_proxy)?;
-            Ok(status.code().unwrap_or(1))
+            Ok(exit_status_code(&status, bundle_path))
         }
     }
+}
+
+fn exit_status_code(status: &std::process::ExitStatus, bundle_path: &Path) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    if let Ok(s) = fs::read_to_string(bundle_path.join("boxr-exitcode")) {
+        if let Ok(c) = s.trim().parse::<i32>() {
+            return c;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 static PROXIED_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
@@ -2167,6 +2183,19 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             let p = abs_rootfs.join(f);
             if p.exists() {
                 let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o666));
+            }
+        }
+        for m in &mounts {
+            let mut m_anc = Some(m.source.as_path());
+            while let Some(p) = m_anc {
+                if p == Path::new("/") || p == Path::new("/tmp") || p == Path::new("/var/tmp") {
+                    break;
+                }
+                if let Ok(meta) = fs::symlink_metadata(p) {
+                    let cur_mode = meta.permissions().mode() & 0o7777;
+                    let _ = fs::set_permissions(p, fs::Permissions::from_mode(cur_mode | 0o755));
+                }
+                m_anc = p.parent();
             }
         }
     }
@@ -3247,6 +3276,35 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
 
 /// Chown a host path from a rootless user namespace (for `:U` volume mounts).
 pub fn chown_path_rootless(path: &Path, uid: u32, gid: u32, recursive: bool) -> Result<()> {
+    #[cfg(unix)]
+    if uid != 0 || gid != 0 {
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            use std::os::unix::fs::MetadataExt;
+            let host_uid = unsafe { libc::geteuid() };
+            let host_gid = unsafe { libc::getegid() };
+            let subuid_base = crate::security::RootlessUserConfig::read_subordinate_ranges(false)
+                .first()
+                .map(|r| r.start)
+                .unwrap_or(100_000);
+            let subgid_base = crate::security::RootlessUserConfig::read_subordinate_ranges(true)
+                .first()
+                .map(|r| r.start)
+                .unwrap_or(100_000);
+            let expected_host_uid = if uid == 0 {
+                host_uid
+            } else {
+                subuid_base + uid - 1
+            };
+            let expected_host_gid = if gid == 0 {
+                host_gid
+            } else {
+                subgid_base + gid - 1
+            };
+            if meta.uid() == expected_host_uid && meta.gid() == expected_host_gid {
+                return Ok(());
+            }
+        }
+    }
     let mut args = vec!["chown".to_string()];
     if recursive {
         args.push("-R".to_string());
@@ -4222,10 +4280,7 @@ fn assume_credentials_for_rootfs_setup(spec: &Spec) {
 
 fn resolve_init_supplementary_gids(bundle_path: Option<&Path>, init_pid: i32) -> Vec<u32> {
     if let Some(bp) = bundle_path {
-        let from_spec = bundle_supplementary_gids(bp);
-        if !from_spec.is_empty() {
-            return from_spec;
-        }
+        return bundle_supplementary_gids(bp);
     }
     if init_pid == 1 {
         parse_supplementary_groups_from_container_init()
@@ -5002,13 +5057,17 @@ fn exec_in_bundle_via_setns(
                     set_supplementary_group_list(&creds.supplementary_gids);
                 } else if !pre_init_supp_gids.is_empty() {
                     set_supplementary_group_list(&pre_init_supp_gids);
+                } else if creds.uid == 0 && creds.gid == 0 && !creds.reset_supplementary_groups {
+                    set_supplementary_group_list(&[0]);
                 } else {
-                    set_supplementary_group_list(&[]);
+                    set_supplementary_group_list(&creds.supplementary_gids);
                 }
                 let _ = nix::unistd::setresgid(gid, gid, gid);
                 let _ = nix::unistd::setresuid(uid, uid, uid);
-            } else {
+            } else if !pre_init_supp_gids.is_empty() {
                 set_supplementary_group_list(&pre_init_supp_gids);
+            } else {
+                set_supplementary_group_list(&[0]);
             }
 
             if effective_uid == 0 {
@@ -5727,6 +5786,29 @@ fn run_container_child(
                 )
                 .is_ok()
                 {
+                    if !unmask_cgroup && !is_privileged {
+                        let _ = mount(
+                            None::<&str>,
+                            &cg_path,
+                            None::<&str>,
+                            MsFlags::MS_REMOUNT
+                                | MsFlags::MS_BIND
+                                | MsFlags::MS_RDONLY
+                                | MsFlags::MS_NOSUID
+                                | MsFlags::MS_NODEV
+                                | MsFlags::MS_NOEXEC,
+                            None::<&str>,
+                        )
+                        .or_else(|_| {
+                            mount(
+                                None::<&str>,
+                                &cg_path,
+                                None::<&str>,
+                                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                                None::<&str>,
+                            )
+                        });
+                    }
                     true
                 } else {
                     mount(
@@ -5759,9 +5841,23 @@ fn run_container_child(
                             None::<&str>,
                             &cg_path,
                             None::<&str>,
-                            MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                            MsFlags::MS_REMOUNT
+                                | MsFlags::MS_BIND
+                                | MsFlags::MS_RDONLY
+                                | MsFlags::MS_NOSUID
+                                | MsFlags::MS_NODEV
+                                | MsFlags::MS_NOEXEC,
                             None::<&str>,
-                        );
+                        )
+                        .or_else(|_| {
+                            mount(
+                                None::<&str>,
+                                &cg_path,
+                                None::<&str>,
+                                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                                None::<&str>,
+                            )
+                        });
                     }
                     true
                 } else {
@@ -5795,6 +5891,29 @@ fn run_container_child(
                 )
                 .is_ok()
                 {
+                    if !unmask_cgroup && !is_privileged {
+                        let _ = mount(
+                            None::<&str>,
+                            &cg_path,
+                            None::<&str>,
+                            MsFlags::MS_REMOUNT
+                                | MsFlags::MS_BIND
+                                | MsFlags::MS_RDONLY
+                                | MsFlags::MS_NOSUID
+                                | MsFlags::MS_NODEV
+                                | MsFlags::MS_NOEXEC,
+                            None::<&str>,
+                        )
+                        .or_else(|_| {
+                            mount(
+                                None::<&str>,
+                                &cg_path,
+                                None::<&str>,
+                                MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                                None::<&str>,
+                            )
+                        });
+                    }
                     true
                 } else {
                     mount(
@@ -6016,7 +6135,10 @@ fn run_container_child(
                         | "stderr"
                         | "ptmx"
                         | "core"
-                ) {
+                ) || name_str
+                    .strip_prefix("tty")
+                    .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                {
                     continue;
                 }
                 let host_dev = entry.path();
@@ -6648,8 +6770,11 @@ fn run_container_child(
             {
                 use std::ffi::CString;
                 use std::os::unix::ffi::OsStrExt;
-                for (rel, (uid, gid)) in map {
-                    let p = rootfs.join(rel.trim_start_matches('/'));
+                let mut sorted_entries: Vec<(&String, &(u32, u32))> = map.iter().collect();
+                sorted_entries.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(b.0)));
+                for (rel, &(uid, gid)) in sorted_entries {
+                    let clean_rel = rel.trim_start_matches('/');
+                    let p = rootfs.join(clean_rel);
                     if let Ok(c_path) = CString::new(p.as_os_str().as_bytes()) {
                         unsafe {
                             let _ = libc::lchown(c_path.as_ptr(), uid, gid);
@@ -6658,6 +6783,14 @@ fn run_container_child(
                     if p.is_dir() {
                         if let Ok(entries) = fs::read_dir(&p) {
                             for entry in entries.flatten() {
+                                let child_rel = format!(
+                                    "{}/{}",
+                                    clean_rel.trim_end_matches('/'),
+                                    entry.file_name().to_string_lossy()
+                                );
+                                if map.contains_key(&child_rel) {
+                                    continue;
+                                }
                                 if let Ok(c_sub) = CString::new(entry.path().as_os_str().as_bytes())
                                 {
                                     unsafe {
@@ -7298,9 +7431,32 @@ fn run_container_child(
                         None::<&str>,
                         target,
                         None::<&str>,
-                        MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                        MsFlags::MS_REMOUNT
+                            | MsFlags::MS_BIND
+                            | MsFlags::MS_RDONLY
+                            | MsFlags::MS_NOSUID
+                            | MsFlags::MS_NODEV
+                            | MsFlags::MS_NOEXEC,
                         None::<&str>,
-                    );
+                    )
+                    .or_else(|_| {
+                        mount(
+                            None::<&str>,
+                            target,
+                            None::<&str>,
+                            MsFlags::MS_REMOUNT | MsFlags::MS_BIND | MsFlags::MS_RDONLY,
+                            None::<&str>,
+                        )
+                    })
+                    .or_else(|_| {
+                        mount(
+                            None::<&str>,
+                            target,
+                            None::<&str>,
+                            MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                            None::<&str>,
+                        )
+                    });
                 }
             }
         }
@@ -7309,7 +7465,13 @@ fn run_container_child(
     let _ = pre_pivot_seccomp;
     let _ = has_systemd;
     become_effective_container_root();
-    for etc_file in ["/etc/hosts", "/etc/resolv.conf", "/etc/hostname", "/usr"] {
+    for etc_file in [
+        "/etc",
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/hostname",
+        "/usr",
+    ] {
         let _ = nix::unistd::chown(
             etc_file,
             Some(nix::unistd::Uid::from_raw(0)),

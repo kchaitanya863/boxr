@@ -99,6 +99,9 @@ if [[ -f "$CACHE_DIR/current_boxr_home" ]]; then
 else
   DEFAULT_BOXR_HOME="$HOME/.boxr-bats"
 fi
+if [[ "\$(id -u)" == "0" ]]; then
+  DEFAULT_BOXR_HOME="\${DEFAULT_BOXR_HOME}-root"
+fi
 export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-\$DEFAULT_BOXR_HOME}}"
 mkdir -p "\$BOXR_HOME"
 if [[ "\${BOXR_TEST_EMBEDDED_USERNET:-}" == "1" ]]; then
@@ -239,6 +242,7 @@ EOF
     "$BOXR_BIN" rm -a -f >/dev/null 2>&1 || true
     chmod -R u+w "$BOXR_HOME" 2>/dev/null || true
     rm -rf "$BOXR_HOME" 2>/dev/null || true
+    sudo -n rm -rf "${BOXR_HOME}-root" 2>/dev/null || true
   done
 
   echo "Log: $log"

@@ -897,19 +897,7 @@ impl RegistryClient {
                             self.token = Some(token);
                         }
                     }
-                } else {
-                    return Err(anyhow!(
-                        "{}/{}: authentication required",
-                        reference.registry,
-                        reference.repository
-                    ));
                 }
-            } else {
-                return Err(anyhow!(
-                    "{}/{}: authentication required",
-                    reference.registry,
-                    reference.repository
-                ));
             }
         }
         Ok(())

@@ -101,6 +101,9 @@ for rec in matched:
         try:
             os.chmod(dst_img_dir, 0o755)
             os.chmod(os.path.join(dst_img_dir, "rootfs"), 0o755)
+            tid = os.path.join(dst_img_dir, "rootfs", "home", "podman", "testimage-id")
+            if os.path.exists(tid):
+                os.utime(tid, (1600000000, 1600000000))
         except OSError:
             pass
     rec["rootfs_path"] = os.path.join(dst_img_dir, "rootfs")

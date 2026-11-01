@@ -216,7 +216,7 @@ impl CheckpointManager {
             && (!args.container.is_empty() || !args.extra_containers.is_empty())
         {
             crate::cli::usage_errors::exit_usage_error(
-                "--all or --latest and containers cannot be used together",
+                "--all, --latest and containers cannot be used together",
             );
         }
         let store = ContainerStore::new();
@@ -493,7 +493,7 @@ impl CheckpointManager {
             && (!args.container.is_empty() || !args.extra_containers.is_empty())
         {
             crate::cli::usage_errors::exit_usage_error(
-                "--all or --latest and containers cannot be used together",
+                "--all, --latest and containers cannot be used together",
             );
         }
         let store = ContainerStore::new();

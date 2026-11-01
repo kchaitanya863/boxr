@@ -648,11 +648,45 @@ impl ContainerCopy {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         if target.host_path.is_dir() {
-            builder.append_dir_all(&name, &target.host_path)?;
+            Self::append_dir_skipping_sockets(&mut builder, &target.host_path, &name)?;
         } else {
             builder.append_path_with_name(&target.host_path, &name)?;
         }
         builder.finish()?;
+        Ok(())
+    }
+
+    fn append_dir_skipping_sockets<W: std::io::Write>(
+        builder: &mut tar::Builder<W>,
+        src_dir: &Path,
+        tar_prefix: &Path,
+    ) -> Result<()> {
+        builder.append_dir(tar_prefix, src_dir)?;
+        for entry in fs::read_dir(src_dir)? {
+            let entry = entry?;
+            let fname = entry.file_name();
+            if fname.to_string_lossy().starts_with("boxr-exec-") {
+                continue;
+            }
+            let path = entry.path();
+            let rel = tar_prefix.join(&fname);
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if meta.file_type().is_socket() || meta.file_type().is_fifo() {
+                    continue;
+                }
+            }
+            if meta.is_dir() {
+                Self::append_dir_skipping_sockets(builder, &path, &rel)?;
+            } else {
+                builder.append_path_with_name(&path, &rel)?;
+            }
+        }
         Ok(())
     }
 
@@ -819,10 +853,20 @@ impl ContainerCopy {
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let file_name = entry.file_name();
+            if file_name.to_string_lossy().starts_with("boxr-exec-") {
+                continue;
+            }
             let sub_src = entry.path();
             let sub_dst = dst.join(&file_name);
             let sub_prefix = format!("{}/{}", err_prefix, file_name.to_string_lossy());
             let meta = fs::symlink_metadata(&sub_src)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileTypeExt;
+                if meta.file_type().is_socket() || meta.file_type().is_fifo() {
+                    continue;
+                }
+            }
             if meta.is_dir() {
                 if let Ok(sub_meta) = fs::symlink_metadata(&sub_dst) {
                     if !sub_meta.is_dir() {
