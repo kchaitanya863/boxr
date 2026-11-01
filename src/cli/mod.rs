@@ -227,6 +227,7 @@ pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
             || a == "--runroot"
             || a == "--tmpdir"
             || a == "--volumepath"
+            || a == "--imagestore"
             || a == "--storage-driver"
             || a == "--storage-opt"
             || a == "--pull-option"
@@ -420,6 +421,14 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 continue;
             }
             if a.starts_with("--pull-option=") {
+                i += 1;
+                continue;
+            }
+            if a == "--imagestore" && i + 1 < argv.len() {
+                i += 2;
+                continue;
+            }
+            if a.starts_with("--imagestore=") {
                 i += 1;
                 continue;
             }

@@ -153,8 +153,7 @@ impl ArchiveManager {
         let mut by_id = Vec::new();
 
         for q in images {
-            let img = store
-                .find(q)
+            let img = crate::find_image_with_shortname(&store, q, None)
                 .ok_or_else(|| anyhow!("Image '{}' not found locally", q))?;
             let is_id = !q.contains(':') && (q == &img.id || img.id.starts_with(q));
             by_id.push(is_id);
@@ -472,6 +471,17 @@ impl ArchiveManager {
                 };
                 let mut archive = Archive::new(std::io::Cursor::new(bytes));
                 crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+            } else if path_str.ends_with(".xz") {
+                let status = std::process::Command::new("tar")
+                    .arg("-xf")
+                    .arg(path)
+                    .arg("-C")
+                    .arg(temp_dir.path())
+                    .status()
+                    .with_context(|| format!("Failed to extract xz archive {:?}", path))?;
+                if !status.success() {
+                    return Err(anyhow!("Failed to extract xz archive {:?}", path));
+                }
             } else {
                 let file = File::open(path)
                     .with_context(|| format!("Failed to open image archive at {:?}", path))?;
@@ -495,7 +505,34 @@ impl ArchiveManager {
         }
 
         let manifest_content = fs::read_to_string(&manifest_path)?;
-        let manifest_items: Vec<TarManifestItem> = serde_json::from_str(&manifest_content)?;
+        let mut manifest_items: Vec<TarManifestItem> = serde_json::from_str(&manifest_content)?;
+        if let Ok(sel) = std::env::var("BOXR_ARCHIVE_SELECTOR") {
+            if sel.is_empty() {
+                if manifest_items.len() != 1 {
+                    return Err(anyhow!(
+                        "Unexpected tar manifest.json: expected 1 item, got {}",
+                        manifest_items.len()
+                    ));
+                }
+            } else if let Some(idx_str) = sel.strip_prefix('@') {
+                let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
+                if idx >= manifest_items.len() {
+                    return Err(anyhow!(
+                        "Invalid source index @{}, only {} manifest items available",
+                        idx_str,
+                        manifest_items.len()
+                    ));
+                }
+                manifest_items = vec![manifest_items.remove(idx)];
+            } else if let Some(pos) = manifest_items
+                .iter()
+                .position(|it| it.repo_tags.iter().any(|t| t == &sel))
+            {
+                manifest_items = vec![manifest_items.remove(pos)];
+            } else {
+                return Err(anyhow!("Tag {:?} not found", sel));
+            }
+        }
 
         let store = ImageStore::with_home(home.to_path_buf());
         let mut loaded = Vec::new();
@@ -625,7 +662,16 @@ impl ArchiveManager {
         Ok(loaded)
     }
 
-    fn load_oci_archive(dir: &Path, home: &Path, quiet: bool) -> Result<Vec<ImageRecord>> {
+    pub fn load_oci_archive(dir: &Path, home: &Path, quiet: bool) -> Result<Vec<ImageRecord>> {
+        Self::load_oci_dir_with_ref(dir, None, home, quiet)
+    }
+
+    pub fn load_oci_dir_with_ref(
+        dir: &Path,
+        ref_override: Option<&str>,
+        home: &Path,
+        quiet: bool,
+    ) -> Result<Vec<ImageRecord>> {
         let index_content = fs::read_to_string(dir.join("index.json"))?;
         let index: OciIndex = serde_json::from_str(&index_content)?;
         let store = ImageStore::with_home(home.to_path_buf());
@@ -682,29 +728,40 @@ impl ArchiveManager {
                     .unwrap_or(&layer.digest);
                 let layer_path = dir.join("blobs/sha256").join(layer_hash);
                 if layer_path.exists() {
-                    let mut layer_archive = Archive::new(File::open(layer_path)?);
-                    crate::oci::image::unpack_archive_safely(&mut layer_archive, &dest_rootfs)?;
+                    let _ = crate::oci::image::unpack_layer(&layer_path, &dest_rootfs);
                 }
             }
 
-            let ref_name = descriptor
-                .annotations
-                .get("org.opencontainers.image.ref.name")
-                .cloned()
+            let ref_name = ref_override
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    descriptor
+                        .annotations
+                        .get("org.opencontainers.image.ref.name")
+                        .cloned()
+                })
                 .unwrap_or_else(|| "<none>:<none>".to_string());
 
-            let parsed = ImageReference::parse(&ref_name).unwrap_or(ImageReference {
-                registry: ImageReference::DEFAULT_REGISTRY.to_string(),
-                repository: ref_name.clone(),
-                tag: ImageReference::DEFAULT_TAG.to_string(),
-                digest: None,
-            });
+            let (registry, repository, tag) = if ref_name == "<none>:<none>" {
+                ("".to_string(), "<none>".to_string(), "<none>".to_string())
+            } else if let Some(rest) = ref_name.strip_prefix("localhost/") {
+                let (repo, t) = rest.split_once(':').unwrap_or((rest, "latest"));
+                ("localhost".to_string(), repo.to_string(), t.to_string())
+            } else {
+                let parsed = ImageReference::parse(&ref_name).unwrap_or(ImageReference {
+                    registry: ImageReference::DEFAULT_REGISTRY.to_string(),
+                    repository: ref_name.clone(),
+                    tag: ImageReference::DEFAULT_TAG.to_string(),
+                    digest: None,
+                });
+                (parsed.registry, parsed.repository, parsed.tag)
+            };
 
             let record = ImageRecord {
                 id: short_id,
-                reference: parsed.repository,
-                tag: parsed.tag,
-                registry: parsed.registry,
+                reference: repository,
+                tag,
+                registry,
                 manifest_digest: format!("sha256:{}:oci", manifest_hash),
                 config_digest: format!("sha256:{}", config_hash),
                 size_bytes: descriptor.size as i64,

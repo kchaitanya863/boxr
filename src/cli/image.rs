@@ -59,13 +59,25 @@ pub struct PullArgs {
     pub retry_delay: String,
 
     /// Suppress output information when pulling images
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
+
+    #[arg(short = 'a', long = "all-tags", hide = true)]
+    pub all_tags: bool,
+
+    #[arg(long = "decryption-key", hide = true)]
+    pub decryption_key: Vec<String>,
+
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
 
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
 
     pub image: String,
+
+    #[arg(hide = true)]
+    pub extra_images: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -73,7 +85,7 @@ pub struct PullArgs {
 pub struct SaveArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<String>,
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
     #[arg(long = "format")]
     pub format: Option<String>,
@@ -93,7 +105,7 @@ pub struct SaveArgs {
 pub struct LoadArgs {
     #[arg(short = 'i', long = "input")]
     pub input: Option<String>,
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
 }
 
@@ -112,10 +124,36 @@ pub struct PushArgs {
     pub format: Option<String>,
     #[arg(long = "compression-format", hide = true)]
     pub compression_format: Option<String>,
+    #[arg(long = "compression-level", allow_hyphen_values = true, hide = true)]
+    pub compression_level: Option<i32>,
+    #[arg(
+        long = "force-compression",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub force_compression: Option<bool>,
     #[arg(long = "encryption-key", hide = true)]
     pub encryption_key: Vec<String>,
     #[arg(long = "remove-signatures", hide = true)]
     pub remove_signatures: bool,
+    #[arg(long = "digestfile", hide = true)]
+    pub digestfile: Option<String>,
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
+    #[arg(long = "sign-by", hide = true)]
+    pub sign_by: Option<String>,
+    #[arg(long = "sign-by-sigstore", hide = true)]
+    pub sign_by_sigstore: Option<String>,
+    #[arg(long = "sign-by-sigstore-private-key", hide = true)]
+    pub sign_by_sigstore_private_key: Option<String>,
+    #[arg(long = "sign-passphrase-file", hide = true)]
+    pub sign_passphrase_file: Option<String>,
+    #[arg(long = "sign-by-sq-fingerprint", hide = true)]
+    pub sign_by_sq_fingerprint: Option<String>,
+    #[arg(long = "platform", hide = true)]
+    pub platform: Option<String>,
     #[arg(short = 'q', long = "quiet", hide = true)]
     pub quiet: bool,
     /// Source image

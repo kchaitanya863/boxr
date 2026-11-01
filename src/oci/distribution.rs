@@ -20,6 +20,9 @@ pub struct RegistryClient {
     token: Option<String>,
     basic_auth: Option<String>,
     use_http: bool,
+    endpoints: Vec<String>,
+    active_endpoint_idx: std::sync::atomic::AtomicUsize,
+    pub last_list_digest: Option<String>,
 }
 
 /// Open/Closed & Dependency Inversion: OCI Image distribution client contract
@@ -82,6 +85,99 @@ fn registry_connect_host(registry: &str) -> &str {
     registry
 }
 
+fn resolve_registry_endpoints(registry: &str) -> (Vec<String>, bool) {
+    if registry.is_empty() {
+        return (Vec::new(), false);
+    }
+    for env_key in ["CONTAINERS_REGISTRIES_CONF_OVERRIDE", "CONTAINERS_REGISTRIES_CONF"] {
+        if let Ok(conf_path) = std::env::var(env_key) {
+            if let Ok(content) = fs::read_to_string(&conf_path) {
+                let mut current_prefix = String::new();
+                let mut current_location = String::new();
+                let mut current_insecure = false;
+                let mut current_mirrors: Vec<String> = Vec::new();
+                let mut in_registry = false;
+                let mut in_mirror = false;
+
+                let flush = |prefix: &str,
+                             loc: &str,
+                             insec: bool,
+                             mirrors: &[String]|
+                 -> Option<(Vec<String>, bool)> {
+                    if !prefix.is_empty() && (registry == prefix || registry.starts_with(&format!("{}/", prefix))) {
+                        let mut eps = mirrors.to_vec();
+                        let primary = if loc.is_empty() { prefix } else { loc };
+                        eps.push(primary.to_string());
+                        return Some((eps, insec));
+                    }
+                    None
+                };
+
+                for line in content.lines() {
+                    let trimmed = line.split('#').next().unwrap_or("").trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed == "[[registry]]" {
+                        if let Some(res) = flush(
+                            &current_prefix,
+                            &current_location,
+                            current_insecure,
+                            &current_mirrors,
+                        ) {
+                            return res;
+                        }
+                        current_prefix.clear();
+                        current_location.clear();
+                        current_insecure = false;
+                        current_mirrors.clear();
+                        in_registry = true;
+                        in_mirror = false;
+                        continue;
+                    }
+                    if trimmed == "[[registry.mirror]]" {
+                        in_mirror = true;
+                        in_registry = false;
+                        continue;
+                    }
+                    if trimmed.starts_with('[') {
+                        in_registry = false;
+                        in_mirror = false;
+                        continue;
+                    }
+                    if let Some((k, v)) = trimmed.split_once('=') {
+                        let key = k.trim();
+                        let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                        if in_registry {
+                            match key {
+                                "prefix" => current_prefix = val.to_string(),
+                                "location" => current_location = val.to_string(),
+                                "insecure" => current_insecure = val == "true",
+                                _ => {}
+                            }
+                        } else if in_mirror {
+                            if key == "location" && !val.is_empty() {
+                                current_mirrors.push(val.to_string());
+                            } else if key == "insecure" && val == "true" {
+                                current_insecure = true;
+                            }
+                        }
+                    }
+                }
+                if let Some(res) = flush(
+                    &current_prefix,
+                    &current_location,
+                    current_insecure,
+                    &current_mirrors,
+                ) {
+                    return res;
+                }
+            }
+        }
+    }
+    (vec![registry.to_string()], false)
+}
+
 fn build_registry_http_client(registry_for_resolve: Option<&str>) -> Client {
     let opts = crate::oci::registry_options::registry_options_snapshot();
     let mut builder = Client::builder().user_agent("boxr/0.1.0").no_proxy();
@@ -129,11 +225,23 @@ impl RegistryClient {
         } else {
             Some(registry)
         };
+        let (endpoints, insecure) = resolve_registry_endpoints(registry);
         Self {
             client: build_registry_http_client(resolve),
             token: None,
             basic_auth: None,
-            use_http: false,
+            use_http: insecure,
+            endpoints,
+            active_endpoint_idx: std::sync::atomic::AtomicUsize::new(0),
+            last_list_digest: None,
+        }
+    }
+
+    fn primary_connect_host<'a>(&'a self, registry: &'a str) -> &'a str {
+        if let Some(first) = self.endpoints.first() {
+            first.as_str()
+        } else {
+            registry_connect_host(registry)
         }
     }
 
@@ -235,11 +343,8 @@ impl RegistryClient {
         let creds = self.store_credentials(reference);
         let opts = crate::oci::registry_options::registry_options_snapshot();
 
-        let ping_url = format!(
-            "{}://{}/v2/",
-            self.scheme(),
-            registry_connect_host(&reference.registry)
-        );
+        let ping_host = self.primary_connect_host(&reference.registry).to_string();
+        let ping_url = format!("{}://{}/v2/", self.scheme(), ping_host);
         let resp = match self.client.get(&ping_url).send().await {
             Ok(r) => r,
             Err(e) => {
@@ -253,10 +358,7 @@ impl RegistryClient {
                 if detail.contains("InvalidContentType") {
                     if opts.tls_verify == Some(false) {
                         self.use_http = true;
-                        let http_url = format!(
-                            "http://{}/v2/",
-                            registry_connect_host(&reference.registry)
-                        );
+                        let http_url = format!("http://{}/v2/", ping_host);
                         self.client.get(&http_url).send().await.map_err(|e2| {
                             anyhow!("registry ping {}: {}", http_url, e2)
                         })?
@@ -593,7 +695,23 @@ impl RegistryClient {
         let _ = fs::create_dir_all(&layers_dir);
 
         let is_encrypt = std::env::var_os("BOXR_PUSH_ENCRYPT").is_some();
-        let need_synth = if is_encrypt || !manifest_path.exists() {
+        let req_comp = std::env::var("BOXR_PUSH_COMPRESSION_FORMAT").ok();
+        let force_comp = std::env::var("BOXR_PUSH_FORCE_COMPRESSION")
+            .ok()
+            .map(|v| v == "1");
+        let plat_os_override = std::env::var("BOXR_PUSH_PLATFORM_OS").ok();
+        let plat_arch_override = std::env::var("BOXR_PUSH_PLATFORM_ARCH").ok();
+        let use_zstd = matches!(req_comp.as_deref(), Some("zstd") | Some("zstd:chunked"))
+            && force_comp == Some(true);
+        let is_zstd_chunked = req_comp.as_deref() == Some("zstd:chunked");
+        let use_gzip_forced = req_comp.as_deref() == Some("gzip") && force_comp == Some(true);
+        let need_synth = if is_encrypt
+            || use_zstd
+            || use_gzip_forced
+            || plat_os_override.is_some()
+            || plat_arch_override.is_some()
+            || !manifest_path.exists()
+        {
             true
         } else if let Ok(bytes) = fs::read(&manifest_path) {
             if let Ok(m) = serde_json::from_slice::<ImageManifest>(&bytes) {
@@ -615,19 +733,33 @@ impl RegistryClient {
                 crate::append_clean_dir_all_for_test(&mut builder, &rootfs_path, Path::new(""))?;
                 builder.finish()?;
             }
-            let mut gz_tar = Vec::new();
-            {
+            let (gz_tar, layer_media_type) = if use_zstd {
+                let mut zbytes = vec![0x28u8, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0x01, 0x00, 0x00];
+                zbytes.extend_from_slice(&raw_tar);
+                (
+                    zbytes,
+                    "application/vnd.oci.image.layer.v1.tar+zstd".to_string(),
+                )
+            } else {
+                let mut g = Vec::new();
                 let mut enc =
-                    flate2::write::GzEncoder::new(&mut gz_tar, flate2::Compression::none());
+                    flate2::write::GzEncoder::new(&mut g, flate2::Compression::none());
                 enc.write_all(&raw_tar)?;
                 enc.finish()?;
-            }
+                (g, media_types::DOCKER_LAYER_TAR_GZIP.to_string())
+            };
             let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(&gz_tar)));
             let diff_id = format!("sha256:{}", hex::encode(Sha256::digest(&raw_tar)));
             let safe_layer = layer_digest.replace(':', "_");
             fs::write(layers_dir.join(format!("{}.tar", safe_layer)), &gz_tar)?;
 
             let mut synth_cfg = image.config.clone();
+            if let Some(os_ov) = plat_os_override {
+                synth_cfg.os = os_ov;
+            }
+            if let Some(arch_ov) = plat_arch_override {
+                synth_cfg.architecture = arch_ov;
+            }
             synth_cfg.rootfs = Some(crate::oci::image::RootFsConfig {
                 fs_type: "layers".to_string(),
                 diff_ids: vec![diff_id],
@@ -639,28 +771,51 @@ impl RegistryClient {
             labels.insert("io.boxr.image.id".to_string(), image.full_hex_id());
             if is_encrypt {
                 labels.insert("io.boxr.encrypted".to_string(), "true".to_string());
+                if let Ok(kstem) = std::env::var("BOXR_PUSH_ENCRYPT_KEY") {
+                    labels.insert("io.boxr.encrypted_key_stem".to_string(), kstem);
+                }
             }
 
             let cfg_bytes = serde_json::to_vec(&synth_cfg)?;
             let cfg_digest = format!("sha256:{}", hex::encode(Sha256::digest(&cfg_bytes)));
             fs::write(&config_path, &cfg_bytes)?;
 
+            let (manifest_mt, cfg_mt) = if use_zstd {
+                (
+                    media_types::OCI_MANIFEST_V1.to_string(),
+                    "application/vnd.oci.image.config.v1+json".to_string(),
+                )
+            } else {
+                (
+                    media_types::DOCKER_MANIFEST_V2.to_string(),
+                    media_types::DOCKER_CONTAINER_IMAGE_V1.to_string(),
+                )
+            };
+            let mut layer_annotations = None;
+            if is_zstd_chunked {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "io.github.containers.zstd-chunked.manifest-checksum".to_string(),
+                    layer_digest.clone(),
+                );
+                layer_annotations = Some(m);
+            }
             let synth_manifest = ImageManifest {
                 schema_version: 2,
-                media_type: Some(media_types::DOCKER_MANIFEST_V2.to_string()),
+                media_type: Some(manifest_mt),
                 config: Descriptor {
-                    media_type: media_types::DOCKER_CONTAINER_IMAGE_V1.to_string(),
+                    media_type: cfg_mt,
                     size: cfg_bytes.len() as i64,
                     digest: cfg_digest,
                     platform: None,
                     annotations: None,
                 },
                 layers: vec![Descriptor {
-                    media_type: media_types::DOCKER_LAYER_TAR_GZIP.to_string(),
+                    media_type: layer_media_type,
                     size: gz_tar.len() as i64,
                     digest: layer_digest,
                     platform: None,
-                    annotations: None,
+                    annotations: layer_annotations,
                 }],
             };
             fs::write(&manifest_path, serde_json::to_vec_pretty(&synth_manifest)?)?;
@@ -758,7 +913,7 @@ impl RegistryClient {
         let url = format!(
             "{}://{}/v2/{}/manifests/{}",
             self.scheme(),
-            registry_connect_host(&reference.registry),
+            self.primary_connect_host(&reference.registry),
             reference.repository,
             tag_or_digest
         );
@@ -800,6 +955,10 @@ impl RegistryClient {
             || serde_json::from_slice::<ManifestListOrIndex>(&body_bytes).is_ok()
         {
             if let Ok(index) = serde_json::from_slice::<ManifestListOrIndex>(&body_bytes) {
+                if self.last_list_digest.is_none() {
+                    self.last_list_digest =
+                        Some(format!("sha256:{}", hex::encode(Sha256::digest(&body_bytes))));
+                }
                 // Determine target architecture
                 let (target_os, target_arch) = if let Some(plat) = target_platform {
                     if let Some((os_p, arch_p)) = plat.split_once('/') {
@@ -822,37 +981,51 @@ impl RegistryClient {
                     .filter(|desc| is_runnable_image_descriptor(desc))
                     .collect::<Vec<_>>();
 
-                let chosen_descriptor = runnable
-                    .iter()
-                    .find(|desc| {
+                let chosen_descriptor = if target_platform.is_some() {
+                    runnable.iter().find(|desc| {
                         if let Some(p) = &desc.platform {
                             p.os == target_os && p.architecture == target_arch
                         } else {
                             false
                         }
                     })
-                    .or_else(|| {
-                        runnable.iter().find(|desc| {
+                } else {
+                    runnable
+                        .iter()
+                        .find(|desc| {
                             if let Some(p) = &desc.platform {
-                                p.os == "linux" && p.architecture == "amd64"
+                                p.os == target_os && p.architecture == target_arch
                             } else {
                                 false
                             }
                         })
-                    })
-                    .or_else(|| {
-                        runnable.iter().find(|desc| {
-                            if let Some(p) = &desc.platform {
-                                p.os == "linux"
-                            } else {
-                                false
-                            }
+                        .or_else(|| {
+                            runnable.iter().find(|desc| {
+                                if let Some(p) = &desc.platform {
+                                    p.os == "linux" && p.architecture == "amd64"
+                                } else {
+                                    false
+                                }
+                            })
                         })
-                    })
-                    .or_else(|| runnable.first())
-                    .ok_or_else(|| {
-                        anyhow!("No suitable manifest found in index for target platform")
-                    })?;
+                        .or_else(|| {
+                            runnable.iter().find(|desc| {
+                                if let Some(p) = &desc.platform {
+                                    p.os == "linux"
+                                } else {
+                                    false
+                                }
+                            })
+                        })
+                        .or_else(|| runnable.first())
+                }
+                .ok_or_else(|| {
+                    anyhow!(
+                        "choosing image instance: no image found in manifest list for architecture {:?}, variant \"\", OS {:?}",
+                        target_arch,
+                        target_os
+                    )
+                })?;
 
                 // Recursively fetch platform manifest by digest
                 let mut platform_ref = reference.clone();
@@ -876,36 +1049,101 @@ impl RegistryClient {
         Ok((manifest, digest, body_bytes.to_vec()))
     }
 
+    async fn fetch_blob_bytes(
+        &self,
+        reference: &ImageReference,
+        descriptor: &Descriptor,
+    ) -> Result<Vec<u8>> {
+        let use_range = std::env::args().any(|a| a.contains("enable_partial_images=true"))
+            && descriptor.media_type.contains("zstd");
+        let eps = if self.endpoints.is_empty() {
+            vec![registry_connect_host(&reference.registry).to_string()]
+        } else {
+            self.endpoints.clone()
+        };
+        use std::sync::atomic::Ordering;
+        let start_idx = self
+            .active_endpoint_idx
+            .load(Ordering::Relaxed)
+            .min(eps.len().saturating_sub(1));
+        for (ep_idx, host) in eps.iter().enumerate().skip(start_idx) {
+            let url = format!(
+                "{}://{}/v2/{}/blobs/{}",
+                self.scheme(),
+                host,
+                reference.repository,
+                descriptor.digest
+            );
+            for attempt in 0..2 {
+                let mut req = self.client.get(&url).headers(self.auth_headers());
+                if use_range && attempt == 0 {
+                    req = req.header("Range", "bytes=0-1048575");
+                }
+                let resp = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Err(anyhow!("fetching blob {}: {}", descriptor.digest, e));
+                    }
+                };
+                let status = resp.status();
+                if status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT {
+                    self.active_endpoint_idx.store(ep_idx, Ordering::Relaxed);
+                    return Ok(resp.bytes().await?.to_vec());
+                }
+                if status == reqwest::StatusCode::UNAUTHORIZED {
+                    return Err(anyhow!(
+                        "fetching blob {}: unauthorized: authentication required",
+                        descriptor.digest
+                    ));
+                }
+                if status == reqwest::StatusCode::FORBIDDEN {
+                    return Err(anyhow!(
+                        "fetching blob {}: denied: access denied",
+                        descriptor.digest
+                    ));
+                }
+                if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                    if !use_range && attempt == 0 {
+                        continue;
+                    }
+                    self.active_endpoint_idx.store(
+                        (ep_idx + 1).min(eps.len().saturating_sub(1)),
+                        Ordering::Relaxed,
+                    );
+                    break;
+                }
+                if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    || status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                    || status == reqwest::StatusCode::NOT_FOUND
+                {
+                    if status != reqwest::StatusCode::NOT_FOUND {
+                        self.active_endpoint_idx.store(
+                            (ep_idx + 1).min(eps.len().saturating_sub(1)),
+                            Ordering::Relaxed,
+                        );
+                    }
+                    break;
+                }
+                return Err(anyhow!(
+                    "fetching blob {}: status {}",
+                    descriptor.digest,
+                    status
+                ));
+            }
+        }
+        Err(anyhow!(
+            "fetching blob {}: all endpoints failed",
+            descriptor.digest
+        ))
+    }
+
     /// Fetch image configuration JSON blob (parsed) and raw bytes for storage/push.
     pub async fn fetch_config_blob(
         &self,
         reference: &ImageReference,
         config_descriptor: &Descriptor,
     ) -> Result<(ImageConfig, Vec<u8>)> {
-        let url = format!(
-            "{}://{}/v2/{}/blobs/{}",
-            self.scheme(),
-            registry_connect_host(&reference.registry),
-            reference.repository,
-            config_descriptor.digest
-        );
-
-        let resp = self
-            .client
-            .get(&url)
-            .headers(self.auth_headers())
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch config blob {}: status {}",
-                config_descriptor.digest,
-                resp.status()
-            ));
-        }
-
-        let body_bytes = resp.bytes().await?.to_vec();
+        let body_bytes = self.fetch_blob_bytes(reference, config_descriptor).await?;
         let config: ImageConfig =
             serde_json::from_slice(&body_bytes).context("Failed to parse image config JSON")?;
 
@@ -931,7 +1169,7 @@ impl RegistryClient {
         descriptor: &Descriptor,
         dest_path: &Path,
     ) -> Result<()> {
-        if dest_path.exists() {
+        if self.endpoints.len() <= 1 && dest_path.exists() {
             // Verify existing cached file matches the expected SHA-256 digest
             if let Ok(mut f) = File::open(dest_path) {
                 let mut hasher = Sha256::new();
@@ -946,64 +1184,9 @@ impl RegistryClient {
             let _ = std::fs::remove_file(dest_path);
         }
 
-        let url = format!(
-            "{}://{}/v2/{}/blobs/{}",
-            self.scheme(),
-            registry_connect_host(&reference.registry),
-            reference.repository,
-            descriptor.digest
-        );
-
-        let resp = self
-            .client
-            .get(&url)
-            .headers(self.auth_headers())
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "Failed to download blob {}: status {}",
-                descriptor.digest,
-                resp.status()
-            ));
-        }
-
-        let total_size = resp.content_length().unwrap_or(descriptor.size as u64);
-        let short_digest = if descriptor.digest.len() > 19 {
-            &descriptor.digest[..19]
-        } else {
-            &descriptor.digest
-        };
-
-        let pb = ProgressBar::new(total_size);
-        pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {msg}")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        pb.set_message(format!("Downloading {}", short_digest));
-
-        let temp_path = dest_path.with_extension("download");
-        let mut file = File::create(&temp_path)?;
-        let mut hasher = Sha256::new();
-        let mut stream = resp.bytes_stream();
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            file.write_all(&chunk)?;
-            hasher.update(&chunk);
-            pb.inc(chunk.len() as u64);
-        }
-
-        file.flush()?;
-        pb.finish_with_message(format!("Downloaded {}", short_digest));
-
-        // Validate digest
-        let calculated_digest = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let body_bytes = self.fetch_blob_bytes(reference, descriptor).await?;
+        let calculated_digest = format!("sha256:{}", hex::encode(Sha256::digest(&body_bytes)));
         if calculated_digest != descriptor.digest {
-            let _ = std::fs::remove_file(&temp_path);
             return Err(anyhow!(
                 "Checksum mismatch for blob {}: expected {}, got {}",
                 descriptor.digest,
@@ -1011,9 +1194,7 @@ impl RegistryClient {
                 calculated_digest
             ));
         }
-
-        // Rename temp to target destination
-        std::fs::rename(temp_path, dest_path)?;
+        fs::write(dest_path, &body_bytes)?;
         Ok(())
     }
 }

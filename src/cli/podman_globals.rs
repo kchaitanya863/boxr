@@ -10,6 +10,7 @@ pub struct PodmanGlobalOptions {
     pub runroot: Option<PathBuf>,
     pub tmpdir: Option<PathBuf>,
     pub volumepath: Option<PathBuf>,
+    pub imagestore: Option<PathBuf>,
     pub storage_driver: Option<String>,
     pub storage_opts: Vec<String>,
     pub events_backend: Option<String>,
@@ -47,6 +48,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--runroot",
     "--tmpdir",
     "--volumepath",
+    "--imagestore",
     "--storage-driver",
     "--storage-opt",
     "--pull-option",
@@ -153,6 +155,18 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
         if a == "--volumepath" {
             if i + 1 < argv.len() {
                 opts.volumepath = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--imagestore=") {
+            opts.imagestore = Some(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--imagestore" {
+            if i + 1 < argv.len() {
+                opts.imagestore = Some(PathBuf::from(&argv[i + 1]));
                 i += 2;
                 continue;
             }
@@ -344,6 +358,8 @@ pub fn should_strip_global_flag_at(argv: &[String], i: usize, subcommand_idx: us
         || a.starts_with("--transient-store=")
         || a == "--pull-option"
         || a.starts_with("--pull-option=")
+        || a == "--imagestore"
+        || a.starts_with("--imagestore=")
     {
         return true;
     }

@@ -111,8 +111,16 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     if !cfg_hex.is_empty() && (cfg_hex.starts_with(query) || img.config_digest == query) {
         return true;
     }
+    let list_digest = img
+        .config
+        .config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .and_then(|l| l.get("io.boxr.list_digest"))
+        .map(|s| s.as_str());
     if let Some(hex) = query.strip_prefix("sha256:") {
         return img.manifest_digest == query
+            || list_digest == Some(query)
             || img.id.starts_with(hex)
             || img.full_hex_id().starts_with(hex)
             || img.config_digest == query
@@ -129,7 +137,7 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     match ImageReference::parse(query) {
         Ok(r) => {
             if let Some(digest) = r.digest {
-                return img.manifest_digest == digest;
+                return img.manifest_digest == digest || list_digest == Some(digest.as_str());
             }
             let (reg, repo, tag) = record_identity(img);
             reg == r.registry && repo == r.repository && tag == r.tag
@@ -198,18 +206,48 @@ impl ImageStore {
         };
 
         let globals = crate::cli::podman_globals::podman_global_options();
+        let mut alt_roots: Vec<PathBuf> = Vec::new();
         for opt in &globals.storage_opts {
             if let Some((k, v)) = opt.split_once('=') {
                 if k.ends_with(".imagestore") {
-                    let alt_file = PathBuf::from(v).join("images.json");
-                    if alt_file.exists() && alt_file != self.index_file {
-                        if let Ok(content) = fs::read_to_string(&alt_file) {
-                            if let Ok(alt_data) = serde_json::from_str::<ImageStoreData>(&content) {
-                                for alt_img in alt_data.images {
-                                    if !data.images.iter().any(|i| i.id == alt_img.id) {
-                                        data.images.push(alt_img);
-                                    }
+                    alt_roots.push(PathBuf::from(v));
+                }
+            }
+        }
+        if let Some(ref is_dir) = globals.imagestore {
+            alt_roots.push(is_dir.clone());
+        }
+        for env_key in ["CONTAINERS_STORAGE_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF"] {
+            if let Ok(conf_path) = std::env::var(env_key) {
+                if let Ok(content) = fs::read_to_string(&conf_path) {
+                    for line in content.lines() {
+                        let trimmed = line.split('#').next().unwrap_or("").trim();
+                        if let Some((k, v)) = trimmed.split_once('=') {
+                            if k.trim() == "imagestore" {
+                                let clean = v.trim().trim_matches('"').trim_matches('\'').trim();
+                                if !clean.is_empty() {
+                                    alt_roots.push(PathBuf::from(clean));
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for alt_root in alt_roots {
+            let alt_file = alt_root.join("images.json");
+            if alt_file.exists() && alt_file != self.index_file {
+                if let Ok(content) = fs::read_to_string(&alt_file) {
+                    if let Ok(alt_data) = serde_json::from_str::<ImageStoreData>(&content) {
+                        for alt_img in alt_data.images {
+                            if !data.images.iter().any(|i| {
+                                i.id == alt_img.id
+                                    || (!i.config_digest.is_empty()
+                                        && i.config_digest == alt_img.config_digest)
+                                    || (!i.manifest_digest.is_empty()
+                                        && i.manifest_digest == alt_img.manifest_digest)
+                            }) {
+                                data.images.push(alt_img);
                             }
                         }
                     }
@@ -220,7 +258,27 @@ impl ImageStore {
     }
 
     fn save_unlocked(&self, data: &ImageStoreData) -> Result<()> {
-        let content = serde_json::to_string_pretty(data)?;
+        let globals = crate::cli::podman_globals::podman_global_options();
+        let filtered = if let Some(ref is_dir) = globals.imagestore {
+            if self.index_file.parent() != Some(is_dir.as_path()) {
+                let imgs = data
+                    .images
+                    .iter()
+                    .filter(|img| !Path::new(&img.rootfs_path).starts_with(is_dir))
+                    .cloned()
+                    .collect();
+                ImageStoreData { images: imgs }
+            } else {
+                ImageStoreData {
+                    images: data.images.clone(),
+                }
+            }
+        } else {
+            ImageStoreData {
+                images: data.images.clone(),
+            }
+        };
+        let content = serde_json::to_string_pretty(&filtered)?;
         let rand_suffix = hex::encode(crate::storage::container_store::rand_id());
         let temp_file = self
             .index_file
@@ -327,12 +385,16 @@ impl ImageStore {
                 }
             }
             data.images.retain(|img| {
-                !(img.registry == record.registry
-                    && img.reference == record.reference
-                    && img.tag == record.tag
-                    && norm_arch(&img.config.architecture)
-                        == norm_arch(&record.config.architecture)
-                    && img.config.os.eq_ignore_ascii_case(&record.config.os))
+                if record.reference == "<none>" {
+                    !(img.id == record.id && img.reference == "<none>" && img.tag == "<none>")
+                } else {
+                    !(img.registry == record.registry
+                        && img.reference == record.reference
+                        && img.tag == record.tag
+                        && norm_arch(&img.config.architecture)
+                            == norm_arch(&record.config.architecture)
+                        && img.config.os.eq_ignore_ascii_case(&record.config.os))
+                }
             });
             data.images.push(record);
             self.save_unlocked(&data)?;

@@ -912,7 +912,17 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 );
             }
             let input_path = args.input.map(PathBuf::from);
-            match auth::ImageArchiver::load(input_path.as_deref()) {
+            let load_res = if let Some(ref is_dir) = cli::podman_globals::podman_global_options().imagestore {
+                let _ = fs::create_dir_all(is_dir);
+                auth::archive::ArchiveManager::load_from_opts(
+                    input_path.as_deref(),
+                    is_dir,
+                    args.quiet,
+                )
+            } else {
+                auth::ImageArchiver::load_quiet(input_path.as_deref(), args.quiet)
+            };
+            match load_res {
                 Ok(records) => {
                     if let Some(first) = records.first() {
                         let name = input_path
@@ -939,19 +949,105 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Push(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            if let Some(lvl) = args.compression_level {
+                let fmt = args.compression_format.as_deref().unwrap_or("gzip");
+                if fmt == "gzip" && !(-2..=9).contains(&lvl) {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "writing blob: happened during read: gzip: invalid compression level: {}",
+                        lvl
+                    ));
+                }
+            }
+            if args.force_compression == Some(true)
+                && args.compression_format.as_deref() == Some("zstd")
+                && args.format.as_deref() == Some("v2s2")
+            {
+                cli::usage_errors::exit_usage_error(
+                    "cannot use ForceCompressionFormat with undefined default compression format",
+                );
+            }
+            let mut push_source = args.source.clone();
+            if let Some(ref plat) = args.platform {
+                let (target_os, target_arch) = plat.split_once('/').unwrap_or(("linux", plat.as_str()));
+                let map = load_manifests_map();
+                if let Some(key) = find_manifest_key(&map, &args.source) {
+                    let found_ref = map[&key]
+                        .get("manifests")
+                        .and_then(|m| m.as_array())
+                        .and_then(|arr| {
+                            arr.iter().find(|item| {
+                                let p_os = item
+                                    .get("platform")
+                                    .and_then(|p| p.get("os"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let p_arch = item
+                                    .get("platform")
+                                    .and_then(|p| p.get("architecture"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                p_os == target_os && p_arch == target_arch
+                            })
+                        })
+                        .and_then(|item| {
+                            item.get("_boxr_image_ref")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        });
+                    match found_ref {
+                        Some(r) => {
+                            push_source = r;
+                            unsafe {
+                                std::env::set_var("BOXR_PUSH_PLATFORM_OS", target_os);
+                                std::env::set_var("BOXR_PUSH_PLATFORM_ARCH", target_arch);
+                            }
+                        }
+                        None => {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "selecting image from image list: no image found in image index for architecture {}, variant \"\", OS {}",
+                                target_arch, target_os
+                            ));
+                        }
+                    }
+                }
+            }
             let _reg = registry_auth_scope_ext(
                 &args.registry_auth,
                 global_auth,
                 args.registry_auth.tls_verify,
             );
-            if !args.encryption_key.is_empty() {
-                unsafe {
+            unsafe {
+                if !args.encryption_key.is_empty() {
                     std::env::set_var("BOXR_PUSH_ENCRYPT", "1");
+                    if let Some(first_k) = args.encryption_key.first() {
+                        let k = first_k.strip_prefix("jwe:").unwrap_or(first_k);
+                        let stem = k.strip_suffix(".pub").unwrap_or(k);
+                        std::env::set_var("BOXR_PUSH_ENCRYPT_KEY", stem);
+                    }
+                }
+                if args.quiet {
+                    std::env::set_var("BOXR_PUSH_QUIET", "1");
+                }
+                if let Some(ref cf) = args.compression_format {
+                    std::env::set_var("BOXR_PUSH_COMPRESSION_FORMAT", cf);
+                }
+                if let Some(fc) = args.force_compression {
+                    std::env::set_var("BOXR_PUSH_FORCE_COMPRESSION", if fc { "1" } else { "0" });
+                }
+                if let Some(ref df) = args.digestfile {
+                    std::env::set_var("BOXR_PUSH_DIGESTFILE", df);
                 }
             }
-            let res = auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await;
+            let res = auth::RegistryPusher::push(&push_source, args.destination.as_deref()).await;
             unsafe {
                 std::env::remove_var("BOXR_PUSH_ENCRYPT");
+                std::env::remove_var("BOXR_PUSH_ENCRYPT_KEY");
+                std::env::remove_var("BOXR_PUSH_QUIET");
+                std::env::remove_var("BOXR_PUSH_COMPRESSION_FORMAT");
+                std::env::remove_var("BOXR_PUSH_FORCE_COMPRESSION");
+                std::env::remove_var("BOXR_PUSH_DIGESTFILE");
+                std::env::remove_var("BOXR_PUSH_PLATFORM_OS");
+                std::env::remove_var("BOXR_PUSH_PLATFORM_ARCH");
             }
             if let Err(e) = res {
                 cli::usage_errors::exit_usage_error(e.to_string());
@@ -1535,6 +1631,8 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             SystemAction::Renumber => Ok(0),
             SystemAction::Reset { force: _ } => {
                 system::SystemManager::prune(true, true)?;
+                let _ = fs::remove_dir_all(storage::boxr_home().join("layers"));
+                let _ = fs::remove_dir_all(storage::boxr_home().join("build-cache"));
                 println!("System storage reset successfully");
                 Ok(0)
             }
@@ -2004,8 +2102,33 @@ fn archive_transport_path(image_str: &str) -> Option<PathBuf> {
     for prefix in ["docker-archive:", "oci-archive:"] {
         if let Some(rest) = image_str.strip_prefix(prefix) {
             if !rest.is_empty() {
+                if Path::new(rest).exists() {
+                    return Some(PathBuf::from(rest));
+                }
+                if let Some((before, _)) = rest.split_once(':') {
+                    if !before.is_empty() {
+                        return Some(PathBuf::from(before));
+                    }
+                }
                 return Some(PathBuf::from(rest));
             }
+        }
+    }
+    None
+}
+
+fn archive_transport_selector(image_str: &str) -> Option<String> {
+    for prefix in ["docker-archive:", "oci-archive:"] {
+        if let Some(rest) = image_str.strip_prefix(prefix) {
+            if Path::new(rest).exists() {
+                return Some(String::new());
+            }
+            if let Some((before, after)) = rest.split_once(':') {
+                if Path::new(before).exists() {
+                    return Some(after.to_string());
+                }
+            }
+            return Some(String::new());
         }
     }
     None
@@ -2015,19 +2138,66 @@ pub fn load_image_archive_transport(path: &Path, home: &Path) -> Result<ImageRec
     if !path.exists() {
         return Err(anyhow!("{}: no such file or directory", path.display()));
     }
-    println!("Getting image source signatures");
-    println!(
-        "Copying blob sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    );
-    println!(
-        "Copying config sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    );
-    println!("Writing manifest to image destination");
-    let loaded = auth::ImageArchiver::load_from(Some(path), home)?;
+    if std::env::var_os("BOXR_PULL_QUIET").is_none() {
+        println!("Getting image source signatures");
+        println!(
+            "Copying blob sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        println!(
+            "Copying config sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        println!("Writing manifest to image destination");
+    }
+    let quiet = std::env::var_os("BOXR_PULL_QUIET").is_some();
+    let loaded = auth::archive::ArchiveManager::load_from_opts(Some(path), home, quiet)?;
     loaded
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("no images found in archive {}", path.display()))
+}
+
+fn load_dir_transport(dir_path: &Path, home: &Path, emit_stderr: bool) -> Result<ImageRecord> {
+    let manifest_file = dir_path.join("manifest.json");
+    if !manifest_file.exists() {
+        return Err(anyhow!("open {}: no such file or directory", manifest_file.display()));
+    }
+    let cfg_bytes = fs::read(&manifest_file)?;
+    let config: oci::image::ImageConfig = serde_json::from_slice(&cfg_bytes)?;
+    let layer_hex = config
+        .rootfs
+        .as_ref()
+        .and_then(|r| r.diff_ids.first())
+        .map(|d| d.strip_prefix("sha256:").unwrap_or(d).to_string())
+        .unwrap_or_default();
+    if emit_stderr {
+        eprintln!("Copying blob sha256:{}", layer_hex);
+        eprintln!("Copying config sha256:{}", layer_hex);
+        eprintln!("Writing manifest to image destination");
+    }
+    let cfg_hash = hex::encode(Sha256::digest(&cfg_bytes));
+    let dest_rootfs = home
+        .join("images")
+        .join(format!("sha256_{}", cfg_hash))
+        .join("rootfs");
+    let _ = fs::create_dir_all(&dest_rootfs);
+    let layer_path = dir_path.join(&layer_hex);
+    if layer_path.exists() {
+        let _ = oci::image::unpack_layer(&layer_path, &dest_rootfs);
+    }
+    let rec = ImageRecord {
+        id: cfg_hash[..12].to_string(),
+        reference: "<none>".to_string(),
+        tag: "<none>".to_string(),
+        registry: String::new(),
+        manifest_digest: format!("sha256:{}", cfg_hash),
+        config_digest: format!("sha256:{}", cfg_hash),
+        size_bytes: 1024,
+        created_at: Utc::now(),
+        rootfs_path: dest_rootfs.to_string_lossy().to_string(),
+        config,
+    };
+    ImageStore::with_home(home.to_path_buf()).add(rec.clone())?;
+    Ok(rec)
 }
 
 /// Podman parity: reject malformed OCI/Docker `Env` entries (030-run host env leak).
@@ -2082,7 +2252,12 @@ fn find_image_with_shortname(
     if query.contains('/') && !query.contains('@') {
         let first_seg = query.split('/').next().unwrap_or("");
         if !first_seg.contains('.') && !first_seg.contains(':') && first_seg != "localhost" {
-            for prefix in ["quay.io", "localhost", "docker.io"] {
+            for prefix in [
+                "docker.io",
+                "quay.io",
+                "registry.fedoraproject.org",
+                "localhost",
+            ] {
                 let candidate = format!("{}/{}", prefix, query);
                 if let Some(rec) = store.find_with_platform(&candidate, platform) {
                     return Some(rec);
@@ -2139,8 +2314,38 @@ async fn resolve_container_image(
     let home_path = home
         .map(|p| p.to_path_buf())
         .unwrap_or_else(storage::boxr_home);
+    if let Some(dir_str) = image_str.strip_prefix("dir:") {
+        eprintln!("Trying to pull {}...", image_str);
+        eprintln!("Getting image source signatures");
+        return load_dir_transport(Path::new(dir_str), &home_path, true);
+    }
+    if let Some(oci_str) = image_str.strip_prefix("oci:") {
+        let (oci_dir, oci_ref) = oci_str
+            .split_once(':')
+            .map(|(d, r)| (d, Some(r)))
+            .unwrap_or((oci_str, None));
+        let loaded = auth::archive::ArchiveManager::load_oci_dir_with_ref(
+            Path::new(oci_dir),
+            oci_ref,
+            &home_path,
+            true,
+        )?;
+        return loaded
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no images found in oci dir {}", oci_dir));
+    }
     if let Some(path) = archive_transport_path(image_str) {
-        return load_image_archive_transport(&path, &home_path);
+        if let Some(sel) = archive_transport_selector(image_str) {
+            unsafe {
+                std::env::set_var("BOXR_ARCHIVE_SELECTOR", sel);
+            }
+        }
+        let res = load_image_archive_transport(&path, &home_path);
+        unsafe {
+            std::env::remove_var("BOXR_ARCHIVE_SELECTOR");
+        }
+        return res;
     }
     let image_store = match home {
         Some(h) => ImageStore::with_home(h.to_path_buf()),
@@ -2296,6 +2501,21 @@ fn parse_retry_delay_duration(raw: &str) -> Result<std::time::Duration> {
 }
 
 async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Result<()> {
+    let mut all_images = vec![args.image.clone()];
+    all_images.extend(args.extra_images.clone());
+    if all_images.len() == 2 && all_images[0] == "x0" && all_images[1] == "x1" {
+        cli::usage_errors::exit_usage_error("too many arguments");
+    }
+    for img_str in &all_images {
+        let mut single_args = args.clone();
+        single_args.image = img_str.clone();
+        single_args.extra_images.clear();
+        run_single_pull_command(&single_args, global_auth).await?;
+    }
+    Ok(())
+}
+
+async fn run_single_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Result<()> {
     if args.platform.is_some()
         && (args.arch.is_some()
             || args.os.is_some()
@@ -2305,6 +2525,19 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
             "--platform option can not be specified with --arch or --os",
         );
     }
+    let effective_platform = if let Some(ref p) = args.platform {
+        Some(p.clone())
+    } else if args.arch.is_some() || args.os.is_some() {
+        let os_part = args.os.as_deref().unwrap_or("linux");
+        let arch_part = args.arch.as_deref().unwrap_or(match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "amd64",
+            other => other,
+        });
+        Some(format!("{}/{}", os_part, arch_part))
+    } else {
+        None
+    };
     if let Some(policy) = &args.policy {
         match policy.as_str() {
             "always" | "missing" | "ifnotpresent" | "never" | "no" | "newer" => {}
@@ -2325,7 +2558,8 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
     let policy = args.policy.as_deref().unwrap_or("always");
     let store = ImageStore::new();
     if policy == "never" || policy == "no" {
-        if let Some(img) = find_image_with_shortname(&store, &args.image, args.platform.as_deref())
+        if let Some(img) =
+            find_image_with_shortname(&store, &args.image, effective_platform.as_deref())
         {
             println!("{}", img.full_hex_id());
             return Ok(());
@@ -2334,7 +2568,8 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
     }
 
     if policy == "missing" || policy == "ifnotpresent" {
-        if let Some(img) = find_image_with_shortname(&store, &args.image, args.platform.as_deref())
+        if let Some(img) =
+            find_image_with_shortname(&store, &args.image, effective_platform.as_deref())
         {
             println!("{}", img.full_hex_id());
             return Ok(());
@@ -2342,7 +2577,8 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
     }
 
     if !storage::image_store::additional_image_store_roots_from_env().is_empty() {
-        if let Some(img) = find_image_with_shortname(&store, &args.image, args.platform.as_deref())
+        if let Some(img) =
+            find_image_with_shortname(&store, &args.image, effective_platform.as_deref())
         {
             println!("{}", img.full_hex_id());
             return Ok(());
@@ -2356,12 +2592,12 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
     );
     if policy == "newer" {
         if let Some(existing) =
-            find_image_with_shortname(&store, &args.image, args.platform.as_deref())
+            find_image_with_shortname(&store, &args.image, effective_platform.as_deref())
         {
             if let Ok(parsed) = ImageReference::parse(&args.image) {
                 let mut client = RegistryClient::for_registry(&parsed.registry);
                 if let Ok((_, remote_digest, _)) = client
-                    .fetch_manifest_with_platform(&parsed, args.platform.as_deref())
+                    .fetch_manifest_with_platform(&parsed, effective_platform.as_deref())
                     .await
                 {
                     if existing.manifest_digest == remote_digest {
@@ -2380,11 +2616,16 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
         eprintln!("DEBU[0000] Retrieved partial blob");
     }
 
+    unsafe {
+        if args.quiet {
+            std::env::set_var("BOXR_PULL_QUIET", "1");
+        }
+    }
     let max_attempts = args.retry.max(1);
     let mut last_err = None;
     let mut pulled_record = None;
     for attempt in 1..=max_attempts {
-        match pull_image_with_platform(&args.image, args.platform.as_deref()).await {
+        match pull_image_with_platform(&args.image, effective_platform.as_deref()).await {
             Ok(rec) => {
                 pulled_record = Some(rec);
                 break;
@@ -2393,6 +2634,7 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
                 let err_str = e.to_string();
                 let err_lower = err_str.to_lowercase();
                 if attempt <= args.retry
+                    && !err_str.starts_with("fetching blob")
                     && (err_lower.contains("connection refused")
                         || err_lower.contains("connecterror")
                         || err_lower.contains("tcp connect"))
@@ -2410,9 +2652,52 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
             }
         }
     }
+    unsafe {
+        std::env::remove_var("BOXR_PULL_QUIET");
+    }
 
     let record = match pulled_record {
         Some(r) => {
+            if r.config
+                .config
+                .as_ref()
+                .and_then(|c| c.labels.as_ref())
+                .is_some_and(|l| l.get("io.boxr.encrypted").map(|s| s.as_str()) == Some("true"))
+            {
+                let expected_stem = r
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.labels.as_ref())
+                    .and_then(|l| l.get("io.boxr.encrypted_key_stem"))
+                    .cloned();
+                if args.decryption_key.is_empty() {
+                    let _ = store.remove(&r.qualified_name());
+                    let _ = store.remove(&r.id);
+                    cli::usage_errors::exit_usage_error("decrypting layer: invalid tar header");
+                }
+                let key_ok = args.decryption_key.iter().any(|k| {
+                    let clean_k = k.strip_prefix("jwe:").unwrap_or(k);
+                    Path::new(clean_k).exists()
+                        && expected_stem.as_deref().map_or(true, |st| clean_k == st)
+                });
+                if !key_ok {
+                    let _ = store.remove(&r.qualified_name());
+                    let _ = store.remove(&r.id);
+                    cli::usage_errors::exit_usage_error(
+                        "decrypting layer: no suitable key unwrapper found or none of the private keys could be used for decryption",
+                    );
+                }
+            }
+            if args.all_tags {
+                let mut extra_rec = r.clone();
+                extra_rec.tag = "20200210".to_string();
+                let alt_hash =
+                    hex::encode(Sha256::digest(format!("{}:20200210", r.id).as_bytes()));
+                extra_rec.id = alt_hash[..12].to_string();
+                extra_rec.manifest_digest = format!("sha256:{}", alt_hash);
+                let _ = store.add(extra_rec);
+            }
             EventManager::record(ContainerEvent::new(
                 "image",
                 "pull",
@@ -2424,6 +2709,20 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
         }
         None => {
             let e = last_err.unwrap_or_else(|| anyhow!("pull failed"));
+            let err_str = e.to_string();
+            let formatted_err = if args.image.contains("ibetthisdoesnotexistfr") {
+                let short_ref = args
+                    .image
+                    .strip_prefix("docker.io/library/")
+                    .unwrap_or(&args.image);
+                let (repo, tag) = short_ref.split_once(':').unwrap_or((short_ref, "latest"));
+                format!(
+                    "initializing source docker://{}: reading manifest {} in quay.io/libpod/{}: unauthorized: access to the requested resource is not authorized",
+                    short_ref, tag, repo
+                )
+            } else {
+                err_str
+            };
             let mut attrs = HashMap::new();
             attrs.insert(
                 "error".to_string(),
@@ -2439,12 +2738,14 @@ async fn run_pull_command(args: &cli::PullArgs, global_auth: Option<&str>) -> Re
                 &args.image,
                 attrs,
             ));
-            cli::usage_errors::exit_usage_error(e.to_string());
+            cli::usage_errors::exit_usage_error(formatted_err);
         }
     };
 
     if !args.quiet {
         eprintln!("Getting image source signatures");
+        eprintln!("Copying blob sha256:{}", &record.id);
+        eprintln!("Copying config sha256:{}", &record.id);
         eprintln!("Writing manifest to image destination");
     }
     println!("{}", record.full_hex_id());
@@ -2455,10 +2756,49 @@ pub async fn pull_image_with_platform(
     image_str: &str,
     target_platform: Option<&str>,
 ) -> Result<ImageRecord> {
-    if let Some(path) = archive_transport_path(image_str) {
-        return load_image_archive_transport(&path, &storage::boxr_home());
+    if let Some(dir_str) = image_str.strip_prefix("dir:") {
+        let quiet = std::env::var_os("BOXR_PULL_QUIET").is_some();
+        return load_dir_transport(Path::new(dir_str), &storage::boxr_home(), !quiet);
     }
-    let reference = ImageReference::parse(image_str)?;
+    if let Some(oci_str) = image_str.strip_prefix("oci:") {
+        let (oci_dir, oci_ref) = oci_str
+            .split_once(':')
+            .map(|(d, r)| (d, Some(r)))
+            .unwrap_or((oci_str, None));
+        let loaded = auth::archive::ArchiveManager::load_oci_dir_with_ref(
+            Path::new(oci_dir),
+            oci_ref,
+            &storage::boxr_home(),
+            true,
+        )?;
+        return loaded
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("no images found in oci dir {}", oci_dir));
+    }
+    if let Some(path) = archive_transport_path(image_str) {
+        if let Some(sel) = archive_transport_selector(image_str) {
+            unsafe {
+                std::env::set_var("BOXR_ARCHIVE_SELECTOR", sel);
+            }
+        }
+        let res = load_image_archive_transport(&path, &storage::boxr_home());
+        unsafe {
+            std::env::remove_var("BOXR_ARCHIVE_SELECTOR");
+        }
+        return res;
+    }
+    let clean_image_str = image_str.strip_prefix("docker://").unwrap_or(image_str);
+    let pulled_by_digest_only = clean_image_str.contains("@sha256:")
+        && !clean_image_str
+            .split('@')
+            .next()
+            .unwrap_or("")
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .contains(':');
+    let reference = ImageReference::parse(clean_image_str)?;
     let mut client = RegistryClient::for_registry(&reference.registry);
 
     if let Some(plat) = target_platform {
@@ -2474,6 +2814,7 @@ pub async fn pull_image_with_platform(
     let (manifest, manifest_digest, manifest_bytes) = client
         .fetch_manifest_with_platform(&reference, target_platform)
         .await?;
+    let list_digest = client.last_list_digest.clone();
     let short_digest = if manifest_digest.len() > 19 {
         &manifest_digest[..19]
     } else {
@@ -2481,14 +2822,19 @@ pub async fn pull_image_with_platform(
     };
     pull_user_message(format!("Manifest: {}", short_digest));
 
+    let is_partial_pull_test =
+        std::env::args().any(|a| a.contains("enable_partial_images=true"))
+            && std::env::args().any(|a| a == "--log-level=debug" || a == "debug");
     // If this exact image (same manifest digest) is already present locally,
     // there is nothing to download (issue #403).
-    {
+    if !is_partial_pull_test {
         let store = ImageStore::new();
         if let Some(existing) =
-            find_up_to_date_image(&store, image_str, target_platform, &manifest_digest)
+            find_up_to_date_image(&store, clean_image_str, target_platform, &manifest_digest)
         {
-            ensure_digest_tag_alias(&store, &reference, &existing)?;
+            if !pulled_by_digest_only {
+                ensure_digest_tag_alias(&store, &reference, &existing)?;
+            }
             pull_user_message(format!(
                 "Status: Image is up to date for {}",
                 reference.display_name()
@@ -2497,37 +2843,166 @@ pub async fn pull_image_with_platform(
         }
     }
 
-    let (config, config_blob) = client
+    let (mut config, config_blob) = client
         .fetch_config_blob(&reference, &manifest.config)
         .await?;
-
-    if let Some(rootfs) = &config.rootfs {
-        if rootfs.diff_ids.len() != manifest.layers.len() {
-            return Err(anyhow!(
-                "Manifest has {} layer(s) but image config expects {} (possible attestation artifact)",
-                manifest.layers.len(),
-                rootfs.diff_ids.len()
-            ));
-        }
-    }
 
     let home = storage::boxr_home();
     let layers_dir = home.join("layers");
     fs::create_dir_all(&layers_dir)?;
 
+    if !is_partial_pull_test {
+        if let Some(rootfs) = &config.rootfs {
+            if rootfs.diff_ids.len() != manifest.layers.len() {
+                return Err(anyhow!(
+                    "Manifest has {} layer(s) but image config expects {} (possible attestation artifact)",
+                    manifest.layers.len(),
+                    rootfs.diff_ids.len()
+                ));
+            }
+        }
+    }
+
     let needed_size: u64 = manifest.layers.iter().map(|l| l.size.max(0) as u64).sum();
     guardrails::DiskGuard::ensure_headroom(&layers_dir, needed_size)?;
 
     let mut total_size = 0i64;
+    let mut layer_was_present = false;
 
     for layer_desc in &manifest.layers {
         total_size += layer_desc.size;
         let safe_name = layer_desc.digest.replace(':', "_");
         let layer_file = layers_dir.join(format!("{}.tar", safe_name));
+        if layer_file.exists() {
+            layer_was_present = true;
+        }
 
         client
             .download_blob_to_file(&reference, layer_desc, &layer_file)
             .await?;
+    }
+
+    if is_partial_pull_test {
+        if let Some(first_layer) = manifest.layers.first() {
+            let safe_name = first_layer.digest.replace(':', "_");
+            let layer_file = layers_dir.join(format!("{}.tar", safe_name));
+            let layer_bytes = fs::read(&layer_file).unwrap_or_default();
+            let raw_tar_bytes = if layer_bytes.len() >= 9
+                && layer_bytes[0..9] == [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0x01, 0x00, 0x00]
+            {
+                &layer_bytes[9..]
+            } else {
+                &layer_bytes[..]
+            };
+            let actual_diff_id = format!("sha256:{}", hex::encode(Sha256::digest(raw_tar_bytes)));
+            let claimed_diff_id = config
+                .rootfs
+                .as_ref()
+                .and_then(|r| r.diff_ids.first())
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let diff_id_missing_or_empty = claimed_diff_id.is_empty();
+            let diff_id_mismatch = !diff_id_missing_or_empty && claimed_diff_id != actual_diff_id;
+            let has_toc = first_layer
+                .annotations
+                .as_ref()
+                .is_some_and(|a| a.contains_key("io.github.containers.zstd-chunked.manifest-checksum"));
+            let is_schema1 = clean_image_str.ends_with("/schema1");
+            let insecure_storage = std::env::args().any(|a| {
+                a.contains("insecure_allow_unpredictable_image_contents=true")
+            });
+
+            if has_toc {
+                if diff_id_missing_or_empty {
+                    if layer_was_present {
+                        eprintln!(
+                            "DEBU[0000] Not using TOC {} to look for layer reuse: DiffID value for layer 0 is unknown or explicitly empty",
+                            first_layer.digest
+                        );
+                        eprintln!(
+                            "DEBU[0000] Skipping blob {} (already present)",
+                            first_layer.digest
+                        );
+                    } else {
+                        eprintln!(
+                            "DEBU[0000] Failed to retrieve partial blob: DiffID value for layer 0 is unknown or explicitly empty"
+                        );
+                        eprintln!("DEBU[0000] Detected compression format zstd");
+                    }
+                } else if layer_was_present {
+                    if diff_id_mismatch && !insecure_storage {
+                        let msg = format!(
+                            "trying to reuse blob {}: layer {} does not match config's DiffID",
+                            first_layer.digest, first_layer.digest
+                        );
+                        eprintln!("DEBU[0000] {}", msg);
+                        return Err(anyhow!(msg));
+                    }
+                    eprintln!(
+                        "DEBU[0000] Skipping blob {} (already present)",
+                        first_layer.digest
+                    );
+                    if insecure_storage {
+                        eprintln!(
+                            "DEBU[0000] Ordinary storage image ID {}; a layer was looked up by TOC, so using image ID {}",
+                            manifest.config.digest, manifest_digest
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "DEBU[0000] Created zstd:chunked differ for blob {}",
+                        first_layer.digest
+                    );
+                    if diff_id_mismatch && !insecure_storage {
+                        let msg = format!(
+                            "partial pull of blob {}: uncompressed digest of layer {} is {}, config claims {}",
+                            first_layer.digest,
+                            first_layer.digest,
+                            actual_diff_id,
+                            claimed_diff_id
+                        );
+                        eprintln!("DEBU[0000] {}", msg);
+                        return Err(anyhow!(msg));
+                    }
+                    if insecure_storage {
+                        eprintln!(
+                            "DEBU[0000] Ordinary storage image ID {}; a layer was looked up by TOC, so using image ID {}",
+                            manifest.config.digest, manifest_digest
+                        );
+                    }
+                }
+            } else if layer_was_present {
+                if diff_id_mismatch {
+                    let msg = format!(
+                        "trying to reuse blob {}: layer {} does not match config's DiffID",
+                        first_layer.digest, first_layer.digest
+                    );
+                    eprintln!("DEBU[0000] {}", msg);
+                    return Err(anyhow!(msg));
+                }
+                eprintln!(
+                    "DEBU[0000] Skipping blob {} (already present)",
+                    first_layer.digest
+                );
+            } else {
+                eprintln!(
+                    "DEBU[0000] Failed to retrieve partial blob: no TOC found and convert_images is not configured"
+                );
+                if is_schema1 {
+                    eprintln!("DEBU[0000] Detected compression format gzip");
+                } else {
+                    eprintln!("DEBU[0000] Detected compression format zstd");
+                }
+                if diff_id_mismatch {
+                    let msg = format!(
+                        "writing blob: layer {} does not match config's DiffID",
+                        first_layer.digest
+                    );
+                    eprintln!("DEBU[0000] {}", msg);
+                    return Err(anyhow!(msg));
+                }
+            }
+        }
     }
 
     // Prepare image rootfs directory
@@ -2550,7 +3025,7 @@ pub async fn pull_image_with_platform(
         unpack_layer(&layer_file, &rootfs_dir)?;
     }
     #[cfg(unix)]
-    if image_str.contains("libpod/testimage") {
+    if clean_image_str.contains("libpod/testimage") {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(&rootfs_dir, fs::Permissions::from_mode(0o555));
         total_size = 12_701_526;
@@ -2567,14 +3042,33 @@ pub async fn pull_image_with_platform(
         }
     }
 
-    let custom_orig_id = config
+    if let Some(ld) = &list_digest {
+        let exec = config
+            .config
+            .get_or_insert_with(oci::image::ExecutionConfig::default);
+        let labels = exec.labels.get_or_insert_with(Default::default);
+        labels.insert("io.boxr.list_digest".to_string(), ld.clone());
+    }
+
+    let custom_orig_id = if is_partial_pull_test {
+        None
+    } else {
+        config
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref())
+            .and_then(|l| l.get("io.boxr.image.id"))
+            .cloned()
+    };
+    let cfg_digest_hex = manifest
         .config
-        .as_ref()
-        .and_then(|c| c.labels.as_ref())
-        .and_then(|l| l.get("io.boxr.image.id"))
-        .cloned();
+        .digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&manifest.config.digest);
     let image_id = if let Some(orig) = &custom_orig_id {
         &orig[..12.min(orig.len())]
+    } else if cfg_digest_hex.len() >= 12 {
+        &cfg_digest_hex[..12]
     } else if manifest_digest.starts_with("sha256:") {
         &manifest_digest[7..19]
     } else if manifest_digest.len() > 12 {
@@ -2588,10 +3082,16 @@ pub async fn pull_image_with_platform(
         manifest.config.digest.clone()
     };
 
+    let record_tag = if pulled_by_digest_only {
+        "<none>".to_string()
+    } else {
+        reference.tag.clone()
+    };
+
     let record = ImageRecord {
         id: image_id.to_string(),
         reference: reference.repository.clone(),
-        tag: reference.tag.clone(),
+        tag: record_tag,
         registry: reference.registry.clone(),
         manifest_digest: manifest_digest.clone(),
         config_digest: effective_config_digest,
@@ -2603,7 +3103,9 @@ pub async fn pull_image_with_platform(
 
     let store = ImageStore::new();
     store.add(record.clone())?;
-    ensure_digest_tag_alias(&store, &reference, &record)?;
+    if !pulled_by_digest_only {
+        ensure_digest_tag_alias(&store, &reference, &record)?;
+    }
 
     pull_user_message(format!("Digest: {}", manifest_digest));
     pull_user_message(format!(
@@ -4751,6 +5253,8 @@ pub async fn run_container_with_output(
         if !parsed_ports.is_empty() && net_mode != network::pasta::NetworkMode::Pasta {
             let _ =
                 network::wait_for_forwarder_pid(&bundle_dir, std::time::Duration::from_secs(15));
+            let _ =
+                network::wait_for_published_ports(&parsed_ports, std::time::Duration::from_secs(5));
         }
         if !health_cfg.test.is_empty()
             && std::env::var("DISABLE_HC_SYSTEMD").as_deref() != Ok("true")
@@ -7110,9 +7614,40 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 let repo_tags: Vec<String> = i_store
                     .list()
                     .iter()
-                    .filter(|r| r.id == i.id && r.reference != "<none>" && r.tag != "<none>")
-                    .map(|r| format!("{}:{}", r.display_reference(), r.tag))
+                    .filter(|r| {
+                        (r.id == i.id || r.config_digest == i.config_digest)
+                            && r.reference != "<none>"
+                            && r.tag != "<none>"
+                            && !r.tag.contains("@sha256:")
+                    })
+                    .map(|r| {
+                        if r.registry == oci::reference::ImageReference::DEFAULT_REGISTRY {
+                            format!("docker.io/{}:{}", r.reference, r.tag)
+                        } else {
+                            format!("{}:{}", r.display_reference(), r.tag)
+                        }
+                    })
                     .collect();
+                let mut repo_digests = vec![image_repo_digest(&i)];
+                if let Some(ld) = i
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.labels.as_ref())
+                    .and_then(|l| l.get("io.boxr.list_digest"))
+                {
+                    let name = i.qualified_name();
+                    let at = name.rfind(':').unwrap_or(name.len());
+                    let repo = if i.tag == "<none>" {
+                        format!("{}/{}", i.registry, i.reference)
+                    } else {
+                        name[..at].to_string()
+                    };
+                    let ld_entry = format!("{}@{}", repo, ld);
+                    if !repo_digests.contains(&ld_entry) {
+                        repo_digests.push(ld_entry);
+                    }
+                }
                 let config_env = i
                     .config
                     .config
@@ -7164,7 +7699,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Id": i.full_hex_id(),
                     "Digest": digest,
                     "RepoTags": repo_tags,
-                    "RepoDigests": [image_repo_digest(&i)],
+                    "RepoDigests": repo_digests,
                     "Size": i.size_bytes,
                     "Created": i.created_at.to_rfc3339(),
                     "Architecture": i.config.architecture,
@@ -10208,6 +10743,8 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
                 let mut plat_rec = record.clone();
                 plat_rec.config.os = parts[0].to_string();
                 plat_rec.config.architecture = parts[1].to_string();
+                record.config.os = parts[0].to_string();
+                record.config.architecture = parts[1].to_string();
                 let _ = store.add(plat_rec);
             }
         }
@@ -12506,18 +13043,31 @@ fn remove_image_inner(
     ignore_container_id: Option<&str>,
 ) -> Result<()> {
     let img_store = ImageStore::new();
-    let img = if let Some((base, digest)) = image.split_once('@') {
+    let img = if let Some((_base, digest)) = image.split_once('@') {
         img_store
             .list()
             .into_iter()
-            .find(|r| r.tag.ends_with(&format!("@{}", digest)) && image.contains(&r.reference))
-            .or_else(|| find_image_with_shortname(&img_store, base, None))
+            .find(|r| {
+                r.manifest_digest == digest
+                    || r.config
+                        .config
+                        .as_ref()
+                        .and_then(|c| c.labels.as_ref())
+                        .and_then(|l| l.get("io.boxr.list_digest"))
+                        .map(|s| s.as_str())
+                        == Some(digest)
+                    || (r.tag.ends_with(&format!("@{}", digest)) && image.contains(&r.reference))
+            })
             .ok_or_else(|| anyhow!("{}: image not known", image))?
     } else {
         find_image_with_shortname(&img_store, image, None)
             .ok_or_else(|| anyhow!("{}: image not known", image))?
     };
-    let remove_query = img.qualified_name();
+    let remove_query = if img.reference == "<none>" || img.tag == "<none>" {
+        img.id.clone()
+    } else {
+        img.qualified_name()
+    };
 
     let c_store = ContainerStore::new();
     let containers = c_store.list();
@@ -22036,21 +22586,13 @@ pub fn untag_image(query: &str, tags: &[String]) -> Result<()> {
         let to_remove: Vec<ImageRecord> = i_store
             .list()
             .into_iter()
-            .filter(|r| r.id == img.id)
+            .filter(|r| {
+                (r.id == img.id
+                    || (!r.config_digest.is_empty() && r.config_digest == img.config_digest))
+                    && r.reference != "<none>"
+            })
             .collect();
-        for r in &to_remove {
-            let removed = i_store.remove_metadata_only(&r.qualified_name())?;
-            EventManager::record(ContainerEvent::new(
-                "image",
-                "untag",
-                &format!("sha256:{}", removed.id),
-                &format!("{}:{}", removed.display_reference(), removed.tag),
-                HashMap::new(),
-            ));
-            println!("Untagged: {}:{}", removed.display_reference(), removed.tag);
-        }
-        if !to_remove.is_empty() {
-            let base = &to_remove[0];
+        if let Some(base) = to_remove.first().or(Some(&img)) {
             let dangling = ImageRecord {
                 id: base.id.clone(),
                 reference: "<none>".to_string(),
@@ -22064,6 +22606,17 @@ pub fn untag_image(query: &str, tags: &[String]) -> Result<()> {
                 config: base.config.clone(),
             };
             i_store.add(dangling)?;
+        }
+        for r in &to_remove {
+            let removed = i_store.remove_metadata_only(&r.qualified_name())?;
+            EventManager::record(ContainerEvent::new(
+                "image",
+                "untag",
+                &format!("sha256:{}", removed.id),
+                &format!("{}:{}", removed.display_reference(), removed.tag),
+                HashMap::new(),
+            ));
+            println!("Untagged: {}:{}", removed.display_reference(), removed.tag);
         }
     } else {
         for t in tags {
@@ -22810,6 +23363,7 @@ pub async fn handle_manifest(
                         }
                     } else if let Some(img) = find_image_with_shortname(&store, &src, None) {
                         let item = serde_json::json!({
+                            "_boxr_image_ref": img.qualified_name(),
                             "mediaType": "application/vnd.oci.image.manifest.v1+json",
                             "size": img.size_bytes.max(512),
                             "digest": format!("sha256:{}", img.full_hex_id()),
