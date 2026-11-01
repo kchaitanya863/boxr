@@ -3,6 +3,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUN_RUST="${RUN_RUST:-1}"
+if [[ "${1:-}" == "--no-rust" ]]; then
+  RUN_RUST=0
+  shift
+fi
 BOXR_BIN="${1:-$REPO_ROOT/target/debug/boxr}"
 if [[ ! -x "$BOXR_BIN" ]]; then
   BOXR_BIN="$REPO_ROOT/target/release/boxr"
@@ -21,8 +26,10 @@ cd "$REPO_ROOT"
 echo "== Podman P0 CLI audit =="
 python3 tools/podman_parity_audit.py --boxr "$BOXR_BIN"
 
-echo "== Podman parity blackbox (Rust) =="
-cargo test --test podman_parity_blackbox_test --test podman_upstream_parity_test -- --test-threads=1
+if [[ "$RUN_RUST" -eq 1 ]]; then
+  echo "== Podman parity blackbox (Rust) =="
+  cargo test --test podman_parity_blackbox_test --test podman_upstream_parity_test -- --test-threads=1
+fi
 
 echo "== Black-Box QA podman section (K1–K19 shell) =="
 ./scripts/run_blackbox_qa.sh -b "$BOXR_BIN" --no-rust -s podman

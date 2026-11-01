@@ -3,10 +3,13 @@ name: CI & Automated Release
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: write
@@ -20,6 +23,7 @@ jobs:
   test:
     # Check name kept for branch ruleset compatibility (job runs on Linux; self-hosted Mac retired).
     name: Test & Lint (macOS Self-Hosted)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -62,9 +66,6 @@ jobs:
       - name: Build boxr binary
         run: cargo build
 
-      - name: Verify vendored Podman BATS catalog
-        run: cargo test --test podman_bats_manifest_test
-
       - name: Podman BATS offline gate (015-help, 020-tag strict)
         env:
           BOXR_TEST_EMBEDDED_USERNET: "1"
@@ -94,8 +95,6 @@ jobs:
           001-basic
           005-info
           010-images
-          015-help
-          020-tag
           040-ps
           080-pause
           085-top
@@ -115,30 +114,25 @@ jobs:
           name: podman-bats-curated-log
           path: .cache/podman-bats-results/run-*.log
 
-      - name: Podman P0 CLI audit
-        run: python3 tools/podman_parity_audit.py --boxr ./target/debug/boxr
-
-      - name: Podman black-box E2E (audit + Rust + shell QA)
-        run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_podman_blackbox_e2e.sh ./target/debug/boxr
+      - name: Podman black-box E2E (audit + shell QA)
+        run: BOXR_TEST_EMBEDDED_USERNET=1 ./scripts/run_podman_blackbox_e2e.sh --no-rust ./target/debug/boxr
 
       - name: Run Test Suite
-        run: cargo test --all --verbose -- --test-threads=1
+        run: cargo test --all -- --test-threads=1
 
       - name: Run Black-Box QA (shell smoke)
         run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s negative
 
-      - name: Run Black-Box QA (Rust integration)
-        run: |
-          cargo test --test blackbox_negative_test \
-                     --test blackbox_resources_test \
-                     --test blackbox_volumes_test \
-                     -- --test-threads=1
-
   podman-bats-full-catalog:
-    name: Podman BATS (full upstream catalog)
+    name: Podman BATS (full upstream catalog, shard ${{ matrix.shard }}/4)
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 45
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -155,16 +149,18 @@ jobs:
           PODMAN_BATS_OMIT_HOST_GATED: "1"
           PODMAN_BATS_STRICT: "1"
           BOXR_TEST_EMBEDDED_USERNET: "1"
+          BATS_SHARD_INDEX: "${{ matrix.shard }}"
+          BATS_SHARD_TOTAL: "4"
         run: |
           chmod +x scripts/run_podman_bats_all_upstream.sh scripts/run_podman_bats_conformance.sh
           ./scripts/run_podman_bats_all_upstream.sh || true
           log=$(ls -t .cache/podman-bats-results/run-*.log | head -1)
-          echo "## Full upstream BATS summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Full upstream BATS summary (shard ${{ matrix.shard }}/4)" >> "$GITHUB_STEP_SUMMARY"
           grep -E '^ok |^not ok ' "$log" | awk '{if($1=="ok") o++; else n++} END {print "- ok:", o+0, "not ok:", n+0}' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: podman-bats-full-log
+          name: podman-bats-full-log-shard-${{ matrix.shard }}
           path: .cache/podman-bats-results/run-*.log
 
   bump-and-tag:
