@@ -1157,7 +1157,17 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                                             && host_sock != proxy_path.to_string_lossy()
                                             && !host_sock.ends_with("/notify/notify.sock")
                                         {
-                                            send_sd_notify(&host_sock, &msg);
+                                            let filtered_lines: Vec<&str> = msg
+                                                .lines()
+                                                .filter(|l| !l.starts_with("BARRIER="))
+                                                .collect();
+                                            if !filtered_lines.is_empty() {
+                                                let mut out_msg = filtered_lines.join("\n");
+                                                if msg.ends_with('\n') {
+                                                    out_msg.push('\n');
+                                                }
+                                                send_sd_notify(&host_sock, &out_msg);
+                                            }
                                         }
                                     }
                                 });
