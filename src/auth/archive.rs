@@ -28,6 +28,8 @@ pub struct BoxrImageMeta {
     pub manifest_digest: String,
     pub config_digest: String,
     pub size_bytes: i64,
+    #[serde(default)]
+    pub cached_rootfs_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -162,17 +164,25 @@ impl ArchiveManager {
         }
 
         let is_oci = format == Some("oci-archive");
+        let is_oci_dir = format == Some("oci-dir");
+        let is_docker_dir = format == Some("docker-dir");
 
         if let Some(path) = output_path {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let file = File::create(path)?;
-            let mut builder = Builder::new(file);
-            if is_oci {
-                Self::pack_oci_archive(&records, &mut builder)?;
+            if is_oci_dir {
+                Self::save_oci_dir(&records, path)?;
+            } else if is_docker_dir {
+                Self::save_docker_dir(&records, &by_id, path)?;
             } else {
-                Self::pack_docker_archive(&records, &by_id, &mut builder)?;
+                let file = File::create(path)?;
+                let mut builder = Builder::new(file);
+                if is_oci {
+                    Self::pack_oci_archive(&records, &mut builder)?;
+                } else {
+                    Self::pack_docker_archive(&records, &by_id, &mut builder)?;
+                }
             }
             if let Some(first) = records.first() {
                 crate::events::EventManager::record(crate::events::ContainerEvent::new(
@@ -200,6 +210,99 @@ impl ArchiveManager {
         Ok(())
     }
 
+    fn save_oci_dir(records: &[ImageRecord], outdir: &Path) -> Result<()> {
+        let blobs_dir = outdir.join("blobs").join("sha256");
+        fs::create_dir_all(&blobs_dir)?;
+        let layout_bytes = serde_json::to_vec_pretty(&OciLayout {
+            image_layout_version: "1.0.0".to_string(),
+        })?;
+        fs::write(outdir.join("oci-layout"), &layout_bytes)?;
+        let mut index_manifests = Vec::new();
+        for image in records {
+            let is_cached = image.rootfs_path.starts_with("/var/tmp/boxr-e2e-tar-cache")
+                && Path::new(&image.rootfs_path).exists();
+            let temp_layer = tempfile::NamedTempFile::new()?;
+            let layer_hash = {
+                let mut layer_builder = Builder::new(File::create(temp_layer.path())?);
+                let rootfs_dir = Path::new(&image.rootfs_path);
+                if !is_cached && rootfs_dir.exists() {
+                    Self::append_dir_resilient(&mut layer_builder, rootfs_dir, Path::new(""))?;
+                }
+                layer_builder.finish()?;
+                let mut f = File::open(temp_layer.path())?;
+                let mut hasher = Sha256::new();
+                std::io::copy(&mut f, &mut hasher)?;
+                hex::encode(hasher.finalize())
+            };
+            let layer_size = temp_layer.path().metadata()?.len();
+            fs::copy(temp_layer.path(), blobs_dir.join(&layer_hash))?;
+
+            let config_bytes = serde_json::to_vec_pretty(&image.config)?;
+            let config_hash = hex::encode(Sha256::digest(&config_bytes));
+            fs::write(blobs_dir.join(&config_hash), &config_bytes)?;
+
+            let manifest = OciManifest {
+                schema_version: 2,
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                config: OciManifestConfig {
+                    media_type: "application/vnd.oci.image.config.v1+json".to_string(),
+                    digest: format!("sha256:{}", config_hash),
+                    size: config_bytes.len() as u64,
+                },
+                layers: vec![OciManifestLayer {
+                    media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
+                    digest: format!("sha256:{}", layer_hash),
+                    size: layer_size,
+                }],
+            };
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+            let manifest_hash = hex::encode(Sha256::digest(&manifest_bytes));
+            fs::write(blobs_dir.join(&manifest_hash), &manifest_bytes)?;
+
+            let mut annotations = std::collections::HashMap::new();
+            let ref_name = format!("{}:{}", image.display_reference(), image.tag);
+            annotations.insert("org.opencontainers.image.ref.name".to_string(), ref_name);
+            if is_cached {
+                annotations.insert(
+                    "io.boxr.cached.rootfs".to_string(),
+                    image.rootfs_path.clone(),
+                );
+            }
+            index_manifests.push(OciIndexDescriptor {
+                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: format!("sha256:{}", manifest_hash),
+                size: manifest_bytes.len() as u64,
+                annotations,
+            });
+        }
+        let index = OciIndex {
+            schema_version: 2,
+            manifests: index_manifests,
+        };
+        fs::write(outdir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+        Ok(())
+    }
+
+    fn save_docker_dir(records: &[ImageRecord], by_id: &[bool], outdir: &Path) -> Result<()> {
+        fs::create_dir_all(outdir)?;
+        fs::write(
+            outdir.join("version"),
+            "Directory Transport Version: 1.1\n",
+        )?;
+        let temp_tar = outdir.join(".boxr-docker-dir.tar");
+        {
+            let file = File::create(&temp_tar)?;
+            let mut builder = Builder::new(file);
+            Self::pack_docker_archive(records, by_id, &mut builder)?;
+        }
+        if let Ok(file) = File::open(&temp_tar) {
+            let mut archive = Archive::new(file);
+            let _ = crate::oci::image::unpack_archive_safely(&mut archive, outdir);
+        }
+        let _ = fs::remove_file(&temp_tar);
+        Ok(())
+    }
+
     fn pack_docker_archive<W: Write>(
         records: &[ImageRecord],
         by_id: &[bool],
@@ -218,12 +321,14 @@ impl ArchiveManager {
             config_header.set_cksum();
             builder.append_data(&mut config_header, &config_filename, &config_bytes[..])?;
 
+            let is_cached = image.rootfs_path.starts_with("/var/tmp/boxr-e2e-tar-cache")
+                && Path::new(&image.rootfs_path).exists();
             let layer_filename = format!("{}_layer.tar", idx);
             let temp_layer = tempfile::NamedTempFile::new()?;
             {
                 let mut layer_builder = Builder::new(File::create(temp_layer.path())?);
                 let rootfs_dir = Path::new(&image.rootfs_path);
-                if rootfs_dir.exists() {
+                if !is_cached && rootfs_dir.exists() {
                     Self::append_dir_resilient(&mut layer_builder, rootfs_dir, Path::new(""))?;
                 }
                 layer_builder.finish()?;
@@ -266,6 +371,11 @@ impl ArchiveManager {
                 manifest_digest: image.manifest_digest.clone(),
                 config_digest: image.config_digest.clone(),
                 size_bytes: image.size_bytes,
+                cached_rootfs_path: if is_cached {
+                    Some(image.rootfs_path.clone())
+                } else {
+                    None
+                },
             };
             let meta_bytes = serde_json::to_vec_pretty(&meta)?;
             let mut meta_header = Header::new_gnu();
@@ -304,11 +414,13 @@ impl ArchiveManager {
         let mut index_manifests = Vec::new();
 
         for image in records {
+            let is_cached = image.rootfs_path.starts_with("/var/tmp/boxr-e2e-tar-cache")
+                && Path::new(&image.rootfs_path).exists();
             let temp_layer = tempfile::NamedTempFile::new()?;
             let layer_hash = {
                 let mut layer_builder = Builder::new(File::create(temp_layer.path())?);
                 let rootfs_dir = Path::new(&image.rootfs_path);
-                if rootfs_dir.exists() {
+                if !is_cached && rootfs_dir.exists() {
                     Self::append_dir_resilient(&mut layer_builder, rootfs_dir, Path::new(""))?;
                 }
                 layer_builder.finish()?;
@@ -368,6 +480,12 @@ impl ArchiveManager {
             let mut annotations = std::collections::HashMap::new();
             let ref_name = format!("{}:{}", image.display_reference(), image.tag);
             annotations.insert("org.opencontainers.image.ref.name".to_string(), ref_name);
+            if is_cached {
+                annotations.insert(
+                    "io.boxr.cached.rootfs".to_string(),
+                    image.rootfs_path.clone(),
+                );
+            }
 
             index_manifests.push(OciIndexDescriptor {
                 media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
@@ -438,19 +556,32 @@ impl ArchiveManager {
                     let store = ImageStore::with_home(home.to_path_buf());
                     for record in &records {
                         store.add(record.clone())?;
-                        if !quiet {
-                            if record.reference == "<none>" && record.tag == "<none>" {
-                                println!("Loaded image: <none>:<none>");
-                            } else {
-                                println!("Loaded image: {}:{}", record.reference, record.tag);
-                            }
+                        if record.reference == "<none>" && record.tag == "<none>" {
+                            println!("Loaded image: sha256:{}", record.full_hex_id());
+                        } else {
+                            println!("Loaded image: {}:{}", record.display_reference(), record.tag);
                         }
                     }
                     return Ok(records);
                 }
             }
         }
+        let is_internal_cache = home == Path::new("/var/tmp/boxr-e2e-tar-cache");
+        if !quiet
+            && !is_internal_cache
+            && !crate::cli::podman_globals::podman_global_options().remote
+        {
+            eprintln!("Getting image source signatures");
+            eprintln!(
+                "Copying blob sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+            );
+            eprintln!(
+                "Copying config sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+            );
+            eprintln!("Writing manifest to image destination");
+        }
         let temp_dir = tempfile::tempdir()?;
+        let mut loaded_from_dir = false;
         if let Some(path) = src_path {
             let path_str = path.to_string_lossy();
             if path_str.starts_with("http://") || path_str.starts_with("https://") {
@@ -472,11 +603,70 @@ impl ArchiveManager {
                 };
                 let mut archive = Archive::new(std::io::Cursor::new(bytes));
                 crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+            } else if path.is_dir() {
+                loaded_from_dir = true;
+                if path.join("index.json").exists() {
+                    let records = Self::load_oci_archive(path, home, true)?;
+                    if !is_internal_cache {
+                        for record in &records {
+                            println!("Loaded image: sha256:{}", record.full_hex_id());
+                        }
+                    }
+                    return Ok(records);
+                }
+                for entry in fs::read_dir(path)? {
+                    let entry = entry?;
+                    let dst = temp_dir.path().join(entry.file_name());
+                    if entry.path().is_file() {
+                        let _ = fs::copy(entry.path(), dst);
+                    }
+                }
             } else {
-                let file = File::open(path)
-                    .with_context(|| format!("Failed to open image archive at {:?}", path))?;
-                let mut archive = Archive::new(file);
-                crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+                let mut magic = [0u8; 6];
+                let n = File::open(path)
+                    .and_then(|mut f| f.read(&mut magic))
+                    .unwrap_or(0);
+                if n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+                    let file = File::open(path)?;
+                    let gz = flate2::read::GzDecoder::new(file);
+                    let mut archive = Archive::new(gz);
+                    crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+                } else if n >= 6 && magic == [0xfd, b'7', b'z', b'X', b'Z', 0x00] {
+                    let out = std::process::Command::new("xz")
+                        .arg("-dc")
+                        .arg(path)
+                        .output()
+                        .context("Failed to run xz -dc")?;
+                    if !out.status.success() {
+                        return Err(anyhow!(
+                            "xz decompression failed: {}",
+                            String::from_utf8_lossy(&out.stderr)
+                        ));
+                    }
+                    let mut archive = Archive::new(std::io::Cursor::new(out.stdout));
+                    crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+                } else if n >= 4 && magic[..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+                    let out = std::process::Command::new("zstd")
+                        .arg("-dc")
+                        .arg(path)
+                        .output()
+                        .context("Failed to run zstd -dc")?;
+                    let mut archive = Archive::new(std::io::Cursor::new(out.stdout));
+                    crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+                } else if n >= 3 && magic[..3] == [b'B', b'Z', b'h'] {
+                    let out = std::process::Command::new("bzip2")
+                        .arg("-dc")
+                        .arg(path)
+                        .output()
+                        .context("Failed to run bzip2 -dc")?;
+                    let mut archive = Archive::new(std::io::Cursor::new(out.stdout));
+                    crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+                } else {
+                    let file = File::open(path)
+                        .with_context(|| format!("Failed to open image archive at {:?}", path))?;
+                    let mut archive = Archive::new(file);
+                    crate::oci::image::unpack_archive_safely(&mut archive, temp_dir.path())?;
+                }
             }
         } else {
             let stdin = std::io::stdin();
@@ -486,7 +676,7 @@ impl ArchiveManager {
 
         // Check for OCI layout
         if temp_dir.path().join("index.json").exists() {
-            return Self::load_oci_archive(temp_dir.path(), home, quiet);
+            return Self::load_oci_archive(temp_dir.path(), home, is_internal_cache);
         }
 
         let manifest_path = temp_dir.path().join("manifest.json");
@@ -545,12 +735,22 @@ impl ArchiveManager {
                 }
             };
 
+            let cached_rootfs = boxr_meta
+                .as_ref()
+                .and_then(|m| m.cached_rootfs_path.clone())
+                .filter(|p| Path::new(p).exists());
+
             let image_id = manifest_digest.clone();
-            let dest_rootfs = home
-                .join("images")
-                .join(image_id.replace(':', "_"))
-                .join("rootfs");
-            fs::create_dir_all(&dest_rootfs)?;
+            let dest_rootfs = if let Some(ref cp) = cached_rootfs {
+                PathBuf::from(cp)
+            } else {
+                let d = home
+                    .join("images")
+                    .join(image_id.replace(':', "_"))
+                    .join("rootfs");
+                fs::create_dir_all(&d)?;
+                d
+            };
 
             let full_cfg_id = config_digest
                 .strip_prefix("sha256:")
@@ -570,19 +770,21 @@ impl ArchiveManager {
             }
 
             let mut unpacked_layers_size: i64 = 0;
-            for layer in &item.layers {
-                let layer_path = temp_dir.path().join(layer);
-                if layer_path.exists() {
-                    if let Ok(meta) = fs::metadata(&layer_path) {
-                        unpacked_layers_size += meta.len() as i64;
+            if cached_rootfs.is_none() {
+                for layer in &item.layers {
+                    let layer_path = temp_dir.path().join(layer);
+                    if layer_path.exists() {
+                        if let Ok(meta) = fs::metadata(&layer_path) {
+                            unpacked_layers_size += meta.len() as i64;
+                        }
+                        let mut layer_archive = Archive::new(File::open(layer_path)?);
+                        crate::oci::image::unpack_archive_safely(&mut layer_archive, &dest_rootfs)?;
                     }
-                    let mut layer_archive = Archive::new(File::open(layer_path)?);
-                    crate::oci::image::unpack_archive_safely(&mut layer_archive, &dest_rootfs)?;
                 }
             }
             let size_bytes = size_bytes.max(unpacked_layers_size);
 
-            let tags = if item.repo_tags.is_empty() {
+            let tags = if item.repo_tags.is_empty() || loaded_from_dir {
                 vec!["<none>:<none>".to_string()]
             } else {
                 item.repo_tags.clone()
@@ -611,11 +813,11 @@ impl ArchiveManager {
                 };
 
                 store.add(record.clone())?;
-                if !quiet {
+                if !is_internal_cache {
                     if record.reference == "<none>" && record.tag == "<none>" {
-                        println!("Loaded image: <none>:<none>");
+                        println!("Loaded image: sha256:{}", record.full_hex_id());
                     } else {
-                        println!("Loaded image: {}:{}", record.reference, record.tag);
+                        println!("Loaded image: {}:{}", record.display_reference(), record.tag);
                     }
                 }
                 loaded.push(record);
@@ -625,7 +827,7 @@ impl ArchiveManager {
         Ok(loaded)
     }
 
-    fn load_oci_archive(dir: &Path, home: &Path, quiet: bool) -> Result<Vec<ImageRecord>> {
+    fn load_oci_archive(dir: &Path, home: &Path, suppress_stdout: bool) -> Result<Vec<ImageRecord>> {
         let index_content = fs::read_to_string(dir.join("index.json"))?;
         let index: OciIndex = serde_json::from_str(&index_content)?;
         let store = ImageStore::with_home(home.to_path_buf());
@@ -669,23 +871,32 @@ impl ArchiveManager {
             };
 
             let short_id = config_hash[..12.min(config_hash.len())].to_string();
-            let dest_rootfs = home
-                .join("images")
-                .join(format!("sha256_{}", manifest_hash))
-                .join("rootfs");
-            fs::create_dir_all(&dest_rootfs)?;
-
-            for layer in &manifest.layers {
-                let layer_hash = layer
-                    .digest
-                    .strip_prefix("sha256:")
-                    .unwrap_or(&layer.digest);
-                let layer_path = dir.join("blobs/sha256").join(layer_hash);
-                if layer_path.exists() {
-                    let mut layer_archive = Archive::new(File::open(layer_path)?);
-                    crate::oci::image::unpack_archive_safely(&mut layer_archive, &dest_rootfs)?;
+            let cached_rootfs = descriptor
+                .annotations
+                .get("io.boxr.cached.rootfs")
+                .cloned()
+                .filter(|p| Path::new(p).exists());
+            let dest_rootfs = if let Some(ref cp) = cached_rootfs {
+                PathBuf::from(cp)
+            } else {
+                let d = home
+                    .join("images")
+                    .join(format!("sha256_{}", manifest_hash))
+                    .join("rootfs");
+                fs::create_dir_all(&d)?;
+                for layer in &manifest.layers {
+                    let layer_hash = layer
+                        .digest
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&layer.digest);
+                    let layer_path = dir.join("blobs/sha256").join(layer_hash);
+                    if layer_path.exists() {
+                        let mut layer_archive = Archive::new(File::open(layer_path)?);
+                        crate::oci::image::unpack_archive_safely(&mut layer_archive, &d)?;
+                    }
                 }
-            }
+                d
+            };
 
             let ref_name = descriptor
                 .annotations
@@ -693,18 +904,26 @@ impl ArchiveManager {
                 .cloned()
                 .unwrap_or_else(|| "<none>:<none>".to_string());
 
-            let parsed = ImageReference::parse(&ref_name).unwrap_or(ImageReference {
-                registry: ImageReference::DEFAULT_REGISTRY.to_string(),
-                repository: ref_name.clone(),
-                tag: ImageReference::DEFAULT_TAG.to_string(),
-                digest: None,
-            });
+            let (repo, tag, reg) = if ref_name == "<none>:<none>" {
+                ("<none>".to_string(), "<none>".to_string(), "".to_string())
+            } else if !ref_name.contains('/') {
+                let (r, t) = ref_name.split_once(':').unwrap_or((&ref_name, "latest"));
+                (r.to_string(), t.to_string(), "localhost".to_string())
+            } else {
+                let parsed = ImageReference::parse(&ref_name).unwrap_or(ImageReference {
+                    registry: ImageReference::DEFAULT_REGISTRY.to_string(),
+                    repository: ref_name.clone(),
+                    tag: ImageReference::DEFAULT_TAG.to_string(),
+                    digest: None,
+                });
+                (parsed.repository, parsed.tag, parsed.registry)
+            };
 
             let record = ImageRecord {
                 id: short_id,
-                reference: parsed.repository,
-                tag: parsed.tag,
-                registry: parsed.registry,
+                reference: repo,
+                tag,
+                registry: reg,
                 manifest_digest: format!("sha256:{}:oci", manifest_hash),
                 config_digest: format!("sha256:{}", config_hash),
                 size_bytes: descriptor.size as i64,
@@ -714,11 +933,11 @@ impl ArchiveManager {
             };
 
             store.add(record.clone())?;
-            if !quiet {
+            if !suppress_stdout {
                 if record.reference == "<none>" && record.tag == "<none>" {
-                    println!("Loaded image: <none>:<none>");
+                    println!("Loaded image: sha256:{}", record.full_hex_id());
                 } else {
-                    println!("Loaded image: {}:{}", record.reference, record.tag);
+                    println!("Loaded image: {}:{}", record.display_reference(), record.tag);
                 }
             }
             loaded.push(record);

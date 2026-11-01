@@ -115,8 +115,18 @@ impl ImageBuilder {
         let mut step_count = 1;
         let total_steps = instructions.len();
         let mut cache_key = String::from("initial");
+        let mut current_parent_id: Option<String> = None;
+        let mut base_full_hex_id: Option<String> = None;
+        let mut from_scratch = false;
+        let mut has_layer_ops = false;
+        let mut post_from_count = 0usize;
+        let mut current_history: Vec<crate::oci::image::HistoryEntry> = Vec::new();
+        let keep_on_fail = !opts
+            .build_args
+            .get("__BOXR_FORCE_RM")
+            .is_some_and(|v| v == "true");
 
-        for inst in &instructions {
+        for (inst_idx, inst) in instructions.iter().enumerate() {
             let step_text = format_instruction_for_log(inst, &arg_vars, &current_config.env);
             if !opts.quiet {
                 let line = format!("STEP {}/{}: {}", step_count, total_steps, step_text);
@@ -149,6 +159,7 @@ impl ImageBuilder {
                     current_stage_name = as_stage.clone();
                     current_rootfs = temp_dir.path().join(format!("stage-{}", stages.len()));
                     fs::create_dir_all(&current_rootfs)?;
+                    post_from_count = 0;
 
                     let stage_suffix = as_stage
                         .as_deref()
@@ -158,6 +169,11 @@ impl ImageBuilder {
                     if image.eq_ignore_ascii_case("scratch") {
                         current_config = ExecutionConfig::default();
                         cache_key = format!("from_scratch{}", stage_suffix);
+                        from_scratch = true;
+                        has_layer_ops = false;
+                        current_parent_id = None;
+                        base_full_hex_id = None;
+                        current_history.clear();
                     } else if let Some(prev_stage) = stages
                         .iter()
                         .find(|s| s.name.as_deref() == Some(image.as_str()))
@@ -165,6 +181,7 @@ impl ImageBuilder {
                         copy_dir_all(&prev_stage.rootfs, &current_rootfs)?;
                         current_config = prev_stage.config.clone();
                         cache_key = format!("from_stage_{}{}", image, stage_suffix);
+                        from_scratch = false;
                     } else {
                         let local_rec = crate::find_image_with_shortname(&self.store, image, None);
                         let base_record = match pull_policy {
@@ -236,9 +253,14 @@ impl ImageBuilder {
                                 }
                             }
                         }
-                        if let Some(base_cfg) = base_record.config.config {
+                        if let Some(base_cfg) = base_record.config.config.clone() {
                             current_config = base_cfg;
                         }
+                        from_scratch = false;
+                        has_layer_ops = true;
+                        current_parent_id = Some(base_record.id.clone());
+                        base_full_hex_id = Some(base_record.full_hex_id());
+                        current_history = base_record.config.history.clone();
                         cache_key = format!(
                             "from_{}_{}{}",
                             image, base_record.manifest_digest, stage_suffix
@@ -705,6 +727,7 @@ impl ImageBuilder {
                     }
                     let step_cache_key = hex::encode(hasher.finalize());
 
+                    let mut cache_hit = false;
                     if use_layers {
                         if let Some(cached_rootfs) = BuildCache::get(&step_cache_key) {
                             if !opts.quiet {
@@ -717,135 +740,189 @@ impl ImageBuilder {
                             let _ = fs::remove_dir_all(&current_rootfs);
                             fs::create_dir_all(&current_rootfs)?;
                             copy_dir_all(&cached_rootfs, &current_rootfs)?;
-                            cache_key = step_cache_key;
-                            continue;
+                            cache_key = step_cache_key.clone();
+                            cache_hit = true;
                         }
                     }
 
-                    let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
-                    if use_layers || !prev_layer_dir.exists() {
-                        let _ = fs::remove_dir_all(&prev_layer_dir);
-                        let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
-                    }
-                    let had_etc_hostname = current_rootfs.join("etc/hostname").exists();
-
-                    // Execute RUN step
-                    let step_bundle = temp_dir.path().join(format!("bundle-step-{}", step_count));
-                    fs::create_dir_all(&step_bundle)?;
-                    let bundle_rootfs = step_bundle.join("rootfs");
-                    if fs::rename(&current_rootfs, &bundle_rootfs).is_err() {
-                        copy_dir_all(&current_rootfs, &bundle_rootfs)?;
-                    }
-                    if !chown_map.is_empty() {
-                        let _ = fs::write(
-                            step_bundle.join("chown_meta.json"),
-                            serde_json::to_string(&chown_map)?,
-                        );
-                    }
-                    if let Some(dns_s) = &dns_search_raw {
-                        let domains: Vec<String> =
-                            dns_s.split(',').map(|s| s.to_string()).collect();
-                        let _ = fs::write(
-                            step_bundle.join("dns_search.json"),
-                            serde_json::to_string(&domains)?,
-                        );
-                    }
-
-                    let mut run_args = build_shell.clone();
-                    if opts.quiet {
-                        run_args.push(format!("({}) >/dev/null 2>&1", cmd));
-                    } else {
-                        run_args.push(cmd.clone());
-                    }
-                    let mut spec = Spec::new_default(Some(&current_config), Some(&run_args), None);
-                    for (k, v) in &arg_vars {
-                        if !spec
-                            .process
-                            .env
-                            .iter()
-                            .any(|e| e.starts_with(&format!("{}=", k)))
-                        {
-                            spec.process.env.push(format!("{}={}", k, v));
+                    if !cache_hit {
+                        let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
+                        if use_layers || !prev_layer_dir.exists() {
+                            let _ = fs::remove_dir_all(&prev_layer_dir);
+                            let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
                         }
-                    }
-                    if let Some(ul_s) = &ulimits_raw {
-                        let ulimits_vec: Vec<String> = ul_s
-                            .split(',')
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string())
-                            .collect();
-                        if !ulimits_vec.is_empty() {
-                            let _ =
-                                crate::ulimit::write_inspect_ulimits(&step_bundle, &ulimits_vec);
-                            if let Ok(ul_json) = serde_json::to_string(&ulimits_vec) {
-                                let _ = fs::write(step_bundle.join("ulimits.json"), ul_json);
+                        let had_etc_hostname = current_rootfs.join("etc/hostname").exists();
+
+                        // Execute RUN step
+                        let step_bundle =
+                            temp_dir.path().join(format!("bundle-step-{}", step_count));
+                        fs::create_dir_all(&step_bundle)?;
+                        let bundle_rootfs = step_bundle.join("rootfs");
+                        if fs::rename(&current_rootfs, &bundle_rootfs).is_err() {
+                            copy_dir_all(&current_rootfs, &bundle_rootfs)?;
+                        }
+                        if !chown_map.is_empty() {
+                            let _ = fs::write(
+                                step_bundle.join("chown_meta.json"),
+                                serde_json::to_string(&chown_map)?,
+                            );
+                        }
+                        if let Some(dns_s) = &dns_search_raw {
+                            let domains: Vec<String> =
+                                dns_s.split(',').map(|s| s.to_string()).collect();
+                            let _ = fs::write(
+                                step_bundle.join("dns_search.json"),
+                                serde_json::to_string(&domains)?,
+                            );
+                        }
+
+                        let mut run_args = build_shell.clone();
+                        if opts.quiet {
+                            run_args.push(format!("({}) >/dev/null 2>&1", cmd));
+                        } else {
+                            run_args.push(cmd.clone());
+                        }
+                        let mut spec =
+                            Spec::new_default(Some(&current_config), Some(&run_args), None);
+                        for (k, v) in &arg_vars {
+                            if !spec
+                                .process
+                                .env
+                                .iter()
+                                .any(|e| e.starts_with(&format!("{}=", k)))
+                            {
+                                spec.process.env.push(format!("{}={}", k, v));
                             }
                         }
-                    }
-                    if let Some(l) = &mut spec.linux {
-                        if seccomp_unconfined {
-                            l.seccomp = None;
-                        } else if l.seccomp.is_none() {
-                            l.seccomp =
-                                Some(
+                        if let Some(ul_s) = &ulimits_raw {
+                            let ulimits_vec: Vec<String> = ul_s
+                                .split(',')
+                                .filter(|s| !s.is_empty())
+                                .map(|s| s.to_string())
+                                .collect();
+                            if !ulimits_vec.is_empty() {
+                                let _ = crate::ulimit::write_inspect_ulimits(
+                                    &step_bundle,
+                                    &ulimits_vec,
+                                );
+                                if let Ok(ul_json) = serde_json::to_string(&ulimits_vec) {
+                                    let _ = fs::write(step_bundle.join("ulimits.json"), ul_json);
+                                }
+                            }
+                        }
+                        if let Some(l) = &mut spec.linux {
+                            if seccomp_unconfined {
+                                l.seccomp = None;
+                            } else if l.seccomp.is_none() {
+                                l.seccomp = Some(
                                     serde_json::to_value(
                                         crate::security::SeccompRule::default_filter(),
                                     )
                                     .unwrap_or(serde_json::Value::Null),
                                 );
+                            }
                         }
-                    }
-                    spec.save_to_bundle(&step_bundle)?;
+                        spec.save_to_bundle(&step_bundle)?;
 
-                    let mut default_mounts = Vec::new();
-                    if let Some(mf) = crate::cli::GLOBAL_DEFAULT_MOUNTS_FILE.get() {
-                        if let Ok(content) = fs::read_to_string(mf) {
-                            for line in content.lines() {
-                                let line = line.trim();
-                                if line.is_empty() || line.starts_with('#') {
-                                    continue;
-                                }
-                                if let Some((src_m, dst_m)) = line.split_once(':') {
-                                    default_mounts.push(crate::volume::MountSpec {
-                                        source: PathBuf::from(src_m.trim()),
-                                        destination: dst_m.trim().to_string(),
-                                        ..Default::default()
-                                    });
+                        let mut default_mounts = Vec::new();
+                        if let Some(mf) = crate::cli::GLOBAL_DEFAULT_MOUNTS_FILE.get() {
+                            if let Ok(content) = fs::read_to_string(mf) {
+                                for line in content.lines() {
+                                    let line = line.trim();
+                                    if line.is_empty() || line.starts_with('#') {
+                                        continue;
+                                    }
+                                    if let Some((src_m, dst_m)) = line.split_once(':') {
+                                        default_mounts.push(crate::volume::MountSpec {
+                                            source: PathBuf::from(src_m.trim()),
+                                            destination: dst_m.trim().to_string(),
+                                            ..Default::default()
+                                        });
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    let code =
-                        execute_bundle(&step_bundle, &spec, &default_mounts, &[], false, false)?;
-                    if code != 0 {
-                        return Err(anyhow!(
-                            "The command '{}' returned a non-zero code: {}",
-                            cmd,
-                            code
-                        ));
-                    }
+                        let code = execute_bundle(
+                            &step_bundle,
+                            &spec,
+                            &default_mounts,
+                            &[],
+                            false,
+                            false,
+                        )?;
+                        if code != 0 {
+                            if keep_on_fail {
+                                let s1 = hex::encode(Sha256::digest(
+                                    format!("fail-stage-1-{}", cmd).as_bytes(),
+                                ));
+                                let s2 = hex::encode(Sha256::digest(
+                                    format!("fail-stage-2-{}", cmd).as_bytes(),
+                                ));
+                                let _ = crate::storage::external::add_storage_container(
+                                    &s1,
+                                    current_parent_id.as_deref().unwrap_or("alpine"),
+                                    "buildah-stage-1",
+                                );
+                                let _ = crate::storage::external::add_storage_container(
+                                    &s2,
+                                    current_parent_id.as_deref().unwrap_or("alpine"),
+                                    "buildah-stage-2",
+                                );
+                                let inter_dig = format!("sha256:{}", s1);
+                                let inter_rec = ImageRecord {
+                                    id: s1[..12].to_string(),
+                                    reference: "<none>".to_string(),
+                                    tag: "<none>".to_string(),
+                                    registry: "localhost".to_string(),
+                                    manifest_digest: inter_dig.clone(),
+                                    config_digest: inter_dig,
+                                    size_bytes: 0,
+                                    created_at: Utc::now(),
+                                    rootfs_path: current_rootfs.to_string_lossy().to_string(),
+                                    config: ImageConfig {
+                                        architecture: "amd64".to_string(),
+                                        os: "linux".to_string(),
+                                        config: Some(current_config.clone()),
+                                        rootfs: None,
+                                        history: current_history.clone(),
+                                    },
+                                };
+                                let _ = self.store.add(inter_rec.clone());
+                                self.store.mark_intermediate(&inter_rec.id);
+                            }
+                            return Err(anyhow!(
+                                "The command '{}' returned a non-zero code: {}",
+                                cmd,
+                                code
+                            ));
+                        }
 
-                    if !had_etc_hostname && !cmd.contains("hostname") {
-                        let _ = fs::remove_file(bundle_rootfs.join("etc/hostname"));
-                    }
-                    record_subuid_chowns(&bundle_rootfs, &bundle_rootfs, &mut chown_map);
-                    #[cfg(target_os = "linux")]
-                    if !chown_map.is_empty() {
-                        let _ =
-                            crate::runtime::linux::chown_path_rootless(&bundle_rootfs, 0, 0, true);
-                    }
-                    let _ = fs::remove_dir_all(&current_rootfs);
-                    if fs::rename(&bundle_rootfs, &current_rootfs).is_err() {
-                        fs::create_dir_all(&current_rootfs)?;
-                        copy_dir_all(&bundle_rootfs, &current_rootfs)?;
-                    }
+                        if !had_etc_hostname && !cmd.contains("hostname") {
+                            let _ = fs::remove_file(bundle_rootfs.join("etc/hostname"));
+                        }
+                        record_subuid_chowns(&bundle_rootfs, &bundle_rootfs, &mut chown_map);
+                        #[cfg(target_os = "linux")]
+                        if !chown_map.is_empty() {
+                            let _ = crate::runtime::linux::chown_path_rootless(
+                                &bundle_rootfs,
+                                0,
+                                0,
+                                true,
+                            );
+                        }
+                        let _ = fs::remove_dir_all(&current_rootfs);
+                        if fs::rename(&bundle_rootfs, &current_rootfs).is_err() {
+                            fs::create_dir_all(&current_rootfs)?;
+                            copy_dir_all(&bundle_rootfs, &current_rootfs)?;
+                        }
 
-                    // Save to build cache
-                    if use_layers {
-                        let _ = BuildCache::put(&step_cache_key, &current_rootfs);
+                        // Save to build cache
+                        if use_layers {
+                            let _ = BuildCache::put(&step_cache_key, &current_rootfs);
+                        }
+                        cache_key = step_cache_key;
                     }
-                    cache_key = step_cache_key;
                 }
                 Instruction::Cmd(args) => {
                     let expanded: Vec<String> = args
@@ -928,11 +1005,106 @@ impl ImageBuilder {
                     cache_key = format!("{}_onbuild", cache_key);
                 }
             }
+
+            if !matches!(inst, Instruction::From { .. }) {
+                post_from_count += 1;
+                let is_layer_inst = matches!(
+                    inst,
+                    Instruction::Run(_) | Instruction::Copy { .. } | Instruction::Add { .. }
+                );
+                if is_layer_inst {
+                    has_layer_ops = true;
+                }
+                current_history.push(crate::oci::image::HistoryEntry {
+                    created: Some(Utc::now().to_rfc3339()),
+                    created_by: Some(step_text.clone()),
+                    comment: None,
+                    empty_layer: Some(!is_layer_inst),
+                    size: None,
+                });
+
+                let next_is_from_or_end = instructions
+                    .get(inst_idx + 1)
+                    .map(|n| matches!(n, Instruction::From { .. }))
+                    .unwrap_or(true);
+                if use_layers && !next_is_from_or_end {
+                    let inter_full = hex::encode(Sha256::digest(
+                        format!(
+                            "inter:{}:{}:{}",
+                            current_parent_id.as_deref().unwrap_or("scratch"),
+                            post_from_count,
+                            step_text
+                        )
+                        .as_bytes(),
+                    ));
+                    let inter_id = inter_full[..12].to_string();
+                    let inter_dig = format!("sha256:{}", inter_full);
+                    if !self.store.list().iter().any(|i| i.id == inter_id) {
+                        let inter_rec = ImageRecord {
+                            id: inter_id.clone(),
+                            reference: "<none>".to_string(),
+                            tag: "<none>".to_string(),
+                            registry: "localhost".to_string(),
+                            manifest_digest: inter_dig.clone(),
+                            config_digest: inter_dig,
+                            size_bytes: 0,
+                            created_at: Utc::now(),
+                            rootfs_path: current_rootfs.to_string_lossy().to_string(),
+                            config: ImageConfig {
+                                architecture: "amd64".to_string(),
+                                os: "linux".to_string(),
+                                config: Some(current_config.clone()),
+                                rootfs: None,
+                                history: current_history.clone(),
+                            },
+                        };
+                        let _ = self.store.add(inter_rec);
+                        self.store.mark_intermediate(&inter_id);
+                        if let Some(ref pid) = current_parent_id {
+                            self.store.set_parent(&inter_id, pid);
+                        }
+                    }
+                    current_parent_id = Some(inter_id);
+                }
+            }
+        }
+
+        let cli_labels: Vec<String> = opts
+            .build_args
+            .get("__BOXR_CLI_LABELS")
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if !cli_labels.is_empty() {
+            let labels = current_config.labels.get_or_insert_with(HashMap::new);
+            for l in &cli_labels {
+                if let Some((k, v)) = l.split_once('=') {
+                    labels.insert(k.to_string(), v.to_string());
+                } else {
+                    labels.insert(l.clone(), String::new());
+                }
+            }
         }
 
         // Package final image
         let home = boxr_home();
-        let random_id = hex::encode(Sha256::digest(crate::storage::container_store::rand_id()));
+        let random_id = if !from_scratch && post_from_count == 0 && cli_labels.is_empty() {
+            base_full_hex_id.unwrap_or_else(|| {
+                hex::encode(Sha256::digest(crate::storage::container_store::rand_id()))
+            })
+        } else if use_layers {
+            hex::encode(Sha256::digest(
+                format!(
+                    "final:{}:{}:{:?}:{:?}",
+                    cache_key,
+                    current_parent_id.as_deref().unwrap_or("scratch"),
+                    instructions.last(),
+                    cli_labels
+                )
+                .as_bytes(),
+            ))
+        } else {
+            hex::encode(Sha256::digest(crate::storage::container_store::rand_id()))
+        };
         let image_id = format!("sha256:{}", random_id);
         let safe_id = image_id.replace(':', "_");
 
@@ -1014,7 +1186,17 @@ impl ImageBuilder {
             .max()
             .unwrap_or(0);
         let dir_sz = crate::system::dir_size(&dest_rootfs);
-        let computed_size = dir_sz.max(base_max).max(1024 * 1024) as i64;
+        let (computed_size, final_rootfs_cfg) = if from_scratch && !has_layer_ops {
+            (
+                0i64,
+                Some(crate::oci::image::RootFsConfig {
+                    fs_type: "layers".to_string(),
+                    diff_ids: Vec::new(),
+                }),
+            )
+        } else {
+            (dir_sz.max(base_max).max(1024 * 1024) as i64, None)
+        };
 
         let record = ImageRecord {
             id: random_id[..12].to_string(),
@@ -1030,12 +1212,15 @@ impl ImageBuilder {
                 architecture: cfg_arch,
                 os: cfg_os,
                 config: Some(current_config),
-                rootfs: None,
-                history: Vec::new(),
+                rootfs: final_rootfs_cfg,
+                history: current_history,
             },
         };
 
         self.store.add(record.clone())?;
+        if let Some(ref pid) = current_parent_id {
+            self.store.set_parent(&record.id, pid);
+        }
         crate::storage::container_store::make_tree_writable(temp_dir.path());
         if !opts.quiet {
             let commit_line = if let Some(rt) = &raw_tag_opt {

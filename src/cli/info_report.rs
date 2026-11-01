@@ -102,7 +102,11 @@ pub fn build_podman_info_document() -> Value {
         "ServerVersion": env!("CARGO_PKG_VERSION"),
         "OSType": "linux",
         "Host": {
-            "Arch": std::env::consts::ARCH,
+            "Arch": match std::env::consts::ARCH {
+                "aarch64" => "arm64",
+                "x86_64" => "amd64",
+                other => other,
+            },
             "BuildahVersion": "1.36.0",
             "CgroupManager": cgroup_manager,
             "CgroupsVersion": cgroup_version,

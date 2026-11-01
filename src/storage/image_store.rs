@@ -81,6 +81,10 @@ impl ImageRecord {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ImageStoreData {
     images: Vec<ImageRecord>,
+    #[serde(default)]
+    parents: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    intermediates: std::collections::HashSet<String>,
 }
 
 /// True when `query` identifies `img`: by image id prefix, by manifest
@@ -113,6 +117,8 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     }
     if let Some(hex) = query.strip_prefix("sha256:") {
         return img.manifest_digest == query
+            || img.tag == query
+            || img.tag.ends_with(&format!("@{}", query))
             || img.id.starts_with(hex)
             || img.full_hex_id().starts_with(hex)
             || img.config_digest == query
@@ -136,7 +142,9 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     match ImageReference::parse(query) {
         Ok(r) => {
             if let Some(digest) = r.digest {
-                return img.manifest_digest == digest;
+                return img.manifest_digest == digest
+                    || img.tag == digest
+                    || img.tag.ends_with(&format!("@{}", digest));
             }
             let (reg, repo, tag) = record_identity(img);
             reg == r.registry && repo == r.repository && tag == r.tag
@@ -325,7 +333,6 @@ impl ImageStore {
     pub fn add(&self, record: ImageRecord) -> Result<()> {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            // Remove previous entry with same registry, reference, tag, architecture, and os if present
             fn norm_arch(a: &str) -> &str {
                 match a {
                     "x86_64" => "amd64",
@@ -333,18 +340,154 @@ impl ImageStore {
                     other => other,
                 }
             }
-            data.images.retain(|img| {
-                !(img.registry == record.registry
-                    && img.reference == record.reference
-                    && img.tag == record.tag
-                    && norm_arch(&img.config.architecture)
-                        == norm_arch(&record.config.architecture)
-                    && img.config.os.eq_ignore_ascii_case(&record.config.os))
-            });
+            if record.reference == "<none>" {
+                data.images
+                    .retain(|img| !(img.id == record.id && img.reference == "<none>"));
+            } else {
+                let mut displaced_ids = Vec::new();
+                data.images.retain(|img| {
+                    let same_slot = img.registry == record.registry
+                        && img.reference == record.reference
+                        && img.tag == record.tag
+                        && norm_arch(&img.config.architecture)
+                            == norm_arch(&record.config.architecture)
+                        && img.config.os.eq_ignore_ascii_case(&record.config.os);
+                    if same_slot {
+                        if img.id != record.id {
+                            displaced_ids.push(img.clone());
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for mut old in displaced_ids {
+                    let still_named = data
+                        .images
+                        .iter()
+                        .any(|i| i.id == old.id && i.reference != "<none>");
+                    if !still_named {
+                        record_untagged_image_history(&self.index_file, &old);
+                        old.reference = "<none>".to_string();
+                        old.tag = "<none>".to_string();
+                        data.images.push(old);
+                    }
+                }
+            }
             data.images.push(record);
             self.save_unlocked(&data)?;
             Ok(())
         })
+    }
+
+    pub fn set_parent(&self, child_id: &str, parent_id: &str) {
+        if child_id == parent_id || child_id.is_empty() || parent_id.is_empty() {
+            return;
+        }
+        let _ = crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            data.parents
+                .insert(child_id.to_string(), parent_id.to_string());
+            self.save_unlocked(&data)?;
+            Ok(())
+        });
+    }
+
+    pub fn get_parent(&self, child_id: &str) -> Option<String> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let data = self.load_unlocked();
+            Ok(data.parents.get(child_id).cloned())
+        })
+        .ok()
+        .flatten()
+    }
+
+    pub fn mark_intermediate(&self, id: &str) {
+        let _ = crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            data.intermediates.insert(id.to_string());
+            self.save_unlocked(&data)?;
+            Ok(())
+        });
+    }
+
+    pub fn is_intermediate(&self, id: &str) -> bool {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let data = self.load_unlocked();
+            Ok(data.intermediates.contains(id)
+                || (data
+                    .images
+                    .iter()
+                    .any(|i| i.id == id && i.reference == "<none>")
+                    && data.parents.values().any(|p| p == id)))
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn has_children(&self, parent_id: &str) -> bool {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let data = self.load_unlocked();
+            Ok(data.parents.iter().any(|(child, p)| {
+                p == parent_id && data.images.iter().any(|i| &i.id == child)
+            }))
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn untag_to_intermediate(&self, query: &str) -> Result<ImageRecord> {
+        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+            let mut data = self.load_unlocked();
+            let pos = data
+                .images
+                .iter()
+                .position(|img| img.qualified_name() == query)
+                .or_else(|| {
+                    data.images
+                        .iter()
+                        .position(|img| query_matches_image(img, query))
+                })
+                .ok_or_else(|| anyhow!("Image not found: '{}'", query))?;
+            let orig = data.images[pos].clone();
+            record_untagged_image_history(&self.index_file, &orig);
+            let other_tags = data
+                .images
+                .iter()
+                .enumerate()
+                .any(|(i, img)| i != pos && img.id == orig.id && img.reference != "<none>");
+            if other_tags {
+                data.images.remove(pos);
+            } else {
+                data.images[pos].reference = "<none>".to_string();
+                data.images[pos].tag = "<none>".to_string();
+                data.intermediates.insert(orig.id.clone());
+            }
+            self.save_unlocked(&data)?;
+            Ok(orig)
+        })
+    }
+
+    pub fn prune_untagged_parents(&self, start_parent_id: Option<String>) -> Vec<String> {
+        let mut deleted_full_ids = Vec::new();
+        let mut cur = start_parent_id;
+        while let Some(pid) = cur {
+            if self.has_children(&pid) {
+                break;
+            }
+            let parent_rec = self
+                .list()
+                .into_iter()
+                .find(|i| i.id == pid && i.reference == "<none>" && i.tag == "<none>");
+            if let Some(p_img) = parent_rec {
+                let next_parent = self.get_parent(&p_img.id);
+                if self.remove(&p_img.id).is_ok() {
+                    deleted_full_ids.push(p_img.full_hex_id());
+                }
+                cur = next_parent;
+            } else {
+                break;
+            }
+        }
+        deleted_full_ids
     }
 
     pub fn remove(&self, query: &str) -> Result<ImageRecord> {
@@ -367,6 +510,10 @@ impl ImageStore {
 
             if let Some(index) = pos {
                 let removed = data.images.remove(index);
+                if !data.images.iter().any(|img| img.id == removed.id) {
+                    data.parents.remove(&removed.id);
+                    data.intermediates.remove(&removed.id);
+                }
                 self.save_unlocked(&data)?;
                 record_untagged_image_history(&self.index_file, &removed);
 
@@ -630,7 +777,11 @@ impl ImageStore {
             config: base_config,
         };
 
+        let parent_img_id = self.find(&container.image).map(|b| b.id);
         self.add(record.clone())?;
+        if let Some(pid) = parent_img_id {
+            self.set_parent(&record.id, &pid);
+        }
         Ok(record)
     }
 }

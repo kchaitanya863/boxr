@@ -21,6 +21,14 @@ pub struct ImageScpArgs {
     #[arg(long = "format")]
     pub format: Option<String>,
 
+    /// Compression format to use (gzip, zstd, none)
+    #[arg(long = "compression-format")]
+    pub compression_format: Option<String>,
+
+    /// Compression level to use
+    #[arg(long = "compression-level")]
+    pub compression_level: Option<i32>,
+
     /// Source image spec (e.g. [user@]host::image)
     pub source: String,
 
@@ -39,6 +47,10 @@ pub struct ImageScpArgs {
 #[derive(Args, Debug, Clone)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ImageSignArgs {
+    /// Sign all manifests in a multi-architecture image
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
     /// Image to sign
     pub image: String,
 
@@ -47,8 +59,16 @@ pub struct ImageSignArgs {
     pub sign_by: Option<String>,
 
     /// Directory for signatures
-    #[arg(long = "directory")]
+    #[arg(short = 'd', long = "directory")]
     pub directory: Option<String>,
+
+    /// Path to a directory with TLS certificates
+    #[arg(long = "cert-dir")]
+    pub cert_dir: Option<String>,
+
+    /// Path of the authentication file
+    #[arg(long = "authfile")]
+    pub authfile: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

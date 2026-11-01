@@ -180,6 +180,10 @@ pub enum SystemAction {
         force: bool,
         #[arg(long = "volumes")]
         volumes: bool,
+        #[arg(long = "external")]
+        external: bool,
+        #[arg(long = "build")]
+        build: bool,
         #[arg(long = "filter")]
         filter: Vec<String>,
     },

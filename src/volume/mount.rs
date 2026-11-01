@@ -270,28 +270,8 @@ pub fn parse_mount_flag(
         }
         "artifact" => {
             let store = crate::artifact::ArtifactStore::new();
-            let Some(art) = store.find(&source) else {
-                let display_src = if source.contains(':') {
-                    source.clone()
-                } else {
-                    format!("{}:latest", source)
-                };
-                crate::cli::usage_errors::exit_usage_error(format!(
-                    "{}: artifact does not exist",
-                    display_src
-                ));
-            };
-            Ok(vec![MountSpec {
-                source: PathBuf::from(art.file_path),
-                destination: target,
-                read_only: true,
-                noexec,
-                chown_u: false,
-                tmpfs_mount_data: None,
-                volume_name: None,
-                subpath: None,
-                is_volume: false,
-            }])
+            store.mount_artifact_to_rootfs(m_trim, std::path::Path::new("/"), true)?;
+            Ok(Vec::new())
         }
         "ramfs" => {
             if target.is_empty() {

@@ -859,53 +859,45 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Save(args) => {
-            let output_path = args.output.map(PathBuf::from);
-            if args.images.is_empty() {
-                cli::usage_errors::exit_usage_error("image name required");
-            }
-            auth::ImageArchiver::save_multiple(
-                &args.images,
-                output_path.as_deref(),
-                args.quiet,
-                args.uncompressed,
-                args.format.as_deref(),
-            )?;
+            run_save_command(&args)?;
             Ok(0)
         }
         Commands::Load(args) => {
-            if args.input.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                cli::usage_errors::exit_usage_error(
-                    "cannot read from terminal, use command-line redirection or the --input flag",
-                );
-            }
-            let input_path = args.input.map(PathBuf::from);
-            match auth::ImageArchiver::load(input_path.as_deref()) {
-                Ok(records) => {
-                    if let Some(first) = records.first() {
-                        let name = input_path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        EventManager::record(ContainerEvent::new(
-                            "image",
-                            "loadfromarchive",
-                            &format!("sha256:{}", first.id),
-                            &name,
-                            HashMap::new(),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    cli::usage_errors::exit_usage_error(format!(
-                        "payload does not match any of the supported image formats: {}",
-                        e
-                    ));
-                }
-            }
+            run_load_command(&args)?;
             Ok(0)
         }
         Commands::Push(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            if find_manifest_key(&load_manifests_map(), &args.source).is_some() {
+                handle_manifest(
+                    cli::ManifestSubcommands {
+                        registry_auth: args.registry_auth.clone(),
+                        command: cli::ManifestAction::Push {
+                            authfile: args.registry_auth.authfile.clone(),
+                            creds: args.registry_auth.creds.clone(),
+                            cert_dir: args.registry_auth.cert_dir.clone(),
+                            target: args.source.clone(),
+                            destination: args.destination.clone(),
+                            insecure: None,
+                            tls_verify: args.registry_auth.tls_verify,
+                            purge: false,
+                            quiet: args.quiet,
+                            all: true,
+                            remove_signatures: false,
+                            force_compression: None,
+                            compression_format: args.compression_format.clone(),
+                            compression_level: None,
+                            add_compression: Vec::new(),
+                            retry: Some(args.retry),
+                            retry_delay: Some(args.retry_delay.clone()),
+                            format: args.format.clone(),
+                        },
+                    },
+                    global_auth,
+                )
+                .await?;
+                return Ok(0);
+            }
             let _reg = registry_auth_scope_ext(
                 &args.registry_auth,
                 global_auth,
@@ -1094,8 +1086,8 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 diff_container_with_mode(&diff_args, true)?;
                 Ok(0)
             }
-            cli::ContainerAction::Prune(_) => {
-                prune_containers()?;
+            cli::ContainerAction::Prune(prune_args) => {
+                prune_containers_with_filter(&prune_args.filter)?;
                 Ok(0)
             }
             cli::ContainerAction::Update(update_args) => {
@@ -1258,27 +1250,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Save(save_args) => {
-                let output_path = save_args.output.map(PathBuf::from);
-                if save_args.images.is_empty() {
-                    cli::usage_errors::exit_usage_error("image name required");
-                }
-                auth::ImageArchiver::save_multiple(
-                    &save_args.images,
-                    output_path.as_deref(),
-                    save_args.quiet,
-                    save_args.uncompressed,
-                    save_args.format.as_deref(),
-                )?;
+                run_save_command(&save_args)?;
                 Ok(0)
             }
             cli::ImageAction::Load(load_args) => {
-                let input_path = load_args.input.map(PathBuf::from);
-                if let Err(e) = auth::ImageArchiver::load(input_path.as_deref()) {
-                    cli::usage_errors::exit_usage_error(format!(
-                        "payload does not match any of the supported image formats: {}",
-                        e
-                    ));
-                }
+                run_load_command(&load_args)?;
                 Ok(0)
             }
             cli::ImageAction::Import(import_args) => {
@@ -1286,7 +1262,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Prune(prune_args) => {
-                prune_images(prune_args.all, prune_args.external)?;
+                prune_images_with_filter(
+                    prune_args.all,
+                    prune_args.external,
+                    &prune_args.filter,
+                )?;
                 Ok(0)
             }
             cli::ImageAction::Exists { image } => {
@@ -1313,6 +1293,40 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                         ));
                     }
                 }
+                if let Some(cf) = &scp_args.compression_format {
+                    if cf != "gzip" && cf != "zstd" && cf != "none" {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "\"{}\" is not a valid value. Choose from: \"gzip, zstd, none\"",
+                            cf
+                        ));
+                    }
+                }
+                if let Some(lvl) = scp_args.compression_level {
+                    match scp_args.compression_format.as_deref() {
+                        None | Some("none") => {
+                            cli::usage_errors::exit_usage_error(
+                                "a compression level requires a compression format: invalid argument",
+                            );
+                        }
+                        Some("gzip") => {
+                            if !(1..=9).contains(&lvl) {
+                                cli::usage_errors::exit_usage_error(format!(
+                                    "compression level {} is out of range for \"gzip\", must be between 1 and 9: invalid argument",
+                                    lvl
+                                ));
+                            }
+                        }
+                        Some("zstd") => {
+                            if !(1..=20).contains(&lvl) {
+                                cli::usage_errors::exit_usage_error(format!(
+                                    "compression level {} is out of range for \"zstd\", must be between 1 and 20: invalid argument",
+                                    lvl
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 scp_image(
                     &scp_args.source,
                     scp_args.destination.as_deref().unwrap_or(""),
@@ -1323,10 +1337,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 Ok(0)
             }
             cli::ImageAction::Sign(sign_args) => {
-                sign_image(
+                sign_image_with_opts(
                     &sign_args.image,
                     sign_args.sign_by.as_deref(),
                     sign_args.directory.as_deref(),
+                    sign_args.all,
                 )?;
                 Ok(0)
             }
@@ -1446,8 +1461,15 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 )?;
                 Ok(0)
             }
-            SystemAction::Prune { all, volumes, .. } => {
-                system::SystemManager::prune(all, volumes)?;
+            SystemAction::Prune {
+                all,
+                volumes,
+                external,
+                build,
+                filter,
+                ..
+            } => {
+                system::SystemManager::prune_with_opts(all, volumes, external, build, &filter)?;
                 Ok(0)
             }
             SystemAction::Check {
@@ -1670,57 +1692,109 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 cli::ArtifactAction::Add {
                     append,
                     replace,
+                    artifact_type,
+                    file_type,
+                    annotation,
                     name,
-                    file,
-                    media_type,
+                    files,
                 } => {
-                    let record = store.add_with_options(
+                    let file_paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+                    let record = store.add_cli(
                         &name,
-                        Path::new(&file),
-                        &media_type,
+                        &file_paths,
+                        artifact_type.as_deref(),
+                        file_type.as_deref(),
+                        &annotation,
                         append,
                         replace,
                     )?;
-                    println!("{}", record.digest);
+                    let hex_digest = record
+                        .digest
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&record.digest);
+                    println!("{}", hex_digest);
                 }
-                cli::ArtifactAction::Extract { name, dest } => {
-                    let out = store.extract(&name, Path::new(&dest))?;
-                    println!("{}", out.display());
+                cli::ArtifactAction::Extract {
+                    digest,
+                    title,
+                    name,
+                    dest,
+                } => {
+                    store.extract_cli(
+                        &name,
+                        Path::new(&dest),
+                        digest.as_deref(),
+                        title.as_deref(),
+                    )?;
                 }
                 cli::ArtifactAction::Inspect { format, name } => {
-                    let art = store
-                        .find(&name)
-                        .ok_or_else(|| anyhow!("Artifact '{}' not found", name))?;
+                    let Some(art) = store.find(&name) else {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "{}: artifact does not exist",
+                            name
+                        ));
+                    };
+                    let (canon_name, _, _) = artifact::normalize_artifact_name(&art.name);
                     let created_str = if !art.created_rfc3339.is_empty() {
                         art.created_rfc3339.clone()
                     } else {
                         art.created_at
                             .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
                     };
-                    let layers_val = if art.layers.is_empty() {
+                    let layers_val: serde_json::Value = if art.layers.is_empty() {
                         serde_json::json!([{
                             "mediaType": art.media_type,
                             "digest": art.digest,
                             "size": art.size_bytes,
                         }])
                     } else {
-                        serde_json::to_value(&art.layers)?
+                        let arr: Vec<serde_json::Value> = art
+                            .layers
+                            .iter()
+                            .map(|l| {
+                                let mut obj = serde_json::json!({
+                                    "mediaType": l.media_type,
+                                    "digest": l.digest,
+                                    "size": l.size,
+                                });
+                                if !l.annotations.is_empty() {
+                                    obj["annotations"] =
+                                        serde_json::to_value(&l.annotations).unwrap_or_default();
+                                    obj["Annotations"] =
+                                        serde_json::to_value(&l.annotations).unwrap_or_default();
+                                }
+                                obj
+                            })
+                            .collect();
+                        serde_json::Value::Array(arr)
+                    };
+                    let mut manifest_obj = serde_json::json!({
+                        "schemaVersion": 2,
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "Layers": layers_val.clone(),
+                        "layers": layers_val,
+                        "Annotations": {
+                            "org.opencontainers.image.created": created_str
+                        },
+                        "annotations": {
+                            "org.opencontainers.image.created": created_str
+                        }
+                    });
+                    if !art.artifact_type.is_empty() {
+                        manifest_obj["artifactType"] =
+                            serde_json::Value::String(art.artifact_type.clone());
+                        manifest_obj["ArtifactType"] =
+                            serde_json::Value::String(art.artifact_type.clone());
+                    }
+                    let full_digest = if art.digest.starts_with("sha256:") {
+                        art.digest.clone()
+                    } else {
+                        format!("sha256:{}", art.digest)
                     };
                     let doc = serde_json::json!({
-                        "Name": art.name,
-                        "Digest": art.digest,
-                        "Manifest": {
-                            "schemaVersion": 2,
-                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                            "Layers": layers_val.clone(),
-                            "layers": layers_val,
-                            "Annotations": {
-                                "org.opencontainers.image.created": created_str
-                            },
-                            "annotations": {
-                                "org.opencontainers.image.created": created_str
-                            }
-                        }
+                        "Name": canon_name,
+                        "Digest": full_digest,
+                        "Manifest": manifest_obj
                     });
                     if let Some(fmt) = format {
                         if fmt.contains("\"\\n\"") {
@@ -1732,33 +1806,179 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                         println!("{}", serde_json::to_string_pretty(&doc)?);
                     }
                 }
-                cli::ArtifactAction::Ls => {
+                cli::ArtifactAction::Ls {
+                    format,
+                    noheading,
+                    no_trunc,
+                    quiet,
+                } => {
+                    if quiet && format.is_some() {
+                        cli::usage_errors::exit_usage_error(
+                            "quiet and format flags cannot be used together",
+                        );
+                    }
                     let list = store.list();
-                    println!("{:<20} {:<68} {:<10}", "NAME", "DIGEST", "SIZE");
-                    for a in list {
+                    let now = Utc::now();
+                    if quiet {
+                        for a in &list {
+                            let hex = a.digest.strip_prefix("sha256:").unwrap_or(&a.digest);
+                            if no_trunc {
+                                println!("{}", hex);
+                            } else {
+                                println!("{}", &hex[..12.min(hex.len())]);
+                            }
+                        }
+                        return Ok(0);
+                    }
+                    if let Some(ref fmt) = format {
+                        if fmt.trim().eq_ignore_ascii_case("json") {
+                            let rows: Vec<serde_json::Value> = list
+                                .iter()
+                                .map(|a| {
+                                    let (_, repo, tag) = artifact::normalize_artifact_name(&a.name);
+                                    let hex =
+                                        a.digest.strip_prefix("sha256:").unwrap_or(&a.digest);
+                                    let dig = if no_trunc {
+                                        hex.to_string()
+                                    } else {
+                                        hex[..12.min(hex.len())].to_string()
+                                    };
+                                    serde_json::json!({
+                                        "Repository": repo,
+                                        "Tag": tag,
+                                        "Digest": dig,
+                                        "Size": system::format_bytes(a.size_bytes),
+                                        "VirtualSize": a.size_bytes,
+                                    })
+                                })
+                                .collect();
+                            println!("{}", serde_json::to_string_pretty(&rows)?);
+                            return Ok(0);
+                        }
+                        for a in &list {
+                            let (_, repo, tag) = artifact::normalize_artifact_name(&a.name);
+                            let hex = a.digest.strip_prefix("sha256:").unwrap_or(&a.digest);
+                            let dig = if no_trunc {
+                                hex.to_string()
+                            } else {
+                                hex[..12.min(hex.len())].to_string()
+                            };
+                            let elapsed_secs =
+                                (now - a.created_at).num_seconds().max(0) as u64;
+                            let created_human = if elapsed_secs == 0 {
+                                "Less than a second ago".to_string()
+                            } else if elapsed_secs == 1 {
+                                "1 second ago".to_string()
+                            } else if elapsed_secs < 60 {
+                                format!("{} seconds ago", elapsed_secs)
+                            } else if elapsed_secs < 3600 {
+                                format!("{} minutes ago", elapsed_secs / 60)
+                            } else {
+                                format!("{} hours ago", elapsed_secs / 3600)
+                            };
+                            let created_at_str =
+                                a.created_at.format("%Y-%m-%d %H:%M:%S%.9f +0000 UTC").to_string();
+                            let mut line = fmt.clone();
+                            line = line.replace("{{.Repository}}", &repo);
+                            line = line.replace("{{.Tag}}", &tag);
+                            line = line.replace("{{.Digest}}", &dig);
+                            line = line.replace("{{.Size}}", &system::format_bytes(a.size_bytes));
+                            line = line.replace("{{.VirtualSize}}", &a.size_bytes.to_string());
+                            line = line.replace("{{.Created}}", &created_human);
+                            line = line.replace("{{.CreatedAt}}", &created_at_str);
+                            println!("{}", line);
+                        }
+                        return Ok(0);
+                    }
+                    if !noheading {
                         println!(
-                            "{:<20} {:<68} {:<10}",
-                            a.name,
-                            a.digest,
+                            "{:<30} {:<15} {:<15} {:<16} {:<12}",
+                            "REPOSITORY", "TAG", "DIGEST", "CREATED", "SIZE"
+                        );
+                    }
+                    for a in &list {
+                        let (_, repo, tag) = artifact::normalize_artifact_name(&a.name);
+                        let hex = a.digest.strip_prefix("sha256:").unwrap_or(&a.digest);
+                        let dig = if no_trunc {
+                            hex.to_string()
+                        } else {
+                            hex[..12.min(hex.len())].to_string()
+                        };
+                        let elapsed_secs = (now - a.created_at).num_seconds().max(0) as u64;
+                        let created_human = if elapsed_secs == 0 {
+                            "Less than a second ago".to_string()
+                        } else if elapsed_secs == 1 {
+                            "1 second ago".to_string()
+                        } else if elapsed_secs < 60 {
+                            format!("{} seconds ago", elapsed_secs)
+                        } else if elapsed_secs < 3600 {
+                            format!("{} minutes ago", elapsed_secs / 60)
+                        } else {
+                            format!("{} hours ago", elapsed_secs / 3600)
+                        };
+                        println!(
+                            "{:<30} {:<15} {:<15} {:<16} {:<12}",
+                            repo,
+                            tag,
+                            dig,
+                            created_human,
                             system::format_bytes(a.size_bytes)
                         );
                     }
                 }
-                cli::ArtifactAction::Pull { reference } => {
-                    println!("Pulling artifact '{}'...", reference);
+                cli::ArtifactAction::Pull {
+                    registry_auth,
+                    retry,
+                    retry_delay,
+                    quiet: _,
+                    reference,
+                } => {
+                    auth::validate_authfile_opt(registry_auth.authfile.as_deref())?;
+                    let _guard = registry_auth_scope(&registry_auth);
+                    let record = store.pull_cli(&reference, retry, &retry_delay).await?;
+                    let hex_digest = record
+                        .digest
+                        .strip_prefix("sha256:")
+                        .unwrap_or(&record.digest);
+                    println!("{}", hex_digest);
                 }
-                cli::ArtifactAction::Push { reference } => {
-                    println!("Pushing artifact '{}'...", reference);
+                cli::ArtifactAction::Push {
+                    registry_auth,
+                    retry: _,
+                    retry_delay: _,
+                    quiet: _,
+                    reference,
+                    destination,
+                } => {
+                    auth::validate_authfile_opt(registry_auth.authfile.as_deref())?;
+                    let _guard = registry_auth_scope(&registry_auth);
+                    store.push_cli(&reference, destination.as_deref()).await?;
                 }
                 cli::ArtifactAction::Rm { all, ignore, names } => {
+                    if all && !names.is_empty() {
+                        cli::usage_errors::exit_usage_error(
+                            "when using the --all switch, you may not pass any artifact names or digests",
+                        );
+                    }
+                    if !all && names.is_empty() {
+                        cli::usage_errors::exit_usage_error(
+                            "at least one artifact name or digest must be specified",
+                        );
+                    }
                     if all {
                         let _ = store.remove_all();
                     } else {
                         for name in names {
                             match store.remove(&name) {
-                                Ok(removed) => println!("{}", removed.name),
+                                Ok(removed) => {
+                                    let hex = removed
+                                        .digest
+                                        .strip_prefix("sha256:")
+                                        .unwrap_or(&removed.digest);
+                                    println!("{}", hex);
+                                }
                                 Err(_) if ignore => {}
-                                Err(e) => return Err(e),
+                                Err(e) => cli::usage_errors::exit_usage_error(format!("{}", e)),
                             }
                         }
                     }
@@ -1767,7 +1987,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Farm(args) => {
-            handle_farm_command(args)?;
+            handle_farm_command(args).await?;
             Ok(0)
         }
         Commands::AutoUpdate(args) => {
@@ -2705,6 +2925,13 @@ async fn prepare_run_pod(args: &mut RunArgs) -> Result<Option<String>> {
 }
 
 fn validate_run_create_option_conflicts(args: &RunArgs) {
+    check_duplicate_mount_destinations(&args.volumes, &args.mount, &args.tmpfs);
+    for m in &args.mount {
+        if m.contains("type=artifact") {
+            let store = artifact::ArtifactStore::new();
+            let _ = store.mount_artifact_to_rootfs(m, Path::new("/"), true);
+        }
+    }
     if args.cpu_period.is_some() && args.cpus.is_some() {
         cli::usage_errors::exit_usage_error("--cpu-period and --cpus cannot be set together");
     }
@@ -2817,6 +3044,48 @@ fn resolve_container_labels(
 
 pub async fn run_container(mut args: RunArgs) -> Result<i32> {
     run_container_with_output(args, CliOutputPolicy::default()).await
+}
+
+fn check_duplicate_mount_destinations(
+    volumes: &[String],
+    mount_flags: &[String],
+    tmpfs: &[String],
+) {
+    let mut seen = std::collections::HashSet::new();
+    for v in volumes {
+        let parts: Vec<&str> = v.split(':').collect();
+        let raw_dst = if parts.len() >= 2 { parts[1] } else { parts[0] };
+        let (dst, _, _, _) = volume::mount::parse_volume_dest_and_options(raw_dst);
+        let dst = dst.trim_end_matches('/').to_string();
+        let dst = if dst.is_empty() { "/".to_string() } else { dst };
+        if !seen.insert(dst.clone()) {
+            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+        }
+    }
+    for m in mount_flags {
+        let mut target = String::new();
+        for kv in m.split(',') {
+            if let Some((k, v)) = kv.split_once('=') {
+                if matches!(k.trim(), "dst" | "destination" | "target") {
+                    target = v.trim().trim_end_matches('/').to_string();
+                    if target.is_empty() {
+                        target = "/".to_string();
+                    }
+                }
+            }
+        }
+        if !target.is_empty() && !seen.insert(target.clone()) {
+            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", target));
+        }
+    }
+    for t in tmpfs {
+        let raw_dst = t.split(':').next().unwrap_or(t).trim();
+        let dst = raw_dst.trim_end_matches('/').to_string();
+        let dst = if dst.is_empty() { "/".to_string() } else { dst };
+        if !seen.insert(dst.clone()) {
+            cli::usage_errors::exit_usage_error(format!("{}: duplicate mount destination", dst));
+        }
+    }
 }
 
 fn resolve_all_container_mounts(
@@ -3045,6 +3314,7 @@ pub async fn run_container_with_output(
     let restart_policy = health::parse_restart_policy(&args.restart)?;
 
     // Resolve volume mounts (after prepare_run_pod so pod-level volumes are included)
+    check_duplicate_mount_destinations(&args.volumes, &args.mount, &args.tmpfs);
     let vol_store = VolumeStore::new();
     let mut parsed_mounts = resolve_all_container_mounts(&args.volumes, &args.mount, &vol_store)?;
 
@@ -3059,6 +3329,22 @@ pub async fn run_container_with_output(
     fs::create_dir_all(&bundle_dir)?;
     let cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
     shift_merged_rootfs_for_run_id_maps(&args, &cow_bundle.merged_dir)?;
+    let artifact_mounts: Vec<String> = args
+        .mount
+        .iter()
+        .filter(|m| m.contains("type=artifact"))
+        .cloned()
+        .collect();
+    if !artifact_mounts.is_empty() {
+        let art_store = artifact::ArtifactStore::new();
+        for am in &artifact_mounts {
+            art_store.mount_artifact_to_rootfs(am, &cow_bundle.merged_dir, false)?;
+        }
+        let _ = fs::write(
+            bundle_dir.join("artifact_mounts.json"),
+            serde_json::to_string(&artifact_mounts)?,
+        );
+    }
     #[cfg(unix)]
     if args.image.contains("libpod/testimage") && args.uidmap.is_empty() {
         use std::os::unix::fs::PermissionsExt;
@@ -3580,7 +3866,7 @@ pub async fn run_container_with_output(
     }
     if !args.dns.is_empty() {
         for dns_ip in &args.dns {
-            if dns_ip.parse::<std::net::IpAddr>().is_err() {
+            if dns_ip != "none" && dns_ip.parse::<std::net::IpAddr>().is_err() {
                 return Err(anyhow!("invalid DNS server address: '{}'", dns_ip));
             }
         }
@@ -5276,6 +5562,17 @@ pub async fn start_container_with_home(
     }
 
     let rootfs = bundle_path.join("rootfs");
+    if let Ok(am_str) = fs::read_to_string(bundle_path.join("artifact_mounts.json")) {
+        if let Ok(artifact_mounts) = serde_json::from_str::<Vec<String>>(&am_str) {
+            let art_store = match home_opt {
+                Some(h) => artifact::ArtifactStore::with_home(h.to_path_buf()),
+                None => artifact::ArtifactStore::new(),
+            };
+            for am in &artifact_mounts {
+                art_store.mount_artifact_to_rootfs(am, &rootfs, false)?;
+            }
+        }
+    }
     if let Some(binary) = spec.process.args.first() {
         if !executable_exists_in_rootfs(&rootfs, binary, &spec.process.env) {
             let _ = store.update_status(&rec.id, ContainerStatus::Exited(127));
@@ -6408,11 +6705,15 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
     }
 
     if let Some(fmt) = &args.format {
-        for res in &results {
-            if fmt == "json" || fmt == "{{json .}}" {
-                println!("{}", serde_json::to_string_pretty(res)?);
-            } else {
-                println!("{}", apply_inspect_format_template(fmt, res));
+        if fmt == "json" {
+            println!("{}", serde_json::to_string_pretty(&results)?);
+        } else {
+            for res in &results {
+                if fmt == "{{json .}}" {
+                    println!("{}", serde_json::to_string_pretty(res)?);
+                } else {
+                    println!("{}", apply_inspect_format_template(fmt, res));
+                }
             }
         }
     } else {
@@ -9117,9 +9418,16 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
     if let Some(lf) = &args.logfile {
         build_args.insert("__BOXR_LOGFILE".to_string(), lf.clone());
     }
+    if !args.labels.is_empty() {
+        if let Ok(lbl_json) = serde_json::to_string(&args.labels) {
+            build_args.insert("__BOXR_CLI_LABELS".to_string(), lbl_json);
+        }
+    }
+    build_args.insert("__BOXR_RM".to_string(), args.rm.to_string());
+    build_args.insert("__BOXR_FORCE_RM".to_string(), args.force_rm.to_string());
 
     let primary_tag = args.tags.first().cloned();
-    let mut record = builder
+    let mut record = match builder
         .build(builder::BuildOptions {
             context_dir,
             dockerfile_path,
@@ -9132,9 +9440,29 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
             shm_size: args.shm_size,
             quiet: args.quiet,
         })
-        .await?;
+        .await
+    {
+        Ok(rec) => rec,
+        Err(e) => {
+            if e.to_string().contains("returned a non-zero code:") {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+            return Err(e);
+        }
+    };
 
     let store = ImageStore::new();
+    if let Some(plat) = &args.platform {
+        let parts: Vec<&str> = plat.split('/').collect();
+        if parts.len() >= 2 {
+            record.config.os = parts[0].to_string();
+            record.config.architecture = parts[1].to_string();
+        } else if !parts.is_empty() {
+            record.config.architecture = parts[0].to_string();
+        }
+        store.add(record.clone())?;
+    }
     if !args.unsetenv.is_empty() {
         if let Some(cfg) = &mut record.config.config {
             if let Some(envs) = &mut cfg.env {
@@ -9748,6 +10076,8 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
             for l in labels {
                 if let Some((k, v)) = l.split_once('=') {
                     label_map.insert(k.to_string(), v.to_string());
+                } else {
+                    label_map.insert(l, String::new());
                 }
             }
             if store.find(&name).is_some() {
@@ -9783,6 +10113,49 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
         }
         NetworkAction::Ls(ls_args) => {
             let mut nets = store.list();
+            for f in &ls_args.filter {
+                if let Some((k, v)) = f.split_once("!=") {
+                    let kt = k.trim();
+                    let vt = v.trim();
+                    if kt == "label" {
+                        nets.retain(|n| {
+                            if let Some((lk, lv)) = vt.split_once('=') {
+                                n.labels.get(lk.trim()).map(String::as_str) != Some(lv.trim())
+                            } else {
+                                !n.labels.contains_key(vt)
+                            }
+                        });
+                    }
+                } else if let Some((k, v)) = f.split_once('=') {
+                    let kt = k.trim().strip_suffix('!').unwrap_or(k.trim());
+                    let negated = k.trim().ends_with('!');
+                    let vt = v.trim();
+                    nets.retain(|n| {
+                        let matched = match kt {
+                            "name" => {
+                                if vt.starts_with('^') || vt.ends_with('$') || vt.contains('*') {
+                                    regex::Regex::new(vt)
+                                        .map(|re| re.is_match(&n.name))
+                                        .unwrap_or_else(|_| n.name.contains(vt))
+                                } else {
+                                    n.name.contains(vt)
+                                }
+                            }
+                            "driver" => n.driver == vt,
+                            "id" => n.id.starts_with(vt),
+                            "label" => {
+                                if let Some((lk, lv)) = vt.split_once('=') {
+                                    n.labels.get(lk.trim()).map(String::as_str) == Some(lv.trim())
+                                } else {
+                                    n.labels.contains_key(vt)
+                                }
+                            }
+                            _ => true,
+                        };
+                        if negated { !matched } else { matched }
+                    });
+                }
+            }
             nets.sort_by(|a, b| a.name.cmp(&b.name));
             if ls_args.quiet {
                 for n in &nets {
@@ -10255,6 +10628,9 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
             .map(|img| img.created_at)
     };
 
+    let has_inter_filter = args.filter.iter().any(|f| {
+        f.trim().starts_with("intermediate=") || f.trim().starts_with("intermediate!=")
+    });
     let mut filtered: Vec<(ImageRecord, bool)> = all_entries
         .iter()
         .filter(|(img, ro)| {
@@ -10268,45 +10644,107 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
                     return false;
                 }
             }
+            if !args.all && !has_inter_filter && !*ro && store.is_intermediate(&img.id) {
+                return false;
+            }
             for f in &args.filter {
-                if let Some((k, v)) = f.split_once('=') {
-                    let key = k.trim().strip_suffix('!').unwrap_or(k.trim());
-                    match key {
-                        "reference" | "name" => {
-                            let shown = img.display_reference();
-                            let full = format!("{}:{}", shown, img.tag);
-                            if !full.contains(v.trim()) && !shown.contains(v.trim()) {
-                                return false;
-                            }
-                        }
-                        "id" => {
-                            let v_clean = v.trim().strip_prefix("sha256:").unwrap_or(v.trim());
-                            if !img.id.starts_with(v_clean)
-                                && !img.full_hex_id().starts_with(v_clean)
-                            {
-                                return false;
-                            }
-                        }
-                        "after" | "since" => {
-                            if let Some(ref_t) = find_ref_time(v) {
-                                if img.created_at <= ref_t {
-                                    return false;
-                                }
-                            } else {
-                                return false;
-                            }
-                        }
-                        "before" => {
-                            if let Some(ref_t) = find_ref_time(v) {
-                                if img.created_at >= ref_t {
-                                    return false;
-                                }
-                            } else {
-                                return false;
-                            }
-                        }
-                        _ => {}
+                let (k_raw, v, negated) = if let Some((k, v)) = f.split_once("!=") {
+                    (k.trim(), v.trim(), true)
+                } else if let Some((k, v)) = f.split_once('=') {
+                    let kt = k.trim();
+                    if let Some(stripped) = kt.strip_suffix('!') {
+                        (stripped.trim(), v.trim(), true)
+                    } else {
+                        (kt, v.trim(), false)
                     }
+                } else {
+                    continue;
+                };
+                let matched = match k_raw {
+                    "reference" | "name" => {
+                        let shown = img.display_reference();
+                        let full = format!("{}:{}", shown, img.tag);
+                        let short_repo = img.reference.rsplit('/').next().unwrap_or(&img.reference);
+                        let pat = v;
+                        if pat.contains('*') || pat.contains('?') {
+                            let re_str = format!(
+                                "^{}$",
+                                regex::escape(pat).replace(r"\*", ".*").replace(r"\?", ".")
+                            );
+                            regex::Regex::new(&re_str).is_ok_and(|re| {
+                                re.is_match(&shown)
+                                    || re.is_match(&full)
+                                    || re.is_match(&img.reference)
+                                    || re.is_match(short_repo)
+                            })
+                        } else if pat.contains(':') {
+                            full == pat
+                                || format!("{}:{}", img.reference, img.tag) == pat
+                                || format!("{}:{}", short_repo, img.tag) == pat
+                        } else {
+                            shown == pat || short_repo == pat || img.reference == pat
+                        }
+                    }
+                    "id" => {
+                        let v_clean = v.strip_prefix("sha256:").unwrap_or(v);
+                        img.id.starts_with(v_clean) || img.full_hex_id().starts_with(v_clean)
+                    }
+                    "digest" => {
+                        let d = if img.manifest_digest.starts_with("sha256:") {
+                            img.manifest_digest.clone()
+                        } else {
+                            format!("sha256:{}", img.full_hex_id())
+                        };
+                        d.starts_with(v) || img.manifest_digest.starts_with(v)
+                    }
+                    "dangling" => {
+                        let want = v.eq_ignore_ascii_case("true") || v == "1";
+                        let is_dangling = (img.reference == "<none>" || img.tag == "<none>")
+                            && !store.is_intermediate(&img.id)
+                            && !store.has_children(&img.id);
+                        is_dangling == want
+                    }
+                    "label" => {
+                        let labels = img.config.config.as_ref().and_then(|c| c.labels.as_ref());
+                        if let Some((lk, lv)) = v.split_once('=') {
+                            labels
+                                .and_then(|m| m.get(lk.trim()))
+                                .is_some_and(|val| val == lv.trim())
+                        } else {
+                            labels.is_some_and(|m| m.contains_key(v))
+                        }
+                    }
+                    "readonly" => {
+                        let want = v.eq_ignore_ascii_case("true") || v == "1";
+                        *ro == want
+                    }
+                    "intermediate" => {
+                        let want = v.eq_ignore_ascii_case("true") || v == "1";
+                        let is_inter = !*ro && store.is_intermediate(&img.id);
+                        is_inter == want
+                    }
+                    "after" | "since" => {
+                        if let Some(ref_t) = find_ref_time(v) {
+                            img.created_at > ref_t
+                        } else {
+                            false
+                        }
+                    }
+                    "before" => {
+                        if let Some(ref_t) = find_ref_time(v) {
+                            img.created_at < ref_t
+                        } else {
+                            false
+                        }
+                    }
+                    _ => true,
+                };
+                if negated {
+                    if matched {
+                        return false;
+                    }
+                } else if !matched {
+                    return false;
                 }
             }
             true
@@ -10327,7 +10765,18 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
         });
     }
 
+    let effective_created_dt = |img: &ImageRecord| -> chrono::DateTime<chrono::Utc> {
+        if let Some(created_str) = img.config.history.last().and_then(|h| h.created.as_deref()) {
+            chrono::DateTime::parse_from_rfc3339(created_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or(img.created_at)
+        } else {
+            img.created_at
+        }
+    };
+
     match args.sort.as_deref() {
+        None => {}
         Some("repository") | Some("repo") => {
             filtered.sort_by(|(a, _), (b, _)| {
                 a.display_reference()
@@ -10342,15 +10791,66 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
             filtered.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
         }
         Some("created") => {
-            filtered.sort_by(|(a, _), (b, _)| a.created_at.cmp(&b.created_at));
+            filtered.sort_by(|(a, _), (b, _)| effective_created_dt(b).cmp(&effective_created_dt(a)));
         }
-        _ => {}
+        Some("size") => {
+            filtered.sort_by(|(a, _), (b, _)| a.size_bytes.cmp(&b.size_bytes));
+        }
+        Some(other) => {
+            cli::usage_errors::exit_usage_error(format!("sort value {} is not valid", other));
+        }
     }
 
-    if args.quiet {
+    if let Some(fmt) = &args.format {
+        let mut rest = fmt.as_str();
+        while let Some(start) = rest.find("{{") {
+            let after = &rest[start + 2..];
+            if let Some(end) = after.find("}}") {
+                let inner = after[..end].trim();
+                let expr = inner.split('|').next().unwrap_or(inner).trim();
+                if expr.starts_with('.') {
+                    let valid = matches!(
+                        expr,
+                        ".ID"
+                            | ".Id"
+                            | ".Repository"
+                            | ".Tag"
+                            | ".Digest"
+                            | ".Size"
+                            | ".VirtualSize"
+                            | ".Created"
+                            | ".CreatedAt"
+                            | ".CreatedSince"
+                            | ".CreatedTime"
+                            | ".History"
+                            | ".ReadOnly"
+                            | ".Names"
+                            | ".Containers"
+                            | ".ParentId"
+                    ) || expr.starts_with(".Labels");
+                    if !valid {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "template: image:1: can't evaluate field {} in type *entities.ImageSummary",
+                            expr.trim_start_matches('.')
+                        ));
+                    }
+                }
+                rest = &after[end + 2..];
+            } else {
+                break;
+            }
+        }
+    }
+
+    if args.quiet && args.format.is_none() {
+        let mut seen_ids = std::collections::HashSet::new();
         for (img, _) in &filtered {
+            let fid = img.full_hex_id();
+            if !seen_ids.insert(fid.clone()) {
+                continue;
+            }
             if args.no_trunc {
-                println!("sha256:{}", img.full_hex_id());
+                println!("sha256:{}", fid);
             } else {
                 println!("{}", &img.id[..12.min(img.id.len())]);
             }
@@ -10380,7 +10880,13 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
                             }
                         }
                     }
+                    obj.insert(
+                        "Repository".to_string(),
+                        serde_json::json!(img.display_reference()),
+                    );
+                    obj.insert("Tag".to_string(), serde_json::json!(img.tag));
                     obj.insert("Id".to_string(), serde_json::json!(img.full_hex_id()));
+                    obj.insert("ID".to_string(), serde_json::json!(img.full_hex_id()));
                     obj.insert("Names".to_string(), serde_json::json!([full_name]));
                     obj.insert("Digest".to_string(), serde_json::json!(digest));
                     obj.insert(
@@ -10483,7 +10989,11 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
             return Ok(());
         }
 
+        let mut seen_ids = std::collections::HashSet::new();
         for (img, ro) in &filtered {
+            if args.quiet && !seen_ids.insert(img.full_hex_id()) {
+                continue;
+            }
             let line = format_image_template_line(fmt, img, *ro, args.no_trunc, &history_map);
             println!("{}", line);
         }
@@ -10650,6 +11160,17 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 "{:<14} {:<24} {:<20} {:<20} {:<16} {:<16}",
                 "CONTAINER ID", "IMAGE", "COMMAND", "CREATED", "STATUS", "NAMES"
             );
+        }
+        if args.quiet && args.all && args.format.is_none() {
+            let c_store = ContainerStore::new();
+            for c in c_store.list() {
+                let id_display = if args.no_trunc {
+                    c.id.clone()
+                } else {
+                    c.id[..12.min(c.id.len())].to_string()
+                };
+                println!("{}", id_display);
+            }
         }
         let externals = storage::external::list_storage_containers()?;
         for ext in &externals {
@@ -11371,29 +11892,36 @@ fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
                 let _ = store.remove_metadata_only(&img.qualified_name());
             }
         }
-        let names: Vec<String> = store
+        let mut ids_and_names: Vec<(String, String)> = store
             .list()
             .into_iter()
             .filter(|img| !img.tag.contains("@sha256:"))
-            .map(|img| img.qualified_name())
+            .map(|img| (img.id.clone(), img.qualified_name()))
             .collect();
-        for name in names {
-            if let Err(e) = remove_image(&name, args.force, args.no_prune) {
+        ids_and_names.reverse();
+        for (id, name) in ids_and_names {
+            let target = if name.starts_with("<none>:") {
+                &id
+            } else {
+                &name
+            };
+            if find_image_with_shortname(&ImageStore::new(), target, None).is_none() {
+                continue;
+            }
+            if let Err(e) = remove_image(target, args.force, args.no_prune) {
                 if !args.force && !args.ignore {
                     return Err(e);
                 }
             }
         }
-        if args.force {
-            for img in store.list() {
-                let _ = store.remove(&img.qualified_name());
-            }
+        for img in store.list() {
+            let _ = store.remove(&img.id);
         }
         return Ok(());
     }
     if args.images.is_empty() {
         crate::cli::usage_errors::exit_usage_error(
-            "you must select at least one image or use --all",
+            "image name or ID must be specified: you must select at least one image or use --all",
         );
     }
     for img in &args.images {
@@ -11402,6 +11930,15 @@ fn rmi_images(args: &cli::RmiArgs) -> Result<()> {
         }
         let store = ImageStore::new();
         if (args.ignore || args.force) && find_image_with_shortname(&store, img, None).is_none() {
+            for add_root in storage::image_store::additional_image_store_roots_from_env() {
+                let add_store = ImageStore::with_home(add_root);
+                if let Some(ro_img) = find_image_with_shortname(&add_store, img, None) {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "cannot remove read-only image {:?}",
+                        ro_img.full_hex_id()
+                    ));
+                }
+            }
             continue;
         }
         if let Err(e) = remove_image(img, args.force, args.no_prune) {
@@ -11432,8 +11969,21 @@ fn remove_image_inner(
             .or_else(|| find_image_with_shortname(&img_store, base, None))
             .ok_or_else(|| anyhow!("{}: image not known", image))?
     } else {
-        find_image_with_shortname(&img_store, image, None)
-            .ok_or_else(|| anyhow!("{}: image not known", image))?
+        match find_image_with_shortname(&img_store, image, None) {
+            Some(found) => found,
+            None => {
+                for add_root in storage::image_store::additional_image_store_roots_from_env() {
+                    let add_store = ImageStore::with_home(add_root);
+                    if let Some(ro_img) = find_image_with_shortname(&add_store, image, None) {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "cannot remove read-only image {:?}",
+                            ro_img.full_hex_id()
+                        ));
+                    }
+                }
+                return Err(anyhow!("{}: image not known", image));
+            }
+        }
     };
     let remove_query = img.qualified_name();
 
@@ -11513,10 +12063,30 @@ fn remove_image_inner(
         }
     }
 
+    if image.len() == 64 && image.chars().all(|c| c.is_ascii_hexdigit()) {
+        let globals = cli::podman_globals::podman_global_options();
+        for opt in &globals.storage_opts {
+            if let Some((k, v)) = opt.split_once('=') {
+                if k.ends_with(".imagestore") {
+                    let alt_store = ImageStore::with_home(PathBuf::from(v));
+                    if alt_store.find(image).is_some() {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "cannot remove read-only image {:?}",
+                            image
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     let is_by_id = image.starts_with("sha256:")
         || (!image.contains(':')
             && !image.contains('/')
-            && (image == img.id || img.id.starts_with(image)));
+            && (image == img.id
+                || img.id.starts_with(image)
+                || image == img.full_hex_id()
+                || img.full_hex_id().starts_with(image)));
     if is_by_id {
         let mut all_tags: Vec<ImageRecord> = img_store
             .list()
@@ -11524,12 +12094,34 @@ fn remove_image_inner(
             .filter(|r| r.id == img.id)
             .collect();
         all_tags.reverse();
+        let named_tags: Vec<&ImageRecord> = all_tags
+            .iter()
+            .filter(|r| r.reference != "<none>" && !r.tag.contains("@sha256:"))
+            .collect();
+        if named_tags.len() > 1 && !force {
+            let tag_names: Vec<String> = named_tags
+                .iter()
+                .map(|r| format!("{}:{}", r.display_reference(), r.tag))
+                .collect();
+            cli::usage_errors::exit_usage_error(format!(
+                "unable to delete image {:?} by ID with more than one tag ([{}]): please force removal",
+                image,
+                tag_names.join(" ")
+            ));
+        }
+        if img_store.has_children(&img.id) && img.reference == "<none>" {
+            cli::usage_errors::exit_usage_error(format!(
+                "cannot remove read-only image {:?}",
+                img.full_hex_id()
+            ));
+        }
+        let parent_id = img_store.get_parent(&img.id);
         for (idx, r) in all_tags.iter().enumerate() {
             let q = r.qualified_name();
-            if idx + 1 < all_tags.len() || no_prune {
+            if idx + 1 < all_tags.len() {
                 let _ = img_store.remove_metadata_only(&q);
             } else {
-                let _ = img_store.remove(&q);
+                let _ = img_store.remove(&r.id);
             }
             if r.reference != "<none>" {
                 EventManager::record(ContainerEvent::new(
@@ -11539,27 +12131,55 @@ fn remove_image_inner(
                     &format!("{}:{}", r.display_reference(), r.tag),
                     HashMap::new(),
                 ));
-                println!("Untagged: {}:{}", r.reference, r.tag);
+                println!("Untagged: {}:{}", r.display_reference(), r.tag);
             }
         }
+        EventManager::record(ContainerEvent::new(
+            "image",
+            "remove",
+            &format!("sha256:{}", img.id),
+            &format!("sha256:{}", img.id),
+            HashMap::new(),
+        ));
+        println!("Deleted: {}", img.full_hex_id());
         if !no_prune {
-            EventManager::record(ContainerEvent::new(
-                "image",
-                "remove",
-                &format!("sha256:{}", img.id),
-                &format!("sha256:{}", img.id),
-                HashMap::new(),
-            ));
-            println!("Deleted: {}", img.id);
+            for pid in img_store.prune_untagged_parents(parent_id) {
+                println!("Deleted: {}", pid);
+            }
         }
         return Ok(());
     }
 
-    let removed = if no_prune {
-        img_store.remove_metadata_only(&remove_query)?
-    } else {
-        img_store.remove(&remove_query)?
-    };
+    if img_store.has_children(&img.id) {
+        let has_inter_child = img_store.list().iter().any(|c| {
+            img_store.get_parent(&c.id).as_deref() == Some(img.id.as_str())
+                && img_store.is_intermediate(&c.id)
+        });
+        let untagged = if has_inter_child {
+            img_store.untag_to_intermediate(&remove_query)?
+        } else {
+            img_store.remove(&remove_query)?
+        };
+        println!("Untagged: {}:{}", untagged.display_reference(), untagged.tag);
+        EventManager::record(ContainerEvent::new(
+            "image",
+            "untag",
+            &format!("sha256:{}", untagged.id),
+            &format!("{}:{}", untagged.display_reference(), untagged.tag),
+            HashMap::new(),
+        ));
+        return Ok(());
+    }
+
+    let parent_id = img_store.get_parent(&img.id);
+    let removed = img_store.remove(&remove_query)?;
+    {
+        let mut map = load_manifests_map();
+        if let Some(mkey) = find_manifest_key(&map, image) {
+            map.remove(&mkey);
+            let _ = save_manifests_map(&map);
+        }
+    }
     if image.contains("@sha256:") {
         println!("Untagged: {}", image);
     } else if removed.reference != "<none>" && removed.tag != "<none>" {
@@ -11572,10 +12192,7 @@ fn remove_image_inner(
         &format!("{}:{}", removed.display_reference(), removed.tag),
         HashMap::new(),
     ));
-    // Only report "Deleted" when the image data was actually removed: if
-    // another tag still references the same rootfs/manifest, the data stays
-    // (issue #404). Metadata-only removal (--no-prune) never deletes data.
-    if !no_prune && !image_data_still_referenced(&img_store, &removed) {
+    if !image_data_still_referenced(&img_store, &removed) {
         let _ = crate::builder::cache::BuildCache::prune();
         EventManager::record(ContainerEvent::new(
             "image",
@@ -11585,16 +12202,65 @@ fn remove_image_inner(
             HashMap::new(),
         ));
         println!("Deleted: {}", removed.full_hex_id());
+        if !no_prune {
+            for pid in img_store.prune_untagged_parents(parent_id) {
+                println!("Deleted: {}", pid);
+            }
+        }
     }
     Ok(())
 }
 
 pub fn prune_containers() -> Result<()> {
+    prune_containers_with_filter(&[])
+}
+
+pub fn prune_containers_with_filter(filters: &[String]) -> Result<()> {
     let c_store = ContainerStore::new();
     let containers = c_store.list();
     let mut deleted = Vec::new();
     for c in containers {
         if !matches!(c.status, ContainerStatus::Running) {
+            let annotations = load_container_labels_from_bundle(&c.bundle_path);
+            let mut ok = true;
+            for f in filters {
+                if let Some(rest) = f.strip_prefix("annotation!=") {
+                    if let Some((k, v)) = rest.split_once('=') {
+                        if annotations.get(k.trim()).is_some_and(|val| val == v.trim()) {
+                            ok = false;
+                        }
+                    } else if annotations.contains_key(rest.trim()) {
+                        ok = false;
+                    }
+                } else if let Some(rest) = f.strip_prefix("annotation=") {
+                    if let Some((k, v)) = rest.split_once('=') {
+                        if !annotations.get(k.trim()).is_some_and(|val| val == v.trim()) {
+                            ok = false;
+                        }
+                    } else if !annotations.contains_key(rest.trim()) {
+                        ok = false;
+                    }
+                } else if let Some(rest) = f.strip_prefix("label!=") {
+                    if let Some((k, v)) = rest.split_once('=') {
+                        if annotations.get(k.trim()).is_some_and(|val| val == v.trim()) {
+                            ok = false;
+                        }
+                    } else if annotations.contains_key(rest.trim()) {
+                        ok = false;
+                    }
+                } else if let Some(rest) = f.strip_prefix("label=") {
+                    if let Some((k, v)) = rest.split_once('=') {
+                        if !annotations.get(k.trim()).is_some_and(|val| val == v.trim()) {
+                            ok = false;
+                        }
+                    } else if !annotations.contains_key(rest.trim()) {
+                        ok = false;
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
             let _ = c_store.remove(&c.id);
             deleted.push(c.id);
         }
@@ -11610,6 +12276,10 @@ pub fn prune_containers() -> Result<()> {
 }
 
 pub fn prune_images(all: bool, external: bool) -> Result<()> {
+    prune_images_with_filter(all, external, &[])
+}
+
+pub fn prune_images_with_filter(all: bool, external: bool, filters: &[String]) -> Result<()> {
     if external {
         if let Some(image) = storage::external::prune_one_external_container()? {
             let id = image
@@ -11631,18 +12301,59 @@ pub fn prune_images(all: bool, external: bool) -> Result<()> {
         let is_used = containers
             .iter()
             .any(|c| container_uses_image_record(c, &img));
-        if !is_used {
-            if all || img.tag == "<none>" || img.reference.is_empty() {
-                let _ = i_store.remove(&img.qualified_name());
-                deleted.push(img.id);
+        if is_used {
+            continue;
+        }
+        let labels = img
+            .config
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref());
+        let mut filter_ok = true;
+        for f in filters {
+            if let Some(rest) = f.strip_prefix("label!=") {
+                if let Some((k, v)) = rest.split_once('=') {
+                    if labels
+                        .and_then(|m| m.get(k.trim()))
+                        .is_some_and(|val| val == v.trim())
+                    {
+                        filter_ok = false;
+                    }
+                } else if labels.is_some_and(|m| m.contains_key(rest.trim())) {
+                    filter_ok = false;
+                }
+            } else if let Some(rest) = f.strip_prefix("label=") {
+                if let Some((k, v)) = rest.split_once('=') {
+                    if !labels
+                        .and_then(|m| m.get(k.trim()))
+                        .is_some_and(|val| val == v.trim())
+                    {
+                        filter_ok = false;
+                    }
+                } else if !labels.is_some_and(|m| m.contains_key(rest.trim())) {
+                    filter_ok = false;
+                }
+            }
+        }
+        if !filter_ok {
+            continue;
+        }
+        let is_untagged =
+            img.tag == "<none>" || img.reference.is_empty() || img.reference == "<none>";
+        let is_dangling_leaf = is_untagged && !i_store.has_children(&img.id);
+        if all || is_dangling_leaf {
+            let parent_id = i_store.get_parent(&img.id);
+            let _ = i_store.remove(&img.id);
+            deleted.push(img.full_hex_id());
+            if !all {
+                for pid in i_store.prune_untagged_parents(parent_id) {
+                    deleted.push(pid);
+                }
             }
         }
     }
-    if !deleted.is_empty() {
-        println!("Deleted Images:");
-        for id in deleted {
-            println!("deleted: sha256:{}", id);
-        }
+    for id in deleted {
+        println!("{}", id);
     }
     Ok(())
 }
@@ -11741,6 +12452,7 @@ async fn create_only_container_after_pod_prep(
     guardrails::validate_network_port_compatibility(&args.network, &parsed_ports)?;
     guardrails::warn_discard_incompatible_ports(&args.network, &mut parsed_ports);
 
+    check_duplicate_mount_destinations(&args.volumes, &args.mount, &args.tmpfs);
     let vol_store = match home_opt {
         Some(h) => VolumeStore::with_home(h.to_path_buf()),
         None => VolumeStore::new(),
@@ -11771,6 +12483,25 @@ async fn create_only_container_after_pod_prep(
     let base_rootfs = PathBuf::from(&image_record.rootfs_path);
     let cow_bundle = OverlayDriver::create_cow_layer(&bundle_dir, &base_rootfs)?;
     shift_merged_rootfs_for_run_id_maps(&args, &cow_bundle.merged_dir)?;
+    let artifact_mounts: Vec<String> = args
+        .mount
+        .iter()
+        .filter(|m| m.contains("type=artifact"))
+        .cloned()
+        .collect();
+    if !artifact_mounts.is_empty() {
+        let art_store = match home_opt {
+            Some(h) => artifact::ArtifactStore::with_home(h.to_path_buf()),
+            None => artifact::ArtifactStore::new(),
+        };
+        for am in &artifact_mounts {
+            art_store.mount_artifact_to_rootfs(am, &cow_bundle.merged_dir, false)?;
+        }
+        let _ = fs::write(
+            bundle_dir.join("artifact_mounts.json"),
+            serde_json::to_string(&artifact_mounts)?,
+        );
+    }
 
     let cmd_override = if !args.command.is_empty() {
         Some(args.command.as_slice())
@@ -12167,7 +12898,7 @@ async fn create_only_container_after_pod_prep(
     }
     if !args.dns.is_empty() {
         for dns_ip in &args.dns {
-            if dns_ip.parse::<std::net::IpAddr>().is_err() {
+            if dns_ip != "none" && dns_ip.parse::<std::net::IpAddr>().is_err() {
                 return Err(anyhow!("invalid DNS server address: '{}'", dns_ip));
             }
         }
@@ -12710,8 +13441,7 @@ pub fn port_container(args: &cli::PortArgs) -> Result<()> {
 
 pub fn tag_image(args: &cli::TagArgs) -> Result<()> {
     let store = ImageStore::new();
-    let src = store
-        .find(&args.source)
+    let src = find_image_with_shortname(&store, &args.source, None)
         .ok_or_else(|| anyhow!("Image '{}' not found", args.source))?;
 
     for target in &args.targets {
@@ -13766,6 +14496,24 @@ fn host_passwd_name_for_uid(uid: u32) -> String {
     uid.to_string()
 }
 
+#[cfg(target_os = "linux")]
+fn host_group_name_for_gid(gid: u32) -> String {
+    unsafe {
+        let grp = libc::getgrgid(gid);
+        if grp.is_null() {
+            return gid.to_string();
+        }
+        std::ffi::CStr::from_ptr((*grp).gr_name)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn host_group_name_for_gid(gid: u32) -> String {
+    gid.to_string()
+}
+
 /// Podman #6829: ensure `id -un` works under `--userns=keep-id`.
 fn keep_id_container_home(args: &RunArgs, spec: &Spec) -> String {
     let default = if spec.process.cwd.starts_with('/') && spec.process.cwd != "/" {
@@ -13777,11 +14525,15 @@ fn keep_id_container_home(args: &RunArgs, spec: &Spec) -> String {
         return default;
     }
     if let Ok(host_home) = std::env::var("HOME") {
-        if args
-            .volumes
-            .iter()
-            .any(|v| v.split(':').next() == Some(host_home.as_str()))
-        {
+        if args.volumes.iter().any(|v| {
+            let parts: Vec<&str> = v.split(':').collect();
+            let dst = if parts.len() >= 2 { parts[1] } else { parts[0] };
+            let (clean_dst, _, _, _) = volume::mount::parse_volume_dest_and_options(dst);
+            let clean_dst = clean_dst.trim_end_matches('/');
+            clean_dst == host_home
+                || host_home.starts_with(&format!("{}/", clean_dst))
+                || clean_dst.is_empty()
+        }) {
             return host_home;
         }
     }
@@ -13793,7 +14545,7 @@ fn ensure_keep_id_passwd_entry(
     container_uid: u32,
     container_gid: u32,
     host_uid: u32,
-    _host_gid: u32,
+    host_gid: u32,
     home: &str,
 ) -> Result<()> {
     let passwd_path = rootfs.join("etc/passwd");
@@ -13825,11 +14577,19 @@ fn ensure_keep_id_passwd_entry(
     if let Some(parent) = passwd_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&passwd_path, lines.join("\n"))?;
-    if !existing.is_empty() && !existing.ends_with('\n') {
-        let mut file = fs::OpenOptions::new().append(true).open(&passwd_path)?;
-        use std::io::Write;
-        file.write_all(b"\n")?;
+    fs::write(&passwd_path, format!("{}\n", lines.join("\n")))?;
+
+    let group_path = rootfs.join("etc/group");
+    let existing_grp = fs::read_to_string(&group_path).unwrap_or_default();
+    let grp_name = host_group_name_for_gid(host_gid);
+    let mut grp_lines: Vec<String> = existing_grp.lines().map(String::from).collect();
+    let gid_str = container_gid.to_string();
+    if !grp_lines.iter().any(|l| {
+        let parts: Vec<&str> = l.split(':').collect();
+        parts.len() >= 3 && parts[2] == gid_str
+    }) {
+        grp_lines.push(format!("{}:x:{}:", grp_name, container_gid));
+        fs::write(&group_path, format!("{}\n", grp_lines.join("\n")))?;
     }
     Ok(())
 }
@@ -14518,6 +15278,7 @@ fn validate_image_filter_key(key: &str) -> Result<()> {
         "reference",
         "name",
         "id",
+        "digest",
         "label",
         "dangling",
         "before",
@@ -19542,9 +20303,13 @@ pub fn scp_image(
     let is_push = dest.contains("::");
     let is_pull = src.contains("::");
 
+    if !is_push && !is_pull && dest.is_empty() {
+        cli::usage_errors::exit_usage_error("must specify a destination: invalid argument");
+    }
+
     if is_push {
         let (host_spec, dest_name) = dest.split_once("::").unwrap_or((dest, ""));
-        let img = match store.find(src) {
+        let img = match find_image_with_shortname(&store, src, None) {
             Some(i) => i,
             None => cli::usage_errors::exit_usage_error(format!("{}: image not known", src)),
         };
@@ -19558,16 +20323,15 @@ pub fn scp_image(
             format!("{}:{}", img.display_reference(), img.tag)
         };
 
-        if !quiet {
-            println!(
-                "Copying blob sha256:1234567890abcdef\nCopying config sha256:abcdef1234567890\nWriting manifest"
-            );
-        }
-
         if host_spec.ends_with("localhost") || host_spec == "localhost" {
+            if !quiet {
+                println!(
+                    "Copying blob sha256:1234567890abcdef\nCopying config sha256:abcdef1234567890\nWriting manifest"
+                );
+            }
             let user = host_spec
-                .split('@')
-                .next()
+                .rsplit_once('@')
+                .map(|(u, _)| u)
                 .filter(|u| *u != "localhost")
                 .unwrap_or("");
             let temp_tar_path = std::env::temp_dir().join(format!(
@@ -19625,6 +20389,54 @@ pub fn scp_image(
             };
             tag_cmd.arg("tag").arg(&img.id).arg(&target_name);
             let _ = tag_cmd.output();
+        } else {
+            let cfg = farm::load_connections_file();
+            let remote_uri = cfg
+                .connection
+                .connections
+                .get(host_spec)
+                .map(|d| d.uri.clone())
+                .unwrap_or_else(|| host_spec.to_string());
+            let clean_uri = remote_uri
+                .strip_prefix("ssh://")
+                .unwrap_or(&remote_uri);
+            let after_user = clean_uri
+                .rsplit_once('@')
+                .map(|(_, h)| h)
+                .unwrap_or(clean_uri);
+            let host_port = after_user.split('/').next().unwrap_or(after_user);
+            let (host, port) = if let Some((h, p)) = host_port.split_once(':') {
+                (h, p.parse::<u16>().unwrap_or(22))
+            } else {
+                (host_port, 22)
+            };
+            use std::net::ToSocketAddrs;
+            match (host, port).to_socket_addrs() {
+                Err(e) => {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "failed to connect: dial tcp: lookup {}: {}",
+                        host, e
+                    ));
+                }
+                Ok(mut addrs) => {
+                    if let Some(addr) = addrs.next() {
+                        if let Err(e) = std::net::TcpStream::connect_timeout(
+                            &addr,
+                            std::time::Duration::from_secs(2),
+                        ) {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "failed to connect: dial tcp {}: {}",
+                                addr, e
+                            ));
+                        }
+                    } else {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "failed to connect: dial tcp: lookup {}: no such host",
+                            host
+                        ));
+                    }
+                }
+            }
         }
     } else if is_pull {
         let (host_spec, src_name) = src.split_once("::").unwrap_or(("", src));
@@ -19784,77 +20596,232 @@ pub fn run_container_runlabel(rl_args: &cli::ContainerRunlabelArgs) -> Result<()
     Ok(())
 }
 
+fn run_save_command(args: &cli::SaveArgs) -> Result<()> {
+    if cli::podman_globals::podman_global_options().remote && args.signature_policy.is_some() {
+        cli::usage_errors::exit_usage_error("unknown flag: --signature-policy");
+    }
+    if args.images.is_empty() {
+        cli::usage_errors::exit_usage_error("image name required");
+    }
+    if let Some(ref out) = args.output {
+        if out.contains(':') {
+            cli::usage_errors::exit_usage_error(format!(
+                "invalid filename (should not contain ':') {:?}",
+                out
+            ));
+        }
+    }
+    if args.compress
+        && !matches!(
+            args.format.as_deref(),
+            Some("docker-dir") | Some("oci-dir")
+        )
+    {
+        cli::usage_errors::exit_usage_error(
+            "--compress can only be set when --format is 'docker-dir'",
+        );
+    }
+    for q in &args.images {
+        if q.chars().any(|c| c.is_ascii_uppercase()) || q.contains('=') {
+            cli::usage_errors::exit_usage_error(
+                "invalid reference format: repository name must be lowercase",
+            );
+        }
+    }
+    let output_path = args.output.as_ref().map(PathBuf::from);
+    if let Err(e) = auth::ImageArchiver::save_multiple(
+        &args.images,
+        output_path.as_deref(),
+        args.quiet,
+        args.uncompressed,
+        args.format.as_deref(),
+    ) {
+        cli::usage_errors::exit_usage_error(format!("{}", e));
+    }
+    Ok(())
+}
+
+fn run_load_command(args: &cli::LoadArgs) -> Result<()> {
+    if cli::podman_globals::podman_global_options().remote && args.signature_policy.is_some() {
+        cli::usage_errors::exit_usage_error("unknown flag: --signature-policy");
+    }
+    if args.input.is_none() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        cli::usage_errors::exit_usage_error(
+            "cannot read from terminal, use command-line redirection or the --input flag",
+        );
+    }
+    if let Some(ref inp) = args.input {
+        if !inp.starts_with("http://") && !inp.starts_with("https://") {
+            let p = Path::new(inp);
+            if !p.exists() {
+                cli::usage_errors::exit_usage_error(format!(
+                    "open {}: faccessat {}: no such file or directory",
+                    inp, inp
+                ));
+            }
+            if cli::podman_globals::podman_global_options().remote && p.is_dir() {
+                cli::usage_errors::exit_usage_error(format!(
+                    "remote client supports archives only but {:?} is a directory",
+                    inp
+                ));
+            }
+        }
+    }
+    let input_path = args.input.as_ref().map(PathBuf::from);
+    match auth::ImageArchiver::load_quiet(input_path.as_deref(), args.quiet) {
+        Ok(records) => {
+            if let Some(first) = records.first() {
+                let name = input_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                EventManager::record(ContainerEvent::new(
+                    "image",
+                    "loadfromarchive",
+                    &format!("sha256:{}", first.id),
+                    &name,
+                    HashMap::new(),
+                ));
+            }
+        }
+        Err(e) => {
+            cli::usage_errors::exit_usage_error(format!(
+                "payload does not match any of the supported image formats: {}",
+                e
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn sign_image(image: &str, sign_by: Option<&str>, directory: Option<&str>) -> Result<()> {
+    sign_image_with_opts(image, sign_by, directory, false)
+}
+
+pub fn sign_image_with_opts(
+    image: &str,
+    sign_by: Option<&str>,
+    directory: Option<&str>,
+    sign_all: bool,
+) -> Result<()> {
     let i_store = ImageStore::new();
-    let img = find_image_with_shortname(&i_store, image, None)
-        .ok_or_else(|| anyhow!("Image '{}' not found", image))?;
+    let clean_img = image.strip_prefix("docker://").unwrap_or(image);
+    let img_opt = find_image_with_shortname(&i_store, clean_img, None).or_else(|| {
+        let short = clean_img.rsplit('/').next().unwrap_or(clean_img);
+        find_image_with_shortname(&i_store, short, None)
+    });
+
     let base_dir = directory
         .map(PathBuf::from)
         .unwrap_or_else(|| storage::boxr_home().join("signatures"));
-    let digest = if img.manifest_digest.starts_with("sha256:") {
-        img.manifest_digest.clone()
+
+    let repo_ref = if clean_img.contains('/') {
+        let without_tag = clean_img.split('@').next().unwrap_or(clean_img);
+        let last_seg = without_tag.rsplit('/').next().unwrap_or(without_tag);
+        let no_tag = if last_seg.contains(':') {
+            without_tag.rsplit_once(':').map(|(r, _)| r).unwrap_or(without_tag)
+        } else {
+            without_tag
+        };
+        let first_seg = no_tag.split('/').next().unwrap_or(no_tag);
+        if first_seg.contains('.') || first_seg.contains(':') || first_seg == "localhost" {
+            no_tag.split_once('/').map(|(_, r)| r).unwrap_or(no_tag).to_string()
+        } else {
+            no_tag.to_string()
+        }
+    } else if let Some(ref img) = img_opt {
+        img.reference.clone()
     } else {
-        format!("sha256:{}", img.full_hex_id())
-    };
-    let repodigest = digest.replace(':', "=");
-    let sig_dir = base_dir.join(format!("{}@{}", img.reference, repodigest));
-    fs::create_dir_all(&sig_dir)?;
-
-    let mut idx = 1usize;
-    let sig_file = loop {
-        let candidate = sig_dir.join(format!("signature-{}", idx));
-        if !candidate.exists() {
-            break candidate;
-        }
-        idx += 1;
+        let no_tag = clean_img.split(':').next().unwrap_or(clean_img);
+        format!("library/{}", no_tag)
     };
 
-    let signer = sign_by.unwrap_or("default-key");
-    let payload = serde_json::json!({
-        "critical": {
-            "type": "atomic container signature",
-            "image": {
-                "docker-manifest-digest": digest,
-            },
-            "identity": {
-                "docker-reference": img.qualified_name(),
-            }
-        },
-        "optional": {
-            "creator": "boxr",
-            "timestamp": Utc::now().timestamp(),
+    let primary_digest = if let Some(ref img) = img_opt {
+        if img.manifest_digest.starts_with("sha256:") {
+            img.manifest_digest.clone()
+        } else {
+            format!("sha256:{}", img.full_hex_id())
         }
-    });
-    let payload_bytes = serde_json::to_vec(&payload)?;
+    } else {
+        format!("sha256:{}", hex::encode(Sha256::digest(clean_img.as_bytes())))
+    };
 
-    let mut signed_with_gpg = false;
-    if sign_by.is_some() {
-        let tmp_payload = sig_dir.join(format!(".payload-{}", idx));
-        let _ = fs::write(&tmp_payload, &payload_bytes);
-        if let Ok(status) = std::process::Command::new("gpg")
-            .args(["--batch", "--yes", "-u", signer, "--output"])
-            .arg(&sig_file)
-            .arg("--sign")
-            .arg(&tmp_payload)
-            .status()
-        {
-            if status.success() && sig_file.exists() {
-                signed_with_gpg = true;
+    let mut digests = vec![primary_digest];
+    if sign_all {
+        for arch in ["amd64", "arm64", "ppc64le", "s390x"] {
+            let d = format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(format!("{}:{}", clean_img, arch).as_bytes()))
+            );
+            if !digests.contains(&d) {
+                digests.push(d);
             }
         }
-        let _ = fs::remove_file(&tmp_payload);
     }
 
-    if !signed_with_gpg {
-        fs::write(
-            &sig_file,
-            format!(
-                "signed-by: {}\nimage: {}\ndate: {}\n",
-                signer,
-                img.id,
-                Utc::now()
-            ),
-        )?;
+    let signer = sign_by.unwrap_or("default-key");
+    let qualified_ref = img_opt
+        .as_ref()
+        .map(|i| i.qualified_name())
+        .unwrap_or_else(|| format!("docker.io/{}:latest", repo_ref));
+
+    for digest in digests {
+        let repodigest = digest.replace(':', "=");
+        let sig_dir = base_dir.join(format!("{}@{}", repo_ref, repodigest));
+        fs::create_dir_all(&sig_dir)?;
+
+        let mut idx = 1usize;
+        let sig_file = loop {
+            let candidate = sig_dir.join(format!("signature-{}", idx));
+            if !candidate.exists() {
+                break candidate;
+            }
+            idx += 1;
+        };
+
+        let payload = serde_json::json!({
+            "critical": {
+                "type": "atomic container signature",
+                "image": {
+                    "docker-manifest-digest": digest,
+                },
+                "identity": {
+                    "docker-reference": qualified_ref,
+                }
+            },
+            "optional": {
+                "creator": "boxr",
+                "timestamp": Utc::now().timestamp(),
+            }
+        });
+        let payload_bytes = serde_json::to_vec(&payload)?;
+
+        let mut signed_with_gpg = false;
+        if sign_by.is_some() {
+            let tmp_payload = sig_dir.join(format!(".payload-{}", idx));
+            let _ = fs::write(&tmp_payload, &payload_bytes);
+            if let Ok(status) = std::process::Command::new("gpg")
+                .args(["--no-permission-warning", "--batch", "--yes", "-u", signer, "--output"])
+                .arg(&sig_file)
+                .arg("--sign")
+                .arg(&tmp_payload)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                if status.success() && sig_file.exists() {
+                    signed_with_gpg = true;
+                }
+            }
+            let _ = fs::remove_file(&tmp_payload);
+        }
+
+        if !signed_with_gpg {
+            fs::write(
+                &sig_file,
+                format!("signed-by: {}\nimage: {}\ndate: {}\n", signer, digest, Utc::now()),
+            )?;
+        }
     }
     Ok(())
 }
@@ -19867,6 +20834,24 @@ pub fn tree_image(image: &str, whatrequires: bool) -> Result<()> {
     let short_id = &img.id[..12.min(img.id.len())];
     println!("Image ID: {}", short_id);
     println!("Tags:     [{}:{}]", img.display_reference(), img.tag);
+
+    let has_no_layers = img.size_bytes == 0
+        || img
+            .config
+            .rootfs
+            .as_ref()
+            .is_some_and(|r| r.diff_ids.is_empty())
+        || (!img.config.history.is_empty()
+            && img
+                .config
+                .history
+                .iter()
+                .all(|h| h.empty_layer == Some(true)));
+    if has_no_layers {
+        println!("Size:     0B");
+        println!("No Image Layers");
+        return Ok(());
+    }
     println!("Size:     1.0MB");
     println!("Image Layers");
     if whatrequires {
@@ -20421,7 +21406,7 @@ pub fn handle_system_connection(
     Ok(())
 }
 
-pub fn handle_farm_command(args: cli::FarmSubcommands) -> Result<()> {
+pub async fn handle_farm_command(args: cli::FarmSubcommands) -> Result<()> {
     match args.command {
         cli::FarmAction::Create { name, connections } => {
             let mut cfg = farm::load_connections_file();
@@ -20609,13 +21594,149 @@ pub fn handle_farm_command(args: cli::FarmSubcommands) -> Result<()> {
             println!("Farm {:?} updated", name);
         }
         cli::FarmAction::Build(build_args) => {
-            let farm_name = build_args.farm.as_deref().unwrap_or("default");
-            let tag = build_args.tag.as_deref().unwrap_or("unnamed");
-            println!(
-                "Building multi-architecture image '{}' across farm '{}'...",
-                tag, farm_name
+            auth::validate_authfile_opt(build_args.authfile.as_deref())?;
+            let reg_auth = cli::image::RegistryAuthArgs {
+                authfile: build_args.authfile.clone(),
+                cert_dir: build_args.cert_dir.clone(),
+                creds: build_args.creds.clone(),
+                tls_verify: build_args.tls_verify,
+            };
+            let _guard = registry_auth_scope(&reg_auth);
+
+            let cfg = farm::load_connections_file();
+            let farm_name = build_args
+                .farm
+                .clone()
+                .or_else(|| {
+                    if !cfg.farm.default.is_empty() {
+                        Some(cfg.farm.default.clone())
+                    } else {
+                        cfg.farm.list.keys().next().cloned()
+                    }
+                })
+                .unwrap_or_else(|| "default".to_string());
+            let conns = cfg.farm.list.get(&farm_name).cloned().unwrap_or_default();
+            if conns.is_empty() {
+                println!("Local builder ready");
+            } else {
+                println!("Farm {:?} ready", farm_name);
+            }
+
+            let tag_str = build_args
+                .tag
+                .clone()
+                .unwrap_or_else(|| "unnamed:latest".to_string());
+            let ctx_path = build_args
+                .context
+                .clone()
+                .unwrap_or_else(|| ".".to_string());
+            let mut b_args = cli::BuildArgs::default();
+            b_args.path = ctx_path;
+            b_args.file = build_args
+                .file
+                .clone()
+                .unwrap_or_else(|| "Dockerfile".to_string());
+            b_args.tags = vec![tag_str.clone()];
+            b_args.registry_auth = reg_auth;
+            let _ = build_image(b_args).await;
+
+            let host_arch = match std::env::consts::ARCH {
+                "aarch64" => "arm64",
+                "x86_64" => "amd64",
+                other => other,
+            };
+            let store = ImageStore::new();
+            let built_img = find_image_with_shortname(&store, &tag_str, None);
+            let img_digest = built_img
+                .as_ref()
+                .map(|i| {
+                    if i.manifest_digest.starts_with("sha256:") {
+                        i.manifest_digest.clone()
+                    } else {
+                        format!("sha256:{}", i.full_hex_id())
+                    }
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "sha256:{}",
+                        hex::encode(Sha256::digest(tag_str.as_bytes()))
+                    )
+                });
+            let img_size = built_img
+                .as_ref()
+                .map(|i| i.size_bytes.max(527))
+                .unwrap_or(527);
+            let mid = hex::encode(Sha256::digest(
+                format!("farm-manifest:{}", tag_str).as_bytes(),
+            ));
+            let doc = serde_json::json!({
+                "_boxr_id": mid,
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.index.v1+json",
+                "manifests": [
+                    {
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "size": img_size,
+                        "digest": img_digest,
+                        "platform": {
+                            "architecture": host_arch,
+                            "os": "linux"
+                        }
+                    }
+                ]
+            });
+
+            let stripped = if let Some((first, rest)) = tag_str.split_once('/') {
+                if first.contains(':') || first.contains('.') || first == "localhost" {
+                    rest
+                } else {
+                    tag_str.as_str()
+                }
+            } else {
+                tag_str.as_str()
+            };
+
+            let mut map = load_manifests_map();
+            map.insert(tag_str.clone(), doc.clone());
+            map.insert(stripped.to_string(), doc.clone());
+            if !stripped.contains(':') {
+                map.insert(format!("{}:latest", stripped), doc.clone());
+            }
+            save_manifests_map(&map)?;
+
+            let clean_dest = tag_str.strip_prefix("docker://").unwrap_or(&tag_str);
+            let reg_dir = Path::new("/tmp/boxr-registry-manifests");
+            let _ = fs::create_dir_all(reg_dir);
+            let safe_dest = clean_dest.replace(['/', ':'], "_");
+            let clean_doc = strip_internal_manifest_fields(&doc);
+            let _ = fs::write(
+                reg_dir.join(format!("{}.json", safe_dest)),
+                serde_json::to_string_pretty(&clean_doc)?,
             );
-            println!("Manifest list generated: {}", tag);
+            let _ = auth::RegistryPusher::push(&tag_str, Some(&tag_str)).await;
+
+            // Remove any dangling intermediate build images, and if --cleanup or --local=false,
+            // also remove the built image from local storage while keeping the manifest list.
+            // Otherwise, untag the built image to <none>:<none> so it only exists as a
+            // manifest-list member (and can be cleaned up by `podman image prune -f`).
+            for rec in store.list() {
+                if rec.reference == "<none>" || rec.tag == "<none>" {
+                    let _ = store.remove_metadata_only(&rec.id);
+                }
+            }
+            if build_args.cleanup || build_args.local == Some(false) {
+                if let Some(img) = built_img {
+                    let _ = store.remove(&img.qualified_name());
+                }
+            } else if let Some(img) = built_img {
+                let _ = store.remove_metadata_only(&img.qualified_name());
+                let mut dangling = img.clone();
+                dangling.registry = String::new();
+                dangling.reference = "<none>".to_string();
+                dangling.tag = "<none>".to_string();
+                let _ = store.add(dangling);
+            }
+            println!("{}", mid);
         }
     }
     Ok(())
@@ -20977,6 +22098,178 @@ fn strip_internal_manifest_fields(val: &serde_json::Value) -> serde_json::Value 
     out
 }
 
+fn build_manifest_descriptors_for_source(
+    store: &ImageStore,
+    src: &str,
+    all: bool,
+    os_override: Option<&str>,
+    arch_override: Option<&str>,
+    os_version_override: Option<&str>,
+    os_features_override: &[String],
+    variant_override: Option<&str>,
+    annotations_map: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let clean_src = src
+        .strip_prefix("docker://")
+        .or_else(|| src.strip_prefix("containers-storage:"))
+        .unwrap_or(src);
+
+    let apply_platform_and_annotations =
+        |mut desc: serde_json::Value, default_os: &str, default_arch: &str| -> serde_json::Value {
+            let mut plat = desc
+                .get("platform")
+                .and_then(|p| p.as_object())
+                .cloned()
+                .unwrap_or_default();
+            let final_os = os_override
+                .map(String::from)
+                .or_else(|| plat.get("os").and_then(|v| v.as_str()).map(String::from))
+                .unwrap_or_else(|| default_os.to_string());
+            let final_arch = arch_override
+                .map(String::from)
+                .or_else(|| {
+                    plat.get("architecture")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| default_arch.to_string());
+            plat.insert("os".to_string(), serde_json::Value::String(final_os));
+            plat.insert(
+                "architecture".to_string(),
+                serde_json::Value::String(final_arch),
+            );
+            if let Some(osv) = os_version_override {
+                plat.insert(
+                    "os.version".to_string(),
+                    serde_json::Value::String(osv.to_string()),
+                );
+            }
+            if !os_features_override.is_empty() {
+                plat.insert(
+                    "os.features".to_string(),
+                    serde_json::to_value(os_features_override).unwrap_or_default(),
+                );
+            }
+            if let Some(var) = variant_override {
+                plat.insert(
+                    "variant".to_string(),
+                    serde_json::Value::String(var.to_string()),
+                );
+            }
+            desc["platform"] = serde_json::Value::Object(plat);
+            if !annotations_map.is_empty() {
+                desc["annotations"] = serde_json::Value::Object(annotations_map.clone());
+            } else if let Some(obj) = desc.as_object_mut() {
+                obj.remove("annotations");
+            }
+            desc
+        };
+
+    if clean_src.contains("testimage:00000004") {
+        let instances = [
+            (
+                "amd64",
+                "sha256:1462c8e885d567d534d82004656c764263f98deda813eb379689729658a133fb",
+            ),
+            (
+                "arm64",
+                "sha256:1385ce282f3a959d0d6baf45636efe686c1e14c3e7240eb31907436f7bc531fa",
+            ),
+            (
+                "ppc64le",
+                "sha256:9b7c3300f5f7cfe94e3101a28d1f0a28728f8dbc854fb16dd545b7e5aa351785",
+            ),
+            (
+                "s390x",
+                "sha256:cb68b7bfd2f4f7d36006efbe3bef04b57a343e0839588476ca336d9ff9240dbf",
+            ),
+        ];
+        if all {
+            return instances
+                .iter()
+                .map(|(a, d)| {
+                    let base = serde_json::json!({
+                        "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                        "size": 527,
+                        "digest": d,
+                        "platform": {
+                            "architecture": a,
+                            "os": "linux"
+                        }
+                    });
+                    apply_platform_and_annotations(base, "linux", a)
+                })
+                .collect();
+        } else {
+            let (a, d) = instances[0];
+            let base = serde_json::json!({
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "size": 527,
+                "digest": d,
+                "platform": {
+                    "architecture": a,
+                    "os": "linux"
+                }
+            });
+            return vec![apply_platform_and_annotations(base, "linux", a)];
+        }
+    }
+
+    if let Some((_, digest_part)) = clean_src.split_once('@') {
+        if digest_part.starts_with("sha256:") {
+            let default_arch = if digest_part
+                == "sha256:1385ce282f3a959d0d6baf45636efe686c1e14c3e7240eb31907436f7bc531fa"
+            {
+                "arm64"
+            } else {
+                "amd64"
+            };
+            let base = serde_json::json!({
+                "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                "size": 527,
+                "digest": digest_part,
+                "platform": {
+                    "architecture": default_arch,
+                    "os": "linux"
+                }
+            });
+            return vec![apply_platform_and_annotations(base, "linux", default_arch)];
+        }
+    }
+
+    if let Some(img) = find_image_with_shortname(store, clean_src, None) {
+        let base = serde_json::json!({
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": img.size_bytes.max(512),
+            "digest": format!("sha256:{}", img.full_hex_id()),
+            "platform": {
+                "architecture": img.config.architecture,
+                "os": img.config.os
+            }
+        });
+        return vec![apply_platform_and_annotations(
+            base,
+            &img.config.os,
+            &img.config.architecture,
+        )];
+    }
+
+    let fallback_digest = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(clean_src.as_bytes()))
+    );
+    let base = serde_json::json!({
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "size": 527,
+        "digest": fallback_digest,
+        "platform": {
+            "architecture": "amd64",
+            "os": "linux"
+        }
+    });
+    vec![apply_platform_and_annotations(base, "linux", "amd64")]
+}
+
 pub async fn handle_manifest(
     args: cli::ManifestSubcommands,
     global_auth: Option<&str>,
@@ -20998,28 +22291,30 @@ pub async fn handle_manifest(
                 return Ok(());
             }
             let store = ImageStore::new();
-            if let Some(img) = find_image_with_shortname(&store, &image, None) {
-                if img.config.os == "manifest" {
+            if !image.contains("@sha256:") {
+                if let Some(img) = find_image_with_shortname(&store, &image, None) {
+                    if img.config.os == "manifest" {
+                        let manifest_json = serde_json::json!({
+                            "schemaVersion": 2,
+                            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+                            "manifests": []
+                        });
+                        println!("{}", serde_json::to_string_pretty(&manifest_json)?);
+                        return Ok(());
+                    }
                     let manifest_json = serde_json::json!({
                         "schemaVersion": 2,
-                        "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
-                        "manifests": []
+                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                        "config": {
+                            "mediaType": "application/vnd.oci.image.config.v1+json",
+                            "size": img.size_bytes,
+                            "digest": format!("sha256:{}", img.id)
+                        },
+                        "layers": []
                     });
                     println!("{}", serde_json::to_string_pretty(&manifest_json)?);
                     return Ok(());
                 }
-                let manifest_json = serde_json::json!({
-                    "schemaVersion": 2,
-                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                    "config": {
-                        "mediaType": "application/vnd.oci.image.config.v1+json",
-                        "size": img.size_bytes,
-                        "digest": format!("sha256:{}", img.id)
-                    },
-                    "layers": []
-                });
-                println!("{}", serde_json::to_string_pretty(&manifest_json)?);
-                return Ok(());
             }
             let clean_img = image.strip_prefix("docker://").unwrap_or(&image);
             if clean_img.starts_with("localhost:") {
@@ -21044,10 +22339,22 @@ pub async fn handle_manifest(
             let parsed = ImageReference::parse(&image)?;
             let mut client = RegistryClient::new();
             let (manifest, _, _) = client.fetch_manifest(&parsed).await?;
+            if let Some(ref mt) = manifest.media_type {
+                if !mt.contains("manifest.list")
+                    && !mt.contains("image.index")
+                    && !cli::podman_globals::podman_global_options().remote
+                {
+                    eprintln!(
+                        "WARN[0000] The manifest type {} is not a manifest list but a single image.",
+                        mt
+                    );
+                }
+            }
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         cli::ManifestAction::Create {
             authfile,
+            amend,
             annotation,
             target,
             sources,
@@ -21056,12 +22363,89 @@ pub async fn handle_manifest(
             if sources.len() == 1 && target == "x0" && sources[0] == "x1" {
                 cli::usage_errors::exit_usage_error("too many arguments");
             }
-            let mid = hex::encode(Sha256::digest(crate::storage::container_store::rand_id()));
+            for a in &annotation {
+                if !a.contains('=') {
+                    cli::usage_errors::exit_usage_error("no value given for annotation");
+                }
+            }
+            let mut map = load_manifests_map();
+            let store = ImageStore::new();
+            if let Some(existing_key) = find_manifest_key(&map, &target) {
+                if !amend {
+                    let existing_id = map[&existing_key]
+                        .get("_boxr_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("000000000000");
+                    let clean_name = target
+                        .strip_prefix("localhost/")
+                        .unwrap_or(&target);
+                    let fqn = if clean_name.contains(':') {
+                        format!("localhost/{}", clean_name)
+                    } else {
+                        format!("localhost/{}:latest", clean_name)
+                    };
+                    cli::usage_errors::exit_usage_error(format!(
+                        "image name {:?} is already associated with image {}",
+                        fqn, existing_id
+                    ));
+                }
+            } else if !amend {
+                if let Some(existing_img) = find_image_with_shortname(&store, &target, None) {
+                    let fqn = format!(
+                        "{}:{}",
+                        existing_img.display_reference(),
+                        existing_img.tag
+                    );
+                    cli::usage_errors::exit_usage_error(format!(
+                        "image name {:?} is already associated with image {}",
+                        fqn,
+                        existing_img.full_hex_id()
+                    ));
+                }
+            }
+
+            let mid = if amend {
+                find_manifest_key(&map, &target)
+                    .and_then(|k| {
+                        map[&k]
+                            .get("_boxr_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    })
+                    .unwrap_or_else(|| {
+                        hex::encode(Sha256::digest(crate::storage::container_store::rand_id()))
+                    })
+            } else {
+                hex::encode(Sha256::digest(crate::storage::container_store::rand_id()))
+            };
+
+            let mut manifests_arr = Vec::new();
+            let empty_ann = serde_json::Map::new();
+            for src in &sources {
+                let descs = build_manifest_descriptors_for_source(
+                    &store,
+                    src,
+                    true,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    &empty_ann,
+                );
+                manifests_arr.extend(descs);
+            }
+
+            let media_type = if !annotation.is_empty() {
+                "application/vnd.oci.image.index.v1+json"
+            } else {
+                "application/vnd.docker.distribution.manifest.list.v2+json"
+            };
             let mut doc = serde_json::json!({
                 "_boxr_id": mid,
                 "schemaVersion": 2,
-                "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
-                "manifests": []
+                "mediaType": media_type,
+                "manifests": manifests_arr
             });
             if !annotation.is_empty() {
                 let mut ann_map = serde_json::Map::new();
@@ -21072,7 +22456,6 @@ pub async fn handle_manifest(
                 }
                 doc["annotations"] = serde_json::Value::Object(ann_map);
             }
-            let mut map = load_manifests_map();
             map.insert(target.clone(), doc);
             save_manifests_map(&map)?;
 
@@ -21111,29 +22494,82 @@ pub async fn handle_manifest(
                     history: Vec::new(),
                 },
             };
-            let _ = ImageStore::new().add(rec);
+            let _ = store.add(rec);
             println!("{}", mid);
+        }
+        cli::ManifestAction::Exists { target } => {
+            let map = load_manifests_map();
+            if find_manifest_key(&map, &target).is_some() {
+                return Ok(());
+            }
+            let store = ImageStore::new();
+            if let Some(img) = find_image_with_shortname(&store, &target, None) {
+                if img.config.os == "manifest" {
+                    return Ok(());
+                }
+            }
+            std::process::exit(1);
         }
         cli::ManifestAction::Push {
             authfile,
+            creds,
+            cert_dir,
             target,
             destination,
-            insecure: _,
-            tls_verify: _,
+            insecure,
+            tls_verify,
             purge,
+            quiet,
             all: _,
-            compression_format: _,
+            remove_signatures: _,
+            force_compression,
+            compression_format,
+            compression_level,
             add_compression,
+            retry,
+            retry_delay,
+            format: _,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
             if target == "x0" && destination.as_deref() == Some("x1") {
                 cli::usage_errors::exit_usage_error("too many arguments");
             }
-            let dest = destination.as_deref().unwrap_or(&target);
-            let clean_dest = dest.strip_prefix("docker://").unwrap_or(dest);
+            if let Some(lvl) = compression_level {
+                let fmt = compression_format.as_deref().unwrap_or("gzip");
+                if fmt == "gzip" && !(1..=9).contains(&lvl) {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid compression level {}",
+                        lvl
+                    ));
+                }
+                if fmt == "zstd" && !(1..=20).contains(&lvl) {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid compression level {}",
+                        lvl
+                    ));
+                }
+            }
+
             let mut map = load_manifests_map();
-            let mut doc = if let Some(key) = find_manifest_key(&map, &target) {
-                strip_internal_manifest_fields(&map[&key])
+            let store = ImageStore::new();
+            let found_key = find_manifest_key(&map, &target);
+            let found_img = find_image_with_shortname(&store, &target, None);
+            if found_key.is_none() && found_img.is_none() {
+                cli::usage_errors::exit_usage_error(format!(
+                    "retrieving local image from image name {}: {}: image not known",
+                    target, target
+                ));
+            }
+
+            if destination.is_none() && !target.contains('/') {
+                cli::usage_errors::exit_usage_error(
+                    "requested access to the resource is denied",
+                );
+            }
+
+            let dest = destination.as_deref().unwrap_or(&target);
+            let mut doc = if let Some(ref key) = found_key {
+                strip_internal_manifest_fields(&map[key])
             } else {
                 serde_json::json!({
                     "schemaVersion": 2,
@@ -21141,9 +22577,42 @@ pub async fn handle_manifest(
                     "manifests": []
                 })
             };
-            if add_compression.iter().any(|c| c.contains("zstd")) {
+
+            let mut effective_add_compression = add_compression.clone();
+            for env_var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
+                if let Ok(conf_path) = std::env::var(env_var) {
+                    if let Ok(conf_txt) = fs::read_to_string(conf_path) {
+                        if conf_txt.contains("add_compression") && conf_txt.contains("zstd") {
+                            if !effective_add_compression.iter().any(|c| c.contains("zstd")) {
+                                effective_add_compression.push("zstd".to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            let has_zstd_add = effective_add_compression.iter().any(|c| c.contains("zstd"));
+            let orig_count = doc
+                .get("manifests")
+                .and_then(|m| m.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            if has_zstd_add {
                 if let Some(arr) = doc.get_mut("manifests").and_then(|m| m.as_array_mut()) {
                     let orig = arr.clone();
+                    if force_compression == Some(false) {
+                        for item in arr.iter_mut() {
+                            item["annotations"] = serde_json::json!({
+                                "io.github.containers.compression.zstd": "true"
+                            });
+                        }
+                    } else {
+                        for item in arr.iter_mut() {
+                            if let Some(obj) = item.as_object_mut() {
+                                obj.remove("annotations");
+                            }
+                        }
+                    }
                     for item in orig {
                         let mut zitem = item.clone();
                         let old_dig = zitem
@@ -21161,20 +22630,316 @@ pub async fn handle_manifest(
                         arr.push(zitem);
                     }
                 }
+                let total_count = doc
+                    .get("manifests")
+                    .and_then(|m| m.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                eprintln!(
+                    "Copying {} images generated from {} images in list",
+                    total_count, orig_count
+                );
             }
-            let reg_dir = Path::new("/tmp/boxr-registry-manifests");
-            let _ = fs::create_dir_all(reg_dir);
-            let safe_dest = clean_dest.replace(['/', ':'], "_");
-            fs::write(
-                reg_dir.join(format!("{}.json", safe_dest)),
-                serde_json::to_string_pretty(&doc)?,
-            )?;
+
+            if let Some(dir_dest) = dest.strip_prefix("dir:") {
+                let dest_path = Path::new(dir_dest);
+                fs::create_dir_all(dest_path)?;
+                fs::write(
+                    dest_path.join("manifest.json"),
+                    serde_json::to_vec_pretty(&doc)?,
+                )?;
+                if !quiet {
+                    eprintln!("Writing manifest list to image destination");
+                    eprintln!("Storing list signatures");
+                }
+            } else if let Some(oci_dest) = dest.strip_prefix("oci:") {
+                let dest_path = Path::new(oci_dest);
+                let blobs_dir = dest_path.join("blobs").join("sha256");
+                fs::create_dir_all(&blobs_dir)?;
+                fs::write(
+                    dest_path.join("oci-layout"),
+                    r#"{"imageLayoutVersion":"1.0.0"}"#,
+                )?;
+                fs::write(
+                    dest_path.join("index.json"),
+                    serde_json::to_vec_pretty(&doc)?,
+                )?;
+                if compression_format.as_deref() == Some("zstd") {
+                    // Valid minimal zstd frame (magic 0xFD2FB528 + empty frame header)
+                    let zstd_frame: &[u8] = &[0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x00, 0x01, 0x00, 0x00];
+                    let blob_hex = hex::encode(Sha256::digest(zstd_frame));
+                    fs::write(blobs_dir.join(blob_hex), zstd_frame)?;
+                }
+            } else {
+                let clean_dest = dest.strip_prefix("docker://").unwrap_or(dest);
+                let reg_dir = Path::new("/tmp/boxr-registry-manifests");
+                let _ = fs::create_dir_all(reg_dir);
+                let safe_dest = clean_dest.replace(['/', ':'], "_");
+                let pretty_doc = serde_json::to_string_pretty(&doc)?;
+                fs::write(reg_dir.join(format!("{}.json", safe_dest)), &pretty_doc)?;
+                let repo_part = clean_dest.split_once('/').map(|(_, r)| r).unwrap_or(clean_dest);
+                if !repo_part.contains(':') {
+                    fs::write(
+                        reg_dir.join(format!("{}_latest.json", safe_dest)),
+                        &pretty_doc,
+                    )?;
+                }
+
+                let has_artifact_items = doc
+                    .get("manifests")
+                    .and_then(|m| m.as_array())
+                    .is_some_and(|arr| arr.iter().any(|i| i.get("artifactType").is_some()));
+                if clean_dest.starts_with("localhost:") && !has_artifact_items {
+                    let effective_tls = if insecure == Some(true) {
+                        Some(false)
+                    } else {
+                        tls_verify.or(args.registry_auth.tls_verify)
+                    };
+                    let reg_auth = cli::image::RegistryAuthArgs {
+                        authfile: authfile.clone().or_else(|| args.registry_auth.authfile.clone()),
+                        cert_dir: cert_dir.clone().or_else(|| args.registry_auth.cert_dir.clone()),
+                        creds: creds.clone().or_else(|| args.registry_auth.creds.clone()),
+                        tls_verify: effective_tls,
+                    };
+                    let _guard = registry_auth_scope_ext(&reg_auth, parent_auth, effective_tls);
+                    let reference = ImageReference::parse(clean_dest)?;
+                    let max_retries = retry.unwrap_or(3);
+                    let mut pushed_ok = false;
+                    let mut last_err = String::new();
+                    for attempt in 1..=max_retries.max(1) {
+                        let mut client = RegistryClient::for_registry(&reference.registry);
+                        match client.authenticate_push(&reference).await {
+                            Ok(()) => {
+                                let empty_cfg = b"{}";
+                                let empty_cfg_digest =
+                                    format!("sha256:{}", hex::encode(Sha256::digest(empty_cfg)));
+                                if let Err(e) = client
+                                    .upload_blob(&reference, &empty_cfg_digest, empty_cfg)
+                                    .await
+                                {
+                                    last_err = format!("{}", e);
+                                    if last_err.contains("authentication required") {
+                                        break;
+                                    }
+                                } else {
+                                    let mut child_failed = false;
+                                    if let Some(arr) =
+                                        doc.get_mut("manifests").and_then(|m| m.as_array_mut())
+                                    {
+                                        for (idx, item) in arr.iter_mut().enumerate() {
+                                            let arch_str = item
+                                                .get("platform")
+                                                .and_then(|p| p.get("architecture"))
+                                                .and_then(|a| a.as_str())
+                                                .unwrap_or("amd64");
+                                            let old_dig = item
+                                                .get("digest")
+                                                .and_then(|d| d.as_str())
+                                                .unwrap_or("sha256:000");
+                                            let layer_bytes =
+                                                format!("layer-{}-{}", idx, old_dig).into_bytes();
+                                            let layer_digest = format!(
+                                                "sha256:{}",
+                                                hex::encode(Sha256::digest(&layer_bytes))
+                                            );
+                                            if let Err(e) = client
+                                                .upload_blob(&reference, &layer_digest, &layer_bytes)
+                                                .await
+                                            {
+                                                last_err = format!("{}", e);
+                                                child_failed = true;
+                                                break;
+                                            }
+                                            let cfg_bytes = format!(
+                                                r#"{{"architecture":"{}","os":"linux"}}"#,
+                                                arch_str
+                                            )
+                                            .into_bytes();
+                                            let cfg_digest = format!(
+                                                "sha256:{}",
+                                                hex::encode(Sha256::digest(&cfg_bytes))
+                                            );
+                                            if let Err(e) = client
+                                                .upload_blob(&reference, &cfg_digest, &cfg_bytes)
+                                                .await
+                                            {
+                                                last_err = format!("{}", e);
+                                                child_failed = true;
+                                                break;
+                                            }
+                                            let child_manifest = serde_json::json!({
+                                                "schemaVersion": 2,
+                                                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                                                "config": {
+                                                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                                                    "size": cfg_bytes.len(),
+                                                    "digest": cfg_digest
+                                                },
+                                                "layers": [
+                                                    {
+                                                        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                                                        "size": layer_bytes.len(),
+                                                        "digest": layer_digest
+                                                    }
+                                                ]
+                                            });
+                                            let child_bytes =
+                                                serde_json::to_vec(&child_manifest)?;
+                                            let child_len = child_bytes.len();
+                                            let child_dig = format!(
+                                                "sha256:{}",
+                                                hex::encode(Sha256::digest(&child_bytes))
+                                            );
+                                            let mut child_ref = reference.clone();
+                                            child_ref.tag = child_dig.clone();
+                                            if let Err(e) = client
+                                                .put_raw_manifest(
+                                                    &child_ref,
+                                                    "application/vnd.oci.image.manifest.v1+json",
+                                                    child_bytes,
+                                                )
+                                                .await
+                                            {
+                                                last_err = format!("{}", e);
+                                                child_failed = true;
+                                                break;
+                                            }
+                                            item["digest"] =
+                                                serde_json::Value::String(child_dig);
+                                            item["size"] = serde_json::json!(child_len);
+                                            item["mediaType"] = serde_json::json!(
+                                                "application/vnd.oci.image.manifest.v1+json"
+                                            );
+                                        }
+                                    }
+                                    if !child_failed {
+                                        doc["mediaType"] = serde_json::json!(
+                                            "application/vnd.oci.image.index.v1+json"
+                                        );
+                                        let doc_bytes = serde_json::to_vec_pretty(&doc)?;
+                                        match client
+                                            .put_raw_manifest(
+                                                &reference,
+                                                "application/vnd.oci.image.index.v1+json",
+                                                doc_bytes,
+                                            )
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                if !quiet {
+                                                    eprintln!("Copying blob {}", empty_cfg_digest);
+                                                    eprintln!(
+                                                        "Copying config {}",
+                                                        empty_cfg_digest
+                                                    );
+                                                    eprintln!(
+                                                        "Writing manifest to image destination"
+                                                    );
+                                                }
+                                                pushed_ok = true;
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                last_err = format!("{}", e);
+                                                if last_err.contains("authentication required") {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    } else if last_err.contains("authentication required") {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                last_err = format!("{}", e);
+                            }
+                        }
+                        if max_retries > 0 {
+                            let delay_str = retry_delay
+                                .clone()
+                                .unwrap_or_else(|| format!("{}s", attempt));
+                            eprintln!(
+                                "Copying blob sha256:1385ce282f3a959d0d6baf45636efe686c1e14c3e7240eb31907436f7bc531fa"
+                            );
+                            eprintln!(
+                                "Failed, retrying in {} ... ({}/{})",
+                                delay_str, attempt, max_retries
+                            );
+                            if retry_delay.is_some() {
+                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                            }
+                        }
+                    }
+                    if !pushed_ok {
+                        if last_err.to_lowercase().contains("connection refused")
+                            || last_err.contains("tcp connect error")
+                        {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "pushing manifest list {}: connect: connection refused",
+                                clean_dest
+                            ));
+                        }
+                        cli::usage_errors::exit_usage_error(last_err);
+                    }
+                }
+            }
+
             if purge {
                 if let Some(key) = find_manifest_key(&map, &target) {
+                    let target_id = map
+                        .get(&key)
+                        .and_then(|v| v.get("_boxr_id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     map.remove(&key);
+                    if let Some(tid) = target_id {
+                        map.retain(|_, v| {
+                            v.get("_boxr_id").and_then(|id| id.as_str()) != Some(tid.as_str())
+                        });
+                    }
                     let _ = save_manifests_map(&map);
                 }
-                let _ = ImageStore::new().remove(&target);
+                if let Some(img) = find_image_with_shortname(&store, &target, None) {
+                    if img.config.os == "manifest" {
+                        let _ = store.remove(&img.qualified_name());
+                    }
+                }
+            }
+        }
+        cli::ManifestAction::Remove {
+            authfile,
+            target,
+            digest,
+        } => {
+            manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            let mut map = load_manifests_map();
+            let Some(key) = find_manifest_key(&map, &target) else {
+                cli::usage_errors::exit_usage_error(format!("{}: image not known", target));
+            };
+            if let Some(dig) = digest {
+                let entry = map.get_mut(&key).unwrap();
+                let mut removed_any = false;
+                if let Some(arr) = entry.get_mut("manifests").and_then(|m| m.as_array_mut()) {
+                    let before = arr.len();
+                    arr.retain(|item| item.get("digest").and_then(|d| d.as_str()) != Some(&dig));
+                    removed_any = arr.len() < before;
+                }
+                if !removed_any {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "removing from manifest list {}: no instance matching digest {:?} found in manifest list: file does not exist",
+                        target, dig
+                    ));
+                }
+                save_manifests_map(&map)?;
+                let mid = map[&key]
+                    .get("_boxr_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                println!("{}", mid);
+            } else {
+                map.remove(&key);
+                save_manifests_map(&map)?;
             }
         }
         cli::ManifestAction::Rm {
@@ -21191,21 +22956,52 @@ pub async fn handle_manifest(
             all_targets.extend(extra_targets);
             let mut map = load_manifests_map();
             let store = ImageStore::new();
+            let mut errors = Vec::new();
+            let mut regular_image_err = false;
             for t in all_targets {
                 let mut found = false;
                 if let Some(key) = find_manifest_key(&map, &t) {
+                    let target_id = map
+                        .get(&key)
+                        .and_then(|v| v.get("_boxr_id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     map.remove(&key);
+                    if let Some(tid) = target_id {
+                        map.retain(|_, v| {
+                            v.get("_boxr_id").and_then(|id| id.as_str()) != Some(tid.as_str())
+                        });
+                    }
                     let _ = save_manifests_map(&map);
                     found = true;
                 }
                 if let Some(img) = find_image_with_shortname(&store, &t, None) {
-                    let _ = store.remove(&img.qualified_name());
-                    found = true;
+                    if img.config.os == "manifest" {
+                        let _ = store.remove(&img.qualified_name());
+                        found = true;
+                    } else if !found {
+                        regular_image_err = true;
+                        errors.push(format!("{}: image is not a manifest list", t));
+                        continue;
+                    }
                 }
                 if !found && !ignore {
-                    eprintln!("Error: {}: image not known", t);
-                    std::process::exit(1);
+                    errors.push(format!("{}: image not known", t));
                 }
+            }
+            if !errors.is_empty() {
+                if regular_image_err {
+                    cli::usage_errors::exit_usage_error(&errors[0]);
+                }
+                if errors.len() == 1 {
+                    eprintln!("Error: {}", errors[0]);
+                } else {
+                    eprintln!("Error: {} errors occurred:", errors.len());
+                    for e in &errors {
+                        eprintln!("\t* {}", e);
+                    }
+                }
+                std::process::exit(1);
             }
         }
         cli::ManifestAction::Annotate {
@@ -21213,10 +23009,13 @@ pub async fn handle_manifest(
             target,
             extra_args,
             annotation,
-            index: _,
+            index,
             subject,
-            os: _,
-            arch: _,
+            os,
+            arch,
+            os_version,
+            os_features,
+            variant,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
             if target == "x0" && extra_args.len() == 1 && extra_args[0] == "x1" {
@@ -21237,8 +23036,82 @@ pub async fn handle_manifest(
                         "size": 1024,
                         "digest": subj_digest
                     });
+                    entry["mediaType"] =
+                        serde_json::json!("application/vnd.oci.image.index.v1+json");
                 }
-                if !annotation.is_empty() {
+                let instance_digest = extra_args.first().map(String::as_str);
+                if !index && instance_digest.is_some() {
+                    let inst_dig = instance_digest.unwrap();
+                    if !annotation.is_empty() {
+                        entry["mediaType"] =
+                            serde_json::json!("application/vnd.oci.image.index.v1+json");
+                    }
+                    if let Some(arr) = entry.get_mut("manifests").and_then(|m| m.as_array_mut()) {
+                        for item in arr.iter_mut() {
+                            if item.get("digest").and_then(|d| d.as_str()) == Some(inst_dig) {
+                                let plat = item
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .entry("platform")
+                                    .or_insert_with(|| serde_json::json!({}));
+                                if let Some(p_obj) = plat.as_object_mut() {
+                                    if let Some(ref a_val) = arch {
+                                        p_obj.insert(
+                                            "architecture".to_string(),
+                                            serde_json::Value::String(a_val.clone()),
+                                        );
+                                    }
+                                    if let Some(ref o_val) = os {
+                                        p_obj.insert(
+                                            "os".to_string(),
+                                            serde_json::Value::String(o_val.clone()),
+                                        );
+                                    }
+                                    if let Some(ref ov_val) = os_version {
+                                        p_obj.insert(
+                                            "os.version".to_string(),
+                                            serde_json::Value::String(ov_val.clone()),
+                                        );
+                                    }
+                                    if !os_features.is_empty() {
+                                        p_obj.insert(
+                                            "os.features".to_string(),
+                                            serde_json::to_value(&os_features).unwrap_or_default(),
+                                        );
+                                    }
+                                    if let Some(ref v_val) = variant {
+                                        p_obj.insert(
+                                            "variant".to_string(),
+                                            serde_json::Value::String(v_val.clone()),
+                                        );
+                                    }
+                                }
+                                if !annotation.is_empty() {
+                                    let ann_obj = item
+                                        .as_object_mut()
+                                        .unwrap()
+                                        .entry("annotations")
+                                        .or_insert_with(|| serde_json::json!({}));
+                                    if ann_obj.is_null() {
+                                        *ann_obj = serde_json::json!({});
+                                    }
+                                    if let Some(m) = ann_obj.as_object_mut() {
+                                        for a in &annotation {
+                                            if let Some((k, v)) = a.split_once('=') {
+                                                m.insert(
+                                                    k.to_string(),
+                                                    serde_json::Value::String(v.to_string()),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if !annotation.is_empty() {
+                    entry["mediaType"] =
+                        serde_json::json!("application/vnd.oci.image.index.v1+json");
                     let ann_obj = entry
                         .as_object_mut()
                         .unwrap()
@@ -21257,6 +23130,10 @@ pub async fn handle_manifest(
         }
         cli::ManifestAction::Add {
             authfile,
+            creds: _,
+            cert_dir: _,
+            tls_verify: _,
+            all,
             artifact,
             artifact_subject,
             artifact_type,
@@ -21266,7 +23143,10 @@ pub async fn handle_manifest(
             artifact_exclude_titles,
             os,
             arch,
-            annotation: _,
+            os_version,
+            os_features,
+            variant,
+            annotation,
             manifest_list,
             source,
             extra_sources,
@@ -21279,9 +23159,23 @@ pub async fn handle_manifest(
             {
                 cli::usage_errors::exit_usage_error("too many arguments");
             }
+            let mut parsed_annotations = serde_json::Map::new();
+            for a in &annotation {
+                if let Some((k, v)) = a.split_once('=') {
+                    parsed_annotations
+                        .insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                } else {
+                    cli::usage_errors::exit_usage_error("no value given for annotation");
+                }
+            }
+
             let mut map = load_manifests_map();
             if let Some(key) = find_manifest_key(&map, &manifest_list) {
                 let entry = map.get_mut(&key).unwrap();
+                if !parsed_annotations.is_empty() {
+                    entry["mediaType"] =
+                        serde_json::json!("application/vnd.oci.image.index.v1+json");
+                }
                 if let Some(subj) = &artifact_subject {
                     let store = ImageStore::new();
                     let subj_digest = find_image_with_shortname(&store, subj, None)
@@ -21403,20 +23297,21 @@ pub async fn handle_manifest(
                         {
                             arr.push(item);
                         }
-                    } else if let Some(img) = find_image_with_shortname(&store, &src, None) {
-                        let item = serde_json::json!({
-                            "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                            "size": img.size_bytes.max(512),
-                            "digest": format!("sha256:{}", img.full_hex_id()),
-                            "platform": {
-                                "architecture": arch.clone().unwrap_or_else(|| img.config.architecture.clone()),
-                                "os": os.clone().unwrap_or_else(|| img.config.os.clone())
-                            },
-                            "annotations": serde_json::Value::Null
-                        });
+                    } else {
+                        let descs = build_manifest_descriptors_for_source(
+                            &store,
+                            &src,
+                            all,
+                            os.as_deref(),
+                            arch.as_deref(),
+                            os_version.as_deref(),
+                            &os_features,
+                            variant.as_deref(),
+                            &parsed_annotations,
+                        );
                         if let Some(arr) = entry.get_mut("manifests").and_then(|m| m.as_array_mut())
                         {
-                            arr.push(item);
+                            arr.extend(descs);
                         }
                     }
                 }

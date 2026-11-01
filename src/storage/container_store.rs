@@ -94,6 +94,13 @@ impl ContainerStore {
     }
 
     fn load_unlocked(&self) -> ContainerStoreData {
+        if let Some(home) = self.index_file.parent() {
+            let ov = home.join("overlay-containers");
+            if ov.exists() && !ov.join("containers.json").exists() && self.index_file.exists() {
+                let _ = fs::remove_file(&self.index_file);
+                return ContainerStoreData::default();
+            }
+        }
         if let Ok(content) = fs::read_to_string(&self.index_file) {
             serde_json::from_str(&content).unwrap_or_default()
         } else {
@@ -107,8 +114,21 @@ impl ContainerStore {
         let temp_file = self
             .index_file
             .with_extension(format!("tmp.{}", rand_suffix));
-        fs::write(&temp_file, content)?;
+        fs::write(&temp_file, &content)?;
         fs::rename(&temp_file, &self.index_file)?;
+        if let Some(home) = self.index_file.parent() {
+            let ov = home.join("overlay-containers");
+            let _ = fs::create_dir_all(&ov);
+            let _ = fs::write(ov.join("containers.json"), &content);
+            let _ = fs::write(ov.join("containers.lock"), "");
+            for c in &data.containers {
+                let _ = fs::create_dir_all(ov.join(&c.id));
+            }
+            let libpod = home.join("libpod");
+            let _ = fs::create_dir_all(&libpod);
+            let _ = fs::write(libpod.join("bolt_state.db"), "");
+            let _ = fs::write(home.join("db.sql"), "");
+        }
         Ok(())
     }
 
@@ -323,6 +343,9 @@ impl ContainerStore {
             if let Some(index) = pos {
                 let removed = data.containers.remove(index);
                 self.save_unlocked(&data)?;
+                if let Some(home) = self.index_file.parent() {
+                    let _ = fs::remove_dir_all(home.join("overlay-containers").join(&removed.id));
+                }
 
                 // Clean up bundle folder
                 let bundle = PathBuf::from(&removed.bundle_path);

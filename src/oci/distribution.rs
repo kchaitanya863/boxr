@@ -19,6 +19,7 @@ pub struct RegistryClient {
     client: Client,
     token: Option<String>,
     basic_auth: Option<String>,
+    scheme: String,
 }
 
 /// Open/Closed & Dependency Inversion: OCI Image distribution client contract
@@ -132,7 +133,23 @@ impl RegistryClient {
             client: build_registry_http_client(resolve),
             token: None,
             basic_auth: None,
+            scheme: "https".to_string(),
         }
+    }
+
+    fn allow_http_fallback() -> bool {
+        let opts = crate::oci::registry_options::registry_options_snapshot();
+        if opts.tls_verify == Some(false) {
+            return true;
+        }
+        if let Ok(conf) = std::env::var("CONTAINERS_REGISTRIES_CONF") {
+            if let Ok(txt) = fs::read_to_string(&conf) {
+                if txt.contains("insecure=true") || txt.contains("insecure = true") {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn inline_credentials(&self) -> Option<(String, String)> {
@@ -158,14 +175,32 @@ impl RegistryClient {
         if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
             req = req.header(AUTHORIZATION, val);
         }
-        let resp = req.send().await.map_err(|e| {
-            anyhow!(
-                "logging into \"{}\": pinging container registry {}: {}",
-                server,
-                clean,
-                e
-            )
-        })?;
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(_) if Self::allow_http_fallback() => {
+                let http_url = format!("http://{}/v2/", registry_connect_host(clean));
+                let mut hreq = self.client.get(&http_url);
+                if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", encoded)) {
+                    hreq = hreq.header(AUTHORIZATION, val);
+                }
+                hreq.send().await.map_err(|e| {
+                    anyhow!(
+                        "logging into \"{}\": pinging container registry {}: {}",
+                        server,
+                        clean,
+                        e
+                    )
+                })?
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "logging into \"{}\": pinging container registry {}: {}",
+                    server,
+                    clean,
+                    e
+                ));
+            }
+        };
         if resp.status().is_success() {
             return Ok(());
         }
@@ -228,17 +263,38 @@ impl RegistryClient {
     pub async fn authenticate(&mut self, reference: &ImageReference) -> Result<()> {
         let creds = self.store_credentials(reference);
 
-        let ping_url = format!("https://{}/v2/", registry_connect_host(&reference.registry));
-        let resp = self.client.get(&ping_url).send().await.map_err(|e| {
-            use std::error::Error;
-            let mut detail = format!("{e}");
-            let mut src = e.source();
-            while let Some(s) = src {
-                detail.push_str(&format!("; {s}"));
-                src = s.source();
+        let ping_url = format!(
+            "{}://{}/v2/",
+            self.scheme,
+            registry_connect_host(&reference.registry)
+        );
+        let resp = match self.client.get(&ping_url).send().await {
+            Ok(r) => r,
+            Err(_) if self.scheme == "https" && Self::allow_http_fallback() => {
+                self.scheme = "http".to_string();
+                let http_url = format!("http://{}/v2/", registry_connect_host(&reference.registry));
+                self.client.get(&http_url).send().await.map_err(|e| {
+                    use std::error::Error;
+                    let mut detail = format!("{e}");
+                    let mut src = e.source();
+                    while let Some(s) = src {
+                        detail.push_str(&format!("; {s}"));
+                        src = s.source();
+                    }
+                    anyhow!("registry ping {}: {}", http_url, detail)
+                })?
             }
-            anyhow!("registry ping {}: {}", ping_url, detail)
-        })?;
+            Err(e) => {
+                use std::error::Error;
+                let mut detail = format!("{e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    detail.push_str(&format!("; {s}"));
+                    src = s.source();
+                }
+                return Err(anyhow!("registry ping {}: {}", ping_url, detail));
+            }
+        };
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -366,23 +422,50 @@ impl RegistryClient {
             self.basic_auth = Some(encoded);
         }
 
-        let ping_url = format!("https://{}/v2/", registry_connect_host(&reference.registry));
+        let ping_url = format!(
+            "{}://{}/v2/",
+            self.scheme,
+            registry_connect_host(&reference.registry)
+        );
         let mut req = self.client.get(&ping_url);
         if let Some(auth) = &self.basic_auth {
             if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
                 req = req.header(AUTHORIZATION, val);
             }
         }
-        let resp = req.send().await.map_err(|e| {
-            use std::error::Error;
-            let mut detail = format!("{e}");
-            let mut src = e.source();
-            while let Some(s) = src {
-                detail.push_str(&format!("; {s}"));
-                src = s.source();
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(_) if self.scheme == "https" && Self::allow_http_fallback() => {
+                self.scheme = "http".to_string();
+                let http_url = format!("http://{}/v2/", registry_connect_host(&reference.registry));
+                let mut hreq = self.client.get(&http_url);
+                if let Some(auth) = &self.basic_auth {
+                    if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
+                        hreq = hreq.header(AUTHORIZATION, val);
+                    }
+                }
+                hreq.send().await.map_err(|e| {
+                    use std::error::Error;
+                    let mut detail = format!("{e}");
+                    let mut src = e.source();
+                    while let Some(s) = src {
+                        detail.push_str(&format!("; {s}"));
+                        src = s.source();
+                    }
+                    anyhow!("registry ping {}: {}", http_url, detail)
+                })?
             }
-            anyhow!("registry ping {}: {}", ping_url, detail)
-        })?;
+            Err(e) => {
+                use std::error::Error;
+                let mut detail = format!("{e}");
+                let mut src = e.source();
+                while let Some(s) = src {
+                    detail.push_str(&format!("; {s}"));
+                    src = s.source();
+                }
+                return Err(anyhow!("registry ping {}: {}", ping_url, detail));
+            }
+        };
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(auth_header) = resp.headers().get("www-authenticate") {
@@ -422,14 +505,15 @@ impl RegistryClient {
         Ok(())
     }
 
-    async fn upload_blob(
+    pub async fn upload_blob(
         &self,
         reference: &ImageReference,
         digest: &str,
         data: &[u8],
     ) -> Result<()> {
         let check_url = format!(
-            "https://{}/v2/{}/blobs/{}",
+            "{}://{}/v2/{}/blobs/{}",
+            self.scheme,
             registry_connect_host(&reference.registry),
             reference.repository,
             digest
@@ -453,7 +537,8 @@ impl RegistryClient {
         }
 
         let upload_url = format!(
-            "https://{}/v2/{}/blobs/uploads/",
+            "{}://{}/v2/{}/blobs/uploads/",
+            self.scheme,
             registry_connect_host(&reference.registry),
             reference.repository
         );
@@ -463,6 +548,13 @@ impl RegistryClient {
             .headers(self.auth_headers())
             .send()
             .await?;
+        if post.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!(
+                "initiating layer upload to /v2/{}/blobs/uploads/ in {}: authentication required",
+                reference.repository,
+                reference.registry
+            ));
+        }
         if !post.status().is_success() {
             return Err(anyhow!(
                 "Failed to initiate blob upload: status {}",
@@ -480,7 +572,8 @@ impl RegistryClient {
             location.to_string()
         } else {
             format!(
-                "https://{}/{}",
+                "{}://{}/{}",
+                self.scheme,
                 registry_connect_host(&reference.registry),
                 location.trim_start_matches('/')
             )
@@ -633,7 +726,8 @@ impl RegistryClient {
             .unwrap_or(media_types::DOCKER_MANIFEST_V2);
 
         let put_url = format!(
-            "https://{}/v2/{}/manifests/{}",
+            "{}://{}/v2/{}/manifests/{}",
+            self.scheme,
             registry_connect_host(&reference.registry),
             reference.repository,
             reference.tag
@@ -648,12 +742,134 @@ impl RegistryClient {
             .send()
             .await?;
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!(
+                "writing manifest {} in {}/{}: authentication required",
+                reference.tag,
+                reference.registry,
+                reference.repository
+            ));
+        }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Failed to push manifest: {} - {}", status, body));
         }
 
         Ok(manifest_digest)
+    }
+
+    pub async fn put_raw_manifest(
+        &self,
+        reference: &ImageReference,
+        manifest_media_type: &str,
+        manifest_bytes: Vec<u8>,
+    ) -> Result<String> {
+        let manifest_digest = format!("sha256:{}", hex::encode(Sha256::digest(&manifest_bytes)));
+        let put_url = format!(
+            "{}://{}/v2/{}/manifests/{}",
+            self.scheme,
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            reference.tag
+        );
+        let mut headers = self.auth_headers();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_str(manifest_media_type)?);
+        let resp = self
+            .client
+            .put(&put_url)
+            .headers(headers)
+            .body(manifest_bytes)
+            .send()
+            .await?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!(
+                "writing manifest {} in {}/{}: authentication required",
+                reference.tag,
+                reference.registry,
+                reference.repository
+            ));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("Failed to push manifest: {} - {}", status, body));
+        }
+        Ok(manifest_digest)
+    }
+
+    pub async fn fetch_raw_manifest(
+        &mut self,
+        reference: &ImageReference,
+    ) -> Result<(serde_json::Value, String, Vec<u8>)> {
+        self.authenticate(reference).await?;
+        let tag_or_digest = reference.digest.as_deref().unwrap_or(&reference.tag);
+        let url = format!(
+            "{}://{}/v2/{}/manifests/{}",
+            self.scheme,
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            tag_or_digest
+        );
+        let mut headers = self.auth_headers();
+        let accept_header = [
+            media_types::OCI_INDEX_V1,
+            media_types::OCI_MANIFEST_V1,
+            media_types::DOCKER_MANIFEST_LIST_V2,
+            media_types::DOCKER_MANIFEST_V2,
+        ]
+        .join(", ");
+        headers.insert(ACCEPT, HeaderValue::from_str(&accept_header)?);
+        let resp = self.client.get(&url).headers(headers).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(anyhow!(
+                "reading manifest {} in {}/{}: authentication required",
+                tag_or_digest,
+                reference.registry,
+                reference.repository
+            ));
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Failed to fetch manifest from {}: status {} - {}",
+                url,
+                status,
+                err_body
+            ));
+        }
+        let body_bytes = resp.bytes().await?.to_vec();
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(&body_bytes)));
+        let doc: serde_json::Value = serde_json::from_slice(&body_bytes)?;
+        Ok((doc, digest, body_bytes))
+    }
+
+    pub async fn download_raw_blob(
+        &self,
+        reference: &ImageReference,
+        digest: &str,
+    ) -> Result<Vec<u8>> {
+        let url = format!(
+            "{}://{}/v2/{}/blobs/{}",
+            self.scheme,
+            registry_connect_host(&reference.registry),
+            reference.repository,
+            digest
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "Failed to download blob {}: status {}",
+                digest,
+                resp.status()
+            ));
+        }
+        Ok(resp.bytes().await?.to_vec())
     }
 
     fn auth_headers(&self) -> HeaderMap {
@@ -689,7 +905,8 @@ impl RegistryClient {
         let tag_or_digest = reference.digest.as_deref().unwrap_or(&reference.tag);
 
         let url = format!(
-            "https://{}/v2/{}/manifests/{}",
+            "{}://{}/v2/{}/manifests/{}",
+            self.scheme,
             registry_connect_host(&reference.registry),
             reference.repository,
             tag_or_digest
@@ -815,7 +1032,8 @@ impl RegistryClient {
         config_descriptor: &Descriptor,
     ) -> Result<(ImageConfig, Vec<u8>)> {
         let url = format!(
-            "https://{}/v2/{}/blobs/{}",
+            "{}://{}/v2/{}/blobs/{}",
+            self.scheme,
             registry_connect_host(&reference.registry),
             reference.repository,
             config_descriptor.digest
@@ -878,7 +1096,8 @@ impl RegistryClient {
         }
 
         let url = format!(
-            "https://{}/v2/{}/blobs/{}",
+            "{}://{}/v2/{}/blobs/{}",
+            self.scheme,
             registry_connect_host(&reference.registry),
             reference.repository,
             descriptor.digest

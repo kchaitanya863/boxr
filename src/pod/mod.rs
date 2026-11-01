@@ -515,6 +515,7 @@ impl PodStore {
             let mut data = self.load_unlocked();
             let c_store = ContainerStore::with_home(home);
             let mut pruned = Vec::new();
+            let mut infra_to_remove = Vec::new();
 
             data.pods.retain(|p| {
                 let any_running = p.containers.iter().any(|cid| {
@@ -529,8 +530,12 @@ impl PodStore {
                     .map(|c| matches!(c.status, ContainerStatus::Running))
                     .unwrap_or(false);
 
-                if !any_running && !infra_running && p.status != "Running" {
+                if !any_running
+                    && !infra_running
+                    && !matches!(p.status.as_str(), "Running" | "Created")
+                {
                     pruned.push(p.name.clone());
+                    infra_to_remove.push((p.infra_container_id.clone(), format!("{}-infra", p.name)));
                     false
                 } else {
                     true
@@ -539,6 +544,12 @@ impl PodStore {
 
             if !pruned.is_empty() {
                 self.save_unlocked(&data)?;
+                for (iid, iname) in infra_to_remove {
+                    if !iid.is_empty() {
+                        let _ = c_store.remove(&iid);
+                    }
+                    let _ = c_store.remove(&iname);
+                }
             }
             Ok(pruned)
         })

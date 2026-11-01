@@ -37,6 +37,14 @@ rsync -a --delete \
   --exclude='*' \
   "$SYSTEM/" "$DEST/"
 
+UPSTREAM_DEST="$REPO_ROOT/tests/podman_upstream"
+mkdir -p "$UPSTREAM_DEST"/{e2e,apiv2,compose,python,farm}
+rsync -a --delete --exclude='e2e.test' --exclude='*.tmp' "$SRC_DIR/test/e2e/" "$UPSTREAM_DEST/e2e/"
+rsync -a --delete --exclude='*.tmp' "$SRC_DIR/test/apiv2/" "$UPSTREAM_DEST/apiv2/"
+rsync -a --delete --exclude='*.tmp' "$SRC_DIR/test/compose/" "$UPSTREAM_DEST/compose/"
+rsync -a --delete --exclude='*.tmp' "$SRC_DIR/test/python/" "$UPSTREAM_DEST/python/"
+rsync -a --delete --exclude='*.tmp' "$SRC_DIR/test/farm/" "$UPSTREAM_DEST/farm/"
+
 cat >"$DEST/UPSTREAM.json" <<EOF
 {
   "repository": "$PODMAN_TESTS_REPO",

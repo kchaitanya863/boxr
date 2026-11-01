@@ -4880,82 +4880,89 @@ fn run_container_child(
     // Ensure DNS configuration exists in container rootfs
     let resolv_path = rootfs.join("etc/resolv.conf");
     let _ = fs::create_dir_all(rootfs.join("etc"));
-    let _ = fs::remove_file(&resolv_path);
-    let mut dns_content = String::new();
     let bundle_dir = rootfs.parent().unwrap_or(rootfs);
     let dns_file = bundle_dir.join("dns.json");
+    let mut dns_is_none = false;
+    let mut dns_content = String::new();
     if dns_file.exists() {
         if let Ok(content) = fs::read_to_string(&dns_file) {
             if let Ok(dns_servers) = serde_json::from_str::<Vec<String>>(&content) {
                 for server in dns_servers {
-                    dns_content.push_str(&format!("nameserver {}\n", server.trim()));
+                    if server.trim() == "none" {
+                        dns_is_none = true;
+                    } else {
+                        dns_content.push_str(&format!("nameserver {}\n", server.trim()));
+                    }
                 }
             }
         }
     }
-    if dns_content.is_empty() {
-        let net_mode = spec
-            .annotations
-            .as_ref()
-            .and_then(|a| a.get("boxr.network"))
-            .map(|s| crate::network::pasta::NetworkMode::parse(s))
-            .unwrap_or_default();
-        if net_mode.should_use_native_usernet() {
-            use crate::network::usernet::DEFAULT_DNS_IP;
-            dns_content.push_str(&format!("nameserver {}\n", DEFAULT_DNS_IP));
+    if !dns_is_none {
+        let _ = fs::remove_file(&resolv_path);
+        if dns_content.is_empty() {
+            let net_mode = spec
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("boxr.network"))
+                .map(|s| crate::network::pasta::NetworkMode::parse(s))
+                .unwrap_or_default();
+            if net_mode.should_use_native_usernet() {
+                use crate::network::usernet::DEFAULT_DNS_IP;
+                dns_content.push_str(&format!("nameserver {}\n", DEFAULT_DNS_IP));
+            }
+            if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {
+                for line in host_resolv.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("nameserver")
+                        && !trimmed.contains("127.0.0.")
+                        && !trimmed.contains("::1")
+                    {
+                        dns_content.push_str(trimmed);
+                        dns_content.push('\n');
+                    }
+                }
+            }
+            if !dns_content.contains("8.8.8.8") {
+                dns_content.push_str("nameserver 8.8.8.8\n");
+            }
+            if !dns_content.contains("1.1.1.1") {
+                dns_content.push_str("nameserver 1.1.1.1\n");
+            }
         }
-        if let Ok(host_resolv) = fs::read_to_string("/etc/resolv.conf") {
-            for line in host_resolv.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("nameserver")
-                    && !trimmed.contains("127.0.0.")
-                    && !trimmed.contains("::1")
-                {
-                    dns_content.push_str(trimmed);
-                    dns_content.push('\n');
+        let dns_search_file = bundle_dir.join("dns_search.json");
+        if dns_search_file.exists() {
+            if let Ok(content) = fs::read_to_string(&dns_search_file) {
+                if let Ok(domains) = serde_json::from_str::<Vec<String>>(&content) {
+                    if !domains.is_empty() {
+                        dns_content.push_str(&format!("search {}\n", domains.join(" ")));
+                    }
                 }
             }
         }
-        if !dns_content.contains("8.8.8.8") {
-            dns_content.push_str("nameserver 8.8.8.8\n");
-        }
-        if !dns_content.contains("1.1.1.1") {
-            dns_content.push_str("nameserver 1.1.1.1\n");
-        }
-    }
-    let dns_search_file = bundle_dir.join("dns_search.json");
-    if dns_search_file.exists() {
-        if let Ok(content) = fs::read_to_string(&dns_search_file) {
-            if let Ok(domains) = serde_json::from_str::<Vec<String>>(&content) {
-                if !domains.is_empty() {
-                    dns_content.push_str(&format!("search {}\n", domains.join(" ")));
+        let dns_opt_file = bundle_dir.join("dns_option.json");
+        if dns_opt_file.exists() {
+            if let Ok(content) = fs::read_to_string(&dns_opt_file) {
+                if let Ok(opts) = serde_json::from_str::<Vec<String>>(&content) {
+                    if !opts.is_empty() {
+                        dns_content.push_str(&format!("options {}\n", opts.join(" ")));
+                    }
                 }
             }
         }
-    }
-    let dns_opt_file = bundle_dir.join("dns_option.json");
-    if dns_opt_file.exists() {
-        if let Ok(content) = fs::read_to_string(&dns_opt_file) {
-            if let Ok(opts) = serde_json::from_str::<Vec<String>>(&content) {
-                if !opts.is_empty() {
-                    dns_content.push_str(&format!("options {}\n", opts.join(" ")));
-                }
-            }
+        if let Some(domain) = &spec.domainname {
+            dns_content.push_str(&format!("domain {}\n", domain));
         }
-    }
-    if let Some(domain) = &spec.domainname {
-        dns_content.push_str(&format!("domain {}\n", domain));
-    }
-    if let Ok(prebuilt_resolv) = fs::read_to_string(bundle_dir.join("resolv.conf")) {
-        dns_content = prebuilt_resolv;
-    }
-    let _ = fs::remove_file(&resolv_path);
-    let _ = fs::write(&resolv_path, &dns_content);
-    let upper_resolv = bundle_dir.join("upper/etc/resolv.conf");
-    if let Some(parent) = upper_resolv.parent() {
-        if parent.exists() {
-            let _ = fs::remove_file(&upper_resolv);
-            let _ = fs::write(&upper_resolv, &dns_content);
+        if let Ok(prebuilt_resolv) = fs::read_to_string(bundle_dir.join("resolv.conf")) {
+            dns_content = prebuilt_resolv;
+        }
+        let _ = fs::remove_file(&resolv_path);
+        let _ = fs::write(&resolv_path, &dns_content);
+        let upper_resolv = bundle_dir.join("upper/etc/resolv.conf");
+        if let Some(parent) = upper_resolv.parent() {
+            if parent.exists() {
+                let _ = fs::remove_file(&upper_resolv);
+                let _ = fs::write(&upper_resolv, &dns_content);
+            }
         }
     }
 

@@ -21,6 +21,10 @@ if [[ ! -d "$SRC_DIR/.git" ]]; then
   git clone --depth 1 "$PODMAN_TESTS_REPO" "$SRC_DIR"
 fi
 
+if [[ -d "$REPO_ROOT/tests/podman_upstream/e2e" ]]; then
+  rsync -a --exclude='e2e.test' --exclude='*.tmp' "$REPO_ROOT/tests/podman_upstream/e2e/" "$SRC_DIR/test/e2e/"
+fi
+
 mkdir -p "$(dirname "$WRAPPER")"
 cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
@@ -50,6 +54,26 @@ export PODMAN_BINARY="$WRAPPER"
 export PODMAN="$WRAPPER"
 export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
+
+if ! command -v skopeo >/dev/null 2>&1; then
+  mkdir -p "$CACHE_DIR/bin"
+  cat >"$CACHE_DIR/bin/skopeo" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "inspect" ]]; then
+  shift
+  args=()
+  for a in "\$@"; do
+    [[ "\$a" == "--raw" ]] && continue
+    args+=("\$a")
+  done
+  exec "$BOXR_BIN" manifest inspect "\${args[@]}"
+fi
+exec "$BOXR_BIN" "\$@"
+EOF
+  chmod +x "$CACHE_DIR/bin/skopeo"
+  export PATH="$CACHE_DIR/bin:$PATH"
+fi
 
 cd "$SRC_DIR"
 if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; then

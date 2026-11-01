@@ -377,19 +377,105 @@ impl SystemManager {
     }
 
     pub fn prune(all_images: bool, prune_volumes: bool) -> Result<u64> {
+        Self::prune_with_opts(all_images, prune_volumes, false, false, &[])
+    }
+
+    pub fn prune_with_opts(
+        all_images: bool,
+        prune_volumes: bool,
+        external: bool,
+        build: bool,
+        filters: &[String],
+    ) -> Result<u64> {
+        if external && (all_images || prune_volumes || build || !filters.is_empty()) {
+            crate::cli::usage_errors::exit_usage_error(
+                "--external cannot be combined with other options",
+            );
+        }
+        if external {
+            let home = boxr_home();
+            let c_store = ContainerStore::new();
+            let active_ids: HashSet<String> = c_store.list().into_iter().map(|c| c.id).collect();
+            let ov = home.join("overlay-containers");
+            if let Ok(entries) = fs::read_dir(&ov) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        if !active_ids.contains(&name) {
+                            let _ = fs::remove_dir_all(entry.path());
+                        }
+                    }
+                }
+            }
+            return Ok(0);
+        }
+
         let mut reclaimed = 0u64;
         crate::warn_and_clean_corrupted_vfs_images(&boxr_home());
+
+        if build {
+            let state_home = crate::storage::container_state_home();
+            let _ = fs::remove_file(state_home.join("external-containers.json"));
+            let _ = fs::remove_file(state_home.join("external-container-names"));
+        }
+
+        let matches_labels = |labels: &std::collections::HashMap<String, String>| -> bool {
+            for f in filters {
+                if let Some(rest) = f.strip_prefix("label!=") {
+                    if let Some((k, v)) = rest.split_once('=') {
+                        if labels.get(k.trim()).is_some_and(|val| val == v.trim()) {
+                            return false;
+                        }
+                    } else if labels.contains_key(rest.trim()) {
+                        return false;
+                    }
+                } else if let Some(rest) = f.strip_prefix("label=") {
+                    if let Some((k, v)) = rest.split_once('=') {
+                        if !labels.get(k.trim()).is_some_and(|val| val == v.trim()) {
+                            return false;
+                        }
+                    } else if !labels.contains_key(rest.trim()) {
+                        return false;
+                    }
+                }
+            }
+            true
+        };
+
+        // 0. Prune exited/stopped pods
+        let pod_store = crate::pod::PodStore::new();
+        if filters.is_empty() {
+            let _ = pod_store.prune();
+        }
+        let active_pods = pod_store.list();
+        let active_infra_ids: HashSet<String> = active_pods
+            .iter()
+            .flat_map(|p| vec![p.infra_container_id.clone(), format!("{}-infra", p.name)])
+            .collect();
 
         // 1. Prune stopped containers
         let c_store = ContainerStore::new();
         let containers = c_store.list();
-        println!("Deleted Containers:");
+        let mut deleted_containers = Vec::new();
         for c in containers {
+            if active_infra_ids.contains(&c.id) || active_infra_ids.contains(&c.name) {
+                continue;
+            }
+            let c_labels = crate::load_container_labels_from_bundle(&c.bundle_path);
+            if !matches_labels(&c_labels) {
+                continue;
+            }
             if !matches!(c.status, ContainerStatus::Running) {
                 let size = dir_size(&std::path::PathBuf::from(&c.bundle_path));
                 reclaimed += size;
                 let _ = c_store.remove(&c.id);
-                println!("{}", c.id);
+                deleted_containers.push(c.id);
+            }
+        }
+        if !deleted_containers.is_empty() {
+            println!("Deleted Containers:");
+            for cid in deleted_containers {
+                println!("{}", cid);
             }
         }
 
@@ -398,25 +484,35 @@ impl SystemManager {
             let i_store = ImageStore::new();
             let images = i_store.list();
             let remaining_containers = c_store.list();
-            let used_images: HashSet<String> = remaining_containers
-                .iter()
-                .map(|c| c.image.clone())
-                .collect();
 
             let mut deleted_images = Vec::new();
             for img in images {
-                let tag = format!("{}:{}", img.reference, img.tag);
-                let is_used = used_images.contains(&tag)
-                    || used_images.contains(&img.reference)
-                    || used_images.contains(&img.id);
+                let is_used = remaining_containers
+                    .iter()
+                    .any(|c| crate::container_uses_image_record(c, &img));
+                let img_labels = img
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.labels.clone())
+                    .unwrap_or_default();
+                if !matches_labels(&img_labels) {
+                    continue;
+                }
                 if !is_used {
-                    let is_dangling = img.tag == "<none>"
+                    let is_untagged = img.tag == "<none>"
                         || img.reference.is_empty()
                         || img.reference == "<none>";
-                    if all_images || is_dangling {
-                        reclaimed += img.size_bytes as u64;
-                        let _ = i_store.remove(&img.id);
-                        deleted_images.push(img.id);
+                    let is_dangling_leaf = is_untagged && !i_store.has_children(&img.id);
+                    if all_images || (build && is_untagged) || is_dangling_leaf {
+                        reclaimed += img.size_bytes.max(0) as u64;
+                        let parent_id = i_store.get_parent(&img.id);
+                        let _ = i_store.remove(&img.qualified_name());
+                        deleted_images.push(img.id.clone());
+                        if !all_images {
+                            let parents = i_store.prune_untagged_parents(parent_id);
+                            deleted_images.extend(parents);
+                        }
                     }
                 }
             }
@@ -437,7 +533,11 @@ impl SystemManager {
         // 4. Prune unused networks
         let n_store = NetworkStore::new();
         for net in n_store.list() {
-            if net.name != NetworkStore::DEFAULT_NETWORK && net.containers.is_empty() {
+            if net.name != NetworkStore::DEFAULT_NETWORK
+                && net.name != "podman"
+                && net.containers.is_empty()
+                && matches_labels(&net.labels)
+            {
                 let _ = n_store.remove(&net.name);
             }
         }
@@ -445,7 +545,7 @@ impl SystemManager {
         // 5. Prune volumes if requested
         if prune_volumes {
             let v_store = VolumeStore::new();
-            let pruned_vols = v_store.prune_with_options(true, &[])?;
+            let pruned_vols = v_store.prune_with_options(true, filters)?;
             for v in pruned_vols {
                 println!("Deleted Volume: {}", v);
             }

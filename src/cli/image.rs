@@ -62,6 +62,9 @@ pub struct PullArgs {
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
 
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
+
     #[command(flatten)]
     pub registry_auth: RegistryAuthArgs,
 
@@ -79,22 +82,28 @@ pub struct SaveArgs {
     pub format: Option<String>,
     #[arg(short = 'm', long = "multi-image-archive")]
     pub multi_image_archive: bool,
+    #[arg(long = "compress")]
+    pub compress: bool,
     #[arg(long = "uncompressed")]
     pub uncompressed: bool,
     #[arg(long = "oci-accept-uncompressed-layers")]
     pub oci_accept_uncompressed_layers: bool,
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
     /// Image(s) to save
     #[arg(value_name = "IMAGE")]
     pub images: Vec<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct LoadArgs {
     #[arg(short = 'i', long = "input")]
     pub input: Option<String>,
     #[arg(short = 'q', long = "quiet")]
     pub quiet: bool,
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -187,8 +196,27 @@ pub struct BuildArgs {
     pub shm_size: Option<String>,
 
     /// Always remove intermediate containers
-    #[arg(long = "rm", default_value_t = true)]
+    #[arg(
+        long = "rm",
+        num_args = 0..=1,
+        default_value_t = true,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub rm: bool,
+
+    /// Always remove intermediate containers after a build, even if the build is unsuccessful
+    #[arg(
+        long = "force-rm",
+        num_args = 0..=1,
+        default_value_t = false,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub force_rm: bool,
 
     /// Do not cache specified stages
     #[arg(long = "no-cache-filter")]
