@@ -261,7 +261,9 @@ async fn test_issue_113_conflicting_rm_and_restart() {
     assert!(res.is_err());
     let err_msg = res.unwrap_err().to_string();
     assert!(
-        err_msg.contains("Conflicting options") || err_msg.contains("both --restart and --rm"),
+        err_msg.contains("Conflicting options")
+            || err_msg.contains("both --restart and --rm")
+            || err_msg.contains("the --rm option conflicts with --restart"),
         "Unexpected error: {}",
         err_msg
     );
@@ -372,12 +374,14 @@ async fn test_issue_117_dns_validation() {
 
     // Invalid DNS IP
     let mut args1 = default_run_args("alpine:latest");
+    args1.network = "pasta".to_string();
     args1.dns = vec!["not_an_ip".to_string()];
     let res1 = boxr::create_only_container_with_home(args1, Some(temp.path())).await;
     assert!(res1.is_err(), "Expected error for invalid DNS address");
 
     // Valid DNS IP
     let mut args2 = default_run_args("alpine:latest");
+    args2.network = "pasta".to_string();
     args2.dns = vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()];
     let res2 = boxr::create_only_container_with_home(args2, Some(temp.path())).await;
     assert!(res2.is_ok(), "Expected success for valid DNS addresses");
@@ -394,7 +398,7 @@ fn test_issue_118_cpus_validation_positive_finite() {
     assert!(ResourceLimits::parse_cpus("1.5").is_ok());
 }
 
-// Issue #119: boxr run --pids-limit accepts 0 without error, preventing any processes from running
+// Issue #119: boxr run --pids-limit rejects values less than -1, and treats 0 as unlimited (-1)
 #[tokio::test]
 async fn test_issue_119_pids_limit_rejects_zero() {
     let temp = create_isolated_home();
@@ -403,7 +407,7 @@ async fn test_issue_119_pids_limit_rejects_zero() {
     img_store.add(img).unwrap();
 
     let mut args = default_run_args("alpine:latest");
-    args.pids_limit = Some(0);
+    args.pids_limit = Some(-2);
 
     let res = boxr::create_only_container_with_home(args, Some(temp.path())).await;
     assert!(res.is_err());

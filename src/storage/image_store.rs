@@ -152,7 +152,10 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
                     || img.tag.ends_with(&format!("@{}", digest));
             }
             let (reg, repo, tag) = record_identity(img);
-            if tag == r.tag && repo == r.repository {
+            let repo_matches = repo == r.repository
+                || repo.strip_prefix("library/") == Some(r.repository.as_str())
+                || r.repository.strip_prefix("library/") == Some(repo.as_str());
+            if tag == r.tag && repo_matches {
                 if reg == r.registry
                     || reg == "localhost"
                     || reg == "registry-1.docker.io"

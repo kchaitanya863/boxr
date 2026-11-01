@@ -454,6 +454,12 @@ pub fn print_podman_info_text(doc: &Value) -> String {
         }
         out.push_str("  graphStatus: {}\n");
     }
+    if let Some(c) = doc.get("Containers") {
+        append_yaml_kv(&mut out, 0, "Containers", scalar_str(Some(c)));
+    }
+    if let Some(i) = doc.get("Images") {
+        append_yaml_kv(&mut out, 0, "Images", scalar_str(Some(i)));
+    }
     out.push_str("registries:\n");
     out.push_str("  search:\n");
     out.push_str("  insecure:\n");

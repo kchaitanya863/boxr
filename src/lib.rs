@@ -1348,6 +1348,16 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 }
             }
             cli::ContainerAction::Cleanup(cl_args) => {
+                if cl_args.all && cl_args.latest {
+                    cli::usage_errors::exit_usage_error(
+                        "--all and --latest cannot be used together",
+                    );
+                }
+                if (cl_args.all || cl_args.latest) && cl_args.container.is_some() {
+                    cli::usage_errors::exit_usage_error(
+                        "--all or --latest and containers cannot be used together",
+                    );
+                }
                 if cl_args.all && cl_args.exec.is_some() {
                     cli::usage_errors::exit_usage_error("--all and --exec cannot be set together");
                 }
@@ -4830,9 +4840,9 @@ pub async fn run_container_with_output(
             health::RestartPolicy::Always | health::RestartPolicy::UnlessStopped
         )
     {
-        cli::usage_errors::exit_usage_error(
-            "the --rm option conflicts with --restart, when the restartPolicy is not \"\" and \"no\"",
-        );
+        return Err(anyhow!(
+            "the --rm option conflicts with --restart, when the restartPolicy is not \"\" and \"no\""
+        ));
     }
     if cli::log_level::config().level <= cli::log_level::Level::Info {
         eprintln!("time=\"2026-01-01T00:00:00Z\" level=info msg=\"Running podman\"");
@@ -5754,7 +5764,7 @@ pub async fn run_container_with_output(
             }
             if ip_str.trim() != "host-gateway" && ip_str.trim().parse::<std::net::IpAddr>().is_err()
             {
-                cli::usage_errors::exit_usage_error(format!(
+                return Err(anyhow!(
                     "bad format for add-host: \"{}\": invalid IP address in add-host: \"{}\"",
                     host_entry,
                     ip_str.trim()
@@ -5769,9 +5779,10 @@ pub async fn run_container_with_output(
     if !args.dns.is_empty() {
         for dns_ip in &args.dns {
             if dns_ip != "none" && dns_ip.parse::<std::net::IpAddr>().is_err() {
-                cli::usage_errors::exit_usage_error(format!(
+                return Err(anyhow!(
                     "invalid DNS server address: '{}': {} is not an ip address",
-                    dns_ip, dns_ip
+                    dns_ip,
+                    dns_ip
                 ));
             }
         }
@@ -7792,6 +7803,11 @@ pub fn stop_containers(args: &cli::StopArgs) -> Result<()> {
     }
     if args.all && args.latest {
         cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all or --latest and containers cannot be used together",
+        );
     }
     if !args.filter.is_empty() && (!args.containers.is_empty() || !args.cidfile.is_empty()) {
         cli::usage_errors::exit_usage_error("--filter takes no arguments");
@@ -11319,6 +11335,19 @@ pub fn attach_container(args: &cli::AttachArgs) -> Result<()> {
 }
 
 pub fn kill_container(args: &cli::KillArgs) -> Result<()> {
+    if !args.cidfile.is_empty() && (args.all || args.latest) {
+        cli::usage_errors::exit_usage_error(
+            "--all, --latest, and --cidfile cannot be used together",
+        );
+    }
+    if args.all && args.latest {
+        cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all or --latest and containers cannot be used together",
+        );
+    }
     let sig_num = if let Some(sig_str) = &args.signal {
         match runtime::kill::validate_podman_signal(sig_str) {
             Ok(s) => Some(s),
@@ -18315,9 +18344,9 @@ async fn create_only_container_after_pod_prep(
             health::RestartPolicy::Always | health::RestartPolicy::UnlessStopped
         )
     {
-        cli::usage_errors::exit_usage_error(
-            "the --rm option conflicts with --restart, when the restartPolicy is not \"\" and \"no\"",
-        );
+        return Err(anyhow!(
+            "the --rm option conflicts with --restart, when the restartPolicy is not \"\" and \"no\""
+        ));
     }
 
     let image_record = resolve_container_image_ext(
@@ -18911,7 +18940,7 @@ async fn create_only_container_after_pod_prep(
             }
             if ip_str.trim() != "host-gateway" && ip_str.trim().parse::<std::net::IpAddr>().is_err()
             {
-                cli::usage_errors::exit_usage_error(format!(
+                return Err(anyhow!(
                     "bad format for add-host: \"{}\": invalid IP address in add-host: \"{}\"",
                     host_entry,
                     ip_str.trim()
@@ -18926,9 +18955,10 @@ async fn create_only_container_after_pod_prep(
     if !args.dns.is_empty() {
         for dns_ip in &args.dns {
             if dns_ip != "none" && dns_ip.parse::<std::net::IpAddr>().is_err() {
-                cli::usage_errors::exit_usage_error(format!(
+                return Err(anyhow!(
                     "invalid DNS server address: '{}': {} is not an ip address",
-                    dns_ip, dns_ip
+                    dns_ip,
+                    dns_ip
                 ));
             }
         }
@@ -19680,6 +19710,11 @@ pub async fn restart_container(args: &cli::RestartArgs) -> Result<()> {
     }
     if args.all && args.latest {
         cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+    }
+    if (args.all || args.latest) && !args.containers.is_empty() {
+        cli::usage_errors::exit_usage_error(
+            "--all or --latest and containers cannot be used together",
+        );
     }
     if !args.filter.is_empty() && (!args.containers.is_empty() || !args.cidfile.is_empty()) {
         cli::usage_errors::exit_usage_error("--filter takes no arguments");
@@ -22472,7 +22507,7 @@ fn validate_no_duplicate_ports(ports: &[network::PortMapping]) -> Result<()> {
     for p in ports {
         let key = (p.host_ip.clone(), p.host_port, p.protocol.clone());
         if !seen.insert(key) {
-            cli::usage_errors::exit_usage_error(format!(
+            return Err(anyhow!(
                 "conflicting port mappings for host port {} (protocol {}): Bind for 0.0.0.0:{} failed: port is already allocated",
                 p.host_port,
                 p.protocol.to_ascii_lowercase(),

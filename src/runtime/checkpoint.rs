@@ -207,6 +207,18 @@ impl CheckpointManager {
     }
 
     pub fn checkpoint_with_args(args: &crate::cli::ContainerCheckpointArgs) -> Result<Vec<String>> {
+        if args.all && args.latest {
+            crate::cli::usage_errors::exit_usage_error(
+                "--all and --latest cannot be used together",
+            );
+        }
+        if (args.all || args.latest)
+            && (!args.container.is_empty() || !args.extra_containers.is_empty())
+        {
+            crate::cli::usage_errors::exit_usage_error(
+                "--all or --latest and containers cannot be used together",
+            );
+        }
         let store = ContainerStore::new();
         let mut targets = Vec::new();
         let mut print_id_always = false;
@@ -472,6 +484,18 @@ impl CheckpointManager {
     }
 
     pub async fn restore_with_args(args: &crate::cli::ContainerRestoreArgs) -> Result<Vec<String>> {
+        if args.all && args.latest {
+            crate::cli::usage_errors::exit_usage_error(
+                "--all and --latest cannot be used together",
+            );
+        }
+        if (args.all || args.latest)
+            && (!args.container.is_empty() || !args.extra_containers.is_empty())
+        {
+            crate::cli::usage_errors::exit_usage_error(
+                "--all or --latest and containers cannot be used together",
+            );
+        }
         let store = ContainerStore::new();
         let mut outputs = Vec::new();
 

@@ -555,12 +555,13 @@ test_step "docker context rm <name>" \
 # 16. Image Manifest Subcommands Parity (docker manifest ...)
 # ------------------------------------------------------------------------------
 echo -e "\n${BOLD}16. Image Manifest Subcommands Parity (docker manifest ...)${NC}"
+MANIFEST_NAME="test-manifest-$(rand_id):latest"
 
 test_step "docker manifest inspect <image>" \
     "$DOCKER_CMD manifest inspect ubuntu | grep -E 'schemaVersion|mediaType|config' >/dev/null"
 
 test_step "docker manifest create <target> <sources...>" \
-    "$DOCKER_CMD manifest create test-manifest:latest ubuntu"
+    "$DOCKER_CMD manifest create $MANIFEST_NAME ubuntu && $DOCKER_CMD manifest rm $MANIFEST_NAME"
 
 # ------------------------------------------------------------------------------
 # 17. Container Init Process Parity (--init)

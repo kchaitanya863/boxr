@@ -164,6 +164,9 @@ fn normalize_usage_line(
         return format!("  {full} [command]");
     }
 
+    if sub_path == ["network", "inspect"] {
+        return "  podman network inspect [options] NETWORK [NETWORK...]".to_string();
+    }
     let mut u = usage.trim().to_string();
     u = u.replace("[OPTIONS]", "[options]");
     u = u.replace('<', "").replace('>', "");

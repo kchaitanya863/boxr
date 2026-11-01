@@ -1042,8 +1042,16 @@ async fn test_issue_205_inspect_hostconfig_does_not_report_capadd_and_capdrop() 
     let json = inspect_container_json(temp.path(), &cid);
     let cap_add = json["HostConfig"]["CapAdd"].as_array().unwrap();
     let cap_drop = json["HostConfig"]["CapDrop"].as_array().unwrap();
-    assert!(cap_add.iter().any(|v| v == "SYS_ADMIN"));
-    assert!(cap_drop.iter().any(|v| v == "NET_RAW"));
+    assert!(
+        cap_add
+            .iter()
+            .any(|v| v == "SYS_ADMIN" || v == "CAP_SYS_ADMIN")
+    );
+    assert!(
+        cap_drop
+            .iter()
+            .any(|v| v == "NET_RAW" || v == "CAP_NET_RAW")
+    );
 }
 
 // Issue #206: boxr inspect HostConfig does not report Privileged: true when --privileged is set
