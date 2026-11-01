@@ -41,6 +41,13 @@ logs_test.go
 mount_rootless_test.go
 mount_test.go
 stats_test.go
-
-
-
+pod_kill_test.go
+pod_pod_namespaces_test.go
+pod_prune_test.go
+pod_ps_test.go
+pod_restart_test.go
+pod_start_test.go
+pod_stats_test.go
+pod_stop_test.go
+volume_inspect_test.go
+volume_plugin_test.go

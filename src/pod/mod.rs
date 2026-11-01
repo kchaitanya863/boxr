@@ -530,6 +530,13 @@ impl PodStore {
                     .unwrap_or(false);
 
                 if !any_running && !infra_running && p.status != "Running" {
+                    for cid in &p.containers {
+                        let _ = c_store.remove(cid);
+                    }
+                    if !p.infra_container_id.is_empty() {
+                        let _ = c_store.remove(&p.infra_container_id);
+                    }
+                    let _ = c_store.remove(&format!("{}-infra", p.name));
                     pruned.push(p.name.clone());
                     false
                 } else {

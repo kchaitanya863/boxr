@@ -317,6 +317,15 @@ pub struct PodLsArgs {
     #[arg(short = 'n', long = "noheading")]
     pub noheading: bool,
 
+    #[arg(long = "ctr-names")]
+    pub ctr_names: bool,
+    #[arg(long = "ctr-ids")]
+    pub ctr_ids: bool,
+    #[arg(long = "ctr-status")]
+    pub ctr_status: bool,
+    #[arg(long = "ns")]
+    pub ns: bool,
+
     #[arg(value_name = "POD")]
     pub pods: Vec<String>,
 }
@@ -590,6 +599,12 @@ pub enum PodAction {
     Top(PodTopArgs),
     /// Display a live stream of pod resource usage statistics
     Stats {
+        #[arg(short = 'a', long = "all")]
+        all: bool,
+        #[arg(short = 'l', long = "latest")]
+        latest: bool,
+        #[arg(long = "no-reset")]
+        no_reset: bool,
         #[arg(long = "no-stream")]
         no_stream: bool,
         #[arg(long = "format")]

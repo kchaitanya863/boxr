@@ -97,7 +97,7 @@ fn curated_e2e_manifest_contains_31_suites() {
         .collect();
     assert_eq!(
         suites.len(),
-        43,
-        "expected 43 Ginkgo E2E suites in e2e_manifest.txt"
+        53,
+        "expected 53 Ginkgo E2E suites in e2e_manifest.txt"
     );
 }

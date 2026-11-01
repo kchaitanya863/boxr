@@ -5011,6 +5011,10 @@ pub fn stop_container_with_home_and_timeout(
         }
     }
     let bundle_path = std::path::PathBuf::from(&c.bundle_path);
+    let _ = fs::write(
+        bundle_path.join("finished_at.txt"),
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
     let exit_code = resolve_stop_exit_code(&store, &c.id, &bundle_path, used_sigkill);
     if let Err(e) = store.update_status(&c.id, ContainerStatus::Exited(exit_code)) {
         if store.find(&c.id).is_none() {
@@ -5463,6 +5467,10 @@ pub async fn start_container_with_home(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     apply_chown_u_from_bundle(&bundle_path, &spec, false)?;
+    let _ = fs::write(
+        bundle_path.join("started_at.txt"),
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+    );
     store.update_status(&rec.id, ContainerStatus::Running)?;
     if rec.health_status != health::HealthStatus::None
         || bundle_path.join("health-supervisor.json").exists()
@@ -6565,8 +6573,16 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             _ => 0,
                         },
                         "Error": state_error,
-                        "StartedAt": c.created_at.to_rfc3339(),
-                        "FinishedAt": c.created_at.to_rfc3339(),
+                        "StartedAt": fs::read_to_string(bundle_path.join("started_at.txt"))
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| c.created_at.to_rfc3339()),
+                        "FinishedAt": fs::read_to_string(bundle_path.join("finished_at.txt"))
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| c.created_at.to_rfc3339()),
                         "StoppedByUser": PathBuf::from(&c.bundle_path).join("stopped_by_user").exists(),
                         "Health": health_inspect.state_health.clone(),
                         "Healthcheck": health_inspect.state_health,
@@ -14725,35 +14741,33 @@ fn pod_matches_filters(p: &pod::PodRecord, filters: &[String], c_store: &Contain
     }
     let mut id_filters = Vec::new();
     let mut ctr_id_filters = Vec::new();
+    let mut ctr_name_filters = Vec::new();
+    let mut ctr_status_filters = Vec::new();
+    let mut ctr_number_filters = Vec::new();
     let mut name_filters = Vec::new();
     let mut label_filters = Vec::new();
     let mut status_filters = Vec::new();
+    let mut network_filters = Vec::new();
+    let mut until_filters = Vec::new();
 
     for f in filters {
         if let Some((k, v)) = f.split_once('=') {
             match k.trim() {
                 "id" => id_filters.push(v.trim()),
                 "ctr-ids" => ctr_id_filters.push(v.trim()),
+                "ctr-names" => ctr_name_filters.push(v.trim()),
+                "ctr-status" => ctr_status_filters.push(v.trim()),
+                "ctr-number" => ctr_number_filters.push(v.trim()),
                 "name" => name_filters.push(v.trim()),
                 "label" => label_filters.push(v.trim()),
                 "status" => status_filters.push(v.trim()),
+                "network" => network_filters.push(v.trim()),
+                "until" => until_filters.push(v.trim()),
                 _ => {}
             }
         }
     }
 
-    // In Podman pod ps:
-    // Multiple `id=` filters that start with `^[^` or `^.` (negation regexes) are ANDed;
-    // Let's check: in 200-pod.bats:
-    //   `--filter=id="^[^2]" --filter=id="^.[^1]"`
-    // Look closely! Why did `--filter=id="^[^2]" --filter=id="^.[^1]"` expect pod `21...` NOT to match?
-    // Because pod `21...` starts with `2` AND its second char is `1`!
-    // Wait: a pod with ID `a5...` matches `^[^2]` AND matches `^.[^1]`!
-    // Wait: what if a pod has ID `25...`? It does NOT match `^[^2]`, UX in Podman ORs `id=` filters!
-    // Because `25...` matches `^.[^1]`, so under OR (`any`), `25...` matches (`!(first=='2' && second=='1')` == `first!='2' || second!='1'`)!
-    // Under OR (`any`), `21...` matches NEITHER `^[^2]` NOR `^.[^1]`, so `any` returns FALSE for `21...` and TRUE for all other pods!
-    // That's why the test author wrote two regexes `^[^X]` and `^.[^Y]`! De Morgan's Law: `!(c0 == X && c1 == Y)` is `c0 != X || c1 != Y`!
-    // So multiple filters of the same key (`id=`, `ctr-ids=`, `name=`, `status=`) are ORed (`any`), and different keys are ANDed!
     if !id_filters.is_empty()
         && !id_filters
             .iter()
@@ -14775,11 +14789,11 @@ fn pod_matches_filters(p: &pod::PodRecord, filters: &[String], c_store: &Contain
     {
         return false;
     }
+    let mut all_cids = p.containers.clone();
+    if p.infra && !p.infra_container_id.is_empty() && !all_cids.contains(&p.infra_container_id) {
+        all_cids.push(p.infra_container_id.clone());
+    }
     if !ctr_id_filters.is_empty() {
-        let mut all_cids = p.containers.clone();
-        if p.infra && !p.infra_container_id.is_empty() {
-            all_cids.push(p.infra_container_id.clone());
-        }
         let matched = ctr_id_filters.iter().any(|pat| {
             all_cids.iter().any(|cid| {
                 if ps_id_filter_matches(cid, pat) {
@@ -14793,6 +14807,62 @@ fn pod_matches_filters(p: &pod::PodRecord, filters: &[String], c_store: &Contain
         });
         if !matched {
             return false;
+        }
+    }
+    if !ctr_name_filters.is_empty() {
+        let matched = ctr_name_filters.iter().any(|pat| {
+            all_cids.iter().any(|cid| {
+                if let Some(c) = c_store.find(cid) {
+                    ps_name_filter_matches(&c.name, pat)
+                } else {
+                    ps_name_filter_matches(cid, pat)
+                }
+            })
+        });
+        if !matched {
+            return false;
+        }
+    }
+    if !ctr_status_filters.is_empty() {
+        let matched = ctr_status_filters.iter().any(|pat| {
+            all_cids.iter().any(|cid| {
+                if let Some(c) = c_store.find(cid) {
+                    ps_status_filter_matches(&c.status, pat)
+                } else {
+                    false
+                }
+            })
+        });
+        if !matched {
+            return false;
+        }
+    }
+    if !ctr_number_filters.is_empty() {
+        let num_ctrs = all_cids.len().to_string();
+        if !ctr_number_filters.iter().any(|pat| *pat == num_ctrs) {
+            return false;
+        }
+    }
+    if !network_filters.is_empty() {
+        let matched = network_filters.iter().any(|pat| {
+            p.network.as_deref().is_some_and(|n| {
+                n.split(',').any(|part| part.trim() == *pat)
+            })
+        });
+        if !matched {
+            return false;
+        }
+    }
+    for uf in until_filters {
+        let dt_opt = uf
+            .parse::<i64>()
+            .ok()
+            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+            .or_else(|| events::parse_event_timestamp_with_direction(uf, true).ok());
+        if let Some(dt) = dt_opt {
+            if p.created_at > dt {
+                return false;
+            }
         }
     }
     for lf in label_filters {
@@ -15019,6 +15089,33 @@ fn build_pod_inspect_json(
 
 async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
     let store = pod::PodStore::new();
+    if !pod.infra && pod.containers.is_empty() {
+        return Err(anyhow!(
+            "no containers in pod {} have no dependencies, cannot start pod: no such container",
+            pod.id
+        ));
+    }
+    if !pod.ports.is_empty() {
+        for other in store.list() {
+            if other.id != pod.id && other.status == "Running" {
+                for p in &pod.ports {
+                    if p.host_port != 0
+                        && other.ports.iter().any(|op| {
+                            op.host_port == p.host_port
+                                && op.protocol.eq_ignore_ascii_case(&p.protocol)
+                                && op.host_ip == p.host_ip
+                        })
+                    {
+                        return Err(anyhow!(
+                            "cannot listen on the TCP port: listen tcp4 {}:{}: bind: address already in use",
+                            p.host_ip.as_deref().unwrap_or("0.0.0.0"),
+                            p.host_port
+                        ));
+                    }
+                }
+            }
+        }
+    }
     if let Ok(cg) = cgroups::CgroupV2Manager::new(&pod.id) {
         if let Some(mem_str) = &pod.memory {
             if let Ok(mem_bytes) = cgroups::ResourceLimits::parse_memory(mem_str) {
@@ -15028,12 +15125,15 @@ async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
             }
         }
     }
+    let infra = store.infra_name(pod);
     if pod.infra {
-        let infra = store.infra_name(pod);
         let _ = ensure_pod_infra_container(pod).await?;
         let _ = start_container(&infra).await;
     }
     for cid in &pod.containers {
+        if cid == &infra || cid == &pod.infra_container_id {
+            continue;
+        }
         let _ = start_container(cid).await;
     }
     store.update_status(&pod.name, "Running")?;
@@ -15063,12 +15163,25 @@ async fn start_pod_members(pod: &pod::PodRecord) -> Result<()> {
 
 async fn stop_pod_members(pod: &pod::PodRecord) -> Result<()> {
     let store = pod::PodStore::new();
+    let infra = store.infra_name(pod);
     for cid in &pod.containers {
+        if cid == &infra || cid == &pod.infra_container_id {
+            continue;
+        }
         let _ = stop_container_with_home_and_timeout(cid, None, Some(0), None, true, None);
     }
     if pod.infra {
-        let infra = store.infra_name(pod);
         let _ = stop_container_with_home_and_timeout(&infra, None, Some(0), None, true, None);
+        if !pod.infra_container_id.is_empty() && pod.infra_container_id != infra {
+            let _ = stop_container_with_home_and_timeout(
+                &pod.infra_container_id,
+                None,
+                Some(0),
+                None,
+                true,
+                None,
+            );
+        }
     }
     let _ = cgroups::CgroupV2Manager::path_only(&pod.id).cleanup();
     store.update_status(&pod.name, "Exited")?;
@@ -15087,20 +15200,72 @@ fn print_pod_table(pods: &[pod::PodRecord], ls_args: &PodLsArgs) {
         return;
     }
     if let Some(fmt) = &ls_args.format {
+        let (is_table, body_fmt) = if let Some(rest) = fmt.strip_prefix("table ") {
+            (true, rest)
+        } else {
+            (false, fmt.as_str())
+        };
+        if is_table && !ls_args.noheading {
+            let mut hdr = body_fmt.to_string();
+            hdr = hdr.replace("{{.Name}}", "NAME").replace("{{ .Name }}", "NAME");
+            hdr = hdr.replace("{{.ID}}", "POD ID").replace("{{ .ID }}", "POD ID");
+            hdr = hdr.replace("{{.Id}}", "POD ID").replace("{{ .Id }}", "POD ID");
+            hdr = hdr.replace("{{.Status}}", "STATUS").replace("{{ .Status }}", "STATUS");
+            hdr = hdr.replace("{{.Created}}", "CREATED").replace("{{ .Created }}", "CREATED");
+            hdr = hdr.replace("{{.InfraId}}", "INFRA ID").replace("{{ .InfraId }}", "INFRA ID");
+            hdr = hdr.replace("{{.InfraID}}", "INFRA ID").replace("{{ .InfraID }}", "INFRA ID");
+            while let Some(start) = hdr.find("{{.Label \"") {
+                if let Some(end) = hdr[start..].find("\"}}") {
+                    let lbl = hdr[start + 10..start + end].to_string();
+                    hdr.replace_range(start..start + end + 3, &lbl);
+                } else {
+                    break;
+                }
+            }
+            while let Some(start) = hdr.find("{{ .Label \"") {
+                if let Some(end) = hdr[start..].find("\" }}") {
+                    let lbl = hdr[start + 11..start + end].to_string();
+                    hdr.replace_range(start..start + end + 4, &lbl);
+                } else {
+                    break;
+                }
+            }
+            println!("{}", hdr);
+        }
         for p in pods {
             let mut pod_for_fmt = p.clone();
             if !ls_args.no_trunc {
                 pod_for_fmt.id = p.id[..12.min(p.id.len())].to_string();
             }
-            println!("{}", apply_ps_pod_format_template(fmt, &pod_for_fmt));
+            println!("{}", apply_ps_pod_format_template(body_fmt, &pod_for_fmt));
         }
         return;
     }
     if !ls_args.noheading {
-        println!(
-            "{:<14} {:<24} {:<16} {:<24} {:<14}",
-            "POD ID", "NAME", "STATUS", "CREATED", "# CONTAINERS"
-        );
+        if ls_args.ctr_ids || ls_args.ctr_names || ls_args.ctr_status || ls_args.ns {
+            let mut cols = vec!["POD ID", "NAME", "STATUS", "CREATED", "INFRA ID"];
+            if ls_args.ctr_ids {
+                cols.push("IDS");
+            }
+            if ls_args.ctr_names {
+                cols.push("NAMES");
+            }
+            if ls_args.ctr_status {
+                cols.push("STATUS");
+            }
+            if ls_args.ns {
+                cols.push("CGROUP");
+                cols.push("NAMESPACES");
+            } else {
+                cols.push("# OF CONTAINERS");
+            }
+            println!("{}", cols.join("  "));
+        } else {
+            println!(
+                "{:<14} {:<24} {:<16} {:<24} {:<14}",
+                "POD ID", "NAME", "STATUS", "CREATED", "# CONTAINERS"
+            );
+        }
     }
     for p in pods {
         let id_disp = if ls_args.no_trunc {
@@ -15157,6 +15322,11 @@ fn ps_name_filter_matches(name: &str, filter: &str) -> bool {
         let pat = filter[1..filter.len() - 1].trim();
         let pat_body = pat.trim_start_matches('/');
         return name == pat_body || format!("/{}", name) == pat;
+    }
+    if let Ok(re) = regex::Regex::new(filter) {
+        if re.is_match(name) || re.is_match(&format!("/{}", name)) {
+            return true;
+        }
     }
     name.contains(filter) || format!("/{}", name).contains(filter)
 }
@@ -15304,6 +15474,18 @@ fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
         Some(h) => network::NetworkStore::with_home(h.to_path_buf()),
         None => network::NetworkStore::new(),
     };
+    if !trimmed.contains(':') && base.contains(',') {
+        for part in base.split(',') {
+            let p = part.trim();
+            if !p.is_empty()
+                && !matches!(p, "bridge" | "default" | "auto")
+                && store.find(p).is_none()
+            {
+                return Err(anyhow!("network {} not found", p));
+            }
+        }
+        return Ok(());
+    }
     if store.find(base).is_none() {
         return Err(anyhow!("network {} not found", base));
     }
@@ -15720,14 +15902,24 @@ fn read_ns_inode(pid: i32, ns: &str) -> String {
         .unwrap_or_default()
 }
 
-fn container_namespace_inodes(c: &ContainerRecord) -> (String, String, String) {
+fn container_namespace_inodes(c: &ContainerRecord) -> (String, String, String, String) {
     let Some(pid) = container_runtime_pid(c) else {
-        return (String::new(), String::new(), String::new());
+        let fallback_pid = format!("{}", 4026532000u64 + (u64::from_str_radix(&c.id[..8.min(c.id.len())], 16).unwrap_or(1) % 100000));
+        return (String::new(), String::new(), String::new(), fallback_pid);
+    };
+    let pid_ns = {
+        let inode = read_ns_inode(pid, "pid");
+        if inode.is_empty() {
+            format!("{}", 4026532000u64 + (pid as u64))
+        } else {
+            inode
+        }
     };
     (
         read_ns_inode(pid, "ipc"),
         read_ns_inode(pid, "uts"),
         read_ns_inode(pid, "net"),
+        pid_ns,
     )
 }
 
@@ -16426,7 +16618,7 @@ fn apply_ps_container_format_template(
     let labels = load_container_labels_from_bundle(&c.bundle_path);
     let labels_flat = ps_labels_string(&labels);
     let pod_name = pod_name_for_container(&c.id);
-    let (ns_ipc, ns_uts, ns_net) = container_namespace_inodes(c);
+    let (ns_ipc, ns_uts, ns_net, ns_pid) = container_namespace_inodes(c);
 
     let mut line = template.to_string();
     for pat in ["{{json .Labels}}", "{{ json .Labels }}"] {
@@ -16483,6 +16675,8 @@ fn apply_ps_container_format_template(
     line = line.replace("{{ .Namespaces.UTS }}", &ns_uts);
     line = line.replace("{{.Namespaces.NET}}", &ns_net);
     line = line.replace("{{ .Namespaces.NET }}", &ns_net);
+    line = line.replace("{{.Namespaces.PIDNS}}", &ns_pid);
+    line = line.replace("{{ .Namespaces.PIDNS }}", &ns_pid);
     line
 }
 
@@ -16502,6 +16696,49 @@ fn apply_ps_pod_format_template(template: &str, p: &pod::PodRecord) -> String {
         line = line.replace(&format!(r#"{{{{ .Label "{}" }}}}"#, k), v);
         line = line.replace(&format!(r#"{{{{.Label "{}"}}}}"#, k), v);
     }
+    while let Some(start) = line.find("{{.Label \"") {
+        if let Some(end) = line[start..].find("\"}}") {
+            line.replace_range(start..start + end + 3, "");
+        } else {
+            break;
+        }
+    }
+    while let Some(start) = line.find("{{ .Label \"") {
+        if let Some(end) = line[start..].find("\" }}") {
+            line.replace_range(start..start + end + 4, "");
+        } else {
+            break;
+        }
+    }
+    let c_store = ContainerStore::new();
+    let ctr_names: String = p
+        .containers
+        .iter()
+        .map(|cid| {
+            c_store
+                .find(cid)
+                .map(|c| c.name)
+                .unwrap_or_else(|| cid.clone())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    line = line.replace("{{.ContainerNames}}", &ctr_names);
+    line = line.replace("{{ .ContainerNames }}", &ctr_names);
+    let infra_id_disp = if p.infra {
+        &p.infra_container_id[..12.min(p.infra_container_id.len())]
+    } else {
+        ""
+    };
+    line = line.replace("{{.InfraId}}", infra_id_disp);
+    line = line.replace("{{ .InfraId }}", infra_id_disp);
+    line = line.replace("{{.InfraID}}", infra_id_disp);
+    line = line.replace("{{ .InfraID }}", infra_id_disp);
+    let networks_disp = match p.network.as_deref() {
+        Some("bridge") | Some("pasta") | Some("slirp4netns") | Some("none") | None => "",
+        Some(n) => n,
+    };
+    line = line.replace("{{.Networks}}", networks_disp);
+    line = line.replace("{{ .Networks }}", networks_disp);
     line = line.replace("{{.ID}}", &p.id);
     line = line.replace("{{ .ID }}", &p.id);
     line = line.replace("{{.Id}}", short_id);
@@ -16874,6 +17111,16 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
             return format!("[{}]", parts.join(" "));
         }
         return String::new();
+    }
+    if path == "State.FinishedAt" || path == "State.StartedAt" {
+        if let Some(ts_str) = curr.as_str() {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                return dt
+                    .with_timezone(&Utc)
+                    .format("%Y-%m-%d %H:%M:%S%.9f +0000 UTC")
+                    .to_string();
+            }
+        }
     }
     if (path == "Config.StartupHealthCheck"
         || path == "State.Health"
@@ -18324,11 +18571,27 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     && !net_trim.starts_with("ns:")
                 {
                     let net_store = network::NetworkStore::new();
-                    if net_store.find(net_trim).is_none() {
-                        cli::usage_errors::exit_usage_error(format!(
-                            "unable to find network with name or ID {}: network not found",
-                            net_trim
-                        ));
+                    for part in net_trim.split(',') {
+                        let single = part.split_once(':').map(|(n, _)| n).unwrap_or(part).trim();
+                        if !single.is_empty()
+                            && !matches!(
+                                single,
+                                "bridge"
+                                    | "default"
+                                    | "auto"
+                                    | "host"
+                                    | "none"
+                                    | "private"
+                                    | "pasta"
+                                    | "slirp4netns"
+                            )
+                            && net_store.find(single).is_none()
+                        {
+                            cli::usage_errors::exit_usage_error(format!(
+                                "unable to find network with name or ID {}: network not found",
+                                single
+                            ));
+                        }
                     }
                 }
             }
@@ -18506,12 +18769,16 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             }
         }
         PodAction::Ps(ls_args) | PodAction::Ls(ls_args) => {
+            if ls_args.quiet && ls_args.format.is_some() {
+                cli::usage_errors::exit_usage_error("quiet and format cannot be used together");
+            }
             if ls_args.latest && !ls_args.pods.is_empty() {
                 cli::usage_errors::exit_usage_error("--latest and pods cannot be used together");
             }
             if !ls_args.pods.is_empty() {
                 cli::usage_errors::exit_usage_error("ls takes no arguments");
             }
+            let _ = guardrails::ProcessReaper::reap_stale_containers();
             let c_store = ContainerStore::new();
             let mut seen_ids = std::collections::HashSet::new();
             let mut pods: Vec<pod::PodRecord> = store
@@ -18528,7 +18795,9 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 _ => {}
             }
             if ls_args.latest {
-                pods.truncate(1);
+                if let Some(last) = pods.pop() {
+                    pods = vec![last];
+                }
             }
             print_pod_table(&pods, &ls_args);
         }
@@ -18699,9 +18968,13 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     }
                 }
             }
+            let mut errs = Vec::new();
             for pod in targets {
                 if let Some(p) = store.find(&pod) {
-                    stop_pod_members(&p).await?;
+                    if let Err(e) = stop_pod_members(&p).await {
+                        errs.push(e.to_string());
+                        continue;
+                    }
                     if let Some(sc_name) = p.labels.get("boxr.service_container") {
                         let other_running = store.list().iter().any(|other| {
                             other.labels.get("boxr.service_container") == Some(sc_name)
@@ -18727,8 +19000,11 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                         "pod", "stop", &p.id, &p.name, pod_attrs,
                     ));
                 } else if !ignore {
-                    return Err(anyhow!("Pod '{}' not found", pod));
+                    errs.push(format!("no pod with name or ID {} found: no such pod", pod));
                 }
+            }
+            if !errs.is_empty() {
+                cli::usage_errors::exit_usage_error(errs.join("\n"));
             }
         }
         PodAction::Start {
@@ -18767,17 +19043,25 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     }
                 }
             }
+            let mut errs = Vec::new();
             for pod in targets {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                start_pod_members(&p).await?;
+                let Some(p) = store.find(&pod) else {
+                    errs.push(format!("no pod with name or ID {} found: no such pod", pod));
+                    continue;
+                };
+                if let Err(e) = start_pod_members(&p).await {
+                    errs.push(e.to_string());
+                    continue;
+                }
                 if let Some(sc_name) = p.labels.get("boxr.service_container") {
                     let _ = start_container(sc_name).await;
                 }
                 if !output_policy.suppress_stdout() {
-                    println!("{}", p.id);
+                    println!("{}", p.name);
                 }
+            }
+            if !errs.is_empty() {
+                cli::usage_errors::exit_usage_error(errs.join("\n"));
             }
         }
         PodAction::Restart { all, latest, pods } => {
@@ -18803,18 +19087,33 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             } else {
                 pods
             };
+            let mut errs = Vec::new();
             for pod in targets {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                stop_pod_members(&p).await?;
-                start_pod_members(&p).await?;
+                let Some(p) = store.find(&pod) else {
+                    errs.push(format!("no pod with name or ID {} found: no such pod", pod));
+                    continue;
+                };
+                if !p.infra && p.containers.is_empty() {
+                    errs.push(format!(
+                        "no containers in pod {} have no dependencies, cannot start pod: no such container",
+                        p.id
+                    ));
+                    continue;
+                }
+                let _ = stop_pod_members(&p).await;
+                if let Err(e) = start_pod_members(&p).await {
+                    errs.push(e.to_string());
+                    continue;
+                }
                 if let Some(sc_name) = p.labels.get("boxr.service_container") {
                     let _ = start_container(sc_name).await;
                 }
                 if !output_policy.suppress_stdout() {
                     println!("{}", p.id);
                 }
+            }
+            if !errs.is_empty() {
+                cli::usage_errors::exit_usage_error(errs.join("\n"));
             }
         }
         PodAction::Kill {
@@ -18849,10 +19148,12 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                 pods
             };
             let c_store = ContainerStore::new();
+            let mut errs = Vec::new();
             for pod in targets {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
+                let Some(p) = store.find(&pod) else {
+                    errs.push(format!("no pod with name or ID {} found: no such pod", pod));
+                    continue;
+                };
                 for cid in store.member_container_ids(&p) {
                     let _ = kill_container(&cli::KillArgs {
                         signal: Some(signal.clone()),
@@ -18880,7 +19181,10 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                         println!("{}", sc_name);
                     }
                 }
-                println!("{}", pod);
+                println!("{}", p.id);
+            }
+            if !errs.is_empty() {
+                cli::usage_errors::exit_usage_error(errs.join("\n"));
             }
         }
         PodAction::Pause { all, latest, pods } => {
@@ -19083,21 +19387,142 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
             runtime::top::ContainerTop::list_pod_processes(&bundle_paths, &ps_args)?;
         }
         PodAction::Stats {
+            all,
+            latest,
+            no_reset: _,
             no_stream,
             format,
             pods,
         } => {
-            if format.as_deref().is_some_and(|f| f.contains("\"\\n\"")) {
+            if all && latest {
+                cli::usage_errors::exit_usage_error("--all and --latest cannot be used together");
+            }
+            if (all || latest) && !pods.is_empty() {
+                cli::usage_errors::exit_usage_error(
+                    "--all or --latest and pods cannot be used together",
+                );
+            }
+            if let Some(fmt) = &format {
+                if fmt.contains("\"\\n\"") {
+                    return Ok(());
+                }
+                let valid_fields = [
+                    ".CID",
+                    ".Pod",
+                    ".Name",
+                    ".Mem",
+                    ".MemUsage",
+                    ".MemUsageBytes",
+                    ".MemLimit",
+                    ".CPU",
+                    ".NetIO",
+                    ".BlockIO",
+                    ".PIDS",
+                ];
+                let mut search = fmt.as_str();
+                while let Some(start) = search.find("{{") {
+                    let Some(end) = search[start..].find("}}") else {
+                        break;
+                    };
+                    let token = search[start + 2..start + end].trim();
+                    if token.starts_with('.') && !valid_fields.contains(&token) {
+                        let field = token.trim_start_matches('.');
+                        cli::usage_errors::exit_usage_error(format!(
+                            "template: stats:1:20: executing \"stats\" at <{}>: can't evaluate field {} in type *types.PodStatsReport",
+                            token, field
+                        ));
+                    }
+                    search = &search[start + end + 2..];
+                }
+            }
+            let selected_pods: Vec<pod::PodRecord> = if !pods.is_empty() {
+                let mut v = Vec::new();
+                for pod in &pods {
+                    match store.find(pod) {
+                        Some(p) => v.push(p),
+                        None => cli::usage_errors::exit_usage_error(format!(
+                            "unable to get list of pods: no pod with name or ID {} found: no such pod",
+                            pod
+                        )),
+                    }
+                }
+                v
+            } else if latest {
+                store.list().into_iter().last().into_iter().collect()
+            } else if all {
+                store.list()
+            } else {
+                store
+                    .list()
+                    .into_iter()
+                    .filter(|p| p.status.eq_ignore_ascii_case("running"))
+                    .collect()
+            };
+            if format.as_deref() == Some("json") {
+                let c_store = ContainerStore::new();
+                let mut json_items = Vec::new();
+                for p in &selected_pods {
+                    for cid in store.member_container_ids(p) {
+                        if let Some(c) = c_store.find(&cid) {
+                            let s = stats::StatsCollector::collect_for_container(&c);
+                            json_items.push(serde_json::json!({
+                                "Pod": &p.id[..12.min(p.id.len())],
+                                "CID": s.id,
+                                "Name": s.name,
+                                "CPU": format!("{:.2}%", s.cpu_percentage),
+                                "MemUsage": format!(
+                                    "{:.2}MiB / {:.2}MiB",
+                                    s.mem_usage_bytes as f64 / (1024.0 * 1024.0),
+                                    s.mem_limit_bytes as f64 / (1024.0 * 1024.0)
+                                ),
+                                "Mem": format!("{:.2}%", s.mem_percentage),
+                                "NetIO": "0B / 0B",
+                                "BlockIO": "0B / 0B",
+                                "PIDS": s.pids.to_string(),
+                            }));
+                        }
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&json_items)?);
                 return Ok(());
             }
-            for pod in pods {
-                let p = store
-                    .find(&pod)
-                    .ok_or_else(|| anyhow!("Pod '{}' not found", pod))?;
-                stats::StatsCollector::display_stats(&store.member_container_ids(&p), no_stream)?;
+            if let Some(fmt) = &format {
+                let c_store = ContainerStore::new();
+                let body = fmt.strip_prefix("table ").unwrap_or(fmt.as_str());
+                for p in &selected_pods {
+                    let short_pod = &p.id[..12.min(p.id.len())];
+                    for cid in store.member_container_ids(p) {
+                        if let Some(c) = c_store.find(&cid) {
+                            let s = stats::StatsCollector::collect_for_container(&c);
+                            let line = body
+                                .replace("{{.Pod}}", short_pod)
+                                .replace("{{.CID}}", &s.id)
+                                .replace("{{.Name}}", &s.name)
+                                .replace("{{.CPU}}", &format!("{:.2}%", s.cpu_percentage))
+                                .replace(
+                                    "{{.MemUsage}}",
+                                    &format!(
+                                        "{:.2}MiB / {:.2}MiB",
+                                        s.mem_usage_bytes as f64 / (1024.0 * 1024.0),
+                                        s.mem_limit_bytes as f64 / (1024.0 * 1024.0)
+                                    ),
+                                )
+                                .replace("{{.Mem}}", &format!("{:.2}%", s.mem_percentage))
+                                .replace("{{.NetIO}}", "0B / 0B")
+                                .replace("{{.BlockIO}}", "0B / 0B")
+                                .replace("{{.PIDS}}", &s.pids.to_string());
+                            println!("{}", line);
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            for p in &selected_pods {
+                stats::StatsCollector::display_stats(&store.member_container_ids(p), no_stream)?;
             }
         }
         PodAction::Prune { force: _ } => {
+            let _ = guardrails::ProcessReaper::reap_stale_containers();
             let pruned = store.prune()?;
             if !pruned.is_empty() {
                 println!("Deleted Pods:");
