@@ -29,5 +29,18 @@ pod_rm_test.go
 pod_pause_test.go
 pod_top_test.go
 port_test.go
+run_aardvark_test.go
+run_cgroup_parent_test.go
+run_cleanup_test.go
+run_cpu_test.go
+run_device_test.go
+run_dns_test.go
+run_entrypoint_test.go
+run_env_test.go
+run_exit_test.go
+run_memory_test.go
+run_staticip_test.go
+run_working_dir_test.go
+
 
 

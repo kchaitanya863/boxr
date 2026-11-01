@@ -579,15 +579,31 @@ pub struct ContainerRunlabelArgs {
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct MountArgs {
+    /// Do not truncate output
+    #[arg(long = "no-trunc")]
+    pub no_trunc: bool,
+
+    /// Mount all containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
     /// Container to mount
-    pub container: String,
+    pub container: Option<String>,
 }
 
 #[derive(Args, Debug)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct UnmountArgs {
+    /// Unmount all containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Force unmount
+    #[arg(short = 'f', long = "force")]
+    pub force: bool,
+
     /// Container to unmount
-    pub container: String,
+    pub container: Option<String>,
 }
 
 #[derive(Args, Debug)]

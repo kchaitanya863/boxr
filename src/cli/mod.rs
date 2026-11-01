@@ -121,7 +121,7 @@ fn is_podman_global_flag_token(a: &str) -> bool {
 }
 
 /// Index of the first Podman subcommand token (skip flags before it).
-pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
+pub fn podman_subcommand_index(argv: &[String]) -> usize {
     const SUBCOMMANDS: &[&str] = &[
         "help",
         "pull",
@@ -335,7 +335,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 continue;
             }
         }
-        if i >= subcommand_idx && (a == "--net" || a == "--network") && i + 1 < argv.len() {
+        if i >= subcommand_idx && (a == "--net" || a == "--network") && i + 1 < argv.len() && !seen_positional_after_sub {
             if !seen_first_net {
                 seen_first_net = true;
                 out.push(a.clone());
@@ -346,7 +346,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 2;
             continue;
         }
-        if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) {
+        if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) && !seen_positional_after_sub {
             let val = a.split_once('=').map(|(_, v)| v).unwrap_or("");
             if !seen_first_net {
                 seen_first_net = true;
@@ -516,6 +516,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 let prev_takes_val = matches!(
                     prev,
                     "-e" | "--env"
+                        | "--env-merge"
                         | "-p"
                         | "--publish"
                         | "-v"
@@ -559,6 +560,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         | "--dns-search"
                         | "--dns-option"
                         | "--device"
+                        | "--cdi-spec-dir"
                         | "--tmpfs"
                         | "--mount"
                         | "--volumes-from"
@@ -599,6 +601,37 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         | "--authfile"
                         | "--cert-dir"
                         | "--creds"
+                        | "--expose"
+                        | "--ip"
+                        | "--ip6"
+                        | "--mac-address"
+                        | "--link"
+                        | "--network-alias"
+                        | "--health-cmd"
+                        | "--health-interval"
+                        | "--health-timeout"
+                        | "--health-retries"
+                        | "--health-start-period"
+                        | "--health-start-interval"
+                        | "--health-on-failure"
+                        | "--health-startup-cmd"
+                        | "--health-startup-interval"
+                        | "--health-startup-timeout"
+                        | "--health-startup-retries"
+                        | "--health-startup-success"
+                        | "--health-max-log-count"
+                        | "--health-max-log-size"
+                        | "--health-log-destination"
+                        | "--pod-id-file"
+                        | "--sdnotify"
+                        | "--cgroups"
+                        | "--isolation"
+                        | "--gpus"
+                        | "--kernel-memory"
+                        | "--cpu-count"
+                        | "--cpu-percent"
+                        | "--io-maxbandwidth"
+                        | "--io-maxiops"
                 );
                 if !prev_takes_val {
                     seen_positional_after_sub = true;
@@ -610,6 +643,12 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                         out.push("--label-file".to_string());
                         out.push(label_files.drain(..).collect::<Vec<_>>().join("\0"));
                     }
+                    out.push(a.clone());
+                    if i + 1 < argv.len() {
+                        out.push("--".to_string());
+                        out.extend_from_slice(&argv[i + 1..]);
+                    }
+                    break;
                 }
             }
         }

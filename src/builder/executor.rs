@@ -115,6 +115,7 @@ impl ImageBuilder {
         let mut step_count = 1;
         let total_steps = instructions.len();
         let mut cache_key = String::from("initial");
+        let mut seen_cmd_in_stage = false;
 
         for inst in &instructions {
             let step_text = format_instruction_for_log(inst, &arg_vars, &current_config.env);
@@ -128,6 +129,7 @@ impl ImageBuilder {
 
             match inst {
                 Instruction::From { image, as_stage } => {
+                    seen_cmd_in_stage = false;
                     let image_expanded = expand_build_vars(image, &arg_vars, &current_config.env);
                     let image = &image_expanded;
                     // If target was specified and previous stage matches, stop building
@@ -257,7 +259,22 @@ impl ImageBuilder {
                             .unwrap_or_else(|| "/".to_string());
                         current_rootfs.join(cur.trim_start_matches('/')).join(dir)
                     };
-                    fs::create_dir_all(&dest)?;
+                    if let Ok(meta) = fs::symlink_metadata(&dest) {
+                        if meta.file_type().is_symlink() {
+                            if let Ok(target) = fs::read_link(&dest) {
+                                let resolved = if target.is_absolute() {
+                                    current_rootfs.join(target.to_string_lossy().trim_start_matches('/'))
+                                } else {
+                                    dest.parent().unwrap_or(&current_rootfs).join(target)
+                                };
+                                let _ = fs::create_dir_all(&resolved);
+                            }
+                        } else if !meta.is_dir() {
+                            fs::create_dir_all(&dest)?;
+                        }
+                    } else {
+                        fs::create_dir_all(&dest)?;
+                    }
                     current_config.working_dir = Some(dir.clone());
                     cache_key = format!("{}_workdir_{}", cache_key, dir);
                 }
@@ -848,6 +865,7 @@ impl ImageBuilder {
                     cache_key = step_cache_key;
                 }
                 Instruction::Cmd(args) => {
+                    seen_cmd_in_stage = true;
                     let expanded: Vec<String> = args
                         .iter()
                         .map(|a| expand_build_vars(a, &arg_vars, &current_config.env))
@@ -860,6 +878,9 @@ impl ImageBuilder {
                         .map(|a| expand_build_vars(a, &arg_vars, &current_config.env))
                         .collect();
                     current_config.entrypoint = Some(expanded);
+                    if !seen_cmd_in_stage {
+                        current_config.cmd = None;
+                    }
                 }
                 Instruction::Expose(port) => {
                     let mut exposed = current_config.exposed_ports.take().unwrap_or_default();

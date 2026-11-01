@@ -188,6 +188,26 @@ pub fn connect_container_to_bridge_network(
     container_name: &str,
     home: Option<&std::path::Path>,
 ) -> Result<()> {
+    connect_container_to_bridge_network_with_aliases(
+        network,
+        container_id,
+        container_name,
+        &[],
+        None,
+        None,
+        home,
+    )
+}
+
+pub fn connect_container_to_bridge_network_with_aliases(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    aliases: &[String],
+    ip_override: Option<&str>,
+    mac_override: Option<&str>,
+    home: Option<&std::path::Path>,
+) -> Result<()> {
     let net_name = resolved_bridge_network_name(network)
         .ok_or_else(|| anyhow!("network {} is not a bridge network", network))?;
     let store = match home {
@@ -197,7 +217,32 @@ pub fn connect_container_to_bridge_network(
     if store.find(&net_name).is_none() {
         return Err(anyhow!("network {} not found", net_name));
     }
-    let _ = store.connect_container(&net_name, container_id, container_name)?;
+    let mut all_aliases: Vec<String> = aliases.to_vec();
+    let mut spec_ip = ip_override.map(|s| s.to_string());
+    let mut spec_mac = mac_override.map(|s| s.to_string());
+    if let Some((_, opts)) = network.split_once(':') {
+        for kv in opts.split(',') {
+            if let Some((k, v)) = kv.split_once('=') {
+                let k = k.trim();
+                let v = v.trim();
+                if k == "alias" && !v.is_empty() {
+                    all_aliases.push(v.to_string());
+                } else if k == "ip" && !v.is_empty() && spec_ip.is_none() {
+                    spec_ip = Some(v.to_string());
+                } else if k == "mac" && !v.is_empty() && spec_mac.is_none() {
+                    spec_mac = Some(v.to_string());
+                }
+            }
+        }
+    }
+    let _ = store.connect_container_with_options(
+        &net_name,
+        container_id,
+        container_name,
+        spec_mac.as_deref(),
+        spec_ip.as_deref(),
+        &all_aliases,
+    )?;
     refresh_bridge_hosts_for_network(&net_name, home)?;
     Ok(())
 }

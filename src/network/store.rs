@@ -14,6 +14,8 @@ pub struct NetworkEndpoint {
     pub container_name: String,
     pub ipv4_address: String,
     pub mac_address: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,6 +450,25 @@ impl NetworkStore {
         container_name: &str,
         mac_override: Option<&str>,
     ) -> Result<NetworkEndpoint> {
+        self.connect_container_with_options(
+            network_name,
+            container_id,
+            container_name,
+            mac_override,
+            None,
+            &[],
+        )
+    }
+
+    pub fn connect_container_with_options(
+        &self,
+        network_name: &str,
+        container_id: &str,
+        container_name: &str,
+        mac_override: Option<&str>,
+        ip_override: Option<&str>,
+        aliases: &[String],
+    ) -> Result<NetworkEndpoint> {
         if mac_override == Some("00:00:00:00:00:00") {
             return Err(anyhow!("Cannot assign requested address"));
         }
@@ -459,16 +480,31 @@ impl NetworkStore {
                 .find(|n| n.name == network_name || n.id.starts_with(network_name))
                 .ok_or_else(|| anyhow!("Network '{}' not found", network_name))?;
 
-            if let Some(ep) = net.containers.get(container_id) {
-                return Ok(ep.clone());
+            if let Some(ep) = net.containers.get_mut(container_id) {
+                for a in aliases {
+                    for part in a.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        if !ep.aliases.iter().any(|x| x == part) {
+                            ep.aliases.push(part.to_string());
+                        }
+                    }
+                }
+                let res = ep.clone();
+                self.save_unlocked(&data)?;
+                return Ok(res);
             }
 
-            let ip = allocate_ip_in_subnet_after(
-                &net.subnet,
-                &net.gateway,
-                &net.containers,
-                net.last_allocated_ip.as_deref(),
-            )?;
+            let ip: Ipv4Addr = if let Some(ip_str) = ip_override.filter(|s| !s.is_empty()) {
+                ip_str
+                    .parse()
+                    .map_err(|_| anyhow!("invalid IPv4 address: {}", ip_str))?
+            } else {
+                allocate_ip_in_subnet_after(
+                    &net.subnet,
+                    &net.gateway,
+                    &net.containers,
+                    net.last_allocated_ip.as_deref(),
+                )?
+            };
             net.last_allocated_ip = Some(ip.to_string());
             let mac = mac_override.map(|m| m.to_string()).unwrap_or_else(|| {
                 format!(
@@ -480,11 +516,21 @@ impl NetworkStore {
                 )
             });
 
+            let mut clean_aliases = Vec::new();
+            for a in aliases {
+                for part in a.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if !clean_aliases.iter().any(|x| x == part) {
+                        clean_aliases.push(part.to_string());
+                    }
+                }
+            }
+
             let endpoint = NetworkEndpoint {
                 container_id: container_id.to_string(),
                 container_name: container_name.to_string(),
                 ipv4_address: ip.to_string(),
                 mac_address: mac,
+                aliases: clean_aliases,
             };
 
             net.containers
@@ -583,14 +629,17 @@ impl NetworkStore {
             {
                 for (cid, ep) in &net.containers {
                     let short_id = if cid.len() >= 12 { &cid[..12] } else { cid };
-                    if ep.container_name == *cid || ep.container_name == short_id {
-                        lines.push(format!("{}\t{}", ep.ipv4_address, ep.container_name));
-                    } else {
-                        lines.push(format!(
-                            "{}\t{}\t{}",
-                            ep.ipv4_address, ep.container_name, cid
-                        ));
+                    let mut names = vec![ep.container_name.clone()];
+                    if ep.container_name != *cid && ep.container_name != short_id {
+                        names.push(cid.clone());
+                        names.push(short_id.to_string());
                     }
+                    for a in &ep.aliases {
+                        if !names.iter().any(|n| n == a) {
+                            names.push(a.clone());
+                        }
+                    }
+                    lines.push(format!("{}\t{}", ep.ipv4_address, names.join("\t")));
                 }
             }
 

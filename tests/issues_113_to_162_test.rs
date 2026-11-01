@@ -108,6 +108,7 @@ fn default_run_args(image: &str) -> RunArgs {
         env: Vec::new(),
         unsetenv: Vec::new(),
         unsetenv_all: false,
+        env_merge: Vec::new(),
         systemd: None,
         ports: Vec::new(),
         volumes: Vec::new(),
@@ -155,6 +156,7 @@ fn default_run_args(image: &str) -> RunArgs {
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
+        cdi_spec_dir: Vec::new(),
         security_opt: Vec::new(),
         cpu_shares: None,
         cpuset_cpus: None,
@@ -947,6 +949,10 @@ fn test_issue_149_network_create_rejects_slashes_and_spaces() {
 fn test_issue_150_network_connect_verifies_container_existence() {
     let sub = NetworkSubcommands {
         command: NetworkAction::Connect {
+            alias: Vec::new(),
+            ip: None,
+            ip6: None,
+            mac_address: None,
             network: "boxr0".to_string(),
             container: "nonexistent_container_150".to_string(),
         },

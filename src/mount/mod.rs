@@ -50,6 +50,12 @@ impl MountManager {
         Ok(())
     }
 
+    pub fn list_mounts(&self) -> Vec<MountRecord> {
+        let mut records: Vec<MountRecord> = self.load().mounts.into_values().collect();
+        records.sort_by(|a, b| a.container_id.cmp(&b.container_id));
+        records
+    }
+
     pub fn mount_container(&self, query: &str) -> Result<String> {
         let store = ContainerStore::new();
         let cont = store

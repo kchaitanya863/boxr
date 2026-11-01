@@ -232,6 +232,14 @@ pub enum NetworkAction {
     },
     Prune(NetworkPruneArgs),
     Connect {
+        #[arg(long = "alias")]
+        alias: Vec<String>,
+        #[arg(long = "ip")]
+        ip: Option<String>,
+        #[arg(long = "ip6")]
+        ip6: Option<String>,
+        #[arg(long = "mac-address")]
+        mac_address: Option<String>,
         network: String,
         container: String,
     },
