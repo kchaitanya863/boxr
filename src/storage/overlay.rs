@@ -129,6 +129,14 @@ impl OverlayDriver {
     /// CoW fallback: copies files and reproduces directory structure, ensuring container
     /// writes never modify the base image layer inodes.
     pub fn create_hardlink_tree(src: &Path, dst: &Path) -> Result<()> {
+        if src == dst {
+            return Ok(());
+        }
+        if let (Ok(cs), Ok(cd)) = (src.canonicalize(), dst.canonicalize()) {
+            if cs == cd {
+                return Ok(());
+            }
+        }
         let mut seen_inodes = std::collections::HashMap::new();
         Self::create_hardlink_tree_inner(src, src, dst, &mut seen_inodes)
     }

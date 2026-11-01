@@ -76,7 +76,11 @@ pub fn build_podman_info_document() -> Value {
         .unwrap_or_else(|| "podman".to_string());
     let mut cdi_spec_dirs = crate::containers_conf_string_array("cdi_spec_dirs");
     if !globals.cdi_spec_dirs.is_empty() {
-        cdi_spec_dirs = globals.cdi_spec_dirs.clone();
+        cdi_spec_dirs = globals
+            .cdi_spec_dirs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
     }
     if cdi_spec_dirs.is_empty() {
         cdi_spec_dirs = vec!["/etc/cdi".to_string(), "/var/run/cdi".to_string()];

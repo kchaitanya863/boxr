@@ -31,6 +31,7 @@ cat >"$WRAPPER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export BOXR_HOME="\${BOXR_HOME:-\${BOXR_BATS_HOME:-$HOME/.boxr-e2e}}"
+export BOXR_ADDITIONAL_IMAGE_STORE="\${BOXR_ADDITIONAL_IMAGE_STORE:-$CACHE_DIR/compose-image-cache:/tmp/boxr-bats-imgcache-\$(id -u):$HOME/.boxr-e2e:$HOME/.boxr}"
 mkdir -p "\$BOXR_HOME"
 podmanize_help() {
   sed -e 's/^Usage: podman /Usage:\\n  podman /' \\
@@ -59,8 +60,25 @@ if [[ -z "${CONMON_BINARY:-}" ]] && [[ ! -x /usr/bin/conmon ]] && [[ ! -x /usr/l
   ln -sf "$BOXR_BIN" "$CACHE_DIR/conmon"
   export CONMON_BINARY="$CACHE_DIR/conmon"
 fi
-export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
+export TMPDIR="${TMPDIR:-$CACHE_DIR/tmp}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$TMPDIR/xdg-runtime}"
+mkdir -p "$TMPDIR" "$XDG_RUNTIME_DIR"
+export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "$TMPDIR/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
+export BOXR_ADDITIONAL_IMAGE_STORE="${BOXR_ADDITIONAL_IMAGE_STORE:-$CACHE_DIR/compose-image-cache:/tmp/boxr-bats-imgcache-$(id -u):$HOME/.boxr-e2e:$HOME/.boxr}"
+
+mkdir -p "$CACHE_DIR/compose-image-cache"
+for e2e_img in \
+  "quay.io/libpod/testimage:20241011" \
+  "quay.io/libpod/alpine:latest" \
+  "quay.io/libpod/busybox:latest" \
+  "quay.io/libpod/redis:alpine" \
+  "quay.io/libpod/alpine_nginx:latest" \
+  "quay.io/libpod/alpine_healthcheck:latest"; do
+  if ! BOXR_HOME="$CACHE_DIR/compose-image-cache" "$BOXR_BIN" image exists "$e2e_img" 2>/dev/null; then
+    BOXR_HOME="$CACHE_DIR/compose-image-cache" "$BOXR_BIN" pull "$e2e_img" >/dev/null 2>&1 || true
+  fi
+done
 
 if ! command -v skopeo >/dev/null 2>&1; then
   mkdir -p "$CACHE_DIR/bin"

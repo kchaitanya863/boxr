@@ -13,9 +13,24 @@ pub struct SeccompSyscall {
     pub action: String,
 }
 
-/// Apply the default seccomp BPF filter inside the container process.
+/// Apply a custom seccomp JSON profile if present, or the default seccomp BPF filter.
 #[cfg(target_os = "linux")]
-pub fn apply_default_seccomp() -> anyhow::Result<()> {
+pub fn apply_seccomp_from_profile(profile_path: Option<&str>) -> anyhow::Result<()> {
+    if let Some(p) = profile_path {
+        if p == "unconfined" {
+            return Ok(());
+        }
+        let raw_opt = if p.trim_start().starts_with('{') {
+            Some(p.to_string())
+        } else {
+            std::fs::read_to_string(p).ok()
+        };
+        if let Some(raw) = raw_opt {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                return apply_seccomp_spec(&val);
+            }
+        }
+    }
     let val = serde_json::to_value(SeccompRule::default_filter())?;
     apply_seccomp_spec(&val)
 }
@@ -47,6 +62,21 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
     let mut mismatch_action = SeccompAction::Errno(libc::EPERM as u32);
     let mut filter_map: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
 
+    let insert_syscall_name =
+        |filter_map: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>, name: &str| {
+            if name == "link" || name == "linkat" {
+                #[cfg(target_arch = "x86_64")]
+                filter_map.insert(libc::SYS_link as i64, vec![]);
+                filter_map.insert(libc::SYS_linkat as i64, vec![]);
+            } else if name == "symlink" || name == "symlinkat" {
+                #[cfg(target_arch = "x86_64")]
+                filter_map.insert(libc::SYS_symlink as i64, vec![]);
+                filter_map.insert(libc::SYS_symlinkat as i64, vec![]);
+            } else if let Some(nr) = syscall_name_to_nr(name) {
+                filter_map.insert(nr as i64, vec![]);
+            }
+        };
+
     if let Some(syscalls) = seccomp_val.get("syscalls").and_then(|v| v.as_array()) {
         for sc in syscalls {
             let act_str = sc
@@ -59,19 +89,18 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
                 if let Some(names) = sc.get("names").and_then(|v| v.as_array()) {
                     for name_val in names {
                         if let Some(name) = name_val.as_str() {
-                            if let Some(nr) = syscall_name_to_nr(name) {
-                                filter_map.insert(nr as i64, vec![]);
-                            }
+                            insert_syscall_name(&mut filter_map, name);
                         }
                     }
+                }
+                if let Some(name) = sc.get("name").and_then(|v| v.as_str()) {
+                    insert_syscall_name(&mut filter_map, name);
                 }
             }
         }
     } else {
         for name in &SeccompRule::default_filter().syscalls[0].names {
-            if let Some(nr) = syscall_name_to_nr(name) {
-                filter_map.insert(nr as i64, vec![]);
-            }
+            insert_syscall_name(&mut filter_map, name);
         }
     }
 
@@ -110,6 +139,17 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
     }
     seccompiler::apply_filter(&bpf)?;
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn apply_seccomp_from_profile(_profile_path: Option<&str>) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Apply the default seccomp BPF filter inside the container process.
+#[cfg(target_os = "linux")]
+pub fn apply_default_seccomp() -> anyhow::Result<()> {
+    apply_seccomp_from_profile(None)
 }
 
 #[cfg(not(target_os = "linux"))]

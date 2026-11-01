@@ -22,35 +22,51 @@ pub struct ResourceLimits {
 impl ResourceLimits {
     pub fn parse_memory(input: &str) -> Result<i64> {
         let input = input.trim().to_lowercase();
-        let (num_str, multiplier) = if let Some(n) = input.strip_suffix("g") {
-            (n, 1024 * 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("gb") {
-            (n, 1024 * 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("m") {
-            (n, 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("mb") {
-            (n, 1024 * 1024)
-        } else if let Some(n) = input.strip_suffix("k") {
-            (n, 1024)
-        } else if let Some(n) = input.strip_suffix("kb") {
-            (n, 1024)
+        let (num_str, multiplier) = if let Some(n) = input.strip_suffix("ti") {
+            (n, 1024_i64 * 1024 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("tb").or_else(|| input.strip_suffix("t")) {
+            (n, 1024_i64 * 1024 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("gi") {
+            (n, 1024_i64 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("gb").or_else(|| input.strip_suffix("g")) {
+            (n, 1024_i64 * 1024 * 1024)
+        } else if let Some(n) = input.strip_suffix("mi") {
+            (n, 1024_i64 * 1024)
+        } else if let Some(n) = input.strip_suffix("mb").or_else(|| input.strip_suffix("m")) {
+            (n, 1024_i64 * 1024)
+        } else if let Some(n) = input.strip_suffix("ki") {
+            (n, 1024_i64)
+        } else if let Some(n) = input.strip_suffix("kb").or_else(|| input.strip_suffix("k")) {
+            (n, 1024_i64)
         } else if let Some(n) = input.strip_suffix("b") {
-            (n, 1)
+            (n, 1_i64)
         } else {
-            (input.as_str(), 1)
+            (input.as_str(), 1_i64)
         };
 
-        let val: i64 = num_str.parse().context("Invalid memory limit string")?;
-        if val < 0 {
+        if let Ok(val) = num_str.parse::<i64>() {
+            if val < 0 {
+                return Err(anyhow::anyhow!(
+                    "Memory limit must be non-negative, got '{}'",
+                    input
+                ));
+            }
+            if val == 0 {
+                return Ok(0);
+            }
+            return Ok(val * multiplier);
+        }
+        let val_f: f64 = num_str.parse().context("Invalid memory limit string")?;
+        if !val_f.is_finite() || val_f < 0.0 {
             return Err(anyhow::anyhow!(
                 "Memory limit must be non-negative, got '{}'",
                 input
             ));
         }
-        if val == 0 {
+        if val_f == 0.0 {
             return Ok(0);
         }
-        Ok(val * multiplier)
+        Ok((val_f * multiplier as f64) as i64)
     }
 
     pub fn parse_cpus(input: &str) -> Result<(i64, u64)> {

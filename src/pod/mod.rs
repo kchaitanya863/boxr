@@ -258,6 +258,9 @@ impl PodStore {
                 return custom.clone();
             }
         }
+        if pod.labels.get("boxr.kube_pod").map(|s| s.as_str()) == Some("true") && !pod.id.is_empty() {
+            return format!("{}-infra", &pod.id[..12.min(pod.id.len())]);
+        }
         format!("{}-infra", pod.name)
     }
 
@@ -504,6 +507,17 @@ impl PodStore {
         if let Some(sc) = removed.labels.get("boxr.service_container") {
             let _ = crate::remove_container_quiet(sc, true, false);
         }
+        if let Some(anon_vols) = removed.labels.get("boxr.pod.anon_volumes") {
+            let v_store = crate::volume::VolumeStore::with_home(self.home.clone());
+            for v in anon_vols.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let _ = v_store.remove(v);
+            }
+        }
+        if let Some(mem_dirs) = removed.labels.get("boxr.pod.mem_dirs") {
+            for d in mem_dirs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let _ = fs::remove_dir_all(d);
+            }
+        }
         if let Ok(cg) = crate::cgroups::CgroupV2Manager::path_only(&removed.id).cleanup() {
             let _ = cg;
         }
@@ -511,10 +525,12 @@ impl PodStore {
     }
 
     pub fn prune(&self) -> Result<Vec<String>> {
+        let _ = crate::guardrails::ProcessReaper::reap_stale_containers();
         let home = self.home.clone();
-        crate::storage::index_lock::with_index_lock(&self.index_file, || {
+        let mut containers_to_remove = Vec::new();
+        let pruned = crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let mut data = self.load_unlocked();
-            let c_store = ContainerStore::with_home(home);
+            let c_store = ContainerStore::with_home(home.clone());
             let mut pruned = Vec::new();
             let mut infra_to_remove = Vec::new();
 
@@ -522,7 +538,12 @@ impl PodStore {
                 let any_running = p.containers.iter().any(|cid| {
                     c_store
                         .find(cid)
-                        .map(|c| matches!(c.status, ContainerStatus::Running))
+                        .map(|c| {
+                            matches!(
+                                c.status,
+                                ContainerStatus::Running | ContainerStatus::Paused
+                            )
+                        })
                         .unwrap_or(false)
                 });
                 let infra_running = c_store
@@ -531,18 +552,23 @@ impl PodStore {
                     .map(|c| matches!(c.status, ContainerStatus::Running))
                     .unwrap_or(false);
 
-                let should_prune = !any_running
-                    && !infra_running
-                    && (!matches!(p.status.as_str(), "Running" | "Created")
-                        || (!p.infra && !p.containers.is_empty()));
+                let has_workload = !p.containers.is_empty();
+                let should_prune = if has_workload {
+                    !any_running
+                } else {
+                    !any_running && !infra_running && p.status != "Running"
+                };
+
                 if should_prune {
                     for cid in &p.containers {
-                        let _ = c_store.remove(cid);
+                        containers_to_remove.push(cid.clone());
                     }
-                    if !p.infra_container_id.is_empty() {
-                        let _ = c_store.remove(&p.infra_container_id);
+                    if p.infra {
+                        containers_to_remove.push(format!("{}-infra", p.name));
+                        if !p.infra_container_id.is_empty() {
+                            containers_to_remove.push(p.infra_container_id.clone());
+                        }
                     }
-                    let _ = c_store.remove(&format!("{}-infra", p.name));
                     pruned.push(p.name.clone());
                     infra_to_remove.push((p.infra_container_id.clone(), format!("{}-infra", p.name)));
                     false
@@ -561,7 +587,22 @@ impl PodStore {
                 }
             }
             Ok(pruned)
-        })
+        })?;
+        let c_store = ContainerStore::with_home(self.home.clone());
+        for cid in containers_to_remove {
+            if let Some(c) = c_store.find(&cid) {
+                let _ = crate::stop_container_with_home_and_timeout(
+                    &c.id,
+                    None,
+                    Some(0),
+                    Some(self.home.as_path()),
+                    true,
+                    None,
+                );
+                let _ = crate::remove_container_quiet(&c.id, true, false);
+            }
+        }
+        Ok(pruned)
     }
 
     pub fn update_status(&self, pod_query: &str, status: &str) -> Result<()> {
@@ -799,18 +840,29 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
             "invalid config provided: networks must be defined when the pod is created: network cannot be configured when it is shared with a pod",
         );
     }
+    if pod.share_net && !args.add_host.is_empty() {
+        crate::cli::usage_errors::exit_usage_error(
+            "extra host entries must be specified on the pod: network cannot be configured when it is shared with a pod",
+        );
+    }
     let has_infra = pod.infra && !infra_name.is_empty();
-    let explicit_custom_net = args.network != "auto"
-        && args.network != "bridge"
-        && args.network != "default"
-        && !args.network.is_empty()
-        && !args.network.starts_with("container:");
-    if pod.network.as_deref() == Some("host") {
-        args.network = "host".to_string();
-    } else if pod.network.as_deref() == Some("none") {
-        args.network = "none".to_string();
+    let explicit_net = crate::cli::CLI_EXPLICIT_NETWORK.get() == Some(&true);
+    let explicit_custom_net = explicit_net
+        || (args.network != "auto"
+            && args.network != "bridge"
+            && args.network != "default"
+            && !args.network.is_empty()
+            && !args.network.starts_with("container:"));
+    if args.network == "pod" {
+        if has_infra {
+            args.network = format!("container:{}", infra_name);
+        }
     } else if !explicit_custom_net {
-        if pod.share_net {
+        if pod.network.as_deref() == Some("host") {
+            args.network = "host".to_string();
+        } else if pod.network.as_deref() == Some("none") {
+            args.network = "none".to_string();
+        } else if pod.share_net {
             if has_infra {
                 args.network = format!("container:{}", infra_name);
             } else if let Some(net) = &pod.network {
@@ -823,28 +875,36 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
     if pod.labels.get("boxr.pod.shm_size").is_some() && args.ipc.as_deref() == Some("host") {
         crate::cli::usage_errors::exit_usage_error("cannot set --shm-size with --ipc=host");
     }
-    if pod.share_ipc && args.ipc.is_none() {
+    if args.ipc.as_deref() == Some("pod") && has_infra {
+        args.ipc = Some(format!("container:{}", infra_name));
+    } else if pod.share_ipc && args.ipc.is_none() {
         if let Some(pod_ipc) = pod.labels.get("boxr.pod.ipc") {
             args.ipc = Some(pod_ipc.clone());
         } else if has_infra {
             args.ipc = Some(format!("container:{}", infra_name));
         }
     }
-    if pod.share_uts && args.uts.is_none() {
+    if args.uts.as_deref() == Some("pod") && has_infra {
+        args.uts = Some(format!("container:{}", infra_name));
+    } else if pod.share_uts && args.uts.is_none() {
         if let Some(pod_uts) = pod.labels.get("boxr.pod.uts") {
             args.uts = Some(pod_uts.clone());
         } else if has_infra {
             args.uts = Some(format!("container:{}", infra_name));
         }
     }
-    if pod.share_pid && args.pid.is_none() {
+    if args.pid.as_deref() == Some("pod") && has_infra {
+        args.pid = Some(format!("container:{}", infra_name));
+    } else if pod.share_pid && args.pid.is_none() {
         if let Some(pod_pid) = pod.labels.get("boxr.pod.pid") {
             args.pid = Some(pod_pid.clone());
         } else if has_infra {
             args.pid = Some(format!("container:{}", infra_name));
         }
     }
-    if pod.labels.get("boxr.pod.share_cgroup").map(|s| s.as_str()) == Some("true")
+    if args.cgroupns.as_deref() == Some("pod") && has_infra {
+        args.cgroupns = Some(format!("container:{}", pod.infra_container_id));
+    } else if pod.labels.get("boxr.pod.share_cgroup").map(|s| s.as_str()) == Some("true")
         && args.cgroupns.is_none()
         && has_infra
     {

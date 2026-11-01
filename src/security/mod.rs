@@ -22,6 +22,8 @@ pub struct RootlessUserConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UsernsMappingMode {
     pub keep_id: bool,
+    pub keep_id_uid: Option<u32>,
+    pub keep_id_gid: Option<u32>,
     pub nomap: bool,
     pub keep_id_uid: Option<u32>,
     pub keep_id_gid: Option<u32>,

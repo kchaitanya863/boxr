@@ -324,16 +324,43 @@ impl ImageStore {
             return None;
         }
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
-            let data = self.load_unlocked();
-            let matching: Vec<ImageRecord> = data
+            let mut data = self.load_unlocked();
+            let mut matching: Vec<ImageRecord> = data
                 .images
-                .into_iter()
+                .iter()
                 .rev()
                 .filter(|img| query_matches_image(img, query_trimmed))
+                .cloned()
                 .collect();
+            if matching.is_empty() {
+                let mut alt_roots = additional_image_store_roots_from_env();
+                if let Ok(env_roots) = std::env::var("BOXR_ADDITIONAL_IMAGE_STORE") {
+                    for part in env_roots.split(':') {
+                        let trimmed = part.trim();
+                        if !trimmed.is_empty() {
+                            alt_roots.push(PathBuf::from(trimmed));
+                        }
+                    }
+                }
+                for alt_root in alt_roots {
+                    let alt_file = alt_root.join("images.json");
+                    if alt_file.exists() && alt_file != self.index_file {
+                        if let Ok(content) = fs::read_to_string(&alt_file) {
+                            if let Ok(alt_data) = serde_json::from_str::<ImageStoreData>(&content) {
+                                for alt_img in alt_data.images {
+                                    if query_matches_image(&alt_img, query_trimmed) {
+                                        matching.push(alt_img);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if matching.is_empty() {
                 return Ok(None);
             }
+            let _ = &mut data;
             if let Some(target_plat) = platform {
                 let (target_os, norm_arch) = {
                     let (os, arch) = if let Some((os, arch)) = target_plat.split_once('/') {
@@ -720,9 +747,13 @@ impl ImageStore {
                 .split(':')
                 .next()
                 .unwrap_or(full_tag);
-            if !full_tag.contains('/') {
+            let first_comp = full_tag.split('/').next().unwrap_or("");
+            let has_registry = full_tag.contains('/')
+                && (first_comp.contains('.') || first_comp.contains(':') || first_comp == "localhost");
+            if !has_registry {
+                let repo_part = name_only.strip_prefix("localhost/").unwrap_or(name_only);
                 (
-                    name_only.to_string(),
+                    repo_part.to_string(),
                     parsed_ref.tag.clone(),
                     "localhost".to_string(),
                 )
@@ -755,9 +786,13 @@ impl ImageStore {
                 history: Vec::new(),
             });
 
-        let bundle_config = PathBuf::from(&container.bundle_path).join("config.json");
+        let bundle_dir_path = PathBuf::from(&container.bundle_path);
+        let bundle_config = bundle_dir_path.join("config.json");
         if let Ok(content) = fs::read_to_string(&bundle_config) {
             if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content) {
+                let exec = base_config
+                    .config
+                    .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
                 let run_args = spec.process.args;
                 let exec = base_config
                     .config
@@ -808,6 +843,23 @@ impl ImageStore {
                 if !exp.is_empty() {
                     exec.exposed_ports = Some(exp);
                 }
+                if !spec.process.cwd.is_empty() {
+                    exec.working_dir = Some(spec.process.cwd);
+                }
+            }
+        }
+        if let Ok(raw_labels) = fs::read_to_string(bundle_dir_path.join("labels.json")) {
+            if let Ok(lbls) = serde_json::from_str::<Vec<String>>(&raw_labels) {
+                let exec = base_config
+                    .config
+                    .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+                let mut labels = exec.labels.take().unwrap_or_default();
+                for l in lbls {
+                    if let Some((k, v)) = l.split_once('=') {
+                        labels.insert(k.to_string(), v.to_string());
+                    }
+                }
+                exec.labels = Some(labels);
             }
         }
 
@@ -926,7 +978,12 @@ impl ImageStore {
                 }
                 exec.volumes = Some(vols);
             } else if key.eq_ignore_ascii_case("STOPSIGNAL") {
-                exec.stop_signal = Some(val.to_string());
+                let sig = if val == "51" {
+                    "SIGRTMAX-13".to_string()
+                } else {
+                    val.to_string()
+                };
+                exec.stop_signal = Some(sig);
             } else if key.eq_ignore_ascii_case("ONBUILD") {
             } else {
                 let norm = format!("{} {}", key, val);

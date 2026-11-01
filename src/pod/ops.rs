@@ -17,12 +17,18 @@ impl PodOps {
             .find(source)
             .ok_or_else(|| anyhow!("Source pod '{}' not found", source))?;
 
-        if pod_store.find(target).is_some() {
-            return Err(anyhow!("Target pod '{}' already exists", target));
+        let target_name = if target.trim().is_empty() {
+            format!("{}-clone", src_pod.name)
+        } else {
+            target.trim().to_string()
+        };
+
+        if pod_store.find(&target_name).is_some() {
+            return Err(anyhow!("Target pod '{}' already exists", target_name));
         }
 
         let cfg = PodConfig {
-            name: Some(target.to_string()),
+            name: Some(target_name.clone()),
             ports: src_pod.ports.clone(),
             hostname: src_pod.hostname.clone(),
             labels: src_pod.labels.clone(),
@@ -50,31 +56,43 @@ impl PodOps {
         };
 
         let new_pod = pod_store.create_with_config(cfg)?;
+        let src_infra_name = pod_store.infra_name(&src_pod);
 
         for cid in &src_pod.containers {
+            if cid == &src_pod.infra_container_id || cid == &src_infra_name {
+                continue;
+            }
             if let Some(c) = c_store.find(cid) {
+                if c.id == src_pod.infra_container_id || c.name == src_infra_name {
+                    continue;
+                }
                 let suffix = c
                     .name
                     .strip_prefix(&format!("{}-", src_pod.name))
                     .unwrap_or(&c.name);
-                let new_c_name = format!("{}-{}", target, suffix);
+                let new_c_name = format!("{}-{}-clone", target_name, suffix);
 
-                let rand_bytes: [u8; 6] = crate::rand_bytes();
-                let new_cid = hex::encode(rand_bytes);
+                let new_cid = crate::new_container_id();
                 let home = crate::storage::boxr_home();
                 let new_bundle = home.join("containers").join(&new_cid);
                 let old_bundle = PathBuf::from(&c.bundle_path);
 
                 fs::create_dir_all(&new_bundle)?;
                 if old_bundle.exists() {
-                    let old_config = old_bundle.join("config.json");
-                    if old_config.exists() {
-                        let _ = fs::copy(&old_config, new_bundle.join("config.json"));
+                    for fname in ["config.json", "mounts.json", "create_command.json", "hosts.json"]
+                    {
+                        let src_f = old_bundle.join(fname);
+                        if src_f.exists() {
+                            let _ = fs::copy(&src_f, new_bundle.join(fname));
+                        }
                     }
                     let old_rootfs = old_bundle.join("rootfs");
                     let new_rootfs = new_bundle.join("rootfs");
                     if old_rootfs.exists() {
-                        let _ = fs::create_dir_all(&new_rootfs);
+                        let _ = crate::storage::overlay::OverlayDriver::create_hardlink_tree(
+                            &old_rootfs,
+                            &new_rootfs,
+                        );
                     }
                 }
 
@@ -94,7 +112,7 @@ impl PodOps {
                 };
 
                 let _ = c_store.add(new_container);
-                let _ = pod_store.add_container_to_pod(&new_pod.name, &new_cid);
+                let _ = pod_store.add_created_container_to_pod(&new_pod.name, &new_cid);
             }
         }
 

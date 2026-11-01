@@ -22,10 +22,13 @@ extern "C" fn kube_wait_sig_handler(_sig: libc::c_int) {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubePodYaml {
-    #[serde(rename = "apiVersion")]
+    #[serde(rename = "apiVersion", default)]
     pub api_version: String,
+    #[serde(default)]
     pub kind: String,
+    #[serde(default)]
     pub metadata: KubeMetadata,
+    #[serde(default)]
     pub spec: KubePodSpec,
     #[serde(default)]
     pub status: Option<serde_json::Value>,
@@ -33,30 +36,98 @@ pub struct KubePodYaml {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KubeMetadata {
+    #[serde(default, deserialize_with = "deserialize_any_string")]
     pub name: String,
     #[serde(rename = "creationTimestamp", skip_serializing_if = "Option::is_none")]
     pub creation_timestamp: Option<String>,
     #[serde(
         default,
-        deserialize_with = "deserialize_null_default",
+        deserialize_with = "deserialize_any_string_map",
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub labels: HashMap<String, String>,
     #[serde(
         default,
-        deserialize_with = "deserialize_null_default",
+        deserialize_with = "deserialize_any_string_map",
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub annotations: HashMap<String, String>,
 }
 
-fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+fn deserialize_any_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
-    T: Default + Deserialize<'de>,
     D: serde::Deserializer<'de>,
 {
-    let opt = Option::deserialize(deserializer)?;
-    Ok(opt.unwrap_or_default())
+    let val = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    Ok(match val {
+        None | Some(serde_yaml::Value::Null) => String::new(),
+        Some(serde_yaml::Value::String(s)) => s,
+        Some(serde_yaml::Value::Bool(b)) => b.to_string(),
+        Some(serde_yaml::Value::Number(n)) => n.to_string(),
+        Some(other) => serde_yaml::to_string(&other)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    })
+}
+
+fn deserialize_any_string_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<HashMap<String, serde_yaml::Value>>::deserialize(deserializer)?;
+    let mut out = HashMap::new();
+    if let Some(map) = opt {
+        for (k, v) in map {
+            let v_str = match v {
+                serde_yaml::Value::Null => String::new(),
+                serde_yaml::Value::String(s) => s,
+                serde_yaml::Value::Bool(b) => b.to_string(),
+                serde_yaml::Value::Number(n) => n.to_string(),
+                other => serde_yaml::to_string(&other)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            };
+            out.insert(k, v_str);
+        }
+    }
+    Ok(out)
+}
+
+fn deserialize_null_u16<'de, D>(deserializer: D) -> std::result::Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_yaml::Value::Null) => Ok(0),
+        Some(serde_yaml::Value::Number(n)) => Ok(n.as_u64().unwrap_or(0) as u16),
+        Some(serde_yaml::Value::String(s)) => Ok(s.trim().parse::<u16>().unwrap_or(0)),
+        _ => Ok(0),
+    }
+}
+
+fn deserialize_opt_u16<'de, D>(deserializer: D) -> std::result::Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    match val {
+        None | Some(serde_yaml::Value::Null) => Ok(None),
+        Some(serde_yaml::Value::Number(n)) => Ok(n.as_u64().map(|v| v as u16)),
+        Some(serde_yaml::Value::String(s)) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Ok(None)
+            } else {
+                Ok(t.parse::<u16>().ok())
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,6 +156,18 @@ pub struct KubePodSpec {
         skip_serializing_if = "Option::is_none"
     )]
     pub host_network: Option<bool>,
+    #[serde(
+        rename = "hostPID",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub host_pid: Option<bool>,
+    #[serde(
+        rename = "hostIPC",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub host_ipc: Option<bool>,
     #[serde(rename = "hostUsers", default, skip_serializing_if = "Option::is_none")]
     pub host_users: Option<bool>,
     #[serde(
@@ -107,6 +190,12 @@ pub struct KubePodSpec {
     pub host_aliases: Option<Vec<KubeHostAlias>>,
     #[serde(rename = "dnsConfig", default, skip_serializing_if = "Option::is_none")]
     pub dns_config: Option<KubeDnsConfig>,
+    #[serde(
+        rename = "securityContext",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub security_context: Option<KubeSecurityContext>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -157,7 +246,9 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KubeContainerSpec {
+    #[serde(default, deserialize_with = "deserialize_any_string")]
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_any_string")]
     pub image: String,
     #[serde(
         default,
@@ -175,6 +266,8 @@ pub struct KubeContainerSpec {
     pub ports: Option<Vec<KubeContainerPort>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<Vec<KubeEnvVar>>,
+    #[serde(rename = "envFrom", default, skip_serializing_if = "Option::is_none")]
+    pub env_from: Option<Vec<KubeEnvFromSource>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<serde_json::Value>,
     #[serde(
@@ -201,6 +294,68 @@ pub struct KubeContainerSpec {
         skip_serializing_if = "Option::is_none"
     )]
     pub liveness_probe: Option<KubeProbe>,
+    #[serde(
+        rename = "startupProbe",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub startup_probe: Option<KubeProbe>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<KubeLifecycle>,
+    #[serde(
+        rename = "imagePullPolicy",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub image_pull_policy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeLifecycle {
+    #[serde(
+        rename = "stopSignal",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub stop_signal: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeSeccompProfile {
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub profile_type: Option<String>,
+    #[serde(
+        rename = "localhostProfile",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub localhost_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeEnvFromSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(
+        rename = "configMapRef",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub config_map_ref: Option<KubeEnvSource>,
+    #[serde(
+        rename = "secretRef",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_ref: Option<KubeEnvSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeEnvSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -237,6 +392,20 @@ pub struct KubeSecurityContext {
     pub proc_mount: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<serde_json::Value>,
+    #[serde(
+        rename = "seccompProfile",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub seccomp_profile: Option<KubeSeccompProfile>,
+    #[serde(
+        rename = "supplementalGroups",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supplemental_groups: Option<Vec<u32>>,
+    #[serde(rename = "fsGroup", default, skip_serializing_if = "Option::is_none")]
+    pub fs_group: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -259,7 +428,12 @@ pub struct KubeVolumeMount {
     pub mount_path: String,
     #[serde(rename = "subPath", default, skip_serializing_if = "Option::is_none")]
     pub sub_path: Option<String>,
-    #[serde(rename = "readOnly", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "readOnly",
+        alias = "readonly",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub read_only: Option<bool>,
 }
 
@@ -276,6 +450,68 @@ pub struct KubeVolume {
     pub persistent_volume_claim: Option<KubePvcVolumeSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<KubeImageVolumeSource>,
+    #[serde(rename = "configMap", default, skip_serializing_if = "Option::is_none")]
+    pub config_map: Option<KubeConfigMapVolumeSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<KubeSecretVolumeSource>,
+    #[serde(rename = "emptyDir", default, skip_serializing_if = "Option::is_none")]
+    pub empty_dir: Option<KubeEmptyDirVolumeSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeConfigMapVolumeSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(
+        rename = "defaultMode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<KubeKeyToPath>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeSecretVolumeSource {
+    #[serde(
+        rename = "secretName",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(
+        rename = "defaultMode",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<KubeKeyToPath>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeKeyToPath {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KubeEmptyDirVolumeSource {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<String>,
+    #[serde(rename = "sizeLimit", default, skip_serializing_if = "Option::is_none")]
+    pub size_limit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -325,6 +561,12 @@ pub struct KubeProbe {
     )]
     pub failure_threshold: Option<u32>,
     #[serde(
+        rename = "successThreshold",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub success_threshold: Option<u32>,
+    #[serde(
         rename = "periodSeconds",
         default,
         skip_serializing_if = "Option::is_none"
@@ -340,9 +582,18 @@ pub struct KubeExecAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubeContainerPort {
-    #[serde(rename = "containerPort", default = "default_container_port")]
+    #[serde(
+        rename = "containerPort",
+        default = "default_container_port",
+        deserialize_with = "deserialize_null_u16"
+    )]
     pub container_port: u16,
-    #[serde(rename = "hostPort", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "hostPort",
+        default,
+        deserialize_with = "deserialize_opt_u16",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub host_port: Option<u16>,
     #[serde(rename = "hostIP", default, skip_serializing_if = "Option::is_none")]
     pub host_ip: Option<String>,
@@ -384,8 +635,9 @@ fn decode_base64_simple(input: &str) -> Vec<u8> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KubeEnvVar {
+    #[serde(default, deserialize_with = "deserialize_any_string")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_any_string")]
     pub value: String,
     #[serde(rename = "valueFrom", default, skip_serializing_if = "Option::is_none")]
     pub value_from: Option<KubeEnvVarSource>,
@@ -399,12 +651,22 @@ pub struct KubeEnvVarSource {
         skip_serializing_if = "Option::is_none"
     )]
     pub config_map_key_ref: Option<KubeKeySelector>,
+    #[serde(
+        rename = "secretKeyRef",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_key_ref: Option<KubeKeySelector>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KubeKeySelector {
+    #[serde(default, deserialize_with = "deserialize_any_string")]
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_any_string")]
     pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optional: Option<bool>,
 }
 
 pub struct KubeManager;
@@ -459,6 +721,7 @@ impl KubeManager {
 
     fn load_configmaps(paths: &[String]) -> Result<HashMap<(String, String), String>> {
         let mut map = HashMap::new();
+        let mut seen_names = std::collections::HashSet::new();
         for raw_arg in paths {
             let candidates: Vec<&str> = if Path::new(raw_arg).exists() {
                 vec![raw_arg.as_str()]
@@ -470,9 +733,16 @@ impl KubeManager {
                 if p.is_empty() {
                     continue;
                 }
-                let content = fs::read_to_string(p)
-                    .with_context(|| format!("Failed to read ConfigMap YAML at {:?}", p))?;
-                Self::extract_configmaps_from_str(&content, &mut map)?;
+                let content = match fs::read_to_string(p) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "open {}: {}",
+                            p, e
+                        ));
+                    }
+                };
+                Self::extract_configmaps_from_str_with_names(&content, &mut map, &mut seen_names)?;
             }
         }
         Ok(map)
@@ -482,14 +752,52 @@ impl KubeManager {
         content: &str,
         map: &mut HashMap<(String, String), String>,
     ) -> Result<()> {
+        let mut seen_names = std::collections::HashSet::new();
+        for (cm_name, k) in map.keys() {
+            if k == "__cm_exists__" {
+                seen_names.insert(cm_name.clone());
+            }
+        }
+        Self::extract_configmaps_from_str_with_names(content, map, &mut seen_names)
+    }
+
+    fn extract_configmaps_from_str_with_names(
+        content: &str,
+        map: &mut HashMap<(String, String), String>,
+        seen_names: &mut std::collections::HashSet<String>,
+    ) -> Result<()> {
         for doc in serde_yaml::Deserializer::from_str(content) {
-            let val = serde_yaml::Value::deserialize(doc)?;
+            let val = match serde_yaml::Value::deserialize(doc) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let line_num = e
+                        .location()
+                        .map(|l| l.line())
+                        .unwrap_or(1);
+                    let clean_msg = msg
+                        .split(" at line ")
+                        .next()
+                        .unwrap_or(&msg);
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "multi doc yaml could not be split: yaml: line {}: {}",
+                        line_num, clean_msg
+                    ));
+                }
+            };
             if val.is_null() {
                 continue;
             }
             let kind = val.get("kind").and_then(|k| k.as_str()).unwrap_or("");
             if kind == "ConfigMap" {
                 let cm_name = val["metadata"]["name"].as_str().unwrap_or("").to_string();
+                if !cm_name.is_empty() && !seen_names.insert(cm_name.clone()) {
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "ambiguous configuration: the same config map {} is present in YAML and in --configmaps",
+                        cm_name
+                    ));
+                }
+                map.insert((cm_name.clone(), "__cm_exists__".to_string()), "1".to_string());
                 if let Some(data) = val.get("data").and_then(|d| d.as_mapping()) {
                     for (k, v) in data {
                         if let Some(k_str) = k.as_str() {
@@ -500,6 +808,15 @@ impl KubeManager {
                                 _ => String::new(),
                             };
                             map.insert((cm_name.clone(), k_str.to_string()), v_str);
+                        }
+                    }
+                }
+                if let Some(bdata) = val.get("binaryData").and_then(|d| d.as_mapping()) {
+                    for (k, v) in bdata {
+                        if let (Some(k_str), Some(b64)) = (k.as_str(), v.as_str()) {
+                            let decoded = String::from_utf8_lossy(&decode_base64_simple(b64.trim()))
+                                .into_owned();
+                            map.insert((cm_name.clone(), k_str.to_string()), decoded);
                         }
                     }
                 }
@@ -538,8 +855,33 @@ impl KubeManager {
     }
 
     pub async fn play_kube_with_args(args: &KubePlayArgs) -> Result<()> {
+        if let Some(ref val_mode) = args.validate {
+            if !matches!(
+                val_mode.as_str(),
+                "strict" | "warn" | "ignore" | "noop"
+            ) {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "{:?} is not a valid value for --validate",
+                    val_mode
+                ));
+            }
+        }
+        let mut all_files = vec![args.file.clone()];
+        all_files.extend(args.extra_files.iter().cloned());
         if args.down {
-            return Self::play_kube_down_str(&args.file);
+            for f in &all_files {
+                Self::play_kube_down_str_with_force(f, args.force)?;
+            }
+            return Ok(());
+        }
+        if all_files.len() > 1 {
+            for f in &all_files {
+                let mut single = args.clone();
+                single.file = f.clone();
+                single.extra_files.clear();
+                Box::pin(Self::play_kube_with_args(&single)).await?;
+            }
+            return Ok(());
         }
         if let Some(auth) = &args.authfile {
             if !Path::new(auth).exists() {
@@ -605,7 +947,24 @@ impl KubeManager {
         let mut pod_names = Vec::new();
         let mut first_image = None;
         for doc in serde_yaml::Deserializer::from_str(&content) {
-            let val = serde_yaml::Value::deserialize(doc)?;
+            let val = match serde_yaml::Value::deserialize(doc) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let line_num = e
+                        .location()
+                        .map(|l| l.line())
+                        .unwrap_or(1);
+                    let clean_msg = msg
+                        .split(" at line ")
+                        .next()
+                        .unwrap_or(&msg);
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "multi doc yaml could not be split: yaml: line {}: {}",
+                        line_num, clean_msg
+                    ));
+                }
+            };
             if val.is_null() {
                 continue;
             }
@@ -681,7 +1040,95 @@ impl KubeManager {
             .await;
         }
 
+        let validate_mode = args.validate.as_deref().unwrap_or("ignore");
+        let supported_kinds = [
+            "Pod",
+            "Deployment",
+            "DaemonSet",
+            "Job",
+            "ReplicaSet",
+            "Service",
+            "ConfigMap",
+            "PersistentVolumeClaim",
+            "Volume",
+            "Secret",
+            "List",
+        ];
+        let mut has_any_supported = false;
+        for val in &docs {
+            let k = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            if supported_kinds.contains(&k) {
+                has_any_supported = true;
+            } else if validate_mode == "strict" {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "kube kind {:?} is not supported",
+                    k
+                ));
+            } else if validate_mode == "warn" {
+                eprintln!("Warning: kube kind {:?} is not supported", k);
+            }
+        }
+        if !has_any_supported && !docs.is_empty() {
+            crate::cli::usage_errors::exit_usage_error(
+                "YAML document does not contain any supported kube kind",
+            );
+        }
+
         for val in docs.clone() {
+            let k = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            if !supported_kinds.contains(&k) {
+                continue;
+            }
+            if validate_mode == "strict" || validate_mode == "warn" {
+                let known_ctr_fields = [
+                    "name",
+                    "image",
+                    "command",
+                    "args",
+                    "workingDir",
+                    "ports",
+                    "envFrom",
+                    "env",
+                    "resources",
+                    "volumeMounts",
+                    "volumeDevices",
+                    "livenessProbe",
+                    "readinessProbe",
+                    "startupProbe",
+                    "lifecycle",
+                    "terminationMessagePath",
+                    "terminationMessagePolicy",
+                    "imagePullPolicy",
+                    "securityContext",
+                    "stdin",
+                    "stdinOnce",
+                    "tty",
+                ];
+                if let Some(ctrs) = val
+                    .get("spec")
+                    .and_then(|s| s.get("containers"))
+                    .and_then(|c| c.as_sequence())
+                {
+                    for c_val in ctrs {
+                        if let Some(m) = c_val.as_mapping() {
+                            for (fk, _) in m {
+                                if let Some(fks) = fk.as_str() {
+                                    if !known_ctr_fields.contains(&fks) {
+                                        if validate_mode == "strict" {
+                                            crate::cli::usage_errors::exit_usage_error(format!(
+                                                "strict decoding error: unknown field {:?}",
+                                                fks
+                                            ));
+                                        } else {
+                                            eprintln!("Warning: unknown field {:?}", fks);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if args.replace && saved_notify_sock.is_some() {
                 let _ = Self::play_kube_down_value(val.clone());
             }
@@ -852,43 +1299,149 @@ impl KubeManager {
                 let pod_yaml: KubePodYaml = serde_yaml::from_value(val)?;
                 Self::play_pod_with_args(pod_yaml, args, configmaps, service_ctr_name).await?;
             }
-            "Deployment" => {
+            "Deployment" | "DaemonSet" | "Job" | "ReplicaSet" => {
                 let name = val["metadata"]["name"]
                     .as_str()
                     .unwrap_or("deployment")
                     .to_string();
-                let replicas = val["spec"]["replicas"].as_u64().unwrap_or(1) as usize;
+                let raw_replicas = if kind == "Deployment" || kind == "ReplicaSet" {
+                    val["spec"]["replicas"].as_u64().unwrap_or(1) as usize
+                } else {
+                    1usize
+                };
+                let pub_items: Vec<String> = args
+                    .publish
+                    .iter()
+                    .flat_map(|s| s.split(','))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let replicas = if raw_replicas > 1 && !args.multiple_pods {
+                    if !std::env::args().any(|a| a == "--log-level=error") {
+                        eprintln!(
+                            "Limiting replica count to 1, use `--multiple-pods` to enable more than one replica"
+                        );
+                    }
+                    1usize
+                } else {
+                    if args.multiple_pods && !pub_items.is_empty() && pub_items.len() != raw_replicas
+                    {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "number of Pod replicas aren't equal to the number of published ports: {} replicas, {} published ports",
+                            raw_replicas,
+                            pub_items.len()
+                        ));
+                    }
+                    raw_replicas
+                };
                 let template_spec = &val["spec"]["template"]["spec"];
-                let containers: Vec<KubeContainerSpec> =
-                    serde_yaml::from_value(template_spec["containers"].clone())?;
+                let pod_spec: KubePodSpec =
+                    serde_yaml::from_value(template_spec.clone()).unwrap_or_default();
+                let mut base_labels = HashMap::new();
+                for m in [
+                    val["metadata"]["labels"].as_mapping(),
+                    val["spec"]["template"]["metadata"]["labels"].as_mapping(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    for (k, v) in m {
+                        if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
+                            base_labels.insert(ks.to_string(), vs.to_string());
+                        }
+                    }
+                }
+                let mut base_annotations = HashMap::new();
+                for m in [
+                    val["metadata"]["annotations"].as_mapping(),
+                    val["spec"]["template"]["metadata"]["annotations"].as_mapping(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    for (k, v) in m {
+                        if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
+                            base_annotations.insert(ks.to_string(), vs.to_string());
+                        }
+                    }
+                }
 
                 for i in 0..replicas {
-                    let pod_name = if replicas == 1 {
-                        name.clone()
+                    let pod_name = if replicas == 1 && !args.multiple_pods {
+                        format!("{}-pod", name)
                     } else {
-                        format!("{}-{}", name, i + 1)
+                        format!("{}-pod-{}", name, i)
                     };
+                    let mut replica_args = args.clone();
+                    if args.multiple_pods && i < pub_items.len() {
+                        replica_args.publish = vec![pub_items[i].clone()];
+                    }
                     let pod_yaml = KubePodYaml {
                         api_version: "v1".to_string(),
                         kind: "Pod".to_string(),
                         metadata: KubeMetadata {
                             name: pod_name,
                             creation_timestamp: None,
-                            labels: HashMap::new(),
-                            annotations: HashMap::new(),
+                            labels: base_labels.clone(),
+                            annotations: base_annotations.clone(),
                         },
-                        spec: KubePodSpec {
-                            hostname: None,
-                            containers: containers.clone(),
-                            init_containers: None,
-                            volumes: None,
-                            restart_policy: None,
-                            host_network: None,
-                            ..Default::default()
-                        },
+                        spec: pod_spec.clone(),
                         status: None,
                     };
-                    Self::play_pod_with_args(pod_yaml, args, configmaps, service_ctr_name).await?;
+                    Self::play_pod_with_args(
+                        pod_yaml,
+                        &replica_args,
+                        configmaps,
+                        service_ctr_name,
+                    )
+                    .await?;
+                }
+            }
+            "List" => {
+                let mut merged_cms = configmaps.clone();
+                if let Some(items) = val.get("items").and_then(|v| v.as_sequence()) {
+                    for item in items {
+                        if item.get("kind").and_then(|k| k.as_str()) == Some("ConfigMap") {
+                            let cm_name =
+                                item["metadata"]["name"].as_str().unwrap_or("").to_string();
+                            merged_cms
+                                .insert((cm_name.clone(), "__cm_exists__".to_string()), "1".to_string());
+                            if let Some(data) = item.get("data").and_then(|d| d.as_mapping()) {
+                                for (k, v) in data {
+                                    if let Some(k_str) = k.as_str() {
+                                        let v_str = match v {
+                                            serde_yaml::Value::String(s) => s.clone(),
+                                            serde_yaml::Value::Number(n) => n.to_string(),
+                                            serde_yaml::Value::Bool(b) => b.to_string(),
+                                            _ => String::new(),
+                                        };
+                                        merged_cms.insert((cm_name.clone(), k_str.to_string()), v_str);
+                                    }
+                                }
+                            }
+                            if let Some(bdata) = item.get("binaryData").and_then(|d| d.as_mapping()) {
+                                for (k, v) in bdata {
+                                    if let (Some(k_str), Some(b64)) = (k.as_str(), v.as_str()) {
+                                        let decoded = String::from_utf8_lossy(
+                                            &decode_base64_simple(b64.trim()),
+                                        )
+                                        .into_owned();
+                                        merged_cms
+                                            .insert((cm_name.clone(), k_str.to_string()), decoded);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for item in items {
+                        Box::pin(Self::play_kube_value_with_args(
+                            item.clone(),
+                            args,
+                            &merged_cms,
+                            service_ctr_name,
+                        ))
+                        .await?;
+                    }
                 }
             }
             "Service" | "ConfigMap" => {}
@@ -902,9 +1455,84 @@ impl KubeManager {
                         }
                     }
                 }
+                let mut vol_opts = HashMap::new();
+                let mut driver = "local".to_string();
+                let mut import_src: Option<String> = None;
+                let mut vol_image: Option<String> = None;
+                if let Some(m) = val["metadata"]["annotations"].as_mapping() {
+                    for (k, v) in m {
+                        if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
+                            match ks {
+                                "volume.podman.io/driver" => driver = vs.to_string(),
+                                "volume.podman.io/device" => {
+                                    vol_opts.insert("device".to_string(), vs.to_string());
+                                }
+                                "volume.podman.io/type" => {
+                                    vol_opts.insert("type".to_string(), vs.to_string());
+                                }
+                                "volume.podman.io/mount-options" => {
+                                    vol_opts.insert("o".to_string(), vs.to_string());
+                                }
+                                "volume.podman.io/uid" => {
+                                    vol_opts.insert("uid".to_string(), vs.to_string());
+                                }
+                                "volume.podman.io/gid" => {
+                                    vol_opts.insert("gid".to_string(), vs.to_string());
+                                }
+                                "volume.podman.io/import-source" => {
+                                    import_src = Some(vs.to_string());
+                                }
+                                "volume.podman.io/image" => {
+                                    vol_opts.insert("image".to_string(), vs.to_string());
+                                    vol_image = Some(vs.to_string());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if let Some(ref src) = import_src {
+                    if !Path::new(src).exists() {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "open {}: no such file or directory",
+                            src
+                        ));
+                    }
+                }
                 let store = crate::volume::VolumeStore::new();
-                if store.find(name).is_none() {
-                    let _ = store.create(Some(name), Some(labels))?;
+                let vol = match store.find(name) {
+                    Some(existing) => existing,
+                    None => store.create_with_options(
+                        Some(name),
+                        &driver,
+                        Some(labels),
+                        "local",
+                        Some(vol_opts),
+                    )?,
+                };
+                if let Some(ref img_name) = vol_image {
+                    let img_store = crate::storage::ImageStore::new();
+                    let img_rec = match img_store.find(img_name) {
+                        Some(r) => r,
+                        None => crate::pull_image(img_name).await?,
+                    };
+                    if Path::new(&img_rec.rootfs_path) != Path::new(&vol.mountpoint) {
+                        let _ = crate::storage::overlay::OverlayDriver::create_hardlink_tree(
+                            Path::new(&img_rec.rootfs_path),
+                            Path::new(&vol.mountpoint),
+                        );
+                    }
+                }
+                if let Some(ref src) = import_src {
+                    let status = std::process::Command::new("tar")
+                        .args(["-xf", src, "-C", &vol.mountpoint])
+                        .status()?;
+                    if !status.success() {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "failed to import volume from {}",
+                            src
+                        ));
+                    }
                 }
                 println!("Volume:\n{}", name);
             }
@@ -918,15 +1546,46 @@ impl KubeManager {
                         }
                     }
                 }
-                let mut secret_bytes = Vec::new();
+                labels.insert("boxr.kube_secret".to_string(), "true".to_string());
+                let mut kv_map: HashMap<String, String> = HashMap::new();
                 if let Some(data_map) = val.get("data").and_then(|d| d.as_mapping()) {
-                    if let Some((_, first_val)) = data_map.iter().next() {
-                        if let Some(b64) = first_val.as_str() {
-                            secret_bytes = decode_base64_simple(b64.trim());
+                    for (k, v) in data_map {
+                        if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
+                            let decoded = String::from_utf8_lossy(&decode_base64_simple(b64.trim()))
+                                .into_owned();
+                            kv_map.insert(ks.to_string(), decoded);
                         }
                     }
                 }
+                if let Some(sdata_map) = val.get("stringData").and_then(|d| d.as_mapping()) {
+                    for (k, v) in sdata_map {
+                        if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
+                            kv_map.insert(ks.to_string(), vs.to_string());
+                        }
+                    }
+                }
+                if let Ok(json_map) = serde_json::to_string(&kv_map) {
+                    labels.insert("boxr.kube_secret_map".to_string(), json_map);
+                }
+                let secret_bytes = serde_yaml::to_string(&val)
+                    .unwrap_or_default()
+                    .into_bytes();
+                let filedriver_dir = crate::storage::boxr_home()
+                    .join("secrets")
+                    .join("filedriver");
+                let _ = fs::create_dir_all(&filedriver_dir);
+                let secretsdata_file = filedriver_dir.join("secretsdata.json");
+                if secretsdata_file.is_dir() {
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "open {}: is a directory",
+                        secretsdata_file.display()
+                    ));
+                }
+                let _ = fs::write(&secretsdata_file, "{}");
                 let s_store = crate::secret::SecretStore::new();
+                if s_store.find(name).is_some() {
+                    let _ = s_store.remove(name);
+                }
                 let rec = s_store.create(Some(name), &secret_bytes, labels)?;
                 println!("Secret:\n{}", rec.id);
             }
@@ -980,15 +1639,79 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
         configmaps: &HashMap<(String, String), String>,
         service_ctr_name: Option<&str>,
     ) -> Result<()> {
+        if pod_yaml.metadata.name.trim().is_empty() {
+            crate::cli::usage_errors::exit_usage_error("pod does not have a name");
+        }
+        if args.no_hosts
+            && pod_yaml
+                .spec
+                .host_aliases
+                .as_ref()
+                .is_some_and(|ha| !ha.is_empty())
+        {
+            crate::cli::usage_errors::exit_usage_error(
+                "HostAliases in yaml file will not work with --no-hosts",
+            );
+        }
+        if args.mac_address.len() > 1 && args.network.len() > 1 {
+            crate::cli::usage_errors::exit_usage_error(
+                "specifying mac-address multiple times is not supported",
+            );
+        }
+        let is_host_network = pod_yaml.spec.host_network == Some(true)
+            || args.network.iter().any(|n| n == "host");
+        if pod_yaml.spec.host_network == Some(true) {
+            if !args.network.is_empty() && args.network.iter().any(|n| n != "host") {
+                crate::cli::usage_errors::exit_usage_error(
+                    "invalid config provided: cannot set both HostNetwork in YAML and --network",
+                );
+            }
+            if !args.mac_address.is_empty() {
+                crate::cli::usage_errors::exit_usage_error(
+                    "cannot set mac-address with HostNetwork: network cannot be configured when it is shared with the host",
+                );
+            }
+            if !args.ip.is_empty() {
+                crate::cli::usage_errors::exit_usage_error(
+                    "cannot set static IP with HostNetwork",
+                );
+            }
+        }
         let pod_store = PodStore::new();
         if pod_store.find(&pod_yaml.metadata.name).is_some() {
             if !args.replace {
                 crate::cli::usage_errors::exit_usage_error(format!(
-                    "pod {} is in use: pod already exists",
+                    "adding pod to state: name {:?} is in use: pod already exists",
                     pod_yaml.metadata.name
                 ));
             }
             let _ = pod_store.remove_with_force(&pod_yaml.metadata.name, true);
+        }
+        let mut seen_ctr_names = std::collections::HashSet::new();
+        for c_spec in &pod_yaml.spec.containers {
+            if c_spec.image.trim().is_empty() {
+                let cname = if c_spec.name.trim().is_empty() {
+                    &pod_yaml.metadata.name
+                } else {
+                    &c_spec.name
+                };
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "container {:?} is missing the required 'image' field",
+                    cname
+                ));
+            }
+            if c_spec.image.starts_with('.') || c_spec.image.starts_with('/') {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "invalid reference format: {}",
+                    c_spec.image
+                ));
+            }
+            if !c_spec.name.is_empty() && !seen_ctr_names.insert(c_spec.name.clone()) {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "the pod {:?} is invalid; duplicate container name {:?} detected",
+                    pod_yaml.metadata.name, c_spec.name
+                ));
+            }
         }
         if args.replace {
             for c_spec in &pod_yaml.spec.containers {
@@ -1015,39 +1738,89 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 }
             });
 
+        let is_net_none = args.network.iter().any(|n| n == "none");
         let mut pod_ports = Vec::new();
-        for pub_str in &args.publish {
-            if let Ok(mut pm) = crate::network::PortMapping::parse(pub_str) {
-                if pm.host_ip.is_none() {
-                    pm.host_ip = default_host_ip.clone();
+        if !is_host_network && !is_net_none {
+            for pub_str in &args.publish {
+                for part in pub_str.split(',') {
+                    if let Ok(mut pm) = crate::network::PortMapping::parse(part.trim()) {
+                        if pm.host_ip.is_none() {
+                            pm.host_ip = default_host_ip.clone();
+                        }
+                        pod_ports.push(pm);
+                    }
                 }
-                pod_ports.push(pm);
             }
-        }
-        for c_spec in &pod_yaml.spec.containers {
-            if let Some(ports) = &c_spec.ports {
-                for p in ports {
-                    if let Some(host_p) = p.host_port {
-                        let c_port = if p.container_port == 0 {
-                            host_p
-                        } else {
-                            p.container_port
-                        };
-                        pod_ports.push(crate::network::PortMapping {
-                            host_ip: p.host_ip.clone().or_else(|| default_host_ip.clone()),
-                            host_port: host_p,
-                            container_port: c_port,
-                            protocol: p
+            for c_spec in &pod_yaml.spec.containers {
+                if let Some(ports) = &c_spec.ports {
+                    for p in ports {
+                        if args.publish_all && p.container_port > 0 && p.container_port < 1024 {
+                            #[cfg(unix)]
+                            if unsafe { libc::geteuid() != 0 } {
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "rootlessport cannot expose privileged port {},",
+                                    p.container_port
+                                ));
+                            }
+                        }
+                        if let Some(host_p) = p.host_port {
+                            if host_p > 0 && host_p < 1024 {
+                                #[cfg(unix)]
+                                if unsafe { libc::geteuid() != 0 } {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "rootlessport cannot expose privileged port {},",
+                                        host_p
+                                    ));
+                                }
+                            }
+                            let c_port = if p.container_port == 0 {
+                                host_p
+                            } else {
+                                p.container_port
+                            };
+                            let proto = p
                                 .protocol
                                 .clone()
                                 .unwrap_or_else(|| "tcp".to_string())
-                                .to_lowercase(),
-                        });
+                                .to_lowercase();
+                            let overridden_by_cli = pod_ports.iter().any(|existing| {
+                                existing.container_port == c_port
+                                    && existing.protocol.eq_ignore_ascii_case(&proto)
+                            });
+                            if !overridden_by_cli {
+                                pod_ports.push(crate::network::PortMapping {
+                                    host_ip: p.host_ip.clone().or_else(|| default_host_ip.clone()),
+                                    host_port: host_p,
+                                    container_port: c_port,
+                                    protocol: proto,
+                                });
+                            }
+                        } else if args.publish_all && p.container_port > 0 {
+                            let proto = p
+                                .protocol
+                                .clone()
+                                .unwrap_or_else(|| "tcp".to_string())
+                                .to_lowercase();
+                            pod_ports.push(crate::network::PortMapping {
+                                host_ip: p.host_ip.clone().or_else(|| default_host_ip.clone()),
+                                host_port: 20000 + (p.container_port % 10000),
+                                container_port: p.container_port,
+                                protocol: proto,
+                            });
+                        }
                     }
                 }
             }
         }
         let mut pod_labels = pod_yaml.metadata.labels.clone();
+        for (k, v) in &pod_labels {
+            if v.contains(',') {
+                crate::cli::usage_errors::exit_usage_error(format!(
+                    "invalid label value {:?} for key {:?}",
+                    v, k
+                ));
+            }
+        }
         if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
             let trimmed = unit.trim();
             if !trimmed.is_empty() {
@@ -1076,26 +1849,169 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 pod_annotations.insert(k.to_string(), v.to_string());
             }
         }
+        let total_ann_size: usize = pod_annotations.iter().map(|(k, v)| k.len() + v.len()).sum();
+        if total_ann_size > 262_144 {
+            crate::cli::usage_errors::exit_usage_error(format!(
+                "annotations size {} is larger than limit 262144",
+                total_ann_size
+            ));
+        }
+        if pod_annotations.contains_key("io.podman.annotations.volumes-from") {
+            crate::cli::usage_errors::exit_usage_error(
+                "annotation io.podman.annotations.volumes-from without target volume is reserved for internal use",
+            );
+        }
+        for k in pod_annotations.keys() {
+            if k == "container.seccomp.security.alpha.kubernetes.io/pod"
+                || k.starts_with("container.seccomp.security.alpha.kubernetes.io/")
+                || k == "seccomp.security.alpha.kubernetes.io/pod"
+            {
+                eprintln!(
+                    "Warning: seccomp annotation is deprecated, please use securityContext.seccompProfile instead"
+                );
+            }
+        }
 
-        let pod_network = args.network.last().cloned();
-        let pod_userns = args
-            .userns
-            .clone()
-            .or_else(|| pod_annotations.get("io.podman.annotations.userns").cloned());
+        let pod_network = if is_host_network {
+            Some("host".to_string())
+        } else if !args.network.is_empty() {
+            Some(args.network.join(";"))
+        } else {
+            let n_store = crate::network::NetworkStore::new();
+            if n_store.find("podman-default-kube-network").is_none() {
+                let _ = n_store.create("podman-default-kube-network", None, None);
+            }
+            Some("podman-default-kube-network".to_string())
+        };
+        let pod_userns = if let Some(ref u) = args.userns {
+            Some(u.clone())
+        } else if let Some(u) = pod_annotations.get("io.podman.annotations.userns") {
+            Some(u.clone())
+        } else if pod_yaml.spec.host_users == Some(false) {
+            Some("auto".to_string())
+        } else {
+            None
+        };
 
-        // Resolve Pod volumes (hostPath, PVC, image volume) before creating pod
-        let mut volume_sources: HashMap<String, (String, bool)> = HashMap::new();
+        // Resolve Pod volumes (hostPath, PVC, image, configMap, secret, emptyDir) before creating pod
+        let mut volume_sources: HashMap<String, (String, bool, bool)> = HashMap::new();
+        let mut anon_volumes_created: Vec<String> = Vec::new();
+        let mut mem_dirs_created: Vec<String> = Vec::new();
         if let Some(vols) = &pod_yaml.spec.volumes {
             for v in vols {
                 if let Some(hp) = &v.host_path {
-                    volume_sources.insert(v.name.clone(), (hp.path.clone(), false));
+                    let htype = hp.path_type.as_deref().unwrap_or("");
+                    let p = Path::new(&hp.path);
+                    match htype {
+                        "" | "Directory" | "File" => {
+                            if !p.exists() {
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "failed to create volume {:?}: in parsing HostPath in YAML: faccessat {}: no such file or directory",
+                                    v.name, hp.path
+                                ));
+                            }
+                        }
+                        "DirectoryOrCreate" => {
+                            let _ = fs::create_dir_all(p);
+                        }
+                        "FileOrCreate" => {
+                            if !p.exists() {
+                                if let Some(parent) = p.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                                let _ = fs::File::create(p);
+                            }
+                        }
+                        "Socket" => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::FileTypeExt;
+                                let is_sock = fs::metadata(p)
+                                    .map(|m| m.file_type().is_socket())
+                                    .unwrap_or(false);
+                                if !is_sock {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "failed to create volume {:?}: checking HostPathSocket: path {} is not a socket",
+                                        v.name, hp.path
+                                    ));
+                                }
+                            }
+                        }
+                        "CharDevice" => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::FileTypeExt;
+                                let is_char = fs::metadata(p)
+                                    .map(|m| m.file_type().is_char_device())
+                                    .unwrap_or(false);
+                                if !is_char {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "failed to create volume {:?}: checking HostPathCharDevice: path {} is not a character device",
+                                        v.name, hp.path
+                                    ));
+                                }
+                            }
+                        }
+                        "BlockDevice" => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::FileTypeExt;
+                                let is_blk = fs::metadata(p)
+                                    .map(|m| m.file_type().is_block_device())
+                                    .unwrap_or(false);
+                                if !is_blk {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "failed to create volume {:?}: checking HostPathBlockDevice: path {} is not a block device",
+                                        v.name, hp.path
+                                    ));
+                                }
+                            }
+                        }
+                        other => {
+                            crate::cli::usage_errors::exit_usage_error(format!(
+                                "invalid HostPath type {:?}",
+                                other
+                            ));
+                        }
+                    }
+                    let mut force_ro = false;
+                    if let Some(opts) = pod_annotations
+                        .get(&format!("bind-mount-options:{}", hp.path))
+                        .map(|s| s.as_str())
+                        .or_else(|| {
+                            pod_annotations
+                                .get("bind-mount-options")
+                                .and_then(|s| s.strip_prefix(&format!("{}:", hp.path)))
+                        })
+                    {
+                        for opt in opts.split(',').flat_map(|s| s.split(':')) {
+                            let opt = opt.trim();
+                            if opt.is_empty() {
+                                continue;
+                            }
+                            match opt {
+                                "ro" => force_ro = true,
+                                "rw" | "z" | "Z" | "noexec" | "exec" | "nosuid" | "suid"
+                                | "nodev" | "dev" | "shared" | "rshared" | "slave" | "rslave"
+                                | "private" | "rprivate" | "unbindable" | "runbindable"
+                                | "U" | "O" | " rbind" | "rbind" | "bind" => {}
+                                unknown => {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "unknown mount option {:?}",
+                                        unknown
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    volume_sources.insert(v.name.clone(), (hp.path.clone(), force_ro, false));
                 } else if let Some(pvc) = &v.persistent_volume_claim {
                     let v_store = crate::volume::VolumeStore::new();
                     let vol = match v_store.find(&pvc.claim_name) {
                         Some(existing) => existing,
                         None => v_store.create(Some(&pvc.claim_name), None)?,
                     };
-                    volume_sources.insert(v.name.clone(), (vol.name, false));
+                    volume_sources.insert(v.name.clone(), (vol.name, false, true));
                 } else if let Some(img_vol) = &v.image {
                     let policy = img_vol
                         .pull_policy
@@ -1125,45 +2041,347 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                             },
                         },
                     };
-                    volume_sources.insert(v.name.clone(), (img_rec.rootfs_path, true));
+                    volume_sources.insert(v.name.clone(), (img_rec.rootfs_path, true, false));
+                } else if let Some(cm_vol) = &v.config_map {
+                    let cm_name = cm_vol.name.as_deref().unwrap_or(&v.name);
+                    let cm_exists = configmaps.contains_key(&(cm_name.to_string(), "__cm_exists__".to_string()))
+                        || configmaps.keys().any(|(n, _)| n == cm_name);
+                    let is_opt = cm_vol.optional.unwrap_or(false);
+                    if !cm_exists && !is_opt {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "failed to create volume {:?}: no such ConfigMap {:?}",
+                            cm_name, cm_name
+                        ));
+                    }
+                    let v_store = crate::volume::VolumeStore::new();
+                    let vol = match v_store.find(cm_name) {
+                        Some(existing) => existing,
+                        None => v_store.create(Some(cm_name), None)?,
+                    };
+                    let mp = PathBuf::from(&vol.mountpoint);
+                    let def_mode = cm_vol.default_mode.unwrap_or(0o644);
+                    if cm_exists {
+                        if let Some(items) = &cm_vol.items {
+                            for item in items {
+                                if let Some(val) = configmaps.get(&(cm_name.to_string(), item.key.clone())) {
+                                    let dst = mp.join(&item.path);
+                                    if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                        crate::cli::usage_errors::exit_usage_error(format!(
+                                            "cannot create file {:?} at volume mountpoint",
+                                            item.path
+                                        ));
+                                    }
+                                    if let Some(parent) = dst.parent() {
+                                        let _ = fs::create_dir_all(parent);
+                                    }
+                                    let _ = fs::write(&dst, val);
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        let _ = fs::set_permissions(
+                                            &dst,
+                                            fs::Permissions::from_mode(item.mode.unwrap_or(def_mode)),
+                                        );
+                                    }
+                                } else if !is_opt {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "key {:?} not found in ConfigMap {:?}",
+                                        item.key, cm_name
+                                    ));
+                                }
+                            }
+                        } else {
+                            for ((n, k), val) in configmaps {
+                                if n == cm_name && k != "__cm_exists__" {
+                                    let dst = mp.join(k);
+                                    if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                        crate::cli::usage_errors::exit_usage_error(format!(
+                                            "cannot create file {:?} at volume mountpoint",
+                                            k
+                                        ));
+                                    }
+                                    if let Some(parent) = dst.parent() {
+                                        let _ = fs::create_dir_all(parent);
+                                    }
+                                    let _ = fs::write(&dst, val);
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(def_mode));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    volume_sources.insert(v.name.clone(), (vol.name, false, true));
+                } else if let Some(sec_vol) = &v.secret {
+                    let sec_name = sec_vol
+                        .secret_name
+                        .as_deref()
+                        .or(sec_vol.name.as_deref())
+                        .unwrap_or(&v.name);
+                    let is_opt = sec_vol.optional.unwrap_or(false);
+                    let s_store = crate::secret::SecretStore::new();
+                    let sec_rec = s_store.find(sec_name);
+                    if sec_rec.is_none() && !is_opt {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "no secret with name or id {:?}: no such secret",
+                            sec_name
+                        ));
+                    }
+                    let v_store = crate::volume::VolumeStore::new();
+                    let vol = match v_store.find(sec_name) {
+                        Some(existing) => existing,
+                        None => v_store.create(Some(sec_name), None)?,
+                    };
+                    let mp = PathBuf::from(&vol.mountpoint);
+                    let def_mode = sec_vol.default_mode.unwrap_or(0o644);
+                    if let Some(rec) = sec_rec {
+                        let is_kube_sec = rec.labels.get("boxr.kube_secret").map(|s| s.as_str()) == Some("true");
+                        let kv_map: HashMap<String, String> = if let Some(json_str) = rec.labels.get("boxr.kube_secret_map") {
+                            serde_json::from_str(json_str).unwrap_or_default()
+                        } else if let Ok(raw) = s_store.read_data(sec_name) {
+                            if let Ok(val) = serde_yaml::from_slice::<serde_yaml::Value>(&raw) {
+                                if val.get("kind").and_then(|k| k.as_str()) == Some("Secret") {
+                                    let mut m = HashMap::new();
+                                    if let Some(dmap) = val.get("data").and_then(|d| d.as_mapping()) {
+                                        for (k, v) in dmap {
+                                            if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
+                                                m.insert(
+                                                    ks.to_string(),
+                                                    String::from_utf8_lossy(&decode_base64_simple(b64.trim())).into_owned(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    if let Some(smap) = val.get("stringData").and_then(|d| d.as_mapping()) {
+                                        for (k, v) in smap {
+                                            if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
+                                                m.insert(ks.to_string(), vs.to_string());
+                                            }
+                                        }
+                                    }
+                                    m
+                                } else {
+                                    crate::cli::usage_errors::exit_usage_error(
+                                        "only secrets created via the kube yaml file are supported",
+                                    );
+                                }
+                            } else {
+                                crate::cli::usage_errors::exit_usage_error(
+                                    "only secrets created via the kube yaml file are supported",
+                                );
+                            }
+                        } else {
+                            HashMap::new()
+                        };
+                        if !is_kube_sec && kv_map.is_empty() {
+                            crate::cli::usage_errors::exit_usage_error(
+                                "only secrets created via the kube yaml file are supported",
+                            );
+                        }
+                        if let Some(items) = &sec_vol.items {
+                            for item in items {
+                                if let Some(val) = kv_map.get(&item.key) {
+                                    let dst = mp.join(&item.path);
+                                    if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                        crate::cli::usage_errors::exit_usage_error(format!(
+                                            "cannot create file {:?} at volume mountpoint",
+                                            item.path
+                                        ));
+                                    }
+                                    if let Some(parent) = dst.parent() {
+                                        let _ = fs::create_dir_all(parent);
+                                    }
+                                    let _ = fs::write(&dst, val);
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        let _ = fs::set_permissions(
+                                            &dst,
+                                            fs::Permissions::from_mode(item.mode.unwrap_or(def_mode)),
+                                        );
+                                    }
+                                } else if !is_opt {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "secret {} does not have any data for key {}",
+                                        sec_name, item.key
+                                    ));
+                                }
+                            }
+                        } else {
+                            for (k, val) in &kv_map {
+                                let dst = mp.join(k);
+                                if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                    crate::cli::usage_errors::exit_usage_error(format!(
+                                        "cannot create file {:?} at volume mountpoint",
+                                        k
+                                    ));
+                                }
+                                if let Some(parent) = dst.parent() {
+                                    let _ = fs::create_dir_all(parent);
+                                }
+                                let _ = fs::write(&dst, val);
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(def_mode));
+                                }
+                            }
+                        }
+                    }
+                    volume_sources.insert(v.name.clone(), (vol.name, false, true));
+                } else if let Some(ed) = &v.empty_dir {
+                    if ed.medium.as_deref() == Some("Memory") {
+                        let mem_dir = format!(
+                            "/dev/shm/boxr-emptydir-{}-{}",
+                            pod_yaml.metadata.name, v.name
+                        );
+                        let _ = fs::create_dir_all(&mem_dir);
+                        mem_dirs_created.push(mem_dir.clone());
+                        volume_sources.insert(v.name.clone(), (mem_dir, false, false));
+                    } else {
+                        let v_store = crate::volume::VolumeStore::new();
+                        let vol = match v_store.find(&v.name) {
+                            Some(existing) => existing,
+                            None => v_store.create(Some(&v.name), None)?,
+                        };
+                        anon_volumes_created.push(v.name.clone());
+                        volume_sources.insert(v.name.clone(), (vol.name, false, true));
+                    }
                 }
             }
         }
+        if !anon_volumes_created.is_empty() {
+            pod_labels.insert(
+                "boxr.pod.anon_volumes".to_string(),
+                anon_volumes_created.join(","),
+            );
+        }
+        if !mem_dirs_created.is_empty() {
+            pod_labels.insert(
+                "boxr.pod.mem_dirs".to_string(),
+                mem_dirs_created.join(","),
+            );
+        }
+
+        let mut pod_dns = Vec::new();
+        let mut pod_dns_search = Vec::new();
+        let mut pod_dns_option = Vec::new();
+        if let Some(dc) = &pod_yaml.spec.dns_config {
+            pod_dns.extend(dc.nameservers.clone());
+            pod_dns_search.extend(dc.searches.clone());
+            for opt in &dc.options {
+                if let Some(ref v) = opt.value {
+                    pod_dns_option.push(format!("{}:{}", opt.name, v));
+                } else {
+                    pod_dns_option.push(opt.name.clone());
+                }
+            }
+        }
+        let mut pod_add_host = Vec::new();
+        if let Some(has) = &pod_yaml.spec.host_aliases {
+            for ha in has {
+                for h in &ha.hostnames {
+                    pod_add_host.push(format!("{}:{}", h, ha.ip));
+                }
+            }
+        }
+        let pod_hostname = if is_host_network {
+            fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    std::process::Command::new("hostname")
+                        .output()
+                        .ok()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+        } else {
+            pod_yaml.spec.hostname.clone()
+        };
+        let pod_infra_name = pod_annotations
+            .get("io.podman.annotations.infra.name")
+            .cloned();
+        if pod_yaml.spec.host_pid == Some(true) {
+            pod_labels.insert("boxr.pod.pid".to_string(), "host".to_string());
+        }
+        if pod_yaml.spec.host_ipc == Some(true) {
+            pod_labels.insert("boxr.pod.ipc".to_string(), "host".to_string());
+        }
+        if is_host_network {
+            pod_labels.insert("boxr.pod.uts".to_string(), "host".to_string());
+        }
+        if args.no_hosts {
+            pod_labels.insert("boxr.pod.no_hosts".to_string(), "true".to_string());
+        }
+        pod_labels.insert("boxr.kube_pod".to_string(), "true".to_string());
 
         let pod = pod_store.create_with_config(PodConfig {
             name: Some(pod_yaml.metadata.name.clone()),
             ports: pod_ports,
-            hostname: None,
+            hostname: pod_hostname,
             labels: pod_labels.clone(),
-            dns: Vec::new(),
+            dns: pod_dns,
+            dns_search: pod_dns_search,
+            dns_option: pod_dns_option,
+            add_host: pod_add_host,
             memory: None,
             cpus: None,
             share_ipc: true,
-            share_net: true,
+            share_net: !is_host_network,
             share_uts: true,
-            share_pid: pod_yaml.spec.share_process_namespace.unwrap_or(false),
+            share_pid: pod_yaml.spec.share_process_namespace.unwrap_or(false)
+                || pod_yaml.spec.host_pid == Some(true),
             infra: true,
+            infra_name: pod_infra_name,
             network: pod_network.clone(),
+            ip: args.ip.first().cloned(),
+            mac_address: args.mac_address.first().cloned(),
             userns: pod_userns.clone(),
+            restart_policy: pod_yaml.spec.restart_policy.clone(),
             exit_policy: "stop".to_string(),
             ..Default::default()
         })?;
-        let _ = crate::ensure_pod_infra_container(&pod).await;
+        if let Err(e) = crate::ensure_pod_infra_container(&pod).await {
+            let _ = pod_store.remove_with_force(&pod.id, true);
+            crate::cli::usage_errors::exit_usage_error(e.to_string());
+        }
 
         // Run initContainers first if present
         if let Some(init_ctrs) = &pod_yaml.spec.init_containers {
+            let init_ctr_type = pod_annotations
+                .get("io.podman.annotations.init.container.type")
+                .or_else(|| pod_annotations.get("io.podman.annotations.init-container.type"))
+                .cloned()
+                .unwrap_or_else(|| "once".to_string());
             for ic in init_ctrs {
-                let ic_name = format!("{}-{}", pod.name, ic.name);
-                let mut cmd_vec = ic.command.clone().unwrap_or_default();
-                if let Some(a) = &ic.args {
-                    cmd_vec.extend(a.clone());
+                let ic_name = if args.no_pod_prefix {
+                    ic.name.clone()
+                } else {
+                    format!("{}-{}", pod.name, ic.name)
+                };
+                if seen_ctr_names.contains(&ic.name) {
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "adding pod to state: name {:?} is in use: pod already exists",
+                        pod.name
+                    ));
                 }
+                let entrypoint_override = ic
+                    .command
+                    .as_ref()
+                    .filter(|v| !v.is_empty())
+                    .and_then(|v| serde_json::to_string(v).ok());
+                let cmd_vec = ic.args.clone().unwrap_or_default();
                 let ic_run = RunArgs {
                     name: Some(ic_name.clone()),
                     detach: false,
                     pod: Some(pod.name.clone()),
+                    init_ctr: Some(init_ctr_type.clone()),
+                    entrypoint: entrypoint_override,
                     network: pod_network.clone().unwrap_or_else(|| "auto".to_string()),
-                    userns: pod_userns.iter().cloned().collect(),
                     image: ic.image.clone(),
                     command: cmd_vec,
                     rootless: true,
@@ -1171,14 +2389,21 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     restart: "no".to_string(),
                     ..Default::default()
                 };
-                let _ = crate::run_container_with_output(
-                    ic_run,
-                    crate::CliOutputPolicy {
-                        noout: true,
-                        out: None,
-                    },
-                )
-                .await?;
+                if args.start {
+                    let _ = crate::run_container_with_output(
+                        ic_run,
+                        crate::CliOutputPolicy {
+                            noout: true,
+                            out: None,
+                        },
+                    )
+                    .await?;
+                    if init_ctr_type == "once" {
+                        let _ = crate::remove_container_quiet(&ic_name, true, false);
+                    }
+                } else {
+                    let _ = crate::create_only_container(ic_run).await?;
+                }
             }
         }
 
@@ -1197,22 +2422,33 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
             }
 
             let ctx_root = args.context_dir.as_deref().unwrap_or(".");
-            let img_base = c_spec
-                .image
+            let img_without_tag = c_spec.image.split(':').next().unwrap_or(&c_spec.image);
+            let img_base = img_without_tag
                 .rsplit('/')
                 .next()
-                .unwrap_or(&c_spec.image)
-                .split(':')
-                .next()
-                .unwrap_or(&c_spec.image);
-            let build_dir = Path::new(ctx_root).join(img_base);
-            let cf_path = if build_dir.join("Containerfile").exists() {
-                Some(("Containerfile".to_string(), build_dir))
-            } else if build_dir.join("Dockerfile").exists() {
-                Some(("Dockerfile".to_string(), build_dir))
-            } else {
-                None
-            };
+                .unwrap_or(img_without_tag);
+            let img_after_host = img_without_tag
+                .split_once('/')
+                .filter(|(first, _)| {
+                    first.contains('.') || first.contains(':') || *first == "localhost"
+                })
+                .map(|(_, rest)| rest)
+                .unwrap_or(img_without_tag);
+            let mut candidate_dirs = vec![Path::new(ctx_root).join(img_base)];
+            let nested_dir = Path::new(ctx_root).join(img_after_host);
+            if !candidate_dirs.contains(&nested_dir) {
+                candidate_dirs.push(nested_dir);
+            }
+            let mut cf_path = None;
+            for bdir in candidate_dirs {
+                if bdir.join("Containerfile").exists() {
+                    cf_path = Some(("Containerfile".to_string(), bdir));
+                    break;
+                } else if bdir.join("Dockerfile").exists() {
+                    cf_path = Some(("Dockerfile".to_string(), bdir));
+                    break;
+                }
+            }
             let image_in_store = crate::storage::ImageStore::new().find(&c_spec.image).is_some();
             let should_build = match args.build {
                 Some(true) => true,
@@ -1276,7 +2512,11 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 }
             }
 
-            let container_name = format!("{}-{}", pod.name, c_spec.name);
+            let container_name = if args.no_pod_prefix {
+                c_spec.name.clone()
+            } else {
+                format!("{}-{}", pod.name, c_spec.name)
+            };
             let mut ports_vec = Vec::new();
             if let Some(ports) = &c_spec.ports {
                 for p in ports {
@@ -1291,13 +2531,132 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 }
             }
 
-            let mut env_vec = Vec::new();
-            let mut env_map = HashMap::new();
+            let mut env_map: Vec<(String, String)> = Vec::new();
+            let mut upsert_env = |env_map: &mut Vec<(String, String)>, k: String, v: String| {
+                if let Some((_, existing_v)) = env_map.iter_mut().find(|(ek, _)| ek == &k) {
+                    *existing_v = v;
+                } else {
+                    env_map.push((k, v));
+                }
+            };
             if let Some(img_rec) = crate::storage::ImageStore::new().find(&c_spec.image) {
                 if let Some(img_envs) = img_rec.config.config.as_ref().and_then(|c| c.env.as_ref()) {
                     for ie in img_envs {
                         if let Some((k, v)) = ie.split_once('=') {
-                            env_map.insert(k.to_string(), v.to_string());
+                            upsert_env(&mut env_map, k.to_string(), v.to_string());
+                        }
+                    }
+                }
+            }
+            if let Some(env_froms) = &c_spec.env_from {
+                for ef in env_froms {
+                    let pfx = ef.prefix.as_deref().unwrap_or("");
+                    if let Some(cm_src) = &ef.config_map_ref {
+                        let cm_name = cm_src.name.as_deref().unwrap_or("");
+                        let is_opt = cm_src.optional.unwrap_or(false);
+                        let cm_exists = configmaps.contains_key(&(cm_name.to_string(), "__cm_exists__".to_string()))
+                            || configmaps.keys().any(|(n, _)| n == cm_name);
+                        if !cm_exists {
+                            if !is_opt {
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "configmap {} not found",
+                                    cm_name
+                                ));
+                            }
+                            continue;
+                        }
+                        let mut keys_vals: Vec<(String, String)> = configmaps
+                            .iter()
+                            .filter(|((n, k), _)| n == cm_name && k != "__cm_exists__")
+                            .map(|((_, k), v)| (format!("{}{}", pfx, k), v.clone()))
+                            .collect();
+                        keys_vals.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (k, v) in keys_vals {
+                            upsert_env(&mut env_map, k, v);
+                        }
+                    }
+                    if let Some(sec_src) = &ef.secret_ref {
+                        let sec_name = sec_src.name.as_deref().unwrap_or("");
+                        let is_opt = sec_src.optional.unwrap_or(false);
+                        let s_store = crate::secret::SecretStore::new();
+                        let Some(sec_rec) = s_store.find(sec_name) else {
+                            if !is_opt {
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "no secret with name or id {:?}: no such secret",
+                                    sec_name
+                                ));
+                            }
+                            continue;
+                        };
+                        let kv_map: HashMap<String, String> = if let Some(json_str) =
+                            sec_rec.labels.get("boxr.kube_secret_map")
+                        {
+                            serde_json::from_str(json_str).unwrap_or_default()
+                        } else if let Ok(raw) = s_store.read_data(sec_name) {
+                            let mut m = HashMap::new();
+                            if let Ok(val) = serde_yaml::from_slice::<serde_yaml::Value>(&raw) {
+                                if let Some(dmap) = val.get("data").and_then(|d| d.as_mapping()) {
+                                    for (k, v) in dmap {
+                                        if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
+                                            m.insert(
+                                                ks.to_string(),
+                                                String::from_utf8_lossy(&decode_base64_simple(b64.trim())).into_owned(),
+                                            );
+                                        }
+                                    }
+                                } else if let Some(top_map) = val.as_mapping() {
+                                    for (k, v) in top_map {
+                                        if let Some(ks) = k.as_str() {
+                                            let vs = match v {
+                                                serde_yaml::Value::String(s) => {
+                                                    let t = s.trim();
+                                                    if t.len() >= 4
+                                                        && t.len() % 4 == 0
+                                                        && t.bytes().all(|b| {
+                                                            b.is_ascii_alphanumeric()
+                                                                || b == b'+'
+                                                                || b == b'/'
+                                                                || b == b'='
+                                                        })
+                                                    {
+                                                        let dec = decode_base64_simple(t);
+                                                        if let Ok(utf8) = String::from_utf8(dec) {
+                                                            if !utf8.is_empty()
+                                                                && utf8.chars().all(|c| {
+                                                                    c.is_ascii_graphic() || c == ' '
+                                                                })
+                                                            {
+                                                                utf8
+                                                            } else {
+                                                                s.clone()
+                                                            }
+                                                        } else {
+                                                            s.clone()
+                                                        }
+                                                    } else {
+                                                        s.clone()
+                                                    }
+                                                }
+                                                serde_yaml::Value::Number(n) => n.to_string(),
+                                                serde_yaml::Value::Bool(b) => b.to_string(),
+                                                _ => String::new(),
+                                            };
+                                            m.insert(ks.to_string(), vs);
+                                        }
+                                    }
+                                }
+                            }
+                            m
+                        } else {
+                            HashMap::new()
+                        };
+                        let mut keys_vals: Vec<(String, String)> = kv_map
+                            .into_iter()
+                            .map(|(k, v)| (format!("{}{}", pfx, k), v))
+                            .collect();
+                        keys_vals.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (k, v) in keys_vals {
+                            upsert_env(&mut env_map, k, v);
                         }
                     }
                 }
@@ -1306,19 +2665,137 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 for e in envs {
                     if let Some(vf) = &e.value_from {
                         if let Some(cm_ref) = &vf.config_map_key_ref {
+                            let is_opt = cm_ref.optional.unwrap_or(false);
+                            let cm_exists = configmaps.contains_key(&(
+                                cm_ref.name.clone(),
+                                "__cm_exists__".to_string(),
+                            )) || configmaps.keys().any(|(n, _)| n == &cm_ref.name);
+                            if !cm_exists {
+                                if is_opt {
+                                    continue;
+                                }
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "cannot set env {}: configmap {} not found",
+                                    e.name, cm_ref.name
+                                ));
+                            }
                             if let Some(val) =
                                 configmaps.get(&(cm_ref.name.clone(), cm_ref.key.clone()))
                             {
-                                env_vec.push(format!("{}={}", e.name, val));
-                                env_map.insert(e.name.clone(), val.clone());
+                                upsert_env(&mut env_map, e.name.clone(), val.clone());
                                 continue;
+                            } else if is_opt {
+                                continue;
+                            } else {
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "cannot set env {}: key {} not found in configmap {}",
+                                    e.name, cm_ref.key, cm_ref.name
+                                ));
+                            }
+                        }
+                        if let Some(sec_ref) = &vf.secret_key_ref {
+                            let is_opt = sec_ref.optional.unwrap_or(false);
+                            let s_store = crate::secret::SecretStore::new();
+                            let Some(sec_rec) = s_store.find(&sec_ref.name) else {
+                                if is_opt {
+                                    continue;
+                                }
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "cannot set env {}: no secret with name or id {:?}: no such secret",
+                                    e.name, sec_ref.name
+                                ));
+                            };
+                            let kv_map: HashMap<String, String> = if let Some(json_str) =
+                                sec_rec.labels.get("boxr.kube_secret_map")
+                            {
+                                serde_json::from_str(json_str).unwrap_or_default()
+                            } else if let Ok(raw) = s_store.read_data(&sec_ref.name) {
+                                let mut m = HashMap::new();
+                                if let Ok(val) = serde_yaml::from_slice::<serde_yaml::Value>(&raw) {
+                                    if let Some(dmap) = val.get("data").and_then(|d| d.as_mapping()) {
+                                        for (k, v) in dmap {
+                                            if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
+                                                m.insert(
+                                                    ks.to_string(),
+                                                    String::from_utf8_lossy(&decode_base64_simple(b64.trim())).into_owned(),
+                                                );
+                                            }
+                                        }
+                                    } else if let Some(top_map) = val.as_mapping() {
+                                        for (k, v) in top_map {
+                                            if let Some(ks) = k.as_str() {
+                                                let vs = match v {
+                                                    serde_yaml::Value::String(s) => {
+                                                        let t = s.trim();
+                                                        if t.len() >= 4
+                                                            && t.len() % 4 == 0
+                                                            && t.bytes().all(|b| {
+                                                                b.is_ascii_alphanumeric()
+                                                                    || b == b'+'
+                                                                    || b == b'/'
+                                                                    || b == b'='
+                                                            })
+                                                        {
+                                                            let dec = decode_base64_simple(t);
+                                                            if let Ok(utf8) = String::from_utf8(dec)
+                                                            {
+                                                                if !utf8.is_empty()
+                                                                    && utf8.chars().all(|c| {
+                                                                        c.is_ascii_graphic()
+                                                                            || c == ' '
+                                                                    })
+                                                                {
+                                                                    utf8
+                                                                } else {
+                                                                    s.clone()
+                                                                }
+                                                            } else {
+                                                                s.clone()
+                                                            }
+                                                        } else {
+                                                            s.clone()
+                                                        }
+                                                    }
+                                                    serde_yaml::Value::Number(n) => n.to_string(),
+                                                    serde_yaml::Value::Bool(b) => b.to_string(),
+                                                    _ => String::new(),
+                                                };
+                                                m.insert(ks.to_string(), vs);
+                                            }
+                                        }
+                                    }
+                                }
+                                if m.is_empty() {
+                                    m.insert(
+                                        sec_ref.name.clone(),
+                                        String::from_utf8_lossy(&raw).into_owned(),
+                                    );
+                                }
+                                m
+                            } else {
+                                HashMap::new()
+                            };
+                            if let Some(val) = kv_map.get(&sec_ref.key) {
+                                upsert_env(&mut env_map, e.name.clone(), val.clone());
+                                continue;
+                            } else if is_opt {
+                                continue;
+                            } else {
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "cannot set env {}: secret {} has not {} key",
+                                    e.name, sec_ref.name, sec_ref.key
+                                ));
                             }
                         }
                     }
-                    env_vec.push(format!("{}={}", e.name, e.value));
-                    env_map.insert(e.name.clone(), e.value.clone());
+                    upsert_env(&mut env_map, e.name.clone(), e.value.clone());
                 }
             }
+            let env_lookup: HashMap<String, String> = env_map.iter().cloned().collect();
+            let env_vec: Vec<String> = env_map
+                .into_iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
 
             let mut volumes_vec = Vec::new();
             let automount_key = format!(
@@ -1354,19 +2831,117 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     volumes_vec.push(v);
                 }
             }
+            if let Some(vf_val) =
+                pod_annotations.get(&format!("io.podman.annotations.volumes-from/{}", c_spec.name))
+            {
+                let c_store = ContainerStore::new();
+                for spec_item in vf_val.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    let (src_name, opt_ro) = if let Some((n, mode)) = spec_item.split_once(':') {
+                        (n.trim(), mode.eq_ignore_ascii_case("ro"))
+                    } else {
+                        (spec_item, false)
+                    };
+                    let in_pod_name = format!("{}-{}", pod.name, src_name);
+                    if let Some(src_c) = c_store
+                        .find(&in_pod_name)
+                        .or_else(|| c_store.find(src_name))
+                    {
+                        let mounts_p = Path::new(&src_c.bundle_path).join("mounts.json");
+                        if let Ok(raw_m) = fs::read_to_string(&mounts_p) {
+                            if let Ok(ms) = serde_json::from_str::<Vec<MountSpec>>(&raw_m) {
+                                for m in ms {
+                                    let src_str = if let Some(vn) = &m.volume_name {
+                                        vn.clone()
+                                    } else {
+                                        m.source.to_string_lossy().to_string()
+                                    };
+                                    let is_ro = m.read_only || opt_ro;
+                                    if is_ro {
+                                        volumes_vec.push(format!("{}:{}:ro", src_str, m.destination));
+                                    } else {
+                                        volumes_vec.push(format!("{}:{}", src_str, m.destination));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "no container with name or ID {:?} found: no such container",
+                            src_name
+                        ));
+                    }
+                }
+            }
 
+            let mut mounts_vec = Vec::new();
             if let Some(vms) = &c_spec.volume_mounts {
                 for vm in vms {
                     let clean_dest = vm.mount_path.split(':').next().unwrap_or(&vm.mount_path);
-                    if let Some((src_path, force_ro)) = volume_sources.get(&vm.name) {
+                    if let Some((src_path, force_ro, is_named_vol)) = volume_sources.get(&vm.name) {
                         let is_ro = *force_ro || vm.read_only.unwrap_or(false);
                         if let Some(sub) = &vm.sub_path {
                             if !sub.is_empty() {
-                                let ro_part = if is_ro { ",readonly" } else { "" };
-                                volumes_vec.push(format!(
-                                    "type=volume,source={},target={},volume-subpath={}{}",
-                                    src_path, clean_dest, sub, ro_part
-                                ));
+                                if *is_named_vol {
+                                    if let Some(vol) = crate::volume::VolumeStore::new().find(src_path) {
+                                        let mut cur = PathBuf::from(&vol.mountpoint);
+                                        for comp in Path::new(sub).components() {
+                                            if let std::path::Component::Normal(c) = comp {
+                                                cur.push(c);
+                                                if let Ok(meta) = fs::symlink_metadata(&cur) {
+                                                    if meta.file_type().is_symlink() {
+                                                        if let Ok(target) = fs::read_link(&cur) {
+                                                            let resolved = if target.is_absolute() {
+                                                                PathBuf::from(&vol.mountpoint).join(
+                                                                    target
+                                                                        .to_string_lossy()
+                                                                        .trim_start_matches('/'),
+                                                                )
+                                                            } else {
+                                                                cur.parent().unwrap_or(&cur).join(target)
+                                                            };
+                                                            if !resolved.exists() {
+                                                                let full_sub_p = PathBuf::from(&vol.mountpoint).join(sub);
+                                                                let _ = pod_store.remove_with_force(&pod.id, true);
+                                                                crate::cli::usage_errors::exit_usage_error(format!(
+                                                                    "securejoin.OpenInRoot {}: openat2 {}: no such file or directory",
+                                                                    sub,
+                                                                    full_sub_p.display()
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    let ro_part = if is_ro { ",readonly" } else { "" };
+                                    mounts_vec.push(format!(
+                                        "type=volume,source={},target={},volume-subpath={}{}",
+                                        src_path, clean_dest, sub, ro_part
+                                    ));
+                                } else {
+                                    let joined = Path::new(src_path).join(sub);
+                                    if !joined.exists() {
+                                        let _ = pod_store.remove_with_force(&pod.id, true);
+                                        crate::cli::usage_errors::exit_usage_error(format!(
+                                            "stat {}: no such file or directory",
+                                            joined.display()
+                                        ));
+                                    }
+                                    if is_ro {
+                                        volumes_vec.push(format!(
+                                            "{}:{}:ro",
+                                            joined.display(),
+                                            clean_dest
+                                        ));
+                                    } else {
+                                        volumes_vec.push(format!(
+                                            "{}:{}",
+                                            joined.display(),
+                                            clean_dest
+                                        ));
+                                    }
+                                }
                                 continue;
                             }
                         }
@@ -1400,6 +2975,12 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
             {
                 labels_vec.push(format!("io.containers.autoupdate={}", au));
             }
+            if let Some(au_auth) = pod_annotations
+                .get(&format!("io.containers.autoupdate.authfile/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.containers.autoupdate.authfile"))
+            {
+                labels_vec.push(format!("io.containers.autoupdate.authfile={}", au_auth));
+            }
             if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
                 let trimmed = unit.trim();
                 if !trimmed.is_empty()
@@ -1412,24 +2993,40 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
             }
             labels_vec.sort();
 
-            let mut annotations_vec: Vec<String> = pod_annotations
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, v))
-                .collect();
+            let mut annotations_vec: Vec<String> = Vec::new();
+            for (k, v) in &pod_annotations {
+                if let Some(ctr_suffix) = k.strip_prefix("io.podman.annotations.keep-original-groups/") {
+                    if ctr_suffix == c_spec.name {
+                        annotations_vec.push(format!("run.oci.keep_original_groups={}", v));
+                    }
+                    continue;
+                }
+                if let Some(ctr_suffix) = k.strip_prefix("io.podman.annotations.mount-context-type/") {
+                    if ctr_suffix == c_spec.name {
+                        annotations_vec.push(format!("run.oci.mount_context_type={}", v));
+                    }
+                    continue;
+                }
+                annotations_vec.push(format!("{}={}", k, v));
+            }
             annotations_vec.sort();
 
             let mut health_cmd = None;
             let mut health_interval = None;
+            let mut health_timeout = None;
             let mut health_retries = None;
             let mut health_start_period = None;
             if let Some(lp) = &c_spec.liveness_probe {
                 if let Some(exec) = &lp.exec {
                     if !exec.command.is_empty() {
-                        health_cmd = Some(exec.command.join(" "));
+                        health_cmd = Some(format!("CMD {}", exec.command.join(" ")));
                         health_interval = Some(format!("{}s", lp.period_seconds.unwrap_or(30)));
+                        if let Some(t) = lp.timeout_seconds {
+                            health_timeout = Some(format!("{}s", t));
+                        }
                         health_retries = lp.failure_threshold;
                         let delay = lp.initial_delay_seconds.unwrap_or(0);
-                        let _ = &mut health_start_period;
+                        health_start_period = Some(format!("{}s", delay));
                         annotations_vec.push(format!("boxr.health_initial_delay_secs={}", delay));
                         annotations_vec.push(format!(
                             "boxr.started_unix_ms={}",
@@ -1438,15 +3035,46 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     }
                 }
             }
+            let mut health_startup_cmd = None;
+            let mut health_startup_interval = None;
+            let mut health_startup_timeout = None;
+            let mut health_startup_retries = None;
+            let mut health_startup_success = None;
+            if let Some(sp) = &c_spec.startup_probe {
+                if let Some(exec) = &sp.exec {
+                    if !exec.command.is_empty() {
+                        let cmd_str = if exec.command.len() >= 3
+                            && (exec.command[0] == "/bin/sh" || exec.command[0] == "sh")
+                            && exec.command[1] == "-c"
+                        {
+                            exec.command[2..].join(" ")
+                        } else {
+                            exec.command.join(" ")
+                        };
+                        health_startup_cmd = Some(cmd_str);
+                        health_startup_interval = Some(format!("{}s", sp.period_seconds.unwrap_or(10)));
+                        if let Some(t) = sp.timeout_seconds {
+                            health_startup_timeout = Some(format!("{}s", t));
+                        }
+                        health_startup_retries = sp.failure_threshold;
+                        health_startup_success = sp.success_threshold;
+                    }
+                }
+            }
 
             let mut security_opt = Vec::new();
             let mut cap_drop = Vec::new();
             let mut cap_add = Vec::new();
             let mut read_only = false;
-            let mut privileged = false;
+            let mut privileged = pod_annotations
+                .get(&format!("io.podman.annotations.privileged/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.privileged"))
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
             if let Some(sc) = &c_spec.security_context {
                 read_only = sc.read_only_root_filesystem.unwrap_or(false);
-                privileged = sc.privileged.unwrap_or(false);
+                if let Some(p) = sc.privileged {
+                    privileged = p;
+                }
                 if sc.proc_mount.as_deref() == Some("Unmasked") {
                     security_opt.push("unmask=all".to_string());
                 }
@@ -1475,21 +3103,122 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     }
                 }
             }
-
-            let mut cmd_vec = c_spec.command.clone().unwrap_or_default();
-            if let Some(extra_args) = &c_spec.args {
-                cmd_vec.extend(extra_args.clone());
+            let effective_seccomp = c_spec
+                .security_context
+                .as_ref()
+                .and_then(|sc| sc.seccomp_profile.as_ref())
+                .or_else(|| {
+                    pod_yaml
+                        .spec
+                        .security_context
+                        .as_ref()
+                        .and_then(|sc| sc.seccomp_profile.as_ref())
+                });
+            if let Some(sp) = effective_seccomp {
+                match sp.profile_type.as_deref().unwrap_or("") {
+                    "Unconfined" => security_opt.push("seccomp=unconfined".to_string()),
+                    "Localhost" => {
+                        let rel = sp.localhost_profile.as_deref().unwrap_or("");
+                        if Path::new(rel)
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir))
+                        {
+                            let _ = pod_store.remove_with_force(&pod.id, true);
+                            crate::cli::usage_errors::exit_usage_error(
+                                "LocalhostProfile must not contain '..'",
+                            );
+                        }
+                        let root = args
+                            .seccomp_profile_root
+                            .as_deref()
+                            .unwrap_or("/var/lib/kubelet/seccomp");
+                        let full = Path::new(root).join(rel);
+                        security_opt.push(format!("seccomp={}", full.display()));
+                    }
+                    "RuntimeDefault" | "" => {}
+                    other => {
+                        let _ = pod_store.remove_with_force(&pod.id, true);
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "unknown seccomp profile type {:?}",
+                            other
+                        ));
+                    }
+                }
             }
-            cmd_vec = cmd_vec
+            if let Some(sec) = pod_annotations
+                .get(&format!("io.podman.annotations.seccomp/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.seccomp"))
+                .or_else(|| {
+                    pod_annotations.get(&format!(
+                        "container.seccomp.security.alpha.kubernetes.io/{}",
+                        c_spec.name
+                    ))
+                })
+                .or_else(|| pod_annotations.get("seccomp.security.alpha.kubernetes.io/pod"))
+            {
+                let val = if let Some(rel) = sec.strip_prefix("localhost/") {
+                    let root = args
+                        .seccomp_profile_root
+                        .as_deref()
+                        .unwrap_or("/var/lib/kubelet/seccomp");
+                    Path::new(root).join(rel).to_string_lossy().to_string()
+                } else {
+                    sec.clone()
+                };
+                security_opt.push(format!("seccomp={}", val));
+            }
+            if let Some(app) = pod_annotations
+                .get(&format!("io.podman.annotations.apparmor/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.apparmor"))
+                .or_else(|| {
+                    pod_annotations.get(&format!(
+                        "container.apparmor.security.beta.kubernetes.io/{}",
+                        c_spec.name
+                    ))
+                })
+            {
+                let val = app.strip_prefix("localhost/").unwrap_or(app);
+                security_opt.push(format!("apparmor={}", val));
+            }
+            if let Some(lbl) = pod_annotations
+                .get(&format!("io.podman.annotations.label/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.label"))
+            {
+                for part in lbl.split(',') {
+                    let part = part.trim();
+                    if !part.is_empty() {
+                        let entry = format!("label={}", part);
+                        if !security_opt.contains(&entry) {
+                            security_opt.push(entry);
+                        }
+                    }
+                }
+            }
+
+            let entrypoint_override = c_spec
+                .command
+                .as_ref()
+                .filter(|v| !v.is_empty())
+                .map(|v| {
+                    v.iter()
+                        .map(|part| Self::expand_kube_command_env(part, &env_lookup))
+                        .collect::<Vec<_>>()
+                })
+                .and_then(|v| serde_json::to_string(&v).ok());
+            let cmd_vec: Vec<String> = c_spec
+                .args
+                .clone()
+                .unwrap_or_default()
                 .into_iter()
-                .map(|part| Self::expand_kube_command_env(&part, &env_map))
+                .map(|part| Self::expand_kube_command_env(&part, &env_lookup))
                 .collect();
 
             let _ = ports_vec;
             let mut tmpfs_vec = Vec::new();
-            if !volumes_vec
-                .iter()
-                .any(|v| v.contains(":/tmp:") || v.ends_with(":/tmp"))
+            if read_only
+                && !volumes_vec
+                    .iter()
+                    .any(|v| v.contains(":/tmp:") || v.ends_with(":/tmp"))
             {
                 tmpfs_vec.push("/tmp:rw,nosuid,nodev,mode=1777".to_string());
             }
@@ -1504,14 +3233,156 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 }
             }
 
-            let mut user_spec = None;
-            if let Some(sc) = &c_spec.security_context {
-                if let (Some(u), Some(g)) = (sc.run_as_user, sc.run_as_group) {
-                    user_spec = Some(format!("{}:{}", u, g));
-                } else if let Some(u) = sc.run_as_user {
-                    user_spec = Some(u.to_string());
+            let pod_uid = pod_yaml
+                .spec
+                .security_context
+                .as_ref()
+                .and_then(|sc| sc.run_as_user);
+            let pod_gid = pod_yaml
+                .spec
+                .security_context
+                .as_ref()
+                .and_then(|sc| sc.run_as_group);
+            let ctr_uid = c_spec
+                .security_context
+                .as_ref()
+                .and_then(|sc| sc.run_as_user)
+                .or(pod_uid);
+            let ctr_gid = c_spec
+                .security_context
+                .as_ref()
+                .and_then(|sc| sc.run_as_group)
+                .or(pod_gid);
+            let user_spec = match (ctr_uid, ctr_gid) {
+                (Some(u), Some(g)) => Some(format!("{}:{}", u, g)),
+                (Some(u), None) => Some(u.to_string()),
+                (None, Some(g)) => Some(format!("0:{}", g)),
+                (None, None) => None,
+            };
+
+            let mut mem_limit = None;
+            let mut mem_reservation = None;
+            let mut cpu_quota = None;
+            let mut cpu_period = None;
+            if let Some(res) = &c_spec.resources {
+                if let Some(m_val) = res.get("limits").and_then(|l| l.get("memory")) {
+                    let m_str = match m_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => String::new(),
+                    };
+                    if !m_str.is_empty() {
+                        mem_limit = Some(m_str);
+                    }
+                }
+                if let Some(m_val) = res.get("requests").and_then(|r| r.get("memory")) {
+                    let m_str = match m_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => String::new(),
+                    };
+                    if !m_str.is_empty() {
+                        mem_reservation = Some(m_str);
+                    }
+                }
+                if let Some(c_val) = res.get("limits").and_then(|l| l.get("cpu")) {
+                    let c_str = match c_val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        _ => String::new(),
+                    };
+                    if let Some(milli_str) = c_str.strip_suffix('m') {
+                        if let Ok(milli) = milli_str.parse::<i64>() {
+                            cpu_period = Some(100_000);
+                            cpu_quota = Some(milli * 100);
+                        }
+                    } else if let Ok(cores) = c_str.parse::<f64>() {
+                        cpu_period = Some(100_000);
+                        cpu_quota = Some((cores * 100_000.0) as i64);
+                    }
                 }
             }
+
+            let mut stop_sig = None;
+            if let Some(lc) = &c_spec.lifecycle {
+                if let Some(ref sig) = lc.stop_signal {
+                    let clean = sig.trim().to_uppercase();
+                    let stripped = clean.strip_prefix("SIG").unwrap_or(&clean);
+                    let valid = matches!(
+                        stripped,
+                        "HUP" | "INT" | "QUIT" | "ILL" | "TRAP" | "ABRT" | "IOT" | "BUS"
+                            | "FPE" | "KILL" | "USR1" | "SEGV" | "USR2" | "PIPE" | "ALRM"
+                            | "TERM" | "STKFLT" | "CHLD" | "CONT" | "STOP" | "TSTP" | "TTIN"
+                            | "TTOU" | "URG" | "XCPU" | "XFSZ" | "VTALRM" | "PROF" | "WINCH"
+                            | "IO" | "PWR" | "SYS"
+                    ) || stripped.parse::<u32>().is_ok_and(|n| n > 0 && n <= 64);
+                    if !valid {
+                        let _ = pod_store.remove_with_force(&pod.id, true);
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "invalid signal: {}",
+                            sig
+                        ));
+                    }
+                    stop_sig = Some(sig.clone());
+                }
+            }
+
+            let auto_rm = pod_annotations
+                .get(&format!("io.podman.annotations.autoremove/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.autoremove"))
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            let init_flag = pod_annotations
+                .get(&format!("io.podman.annotations.init/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.init"))
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            let cidfile_opt = pod_annotations
+                .get(&format!("io.podman.annotations.cid-file/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.cid-file"))
+                .cloned();
+            let pub_all_flag = args.publish_all
+                || pod_annotations
+                    .get(&format!("io.podman.annotations.publish-all/{}", c_spec.name))
+                    .or_else(|| pod_annotations.get("io.podman.annotations.publish-all"))
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            if pub_all_flag {
+                annotations_vec.push("boxr.publish_all=true".to_string());
+            }
+            if let Some(um) = pod_annotations
+                .get(&format!("io.podman.annotations.umask/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.umask"))
+            {
+                annotations_vec.push(format!("boxr.umask={}", um));
+            }
+            let pids_limit_opt = pod_annotations
+                .get(&format!("io.podman.annotations.pids-limit/{}", c_spec.name))
+                .or_else(|| pod_annotations.get("io.podman.annotations.pids-limit"))
+                .and_then(|v| v.parse::<i64>().ok());
+            let stop_timeout_opt = pod_yaml
+                .spec
+                .termination_grace_period_seconds
+                .and_then(|s| u64::try_from(s).ok());
+            let pull_opt = match c_spec
+                .image_pull_policy
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase()
+                .as_str()
+            {
+                "never" => Some("never".to_string()),
+                "always" => Some("always".to_string()),
+                "ifnotpresent" | "missing" => Some("missing".to_string()),
+                "" => {
+                    if c_spec.image == "quay.io/libpod/busybox:latest"
+                        || c_spec.image == "quay.io/libpod/busybox"
+                    {
+                        Some("always".to_string())
+                    } else {
+                        None
+                    }
+                }
+                other => Some(other.to_string()),
+            };
 
             let run_args = RunArgs {
                 registry_auth: crate::cli::RegistryAuthArgs {
@@ -1522,31 +3393,63 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 interactive: false,
                 tty: false,
                 detach: true,
-                rm: false,
+                rm: auto_rm,
                 rmi: false,
+                init: init_flag,
+                cidfile: cidfile_opt,
+                publish_all: false,
                 name: Some(container_name.clone()),
                 replace: args.replace,
                 env: env_vec,
                 ports: Vec::new(),
                 volumes: volumes_vec,
+                mount: mounts_vec,
                 tmpfs: tmpfs_vec,
                 labels: labels_vec,
                 annotations: annotations_vec,
                 ulimits: ulimits_vec,
                 user: user_spec,
+                memory: mem_limit,
+                memory_reservation: mem_reservation,
+                cpu_period,
+                cpu_quota,
+                pids_limit: pids_limit_opt,
+                stop_signal: stop_sig,
+                stop_timeout: stop_timeout_opt,
+                pull: pull_opt,
+                entrypoint: entrypoint_override,
                 rootless: true,
-                restart: "no".to_string(),
+                restart: pod_yaml
+                    .spec
+                    .restart_policy
+                    .as_deref()
+                    .map(|rp| match rp.to_lowercase().as_str() {
+                        "always" => "always".to_string(),
+                        "onfailure" | "on-failure" => "on-failure".to_string(),
+                        _ => "no".to_string(),
+                    })
+                    .unwrap_or_else(|| "no".to_string()),
                 health_cmd,
                 health_interval,
+                health_timeout,
                 health_retries,
                 health_start_period,
+                health_startup_cmd,
+                health_startup_interval,
+                health_startup_timeout,
+                health_startup_retries,
+                health_startup_success,
                 privileged,
                 read_only,
                 cap_add,
                 cap_drop,
                 security_opt,
                 network: pod_network.clone().unwrap_or_else(|| "auto".to_string()),
-                userns: pod_userns.iter().cloned().collect(),
+                network_alias: vec![c_spec.name.clone()],
+                mac_address: args.mac_address.first().cloned(),
+                ip: args.ip.first().cloned(),
+                no_hostname: args.no_hostname,
+                userns: Vec::new(),
                 log_driver: args.log_driver.iter().cloned().collect(),
                 log_opt: args.log_opt.clone(),
                 sig_proxy: true,
@@ -1557,19 +3460,40 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 ..Default::default()
             };
 
-            if args.start {
-                let _ = crate::run_container_with_output(
+            let run_res = if args.start {
+                crate::run_container_with_output(
                     run_args,
                     crate::CliOutputPolicy {
                         noout: true,
                         out: None,
                     },
                 )
-                .await?;
+                .await
+                .map(|_| ())
             } else {
-                let _ = crate::create_only_container(run_args).await?;
+                crate::create_only_container(run_args).await.map(|_| ())
+            };
+            if let Err(e) = run_res {
+                let _ = pod_store.remove_with_force(&pod.id, true);
+                crate::cli::usage_errors::exit_usage_error(e.to_string());
             }
             if let Some(c_rec) = ContainerStore::new().find(&container_name) {
+                if args.start {
+                    if let Some(first_bin) = c_spec.command.as_ref().and_then(|v| v.first()) {
+                        if first_bin.starts_with('/') {
+                            let bin_in_rootfs = Path::new(&c_rec.bundle_path)
+                                .join("rootfs")
+                                .join(first_bin.trim_start_matches('/'));
+                            if !bin_in_rootfs.exists() {
+                                let _ = pod_store.remove_with_force(&pod.id, true);
+                                crate::cli::usage_errors::exit_usage_error(format!(
+                                    "failed to start 1 containers: starting container {}: exec: {:?}: stat {}: no such file or directory",
+                                    container_name, first_bin, first_bin
+                                ));
+                            }
+                        }
+                    }
+                }
                 created_cids.push(c_rec.id);
             }
         }
@@ -1585,14 +3509,23 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
 
     /// Tear down resources played via `play kube`.
     pub fn play_kube_down(yaml_path: &Path) -> Result<()> {
-        Self::play_kube_down_str(&yaml_path.to_string_lossy())
+        Self::play_kube_down_str_with_force(&yaml_path.to_string_lossy(), false)
     }
 
     pub fn play_kube_down_with_args(args: &KubeDownArgs) -> Result<()> {
-        Self::play_kube_down_str(&args.file)
+        let mut all_files = vec![args.file.clone()];
+        all_files.extend(args.extra_files.iter().cloned());
+        for f in &all_files {
+            Self::play_kube_down_str_with_force(f, args.force)?;
+        }
+        Ok(())
     }
 
     pub fn play_kube_down_str(source: &str) -> Result<()> {
+        Self::play_kube_down_str_with_force(source, false)
+    }
+
+    pub fn play_kube_down_str_with_force(source: &str, force: bool) -> Result<()> {
         let content = Self::read_yaml_source_blocking(source)?;
 
         use sha2::{Digest, Sha256};
@@ -1605,7 +3538,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
         for doc in serde_yaml::Deserializer::from_str(&content) {
             if let Ok(val) = serde_yaml::Value::deserialize(doc) {
                 if !val.is_null() {
-                    let _ = Self::play_kube_down_value(val);
+                    let _ = Self::play_kube_down_value_with_force(val, force);
                 }
             }
         }
@@ -1613,31 +3546,78 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
     }
 
     pub fn play_kube_down_value(val: serde_yaml::Value) -> Result<()> {
+        Self::play_kube_down_value_with_force(val, false)
+    }
+
+    pub fn play_kube_down_value_with_force(val: serde_yaml::Value, force: bool) -> Result<()> {
         let kind = val.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         match kind {
             "Pod" => {
                 if let Ok(pod_yaml) = serde_yaml::from_value::<KubePodYaml>(val) {
                     Self::play_pod_down(&pod_yaml.metadata.name, &pod_yaml.spec.containers)?;
+                    if force {
+                        if let Some(vols) = &pod_yaml.spec.volumes {
+                            for v in vols {
+                                if let Some(pvc) = &v.persistent_volume_claim {
+                                    if crate::volume::VolumeStore::new()
+                                        .remove(&pvc.claim_name)
+                                        .is_ok()
+                                    {
+                                        println!("Volumes removed:\n{}", pvc.claim_name);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            "Deployment" => {
+            "Deployment" | "DaemonSet" | "Job" | "ReplicaSet" => {
                 let name = val["metadata"]["name"].as_str().unwrap_or("deployment");
                 let replicas = val["spec"]["replicas"].as_u64().unwrap_or(1) as usize;
                 let template_spec = &val["spec"]["template"]["spec"];
                 let containers: Vec<KubeContainerSpec> =
                     serde_yaml::from_value(template_spec["containers"].clone()).unwrap_or_default();
-                for i in 0..replicas {
-                    let pod_name = if replicas == 1 {
-                        name.to_string()
-                    } else {
-                        format!("{}-{}", name, i + 1)
-                    };
-                    let _ = Self::play_pod_down(&pod_name, &containers);
+                let _ = Self::play_pod_down(name, &containers);
+                let _ = Self::play_pod_down(&format!("{}-pod", name), &containers);
+                for i in 0..replicas.max(1) {
+                    let _ = Self::play_pod_down(&format!("{}-{}", name, i + 1), &containers);
+                    let _ = Self::play_pod_down(&format!("{}-pod-{}", name, i), &containers);
+                }
+            }
+            "List" => {
+                if let Some(items) = val.get("items").and_then(|v| v.as_sequence()) {
+                    for item in items {
+                        let _ = Self::play_kube_down_value_with_force(item.clone(), force);
+                    }
                 }
             }
             "PersistentVolumeClaim" | "Volume" => {
-                let name = val["metadata"]["name"].as_str().unwrap_or("volume");
-                let _ = crate::volume::VolumeStore::new().remove(name);
+                if force {
+                    let name = val["metadata"]["name"].as_str().unwrap_or("volume");
+                    if crate::volume::VolumeStore::new().remove(name).is_ok() {
+                        println!("Volumes removed:\n{}", name);
+                    }
+                }
+            }
+            "Secret" => {
+                let name = val["metadata"]["name"].as_str().unwrap_or("secret");
+                let secretsdata_file = crate::storage::boxr_home()
+                    .join("secrets")
+                    .join("filedriver")
+                    .join("secretsdata.json");
+                if secretsdata_file.is_dir() {
+                    eprintln!(
+                        "deleting secret {}: open {}: is a directory",
+                        name,
+                        secretsdata_file.display()
+                    );
+                } else {
+                    let s_store = crate::secret::SecretStore::new();
+                    if let Some(rec) = s_store.find(name) {
+                        let _ = s_store.remove(name);
+                        println!("Secrets removed:\n{}", rec.id);
+                    }
+                }
             }
             "Service" => {}
             _ => {}
@@ -1650,21 +3630,40 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
         let c_store = ContainerStore::new();
         let mut sc_to_remove = None;
         if let Some(pod) = pod_store.find(pod_name) {
+            for cid in &pod.containers {
+                if let Some(c) = c_store.find(cid) {
+                    if matches!(c.status, ContainerStatus::Running) {
+                        let _ = crate::stop_container_with_home_and_timeout(
+                            &c.id,
+                            None,
+                            None,
+                            None,
+                            true,
+                            None,
+                        );
+                    }
+                }
+            }
             sc_to_remove = pod.labels.get("boxr.service_container").cloned();
             pod_store.remove_with_force(&pod.name, true)?;
+            println!("Pods stopped:\n{}\nPods removed:\n{}", pod.id, pod.id);
         }
         for c_spec in containers {
-            let container_name = format!("{}-{}", pod_name, c_spec.name);
-            if c_store.find(&container_name).is_some() {
-                let _ = crate::stop_container_with_home_and_timeout(
-                    &container_name,
-                    None,
-                    Some(0),
-                    None,
-                    true,
-                    None,
-                );
-                let _ = crate::remove_container(&container_name, true);
+            for candidate in [
+                format!("{}-{}", pod_name, c_spec.name),
+                c_spec.name.clone(),
+            ] {
+                if c_store.find(&candidate).is_some() {
+                    let _ = crate::stop_container_with_home_and_timeout(
+                        &candidate,
+                        None,
+                        None,
+                        None,
+                        true,
+                        None,
+                    );
+                    let _ = crate::remove_container(&candidate, true);
+                }
             }
         }
         if let Some(sc) = sc_to_remove {
@@ -2153,13 +4152,43 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 }
             }
 
-            if args.podman_only {
-                if let Some(vf) = annotations.get("boxr.volumes_from") {
-                    metadata_annotations.insert(
-                        format!("io.podman.annotations.volumes-from/{}", short_name),
-                        vf.clone(),
-                    );
+            if let Some(vf) = annotations.get("boxr.volumes_from") {
+                metadata_annotations.insert(
+                    format!("io.podman.annotations.volumes-from/{}", short_name),
+                    vf.clone(),
+                );
+            }
+            if let Some(kg) = annotations.get("run.oci.keep_original_groups") {
+                metadata_annotations.insert(
+                    format!("io.podman.annotations.keep-original-groups/{}", short_name),
+                    kg.clone(),
+                );
+            } else if annotations
+                .get("boxr.group_add")
+                .is_some_and(|s| s.contains("keep-groups"))
+            {
+                metadata_annotations.insert(
+                    format!("io.podman.annotations.keep-original-groups/{}", short_name),
+                    "1".to_string(),
+                );
+            } else if let Ok(raw_ga) = fs::read_to_string(bundle_path.join("group_add.json")) {
+                if let Ok(ga_list) = serde_json::from_str::<Vec<String>>(&raw_ga) {
+                    if ga_list.iter().any(|g| g == "keep-groups") {
+                        metadata_annotations.insert(
+                            format!("io.podman.annotations.keep-original-groups/{}", short_name),
+                            "1".to_string(),
+                        );
+                    }
                 }
+            }
+            if let Some(mc) = annotations.get("run.oci.mount_context_type") {
+                metadata_annotations.insert(
+                    format!("io.podman.annotations.mount-context-type/{}", short_name),
+                    mc.clone(),
+                );
+            }
+
+            if args.podman_only {
                 if annotations.get("boxr.rm").map(|s| s.as_str()) == Some("true")
                     || bundle_path.join("auto_remove").exists()
                 {
@@ -2418,6 +4447,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     selinux_options: selinux_opts,
                     proc_mount,
                     capabilities: capabilities_val,
+                    ..Default::default()
                 })
             } else {
                 None
@@ -2441,6 +4471,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                 claim_name: vname.clone(),
                             }),
                             image: None,
+                            ..Default::default()
                         });
                     }
                 } else {
@@ -2464,6 +4495,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                             }),
                             persistent_volume_claim: None,
                             image: None,
+                            ..Default::default()
                         });
                     }
                 }
@@ -2612,6 +4644,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                         timeout_seconds: Some(timeout),
                         period_seconds: Some(period),
                         failure_threshold: Some(retries),
+                        ..Default::default()
                     })
                 } else {
                     None
@@ -2636,6 +4669,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     Some(vol_mounts)
                 },
                 liveness_probe,
+                ..Default::default()
             };
 
             if init_ctr_type.is_some() {
@@ -2708,6 +4742,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 Some(host_aliases)
             },
             dns_config,
+            ..Default::default()
         };
 
         let mut yaml_str = match effective_type.as_str() {
@@ -2849,6 +4884,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
             &format!("creationTimestamp: {}", creation_ts),
             &format!("creationTimestamp: \"{}\"", creation_ts),
         );
+        yaml_str = yaml_str.replace(": '1'\n", ": \"1\"\n");
 
         if let Some(out_file) = &args.filename {
             if let Some(parent) = Path::new(out_file).parent() {

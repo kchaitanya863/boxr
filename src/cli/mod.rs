@@ -45,6 +45,9 @@ pub static READ_ONLY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 /// Podman `pod create --infra=false` (clap `SetTrue` cannot represent this).
 pub static POD_INFRA_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
+/// Whether `--network` / `--net` was explicitly supplied on the CLI.
+pub static CLI_EXPLICIT_NETWORK: OnceLock<bool> = OnceLock::new();
+
 /// Podman `run --http-proxy=false` (accepted for e2e; boxr does not inject proxy env).
 pub static HTTP_PROXY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
@@ -259,6 +262,11 @@ pub fn podman_subcommand_index(argv: &[String]) -> usize {
 
 pub static EXTRA_NETWORK_SPECS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 pub static NETWORK_CONNECT_MAC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub static NETWORK_CONNECT_IP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub static NETWORK_CONNECT_IP6: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+pub static NETWORK_CONNECT_ALIASES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+pub static EXTRA_NETWORK_INSPECT_NAMES: std::sync::OnceLock<Vec<String>> =
+    std::sync::OnceLock::new();
 pub static CLI_GLOBAL_NOOUT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
@@ -291,9 +299,14 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut build_files: Vec<String> = Vec::new();
     let mut seen_first_net = false;
     let mut extra_nets = Vec::new();
+    let mut net_connect_aliases = Vec::new();
+    let mut net_inspect_names = Vec::new();
     let is_net_connect = argv
         .windows(2)
         .any(|w| w[0] == "network" && w[1] == "connect");
+    let is_net_inspect = argv
+        .windows(2)
+        .any(|w| w[0] == "network" && w[1] == "inspect");
     let subcommand_idx = podman_subcommand_index(&argv);
     let sub_name = argv.get(subcommand_idx).map(String::as_str).unwrap_or("");
     let sub2_name = argv
@@ -376,21 +389,101 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 i += 1;
                 continue;
             }
+            if a == "--ip" && i + 1 < argv.len() {
+                let _ = NETWORK_CONNECT_IP.set(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(ip) = a.strip_prefix("--ip=") {
+                let _ = NETWORK_CONNECT_IP.set(ip.to_string());
+                i += 1;
+                continue;
+            }
+            if a == "--ip6" && i + 1 < argv.len() {
+                let _ = NETWORK_CONNECT_IP6.set(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(ip6) = a.strip_prefix("--ip6=") {
+                let _ = NETWORK_CONNECT_IP6.set(ip6.to_string());
+                i += 1;
+                continue;
+            }
+            if a == "--alias" && i + 1 < argv.len() {
+                net_connect_aliases.push(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(al) = a.strip_prefix("--alias=") {
+                net_connect_aliases.push(al.to_string());
+                i += 1;
+                continue;
+            }
         }
-        if i >= subcommand_idx && (a == "--net" || a == "--network") && i + 1 < argv.len() && !seen_positional_after_sub {
-            if !seen_first_net {
-                seen_first_net = true;
+        if is_net_inspect && i > subcommand_idx + 1 {
+            if (a == "-f" || a == "--format") && i + 1 < argv.len() {
                 out.push(a.clone());
                 out.push(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if !a.starts_with('-') {
+                if net_inspect_names.is_empty() {
+                    net_inspect_names.push(a.clone());
+                    out.push(a.clone());
+                } else {
+                    net_inspect_names.push(a.clone());
+                }
+                i += 1;
+                continue;
+            }
+        }
+        if i >= subcommand_idx
+            && (a == "--net" || a == "--network")
+            && i + 1 < argv.len()
+            && !seen_positional_after_sub
+        {
+            let raw_val = &argv[i + 1];
+            if is_run_or_create && raw_val.contains(',') && !raw_val.contains(':') {
+                for part in raw_val.split(',') {
+                    let p = part.trim();
+                    if p.is_empty() {
+                        continue;
+                    }
+                    if !seen_first_net {
+                        seen_first_net = true;
+                        out.push(a.clone());
+                        out.push(p.to_string());
+                    } else {
+                        extra_nets.push(p.to_string());
+                    }
+                }
+            } else if !seen_first_net {
+                seen_first_net = true;
+                out.push(a.clone());
+                out.push(raw_val.clone());
             } else {
-                extra_nets.push(argv[i + 1].clone());
+                extra_nets.push(raw_val.clone());
             }
             i += 2;
             continue;
         }
         if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) && !seen_positional_after_sub {
             let val = a.split_once('=').map(|(_, v)| v).unwrap_or("");
-            if !seen_first_net {
+            if is_run_or_create && val.contains(',') && !val.contains(':') {
+                for part in val.split(',') {
+                    let p = part.trim();
+                    if p.is_empty() {
+                        continue;
+                    }
+                    if !seen_first_net {
+                        seen_first_net = true;
+                        out.push(format!("--network={}", p));
+                    } else {
+                        extra_nets.push(p.to_string());
+                    }
+                }
+            } else if !seen_first_net {
                 seen_first_net = true;
                 out.push(a.clone());
             } else {
@@ -830,6 +923,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         if a == "--infra=false" {
             pod_infra_false = true;
+            if !argv[i + 1..].iter().any(|s| s == "--infra=true" || s == "--infra") {
+                let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
+            }
             i += 1;
             continue;
         }
@@ -900,8 +996,17 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     if build_files.len() > 1 {
         let _ = BUILD_EXTRA_FILES.set(build_files[1..].to_vec());
     }
+    if seen_first_net {
+        let _ = CLI_EXPLICIT_NETWORK.set(true);
+    }
     if !extra_nets.is_empty() {
         let _ = EXTRA_NETWORK_SPECS.set(extra_nets);
+    }
+    if !net_connect_aliases.is_empty() {
+        let _ = NETWORK_CONNECT_ALIASES.set(net_connect_aliases);
+    }
+    if net_inspect_names.len() > 1 {
+        let _ = EXTRA_NETWORK_INSPECT_NAMES.set(net_inspect_names[1..].to_vec());
     }
     if subcommand_idx == argv.len() && out.len() >= 2 && out[out.len() - 1] == "-v" {
         let _ = VERSION_SHORT_OUTPUT.set(true);

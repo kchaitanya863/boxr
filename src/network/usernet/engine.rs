@@ -520,6 +520,7 @@ pub mod platform {
     }
 
     const TUNSETIFF: libc::c_ulong = 0x400454ca;
+    const TUNSETPERSIST: libc::c_ulong = 0x400454cb;
     const IFF_TAP: libc::c_short = 0x0002;
     const IFF_NO_PI: libc::c_short = 0x1000;
 
@@ -575,6 +576,27 @@ pub mod platform {
             });
         }
         let _ = cmd.status();
+    }
+
+    pub fn create_persistent_tap_device(dev_name: &str) -> Result<()> {
+        let f = create_tap_device(dev_name)?;
+        unsafe {
+            let _ = libc::ioctl(f.as_raw_fd(), TUNSETPERSIST as _, 1);
+        }
+        Ok(())
+    }
+
+    pub fn destroy_tap_device(dev_name: &str) {
+        if let Ok(f) = create_tap_device(dev_name) {
+            unsafe {
+                let _ = libc::ioctl(f.as_raw_fd(), TUNSETPERSIST as _, 0);
+            }
+            drop(f);
+        }
+        let ip_bin = ip_command();
+        let _ = Command::new(ip_bin)
+            .args(["link", "delete", dev_name])
+            .output();
     }
 
     /// Configure IP address, netmask, MTU, and default gateway inside the container network namespace

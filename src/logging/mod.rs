@@ -88,6 +88,7 @@ pub fn tee_k8s_stream_with_tty<R: Read>(
 pub struct K8sLogEntry {
     pub timestamp: DateTime<FixedOffset>,
     pub stream: String,
+    pub is_stderr: bool,
     pub partial: bool,
     pub payload: Vec<u8>,
 }
@@ -251,6 +252,7 @@ fn parse_k8s_log_line(line: &[u8]) -> Option<K8sLogEntry> {
                 return Some(K8sLogEntry {
                     timestamp,
                     stream: stream.to_string(),
+                    is_stderr: stream == "stderr",
                     partial,
                     payload,
                 });
@@ -574,11 +576,16 @@ pub fn stream_k8s_container_logs(
     if !follow {
         if is_k8s_log_path(path) {
             let entries = filter_k8s_entries_opts(read_k8s_log_entries(path)?, since, until);
-            if entries.iter().any(|e| e.stream == "stderr") && tail.is_none() && !timestamps {
+            if entries.iter().any(|e| e.is_stderr || e.stream == "stderr")
+                && since.is_none()
+                && until.is_none()
+                && tail.is_none()
+                && !timestamps
+            {
                 let mut out_entries = Vec::new();
                 let mut err_entries = Vec::new();
                 for e in entries {
-                    if e.stream == "stderr" {
+                    if e.is_stderr || e.stream == "stderr" {
                         err_entries.push(e);
                     } else {
                         out_entries.push(e);
