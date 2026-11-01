@@ -50,6 +50,7 @@ pub static HTTP_PROXY_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run/create --no-hosts`
 pub static RUN_NO_HOSTS: OnceLock<bool> = OnceLock::new();
+pub static RUN_NO_HOSTS_EXPLICIT_FALSE: OnceLock<bool> = OnceLock::new();
 
 /// Podman `run/create --env-host`
 pub static RUN_ENV_HOST: OnceLock<bool> = OnceLock::new();
@@ -358,7 +359,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 continue;
             }
         }
-        if i >= subcommand_idx && (a == "--net" || a == "--network") && i + 1 < argv.len() {
+        if i >= subcommand_idx && (a == "--net" || a == "--network") && i + 1 < argv.len() && !seen_positional_after_sub {
             if !seen_first_net {
                 seen_first_net = true;
                 out.push(a.clone());
@@ -369,7 +370,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 2;
             continue;
         }
-        if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) {
+        if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) && !seen_positional_after_sub {
             let val = a.split_once('=').map(|(_, v)| v).unwrap_or("");
             if !seen_first_net {
                 seen_first_net = true;
@@ -437,13 +438,17 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         if i > sub_start
             && !seen_positional_after_sub
-            && a == "--no-hosts"
+            && (a == "--no-hosts" || a == "--no-hosts=true" || a == "--no-hosts=false")
             && (is_run_or_create
                 || sub_name == "build"
                 || (sub_name == "image" && sub2_name == "build")
                 || (sub_name == "pod" && sub2_name == "create"))
         {
-            let _ = RUN_NO_HOSTS.set(true);
+            if a == "--no-hosts=false" {
+                let _ = RUN_NO_HOSTS_EXPLICIT_FALSE.set(true);
+            } else {
+                let _ = RUN_NO_HOSTS.set(true);
+            }
             i += 1;
             continue;
         }
@@ -582,6 +587,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                     || matches!(
                         prev,
                         "-e" | "--env"
+                            | "--env-merge"
                             | "-p"
                             | "--publish"
                             | "-v"
@@ -623,6 +629,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                             | "--dns-search"
                             | "--dns-option"
                             | "--device"
+                            | "--cdi-spec-dir"
                             | "--tmpfs"
                             | "--mount"
                             | "--volumes-from"
@@ -668,9 +675,12 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                             | "--signature-policy"
                             | "--chrootdirs"
                             | "--pidfile"
+                            | "--expose"
                             | "--ip"
                             | "--ip6"
                             | "--mac-address"
+                            | "--link"
+                            | "--network-alias"
                             | "--cgroups"
                             | "--cgroup-conf"
                             | "--pod-id-file"
@@ -690,6 +700,16 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                             | "--health-max-log-count"
                             | "--health-max-log-size"
                             | "--health-log-destination"
+                            | "--isolation"
+                            | "--gpus"
+                            | "--kernel-memory"
+                            | "--cpu-count"
+                            | "--cpu-percent"
+                            | "--io-maxbandwidth"
+                            | "--io-maxiops"
+                            | "--init-ctr"
+                            | "--subuidname"
+                            | "--subgidname"
                     );
                 if !prev_takes_val {
                     seen_positional_after_sub = true;

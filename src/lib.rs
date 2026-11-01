@@ -407,9 +407,12 @@ fn apply_podman_run_env(spec: &mut Spec, args: &RunArgs) {
 
 fn parse_entrypoint_override(ep: &str) -> Vec<String> {
     let trimmed = ep.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
     if trimmed.starts_with('[') {
         if let Ok(parts) = serde_json::from_str::<Vec<String>>(trimmed) {
-            return parts;
+            return parts.into_iter().filter(|s| !s.is_empty()).collect();
         }
     }
     vec![ep.to_string()]
@@ -1262,14 +1265,12 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 run_container_runlabel(&rl_args)?;
                 Ok(0)
             }
-            cli::ContainerAction::Mount { container } => {
-                let path = mount::MountManager::new().mount_container(&container)?;
-                println!("{}", path);
+            cli::ContainerAction::Mount(m_args) => {
+                handle_container_mount(&m_args)?;
                 Ok(0)
             }
-            cli::ContainerAction::Unmount { container } => {
-                mount::MountManager::new().unmount_container(&container)?;
-                println!("{}", container);
+            cli::ContainerAction::Unmount(u_args) => {
+                handle_container_unmount(&u_args)?;
                 Ok(0)
             }
         },
@@ -1772,13 +1773,11 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Commands::Mount(args) => {
-            let path = mount::MountManager::new().mount_container(&args.container)?;
-            println!("{}", path);
+            handle_container_mount(&args)?;
             Ok(0)
         }
         Commands::Unmount(args) => {
-            mount::MountManager::new().unmount_container(&args.container)?;
-            println!("{}", args.container);
+            handle_container_unmount(&args)?;
             Ok(0)
         }
         Commands::Artifact(args) => {
@@ -3247,6 +3246,23 @@ fn apply_capabilities_and_security(
     cap_drop: &[String],
 ) {
     let mut cap_profile = security::CapabilityProfile::default();
+    let conf_caps = containers_conf_string_array("default_capabilities");
+    if !conf_caps.is_empty() {
+        let normalized_conf: Vec<String> = conf_caps
+            .into_iter()
+            .map(|c| {
+                let up = c.trim().to_uppercase();
+                if up.starts_with("CAP_") {
+                    up
+                } else {
+                    format!("CAP_{}", up)
+                }
+            })
+            .collect();
+        cap_profile.bounding = normalized_conf.clone();
+        cap_profile.effective = normalized_conf.clone();
+        cap_profile.permitted = normalized_conf;
+    }
     if privileged {
         let all_caps: Vec<String> = vec![
             "CAP_CHOWN",
@@ -3463,8 +3479,11 @@ fn validate_run_create_option_conflicts(args: &RunArgs) {
     if (args.ip.is_some() || args.mac_address.is_some()) && args.pod.is_none() {
         let is_rootless = unsafe { libc::getuid() != 0 };
         let net = args.network.trim();
-        let is_default_rootless_net =
-            net.is_empty() || net == "auto" || net == "pasta" || net.starts_with("pasta:") || net == "slirp4netns";
+        let is_default_rootless_net = net.is_empty()
+            || net == "auto"
+            || net == "pasta"
+            || net.starts_with("pasta:")
+            || net == "slirp4netns";
         if is_rootless && is_default_rootless_net {
             cli::usage_errors::exit_usage_error(
                 "invalid config provided: networks and static ip/mac address can only be used with Bridge mode networking",
@@ -3503,6 +3522,27 @@ fn validate_run_create_option_conflicts(args: &RunArgs) {
                 );
             }
         }
+    }
+    let has_dns_flags =
+        !args.dns.is_empty() || !args.dns_option.is_empty() || !args.dns_search.is_empty();
+    let net = args.network.trim();
+    if has_dns_flags {
+        if net == "none" {
+            cli::usage_errors::exit_usage_error(
+                "conflicting options: dns and the network mode: none",
+            );
+        } else if net.starts_with("container:") || net.starts_with("container://") {
+            cli::usage_errors::exit_usage_error(
+                "conflicting options: dns and the network mode: container",
+            );
+        }
+    }
+    if !args.add_host.is_empty()
+        && (net.starts_with("container:") || net.starts_with("container://"))
+    {
+        cli::usage_errors::exit_usage_error(
+            "cannot set extra host entries when the container is joined to another containers network namespace: invalid configuration",
+        );
     }
 }
 
@@ -3773,6 +3813,7 @@ pub async fn run_container_with_output(
     }
 
     apply_containers_conf_defaults(&mut args);
+    validate_run_create_option_conflicts(&args);
     if let Some(adj) = args.oom_score_adj {
         args.oom_score_adj = Some(clamp_rootless_oom_score_adj(adj));
     }
@@ -3952,9 +3993,28 @@ pub async fn run_container_with_output(
         let (quota, period) = cgroups::ResourceLimits::parse_cpus(cpus_str)?;
         limits.cpu_quota_us = Some(quota);
         limits.cpu_period_us = Some(period);
+    } else {
+        if let Some(q) = args.cpu_quota {
+            limits.cpu_quota_us = Some(q);
+        }
+        if let Some(p) = args.cpu_period {
+            limits.cpu_period_us = Some(p);
+        }
+    }
+    if args.cpu_rt_period.is_some() {
+        eprintln!(
+            "Realtime period is not supported as it requires cgroups v1, the value is ignored (NOP) and the option will be removed in the next major release"
+        );
+    }
+    if args.cpu_rt_runtime.is_some() {
+        eprintln!(
+            "Realtime runtime is not supported as it requires cgroups v1, the value is ignored (NOP) and the option will be removed in the next major release"
+        );
     }
     limits.cpu_shares = args.cpu_shares;
     limits.cpuset_cpus = args.cpuset_cpus.clone();
+    limits.cpuset_mems = args.cpuset_mems.clone();
+    limits.cgroup_conf = args.cgroup_conf.clone();
     if let Some(swap_str) = &args.memory_swap {
         limits.memory_swap_max_bytes = Some(cgroups::ResourceLimits::parse_memory(swap_str)?);
     }
@@ -3963,7 +4023,7 @@ pub async fn run_container_with_output(
         limits.pids_max = Some(pids);
     }
 
-    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&container_id) {
+    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref()) {
         let _ = cgroup_mgr.apply_limits(&limits);
     }
 
@@ -3992,7 +4052,7 @@ pub async fn run_container_with_output(
         spec.process.args = vec![String::new()];
     }
 
-    apply_run_hostname(&mut spec, &args);
+    apply_run_hostname(&mut spec, &args, &container_id);
 
     if let Some(u) = &args.user {
         if let Some((uid_str, gid_str)) = u.split_once(':') {
@@ -4006,24 +4066,40 @@ pub async fn run_container_with_output(
         }
     }
     apply_podman_run_env(&mut spec, &args);
-    if let Some(tz) = args.tz.last() {
+    let effective_tz = args
+        .tz
+        .last()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| containers_conf_toml_value("tz"));
+    if let Some(tz) = &effective_tz {
         apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
     }
-    if !args.unsetenv_all && !spec.process.env.iter().any(|e| e.starts_with("HOME=")) {
-        spec.process.env.push("HOME=/".to_string());
+    if !args.unsetenv_all
+        && !args.unsetenv.iter().any(|k| k == "HOME")
+        && !spec.process.env.iter().any(|e| e.starts_with("HOME="))
+    {
+        let default_home = lookup_passwd_home(&cow_bundle.merged_dir, spec.process.user.uid)
+            .unwrap_or_else(|| "/".to_string());
+        spec.process.env.push(format!("HOME={}", default_home));
+    }
+    if !args.env_merge.is_empty() {
+        apply_env_merge(&mut spec, &args.env_merge);
     }
 
     apply_read_only_rootfs_config(&args, &mut spec);
 
     if let Some(shm) = &args.shm_size {
-        cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_bytes = cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_kb = (shm_bytes / 1024).max(4);
+        let aligned_kb = (shm_kb / 4) * 4;
         if let Some(m) = spec.mounts.iter_mut().find(|m| m.destination == "/dev/shm") {
             m.options = Some(vec![
                 "nosuid".to_string(),
                 "noexec".to_string(),
                 "nodev".to_string(),
                 "mode=1777".to_string(),
-                format!("size={}", shm),
+                format!("size={}k", aligned_kb),
             ]);
         }
     }
@@ -4032,6 +4108,9 @@ pub async fn run_container_with_output(
         let mut new_args = parse_entrypoint_override(ep);
         if !args.command.is_empty() {
             new_args.extend(args.command.clone());
+        }
+        if new_args.is_empty() {
+            new_args.push(String::new());
         }
         spec.process.args = new_args;
     }
@@ -4291,6 +4370,47 @@ pub async fn run_container_with_output(
         annotations.insert("boxr.pod".to_string(), pod_key);
     }
     if let Some(linux) = &mut spec.linux {
+        let res = linux.resources.get_or_insert_with(Default::default);
+        if let Some(m) = limits.memory_max_bytes {
+            let mem = res.memory.get_or_insert_with(Default::default);
+            mem.limit = Some(m);
+        }
+        if let Some(mres) = limits.memory_reservation_bytes {
+            let mem = res.memory.get_or_insert_with(Default::default);
+            mem.reservation = Some(mres);
+        }
+        if let Some(mswap) = limits.memory_swap_max_bytes {
+            let mem = res.memory.get_or_insert_with(Default::default);
+            mem.swap = Some(mswap);
+        }
+        if let Some(swappiness) = limits.memory_swappiness {
+            let mem = res.memory.get_or_insert_with(Default::default);
+            mem.swappiness = Some(swappiness);
+        }
+        if args.oom_kill_disable {
+            let mem = res.memory.get_or_insert_with(Default::default);
+            mem.disable_oom_killer = Some(true);
+        }
+        if let Some(adj) = args.oom_score_adj {
+            spec.process.oom_score_adj = Some(adj);
+            res.oom_score_adj = Some(adj);
+        }
+        if limits.cpu_shares.is_some()
+            || limits.cpu_quota_us.is_some()
+            || limits.cpu_period_us.is_some()
+            || limits.cpuset_cpus.is_some()
+            || limits.cpuset_mems.is_some()
+        {
+            let cpu = res.cpu.get_or_insert_with(Default::default);
+            cpu.shares = limits.cpu_shares;
+            cpu.quota = limits.cpu_quota_us;
+            cpu.period = limits.cpu_period_us;
+            cpu.cpus = limits.cpuset_cpus.clone();
+            cpu.mems = limits.cpuset_mems.clone();
+        }
+        if let Some(p) = limits.pids_max {
+            res.pids = Some(oci::runtime::LinuxPids { limit: p });
+        }
         if let Some(cg_parent) = &args.cgroup_parent {
             linux.cgroup_parent = Some(cg_parent.clone());
             annotations.insert("boxr.cgroup-parent".to_string(), cg_parent.clone());
@@ -4316,6 +4436,7 @@ pub async fn run_container_with_output(
             apply_namespace_to_linux(linux, &mut annotations, "net", &Some(args.network.clone()))?;
         }
     }
+    apply_devices_to_spec(&mut spec, &args.devices, &args.cdi_spec_dir)?;
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     apply_run_id_maps(&args, &mut spec, &mut annotations)?;
     if !args.uidmap.is_empty() {
@@ -4436,6 +4557,49 @@ pub async fn run_container_with_output(
             annotations.insert("boxr.sdnotify_socket".to_string(), sock);
         }
     }
+    if let Some(cg_mode) = &args.cgroups {
+        annotations.insert("boxr.cgroups".to_string(), cg_mode.clone());
+    }
+    if !args.sysctl.is_empty() {
+        annotations.insert(
+            "boxr.sysctls".to_string(),
+            serde_json::to_string(&args.sysctl)?,
+        );
+    }
+    let mut merged_exposed_ports = Vec::new();
+    let is_shared_net = args.network.starts_with("container:")
+        || args.network.starts_with("container://")
+        || args.network.starts_with("ns:");
+    if !is_shared_net {
+        if let Some(img) = image_ref {
+            if let Some(cfg) = &img.config.config {
+                if let Some(exp) = &cfg.exposed_ports {
+                    let mut keys: Vec<String> = exp.keys().cloned().collect();
+                    keys.sort();
+                    merged_exposed_ports.extend(keys);
+                }
+            }
+        }
+    }
+    for ep in &args.expose {
+        let norm = if ep.contains('/') {
+            ep.to_ascii_lowercase()
+        } else {
+            format!("{}/tcp", ep)
+        };
+        if !merged_exposed_ports.contains(&norm) {
+            merged_exposed_ports.push(norm);
+        }
+    }
+    for p in &parsed_ports {
+        let norm = format!("{}/{}", p.container_port, p.protocol.to_ascii_lowercase());
+        if !merged_exposed_ports.contains(&norm) {
+            merged_exposed_ports.push(norm);
+        }
+    }
+    if args.publish_all {
+        annotations.insert("boxr.publish_all".to_string(), "true".to_string());
+    }
     spec.annotations = Some(annotations);
 
     fs::create_dir_all(&bundle_dir)?;
@@ -4465,8 +4629,13 @@ pub async fn run_container_with_output(
             if host.is_empty() {
                 return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
             }
-            if ip_str.trim() != "host-gateway" && ip_str.trim().parse::<std::net::IpAddr>().is_err() {
-                return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
+            if ip_str.trim() != "host-gateway" && ip_str.trim().parse::<std::net::IpAddr>().is_err()
+            {
+                cli::usage_errors::exit_usage_error(format!(
+                    "bad format for add-host: \"{}\": invalid IP address in add-host: \"{}\"",
+                    host_entry,
+                    ip_str.trim()
+                ));
             }
             cleaned_add_host.push(format!("{}:{}", host.trim(), ip_str.trim()));
         }
@@ -4477,7 +4646,10 @@ pub async fn run_container_with_output(
     if !args.dns.is_empty() {
         for dns_ip in &args.dns {
             if dns_ip != "none" && dns_ip.parse::<std::net::IpAddr>().is_err() {
-                return Err(anyhow!("invalid DNS server address: '{}'", dns_ip));
+                cli::usage_errors::exit_usage_error(format!(
+                    "invalid DNS server address: '{}': {} is not an ip address",
+                    dns_ip, dns_ip
+                ));
             }
         }
         let dns_json = serde_json::to_string(&args.dns)?;
@@ -4826,6 +4998,7 @@ pub async fn run_container_with_output(
         event_attrs.clone(),
     ));
     add_container_record(&container_store, record, &ephemeral_new_pod)?;
+    let _ = mount::MountManager::new().mount_container(&container_id);
 
     if args.detach {
         if let Some((code, msg)) = check_custom_systemd_run_for_healthcheck(&health_cfg) {
@@ -4893,24 +5066,21 @@ pub async fn run_container_with_output(
         .unwrap_or_default();
     for (idx, net_spec) in all_net_specs.iter().enumerate() {
         if let Some(net_name) = network::resolved_bridge_network_name(net_spec) {
-            if idx == 0 && args.mac_address.is_some() && cli_ips.is_empty() && !net_spec.contains(':') {
-                let _ = net_store_run.connect_container_with_mac(
-                    &net_name,
-                    &container_id,
-                    &container_name,
-                    args.mac_address.as_deref(),
-                );
-                let _ = network::refresh_bridge_hosts_for_network(&net_name, None);
+            let spec_cli_ips = if idx == 0 { &cli_ips[..] } else { &[] };
+            let mac_opt = if idx == 0 {
+                args.mac_address.as_deref()
             } else {
-                let spec_cli_ips = if idx == 0 { &cli_ips[..] } else { &[] };
-                let _ = network::connect_container_to_bridge_network_with_opts(
-                    net_spec,
-                    &container_id,
-                    &container_name,
-                    spec_cli_ips,
-                    None,
-                );
-            }
+                None
+            };
+            let _ = network::connect_container_to_bridge_network_full(
+                net_spec,
+                &container_id,
+                &container_name,
+                &args.network_alias,
+                spec_cli_ips,
+                mac_opt,
+                None,
+            );
             let mut ifname = if idx == 0 {
                 "eth0".to_string()
             } else {
@@ -5105,7 +5275,10 @@ pub async fn run_container_with_output(
     event_attrs.insert("exitCode".to_string(), exit_code.to_string());
     if !args.detach {
         let oom = cgroups::CgroupV2Manager::was_oom_killed(&container_id)
-            || (args.memory.is_some() && exit_code != 0);
+            || exit_code == 137;
+        if oom {
+            let _ = fs::write(bundle_dir.join("oom_killed"), "1");
+        }
         event_attrs.insert("oomKilled".to_string(), oom.to_string());
         EventManager::record(ContainerEvent::new(
             "container",
@@ -5123,6 +5296,7 @@ pub async fn run_container_with_output(
     }
 
     if !args.detach {
+        let _ = mount::MountManager::new().unmount_container(&container_id);
         let auto_rm = run_auto_remove_enabled(&args);
         if args.rmi {
             try_rmi_with_in_use_warning(&args.image, Some(&container_id), !auto_rm);
@@ -5134,6 +5308,9 @@ pub async fn run_container_with_output(
             prune_container_attached_volumes(bundle_dir.clone());
             let _ = network::NetworkStore::new()
                 .cleanup_container_endpoints(&container_id, &container_name);
+            if let Ok(cg) = cgroups::CgroupV2Manager::for_bundle(&bundle_dir) {
+                let _ = cg.cleanup();
+            }
             let _ = OverlayDriver::cleanup(&cow_bundle);
             let _ = container_store.remove(&container_id);
             let _ = fs::remove_dir_all(&bundle_dir);
@@ -5150,6 +5327,9 @@ pub async fn run_container_with_output(
             };
             let _ =
                 container_store.update_status(&container_id, ContainerStatus::Exited(stored_exit));
+            if let Ok(cg) = cgroups::CgroupV2Manager::for_bundle(&bundle_dir) {
+                let _ = cg.cleanup();
+            }
             update_pod_state_on_container_exit(&container_id);
         }
         let exit_for_systemd =
@@ -5417,7 +5597,14 @@ pub fn detached_container_process_exited(
             .and_then(|sp| sp.annotations)
             .is_some_and(|a| a.contains_key("boxr.memory"));
         let oom = cgroups::CgroupV2Manager::was_oom_killed(container_id)
+            || stored == 137
             || (has_mem_limit && stored != 0 && !bundle_path.join("manual_stop").exists());
+        if oom {
+            let _ = fs::write(bundle_path.join("oom_killed"), "1");
+        }
+        if let Ok(cg) = cgroups::CgroupV2Manager::for_bundle(bundle_path) {
+            let _ = cg.cleanup();
+        }
         event_attrs.insert("oomKilled".to_string(), oom.to_string());
         EventManager::record(ContainerEvent::new(
             "container",
@@ -7736,7 +7923,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "Running": is_running,
                         "Paused": matches!(c.status, ContainerStatus::Paused),
                         "Restarting": false,
-                        "OOMKilled": false,
+                        "OOMKilled": PathBuf::from(&c.bundle_path).join("oom_killed").exists()
+                            || cgroups::CgroupV2Manager::was_oom_killed(&c.id),
                         "Dead": false,
                         "Pid": pid,
                         "ConmonPid": conmon_pid,
@@ -7817,6 +8005,10 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "IntelRdtClosID": rdt_class,
                         "CgroupManager": cgroup_manager,
                         "CgroupParent": cgroup_parent,
+                        "Cgroups": annotations
+                            .get("boxr.cgroups")
+                            .cloned()
+                            .unwrap_or_else(|| "default".to_string()),
                         "MemorySwappiness": memory_swappiness
                             .map(serde_json::Value::from)
                             .unwrap_or(serde_json::Value::Null),
@@ -9613,14 +9805,22 @@ pub fn kill_container(args: &cli::KillArgs) -> Result<()> {
 }
 
 fn containers_conf_content() -> Option<String> {
+    let mut combined = String::new();
     for var in ["CONTAINERS_CONF_OVERRIDE", "CONTAINERS_CONF"] {
         if let Ok(path) = std::env::var(var) {
             if let Ok(content) = fs::read_to_string(&path) {
-                return Some(content);
+                if !combined.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&content);
             }
         }
     }
-    None
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined)
+    }
 }
 
 /// Default container env entries from `CONTAINERS_CONF*` and `--module` (override replaces `[containers].env`).
@@ -9745,7 +9945,9 @@ pub(crate) fn containers_conf_toml_value(key: &str) -> Option<String> {
         if line.starts_with('#') || line.is_empty() || line.starts_with('[') {
             continue;
         }
-        let (k, v) = line.split_once('=')?;
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         if k.trim() != key {
             continue;
         }
@@ -9770,9 +9972,9 @@ fn containers_conf_bool(key: &str) -> Option<bool> {
     })
 }
 
-fn containers_conf_string_array(key: &str) -> Vec<String> {
+pub(crate) fn containers_conf_string_array(key: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut parse_from = |content: &str| -> Vec<String> {
+    let parse_from = |content: &str| -> Vec<String> {
         let mut res = Vec::new();
         let mut in_arr = false;
         for line in content.lines() {
@@ -9800,8 +10002,15 @@ fn containers_conf_string_array(key: &str) -> Vec<String> {
         }
         res
     };
-    if let Some(content) = containers_conf_content() {
-        out = parse_from(&content);
+    for var in ["CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"] {
+        if let Ok(path) = std::env::var(var) {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let entries = parse_from(&content);
+                if !entries.is_empty() {
+                    out = entries;
+                }
+            }
+        }
     }
     for mod_path in &cli::podman_globals::podman_global_options().modules {
         if let Ok(content) = fs::read_to_string(mod_path) {
@@ -9919,9 +10128,17 @@ fn write_prebuilt_resolv_and_hosts(
         .and_then(|n| net_store.find(&n));
 
     if let Some(net_rec) = &custom_bridge_net {
-        if net_rec.driver == "macvlan" || net_rec.disable_dns {
-            for s in &dns_servers {
-                resolv_lines.push(format!("nameserver {}", s));
+        if net_rec.driver == "macvlan" || net_rec.driver == "ipvlan" || net_rec.disable_dns {
+            if !dns_servers.is_empty() {
+                for s in &dns_servers {
+                    resolv_lines.push(format!("nameserver {}", s));
+                }
+            } else if !net_rec.dns_servers.is_empty() {
+                for s in &net_rec.dns_servers {
+                    resolv_lines.push(format!("nameserver {}", s));
+                }
+            } else {
+                resolv_lines.push("nameserver 8.8.8.8".to_string());
             }
         } else {
             resolv_lines.push(format!("nameserver {}", net_rec.gateway));
@@ -10004,12 +10221,17 @@ fn write_prebuilt_resolv_and_hosts(
             .and_then(|p| p.labels.get("boxr.pod.base_hosts_content"))
             .cloned()
             .or_else(|| fs::read_to_string(merged_rootfs.join("etc/hosts")).ok()),
-        Some("") | None => {
-            containers_conf_toml_value("base_hosts_file").and_then(|p| fs::read_to_string(p).ok())
-        }
+        Some("") | None => match containers_conf_toml_value("base_hosts_file").as_deref() {
+            Some("none") => Some(String::new()),
+            Some("image") => fs::read_to_string(merged_rootfs.join("etc/hosts")).ok(),
+            Some(p) if !p.is_empty() => fs::read_to_string(p).ok(),
+            _ => None,
+        },
         Some(custom_path) => fs::read_to_string(custom_path).ok(),
     };
-    let sep = if pod_hosts_file_opt.is_some() {
+    let sep = if pod_hosts_file_opt.is_some()
+        || containers_conf_toml_value("base_hosts_file").is_some()
+    {
         " "
     } else {
         "\t"
@@ -10280,6 +10502,40 @@ fn apply_log_config_annotations(
                 "boxr.journald_capture".to_string(),
                 capture.to_string_lossy().to_string(),
             );
+            let mut raw_tag = args
+                .log_opt
+                .iter()
+                .find_map(|o| o.strip_prefix("tag="))
+                .map(|s| s.to_string())
+                .or_else(|| containers_conf_toml_value("log_tag"))
+                .unwrap_or_default();
+            if raw_tag.contains("{{") {
+                let short_img = args
+                    .image
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(args.image.as_str())
+                    .split(':')
+                    .next()
+                    .unwrap_or(args.image.as_str());
+                let short_id = if container_id.len() > 12 {
+                    &container_id[..12]
+                } else {
+                    container_id
+                };
+                raw_tag = raw_tag
+                    .replace("{{.ImageName}}", short_img)
+                    .replace("{{ .ImageName }}", short_img)
+                    .replace("{{.ImageFullName}}", &args.image)
+                    .replace("{{ .ImageFullName }}", &args.image)
+                    .replace("{{.ID}}", short_id)
+                    .replace("{{ .ID }}", short_id)
+                    .replace("{{.FullID}}", container_id)
+                    .replace("{{ .FullID }}", container_id);
+            }
+            if !raw_tag.is_empty() {
+                annotations.insert("boxr.log_tag".to_string(), raw_tag);
+            }
         } else if driver == "passthrough" || driver == "passthrough-tty" {
             annotations.insert("boxr.attach_stdin".to_string(), "true".to_string());
         }
@@ -10909,22 +11165,42 @@ pub(crate) fn id_maps_from_spec(
     Some((uid_maps, gid_maps))
 }
 
-fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs) {
+fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs, container_id: &str) {
     if args.no_hostname {
         spec.hostname = None;
         return;
     }
+    let net_is_host =
+        network::pasta::NetworkMode::parse(&args.network) == network::pasta::NetworkMode::Host;
+    let uts_is_host = args.uts.as_deref() == Some("host");
     if let Some(h) = &args.hostname {
         spec.hostname = Some(h.clone());
-    } else if args.uts.as_deref() == Some("host") || args.network.trim() == "host" {
+    } else if uts_is_host || net_is_host {
         let host_hn = std::fs::read_to_string("/proc/sys/kernel/hostname")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "localhost".to_string());
         spec.hostname = Some(host_hn);
-    } else if args.name.as_deref().is_some_and(|n| !n.is_empty()) {
-        spec.hostname = Some(args.name.clone().unwrap_or_default());
+    } else if containers_conf_bool("container_name_as_hostname") == Some(true) {
+        let cname = args
+            .name
+            .as_ref()
+            .map(|n| ContainerStore::normalize_container_name(n))
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("boxr-{}", &container_id[..6]));
+        let mut hn = cname.replace('_', "");
+        if hn.len() > 64 {
+            hn.truncate(64);
+        }
+        spec.hostname = Some(hn);
+    } else {
+        let short_id = if container_id.len() > 12 {
+            &container_id[..12]
+        } else {
+            container_id
+        };
+        spec.hostname = Some(short_id.to_string());
     }
     if let Some(h) = spec.hostname.clone() {
         if !args.unsetenv_all
@@ -10933,6 +11209,81 @@ fn apply_run_hostname(spec: &mut oci::runtime::Spec, args: &cli::RunArgs) {
         {
             spec.process.env.push(format!("HOSTNAME={}", h));
         }
+    }
+}
+
+fn lookup_passwd_home(rootfs: &Path, uid: u32) -> Option<String> {
+    let passwd = fs::read_to_string(rootfs.join("etc/passwd")).ok()?;
+    let uid_str = uid.to_string();
+    for line in passwd.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 6 && parts[2] == uid_str {
+            let home = parts[5].trim();
+            if !home.is_empty() {
+                return Some(home.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn expand_env_merge_value(raw: &str, env_list: &[String]) -> String {
+    let lookup = |name: &str| -> String {
+        for entry in env_list {
+            if let Some((k, v)) = entry.split_once('=') {
+                if k == name {
+                    return v.to_string();
+                }
+            }
+        }
+        std::env::var(name).unwrap_or_default()
+    };
+    let mut out = String::new();
+    let chars: Vec<char> = raw.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '$' {
+            out.push('$');
+            i += 2;
+            continue;
+        }
+        if chars[i] == '$' && i + 1 < chars.len() {
+            if chars[i + 1] == '{' {
+                if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
+                    let name: String = chars[i + 2..i + 2 + close].iter().collect();
+                    out.push_str(&lookup(&name));
+                    i += 2 + close + 1;
+                    continue;
+                }
+            } else if chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '_' {
+                let mut end = i + 1;
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
+                    end += 1;
+                }
+                let name: String = chars[i + 1..end].iter().collect();
+                out.push_str(&lookup(&name));
+                i = end;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn apply_env_merge(spec: &mut oci::runtime::Spec, env_merges: &[String]) {
+    for item in env_merges {
+        let Some((key, raw_val)) = item.split_once('=') else {
+            cli::usage_errors::exit_usage_error(format!(
+                "invalid env-merge {:?}: must be KEY=VALUE",
+                item
+            ));
+        };
+        let expanded = expand_env_merge_value(raw_val, &spec.process.env);
+        spec.process.env.retain(|e| e.split('=').next() != Some(key));
+        spec.process.env.push(format!("{}={}", key, expanded));
     }
 }
 
@@ -10957,6 +11308,187 @@ fn parse_module_annotations(content: &str) -> Vec<String> {
     out
 }
 
+fn is_valid_device_mode(mode: &str) -> bool {
+    !mode.is_empty() && mode.chars().all(|c| matches!(c, 'r' | 'w' | 'm'))
+}
+
+fn resolve_cdi_device_mounts(
+    cdi_ref: &str,
+    cdi_dirs: &[String],
+) -> Result<Vec<(String, String, bool)>> {
+    let Some((kind, dev_name)) = cdi_ref.split_once('=') else {
+        return Err(anyhow!("invalid CDI device reference: {}", cdi_ref));
+    };
+    let mut dirs = cdi_dirs.to_vec();
+    for def_dir in ["/etc/cdi", "/var/run/cdi"] {
+        if !dirs.iter().any(|d| d == def_dir) {
+            dirs.push(def_dir.to_string());
+        }
+    }
+    let mut mounts = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            if json.get("kind").and_then(|v| v.as_str()) != Some(kind) {
+                continue;
+            }
+            if let Some(devs) = json.get("devices").and_then(|v| v.as_array()) {
+                for dev in devs {
+                    if dev.get("name").and_then(|v| v.as_str()) != Some(dev_name) {
+                        continue;
+                    }
+                    if let Some(edits) = dev.get("containerEdits") {
+                        if let Some(m_arr) = edits.get("mounts").and_then(|v| v.as_array()) {
+                            for m in m_arr {
+                                let hp = m.get("hostPath").and_then(|v| v.as_str()).unwrap_or("");
+                                let cp = m.get("containerPath").and_then(|v| v.as_str()).unwrap_or(hp);
+                                let ro = m
+                                    .get("options")
+                                    .and_then(|v| v.as_array())
+                                    .is_some_and(|opts| opts.iter().any(|o| o.as_str() == Some("ro")));
+                                if !hp.is_empty() && !cp.is_empty() {
+                                    mounts.push((hp.to_string(), cp.to_string(), ro));
+                                }
+                            }
+                        }
+                        if let Some(d_arr) = edits.get("deviceNodes").and_then(|v| v.as_array()) {
+                            for d in d_arr {
+                                let cp = d.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                                let hp = d.get("hostPath").and_then(|v| v.as_str()).unwrap_or(cp);
+                                let perms = d.get("permissions").and_then(|v| v.as_str()).unwrap_or("rwm");
+                                let ro = !perms.contains('w');
+                                if !hp.is_empty() && !cp.is_empty() {
+                                    mounts.push((hp.to_string(), cp.to_string(), ro));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if mounts.is_empty() {
+        cli::usage_errors::exit_usage_error(format!(
+            "resolving CDI devices: unresolvable CDI devices {}",
+            cdi_ref
+        ));
+    }
+    Ok(mounts)
+}
+
+fn apply_devices_to_spec(spec: &mut Spec, devices: &[String], cdi_dirs: &[String]) -> Result<()> {
+    for dev_str in devices {
+        if dev_str.contains('=') && !dev_str.starts_with('/') {
+            let cdi_mounts = resolve_cdi_device_mounts(dev_str, cdi_dirs)?;
+            for (host_path, cont_path, ro) in cdi_mounts {
+                let mut opts = vec!["rbind".to_string(), "rprivate".to_string()];
+                if ro {
+                    opts.push("ro".to_string());
+                }
+                spec.mounts.push(oci::runtime::Mount {
+                    destination: cont_path.clone(),
+                    mount_type: "bind".to_string(),
+                    source: host_path,
+                    options: Some(opts),
+                });
+                if let Some(l) = &mut spec.linux {
+                    l.devices.push(oci::runtime::LinuxDevice {
+                        dev_type: "c".to_string(),
+                        path: cont_path,
+                        major: None,
+                        minor: None,
+                        file_mode: Some(0o666),
+                        uid: Some(0),
+                        gid: Some(0),
+                    });
+                }
+            }
+            continue;
+        }
+        let parts: Vec<&str> = dev_str.split(':').collect();
+        let (host_path, cont_path, mode) = match parts.as_slice() {
+            [h] => (*h, *h, "rwm"),
+            [h, second] => {
+                if second.is_empty() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "empty device mode in device specification: {}",
+                        dev_str
+                    ));
+                }
+                if second.starts_with('/') {
+                    (*h, *second, "rwm")
+                } else if is_valid_device_mode(second) {
+                    (*h, *h, *second)
+                } else {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid device mode {:?} in device {:?}",
+                        second, dev_str
+                    ));
+                }
+            }
+            [h, c, m] => {
+                if m.is_empty() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "empty device mode in device specification: {}",
+                        dev_str
+                    ));
+                }
+                if !is_valid_device_mode(m) {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid device mode {:?} in device {:?}",
+                        m, dev_str
+                    ));
+                }
+                let eff_c = if c.is_empty() { *h } else { *c };
+                (*h, eff_c, *m)
+            }
+            _ => {
+                cli::usage_errors::exit_usage_error(format!("invalid device specification: {}", dev_str));
+            }
+        };
+        if !Path::new(host_path).exists() {
+            cli::usage_errors::exit_usage_error(format!(
+                "stat {}: no such file or directory",
+                host_path
+            ));
+        }
+        let mut opts = vec!["rbind".to_string(), "rprivate".to_string()];
+        if !mode.contains('w') {
+            opts.push("ro".to_string());
+        }
+        spec.mounts.push(oci::runtime::Mount {
+            destination: cont_path.to_string(),
+            mount_type: "bind".to_string(),
+            source: host_path.to_string(),
+            options: Some(opts),
+        });
+        if let Some(l) = &mut spec.linux {
+            l.devices.push(oci::runtime::LinuxDevice {
+                dev_type: "c".to_string(),
+                path: cont_path.to_string(),
+                major: None,
+                minor: None,
+                file_mode: Some(0o666),
+                uid: Some(0),
+                gid: Some(0),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn apply_containers_conf_defaults(args: &mut RunArgs) {
     let conf_env = containers_conf_default_env();
     if !conf_env.is_empty() {
@@ -10964,10 +11496,69 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
         merged.extend(args.env.drain(..));
         args.env = merged;
     }
-    if (args.network == "auto" || args.network == "default" || args.network.is_empty())
-        && containers_conf_toml_value("default_rootless_network_cmd").as_deref() == Some("pasta")
+    if args.network == "auto" || args.network == "default" || args.network.is_empty() {
+        let is_rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
+        if is_rootless {
+            if let Some(cmd) = containers_conf_toml_value("default_rootless_network_cmd") {
+                if !matches!(cmd.as_str(), "pasta" | "slirp4netns") {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid default_rootless_network_cmd option {:?}",
+                        cmd
+                    ));
+                }
+                if cmd == "pasta" {
+                    args.network = "pasta".to_string();
+                }
+            }
+        }
+        if args.network == "auto" || args.network == "default" || args.network.is_empty() {
+            if let Some(netns) = containers_conf_toml_value("netns") {
+                args.network = netns;
+            }
+        }
+    }
+    if args.ipc.is_none() {
+        args.ipc = containers_conf_toml_value("ipcns");
+    }
+    if args.uts.is_none() {
+        args.uts = containers_conf_toml_value("utsns");
+    }
+    if args.pid.is_none() {
+        args.pid = containers_conf_toml_value("pidns");
+    }
+    if args.cgroupns.is_none() {
+        args.cgroupns = containers_conf_toml_value("cgroupns");
+    }
+    if args.cgroups.is_none() {
+        args.cgroups = containers_conf_toml_value("cgroups");
+    }
+    if args.shm_size.is_none() {
+        args.shm_size = containers_conf_toml_value("shm_size");
+    }
+    let conf_volumes = containers_conf_string_array("volumes");
+    for v in conf_volumes {
+        if !args.volumes.contains(&v) {
+            args.volumes.push(v);
+        }
+    }
+    if args.sysctl.is_empty() {
+        args.sysctl.extend(containers_conf_string_array("default_sysctls"));
+    }
+    if args.tz.is_empty() {
+        if let Some(tz) = containers_conf_toml_value("tz") {
+            args.tz.push(tz);
+        }
+    }
+    let conf_anns = containers_conf_string_array("annotations");
+    for ann in conf_anns {
+        if !args.annotations.contains(&ann) {
+            args.annotations.push(ann);
+        }
+    }
+    if cli::RUN_NO_HOSTS_EXPLICIT_FALSE.get() != Some(&true)
+        && containers_conf_bool("no_hosts") == Some(true)
     {
-        args.network = "pasta".to_string();
+        let _ = cli::RUN_NO_HOSTS.set(true);
     }
     for mod_path in &cli::podman_globals::podman_global_options().modules {
         if let Ok(content) = fs::read_to_string(mod_path) {
@@ -11003,6 +11594,18 @@ fn apply_containers_conf_defaults(args: &mut RunArgs) {
     }
     if args.ulimits.is_empty() {
         args.ulimits.extend(default_ulimits_from_containers_conf());
+    }
+    let conf_devices = containers_conf_string_array("devices");
+    for d in conf_devices {
+        if !args.devices.contains(&d) {
+            args.devices.push(d);
+        }
+    }
+    let conf_cdi_dirs = containers_conf_string_array("cdi_spec_dirs");
+    for dir in conf_cdi_dirs {
+        if !args.cdi_spec_dir.contains(&dir) {
+            args.cdi_spec_dir.push(dir);
+        }
     }
     if args.log_driver.is_empty() {
         if let Some(driver) = containers_conf_toml_value("log_driver") {
@@ -12447,13 +13050,29 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 }
             }
         }
-        NetworkAction::Connect { network, container } => {
+        NetworkAction::Connect {
+            alias,
+            ip,
+            ip6: _,
+            mac_address,
+            network,
+            container,
+        } => {
             let c_store = ContainerStore::new();
             let c = c_store
                 .find(&container)
                 .ok_or_else(|| anyhow!("Error: No such container: {}", container))?;
-            let mac_opt = cli::NETWORK_CONNECT_MAC.get().map(|s| s.as_str());
-            if let Err(e) = store.connect_container_with_mac(&network, &c.id, &c.name, mac_opt) {
+            let mac_opt = mac_address
+                .as_deref()
+                .or_else(|| cli::NETWORK_CONNECT_MAC.get().map(|s| s.as_str()));
+            if let Err(e) = store.connect_container_with_options(
+                &network,
+                &c.id,
+                &c.name,
+                mac_opt,
+                ip.as_deref(),
+                &alias,
+            ) {
                 cli::usage_errors::exit_usage_error(e.to_string());
             }
             let bundle_dir = PathBuf::from(&c.bundle_path);
@@ -13969,7 +14588,7 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
                 effective_ports = pod.ports;
             }
         }
-        let ports_col = format_container_ports(&effective_ports);
+        let ports_col = format_container_ports_with_exposed(&effective_ports, &c.exposed_ports);
         let status_with_ports = if ports_col.is_empty() {
             status_col
         } else {
@@ -14252,7 +14871,7 @@ pub fn rm_containers(args: &cli::RmArgs, quiet_stdout: bool) -> Result<()> {
         if args.all {
             depend_args.depend = true;
         }
-        for c in store.list() {
+        for c in store.list().into_iter().rev() {
             if store.find(&c.id).is_none() {
                 continue;
             }
@@ -14266,7 +14885,7 @@ pub fn rm_containers(args: &cli::RmArgs, quiet_stdout: bool) -> Result<()> {
                 continue;
             }
             if let Err(e) = rm_container_resolving_depend(&c.id, &depend_args, quiet_stdout) {
-                if !args.ignore {
+                if !args.ignore && !args.force {
                     return Err(e);
                 }
             }
@@ -14470,6 +15089,9 @@ fn remove_container_opts_inner(
     }
 
     let bundle_path = PathBuf::from(&c.bundle_path);
+    if let Ok(cg) = cgroups::CgroupV2Manager::for_bundle(&bundle_path) {
+        let _ = cg.cleanup();
+    }
     make_bundle_tree_removable(&bundle_path);
     if let Ok(content) = fs::read_to_string(bundle_path.join("config.json")) {
         if let Ok(spec) = serde_json::from_str::<Spec>(&content) {
@@ -14500,6 +15122,7 @@ fn remove_container_opts_inner(
     ));
     let pod_store = pod::PodStore::new();
     let _ = pod_store.remove_container_from_pods(&removed.id, &removed.name);
+    let _ = mount::MountManager::new().unmount_container(&removed.id);
     let net_store = network::NetworkStore::new();
     let _ = net_store.cleanup_container_endpoints(&removed.id, &removed.name);
     let _ = guardrails::ProcessReaper::reap_stale_containers();
@@ -15057,6 +15680,7 @@ async fn create_only_container_after_pod_prep(
     validate_image_record_env(&image_record);
 
     apply_containers_conf_defaults(&mut args);
+    validate_run_create_option_conflicts(&args);
     if let Err(e) = ulimit::validate_ulimit_cli_options(&args.ulimits) {
         cli::usage_errors::exit_usage_error(e.to_string());
     }
@@ -15164,7 +15788,7 @@ async fn create_only_container_after_pod_prep(
         cmd_override,
         env_override,
     );
-    apply_run_hostname(&mut spec, &args);
+    apply_run_hostname(&mut spec, &args, &container_id);
 
     if let Some(u) = &args.user {
         if let Some((uid_str, gid_str)) = u.split_once(':') {
@@ -15180,24 +15804,40 @@ async fn create_only_container_after_pod_prep(
     let mut create_env_args = args.clone();
     create_env_args.detach = true;
     apply_podman_run_env(&mut spec, &create_env_args);
-    if let Some(tz) = args.tz.last() {
+    let effective_tz = args
+        .tz
+        .last()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| containers_conf_toml_value("tz"));
+    if let Some(tz) = &effective_tz {
         apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
     }
-    if !args.unsetenv_all && !spec.process.env.iter().any(|e| e.starts_with("HOME=")) {
-        spec.process.env.push("HOME=/".to_string());
+    if !args.unsetenv_all
+        && !args.unsetenv.iter().any(|k| k == "HOME")
+        && !spec.process.env.iter().any(|e| e.starts_with("HOME="))
+    {
+        let default_home = lookup_passwd_home(&cow_bundle.merged_dir, spec.process.user.uid)
+            .unwrap_or_else(|| "/".to_string());
+        spec.process.env.push(format!("HOME={}", default_home));
+    }
+    if !args.env_merge.is_empty() {
+        apply_env_merge(&mut spec, &args.env_merge);
     }
 
     apply_read_only_rootfs_config(&args, &mut spec);
 
     if let Some(shm) = &args.shm_size {
-        cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_bytes = cgroups::ResourceLimits::parse_memory(shm)?;
+        let shm_kb = (shm_bytes / 1024).max(4);
+        let aligned_kb = (shm_kb / 4) * 4;
         if let Some(m) = spec.mounts.iter_mut().find(|m| m.destination == "/dev/shm") {
             m.options = Some(vec![
                 "nosuid".to_string(),
                 "noexec".to_string(),
                 "nodev".to_string(),
                 "mode=1777".to_string(),
-                format!("size={}", shm),
+                format!("size={}k", aligned_kb),
             ]);
         }
     }
@@ -15206,6 +15846,9 @@ async fn create_only_container_after_pod_prep(
         let mut new_args = parse_entrypoint_override(ep);
         if !args.command.is_empty() {
             new_args.extend(args.command.clone());
+        }
+        if new_args.is_empty() {
+            new_args.push(String::new());
         }
         spec.process.args = new_args;
     }
@@ -15235,9 +15878,28 @@ async fn create_only_container_after_pod_prep(
         let (quota, period) = cgroups::ResourceLimits::parse_cpus(cpus_str)?;
         limits.cpu_quota_us = Some(quota);
         limits.cpu_period_us = Some(period);
+    } else {
+        if let Some(q) = args.cpu_quota {
+            limits.cpu_quota_us = Some(q);
+        }
+        if let Some(p) = args.cpu_period {
+            limits.cpu_period_us = Some(p);
+        }
+    }
+    if args.cpu_rt_period.is_some() {
+        eprintln!(
+            "Realtime period is not supported as it requires cgroups v1, the value is ignored (NOP) and the option will be removed in the next major release"
+        );
+    }
+    if args.cpu_rt_runtime.is_some() {
+        eprintln!(
+            "Realtime runtime is not supported as it requires cgroups v1, the value is ignored (NOP) and the option will be removed in the next major release"
+        );
     }
     limits.cpu_shares = args.cpu_shares;
     limits.cpuset_cpus = args.cpuset_cpus.clone();
+    limits.cpuset_mems = args.cpuset_mems.clone();
+    limits.cgroup_conf = args.cgroup_conf.clone();
     if let Some(swap_str) = &args.memory_swap {
         limits.memory_swap_max_bytes = Some(cgroups::ResourceLimits::parse_memory(swap_str)?);
     }
@@ -15245,7 +15907,7 @@ async fn create_only_container_after_pod_prep(
     if let Some(pids) = args.pids_limit {
         limits.pids_max = Some(pids);
     }
-    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new(&container_id) {
+    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref()) {
         let _ = cgroup_mgr.apply_limits(&limits);
     }
 
@@ -15547,8 +16209,13 @@ async fn create_only_container_after_pod_prep(
             if host.is_empty() {
                 return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
             }
-            if ip_str.trim() != "host-gateway" && ip_str.trim().parse::<std::net::IpAddr>().is_err() {
-                return Err(anyhow!("bad format for add-host: \"{}\"", host_entry));
+            if ip_str.trim() != "host-gateway" && ip_str.trim().parse::<std::net::IpAddr>().is_err()
+            {
+                cli::usage_errors::exit_usage_error(format!(
+                    "bad format for add-host: \"{}\": invalid IP address in add-host: \"{}\"",
+                    host_entry,
+                    ip_str.trim()
+                ));
             }
             cleaned_add_host.push(format!("{}:{}", host.trim(), ip_str.trim()));
         }
@@ -15559,7 +16226,10 @@ async fn create_only_container_after_pod_prep(
     if !args.dns.is_empty() {
         for dns_ip in &args.dns {
             if dns_ip != "none" && dns_ip.parse::<std::net::IpAddr>().is_err() {
-                return Err(anyhow!("invalid DNS server address: '{}'", dns_ip));
+                cli::usage_errors::exit_usage_error(format!(
+                    "invalid DNS server address: '{}': {} is not an ip address",
+                    dns_ip, dns_ip
+                ));
             }
         }
         let dns_json = serde_json::to_string(&args.dns)?;
@@ -15726,13 +16396,16 @@ async fn create_only_container_after_pod_prep(
         }
         if limits.cpu_shares.is_some()
             || limits.cpu_quota_us.is_some()
+            || limits.cpu_period_us.is_some()
             || limits.cpuset_cpus.is_some()
+            || limits.cpuset_mems.is_some()
         {
             let cpu = res.cpu.get_or_insert_with(Default::default);
             cpu.shares = limits.cpu_shares;
             cpu.quota = limits.cpu_quota_us;
             cpu.period = limits.cpu_period_us;
             cpu.cpus = limits.cpuset_cpus.clone();
+            cpu.mems = limits.cpuset_mems.clone();
         }
         if let Some(p) = limits.pids_max {
             res.pids = Some(oci::runtime::LinuxPids { limit: p });
@@ -15761,27 +16434,8 @@ async fn create_only_container_after_pod_prep(
         if args.network.trim().starts_with("ns:") {
             apply_namespace_to_linux(l, &mut annotations, "net", &Some(args.network.clone()))?;
         }
-        for dev_str in &args.devices {
-            let parts: Vec<&str> = dev_str.split(':').collect();
-            let host_path = parts[0];
-            let cont_path = if parts.len() > 1 { parts[1] } else { host_path };
-            spec.mounts.push(oci::runtime::Mount {
-                destination: cont_path.to_string(),
-                mount_type: "bind".to_string(),
-                source: host_path.to_string(),
-                options: Some(vec!["rbind".to_string(), "rprivate".to_string()]),
-            });
-            l.devices.push(oci::runtime::LinuxDevice {
-                dev_type: "c".to_string(),
-                path: cont_path.to_string(),
-                major: None,
-                minor: None,
-                file_mode: Some(0o666),
-                uid: Some(0),
-                gid: Some(0),
-            });
-        }
     }
+    apply_devices_to_spec(&mut spec, &args.devices, &args.cdi_spec_dir)?;
     apply_podman_userns(&args, &mut spec, &mut annotations, &cow_bundle.merged_dir)?;
     apply_run_id_maps(&args, &mut spec, &mut annotations)?;
     if !args.uidmap.is_empty() {
@@ -15888,6 +16542,47 @@ async fn create_only_container_after_pod_prep(
     )?;
     if !image_id_for_env.is_empty() {
         let _ = fs::write(bundle_dir.join("image_id.txt"), &image_id_for_env);
+    }
+    if let Some(cg_mode) = &args.cgroups {
+        annotations.insert("boxr.cgroups".to_string(), cg_mode.clone());
+    }
+    if !args.sysctl.is_empty() {
+        annotations.insert(
+            "boxr.sysctls".to_string(),
+            serde_json::to_string(&args.sysctl)?,
+        );
+    }
+    let mut merged_exposed_ports = Vec::new();
+    let is_shared_net = args.network.starts_with("container:")
+        || args.network.starts_with("container://")
+        || args.network.starts_with("ns:");
+    if !is_shared_net {
+        if let Some(cfg) = &image_record.config.config {
+            if let Some(exp) = &cfg.exposed_ports {
+                let mut keys: Vec<String> = exp.keys().cloned().collect();
+                keys.sort();
+                merged_exposed_ports.extend(keys);
+            }
+        }
+    }
+    for ep in &args.expose {
+        let norm = if ep.contains('/') {
+            ep.to_ascii_lowercase()
+        } else {
+            format!("{}/tcp", ep)
+        };
+        if !merged_exposed_ports.contains(&norm) {
+            merged_exposed_ports.push(norm);
+        }
+    }
+    for p in &parsed_ports {
+        let norm = format!("{}/{}", p.container_port, p.protocol.to_ascii_lowercase());
+        if !merged_exposed_ports.contains(&norm) {
+            merged_exposed_ports.push(norm);
+        }
+    }
+    if args.publish_all {
+        annotations.insert("boxr.publish_all".to_string(), "true".to_string());
     }
     spec.annotations = Some(annotations.clone());
     spec.save_to_bundle(&bundle_dir)?;
@@ -16096,28 +16791,21 @@ async fn create_only_container_after_pod_prep(
         let mut net_ifaces_v2: Vec<(String, Vec<(String, String, String)>, bool)> = Vec::new();
         for (idx, net_spec) in all_net_specs.iter().enumerate() {
             if let Some(net_name) = network::resolved_bridge_network_name(net_spec) {
-                if idx == 0
-                    && args.mac_address.is_some()
-                    && cli_ips.is_empty()
-                    && !net_spec.contains(':')
-                {
-                    let _ = net_store_create.connect_container_with_mac(
-                        &net_name,
-                        &container_id,
-                        &container_name,
-                        args.mac_address.as_deref(),
-                    );
-                    let _ = network::refresh_bridge_hosts_for_network(&net_name, home_opt);
+                let spec_cli_ips = if idx == 0 { &cli_ips[..] } else { &[] };
+                let mac_opt = if idx == 0 {
+                    args.mac_address.as_deref()
                 } else {
-                    let spec_cli_ips = if idx == 0 { &cli_ips[..] } else { &[] };
-                    let _ = network::connect_container_to_bridge_network_with_opts(
-                        net_spec,
-                        &container_id,
-                        &container_name,
-                        spec_cli_ips,
-                        home_opt,
-                    );
-                }
+                    None
+                };
+                let _ = network::connect_container_to_bridge_network_full(
+                    net_spec,
+                    &container_id,
+                    &container_name,
+                    &args.network_alias,
+                    spec_cli_ips,
+                    mac_opt,
+                    home_opt,
+                );
                 let mut ifname = if idx == 0 {
                     "eth0".to_string()
                 } else {
@@ -17547,12 +18235,30 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
         if normalized.is_empty() || normalized == "__EMPTY_FORMAT__" {
             return Ok(());
         }
-        if normalized.eq_ignore_ascii_case("json") || normalized == "{{json .}}" {
+        if normalized.starts_with("{{") && !normalized.ends_with("}}") {
+            cli::usage_errors::exit_usage_error(format!(
+                "template: info:1: unclosed action"
+            ));
+        }
+        let is_json_template = normalized.eq_ignore_ascii_case("json")
+            || (normalized.starts_with("{{")
+                && normalized.ends_with("}}")
+                && matches!(
+                    normalized[2..normalized.len() - 2].trim(),
+                    "json" | "json ."
+                ));
+        if is_json_template {
             let bats_json = cli::info_report::podman_info_json_for_bats(&doc);
             println!("{}", serde_json::to_string_pretty(&bats_json)?);
             return Ok(());
         }
-        println!("{}", render_info_format(fmt, &doc));
+        let has_trim_right = normalized.ends_with("-}}") || normalized.ends_with("- }}");
+        let rendered = render_info_format(fmt, &doc);
+        if has_trim_right {
+            print!("{}", rendered);
+        } else {
+            println!("{}", rendered);
+        }
         return Ok(());
     }
 
@@ -18789,8 +19495,8 @@ fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
     if let Some(ns_path) = trimmed.strip_prefix("ns:") {
         if !Path::new(ns_path).exists() {
             cli::usage_errors::exit_usage_error(format!(
-                "network namespace cannot be found: faccessat {}: no such file or directory",
-                ns_path
+                "network namespace cannot be found: stat {}: faccessat {}: no such file or directory",
+                ns_path, ns_path
             ));
         }
         return Ok(());
@@ -19095,6 +19801,11 @@ fn network_endpoint_inspect_json(
             dns_names.push(alias.clone());
         }
     }
+    for a in &ep.aliases {
+        if !a.is_empty() && !dns_names.iter().any(|d| d == a) {
+            dns_names.push(a.clone());
+        }
+    }
     let short_id = ep.container_id[..12.min(ep.container_id.len())].to_string();
     if !dns_names.contains(&short_id) {
         dns_names.push(short_id);
@@ -19102,10 +19813,16 @@ fn network_endpoint_inspect_json(
     if !container_hostname.is_empty() && !dns_names.iter().any(|d| d == container_hostname) {
         dns_names.push(container_hostname.to_string());
     }
-    let aliases_val = if user_aliases.is_empty() {
+    let mut combined_aliases: Vec<String> = user_aliases.to_vec();
+    for a in &ep.aliases {
+        if !a.is_empty() && !combined_aliases.contains(a) {
+            combined_aliases.push(a.clone());
+        }
+    }
+    let aliases_val = if combined_aliases.is_empty() {
         serde_json::Value::Null
     } else {
-        serde_json::json!(user_aliases)
+        serde_json::json!(combined_aliases)
     };
     let v4_ips: Vec<(String, u32)> = ep
         .ips
@@ -19205,15 +19922,17 @@ fn container_inspect_networks(
             {
                 continue;
             }
-            let key = if net.name == network::NetworkStore::DEFAULT_NETWORK
-                && network_mode == "bridge"
+            let key_name = if net.name == network::NetworkStore::DEFAULT_NETWORK
+                && (network_mode == "bridge"
+                    || network_mode == "podman"
+                    || network_mode.starts_with("bridge:"))
             {
                 "podman".to_string()
             } else {
                 net.name.clone()
             };
             networks.insert(
-                key,
+                key_name,
                 network_endpoint_inspect_json(&net, ep, container_hostname, &user_aliases),
             );
         }
@@ -20419,7 +21138,11 @@ fn format_container_ports_and_exposed(
                 idx += 1;
             }
         }
-        exposed_ranges.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
+        exposed_ranges.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
         for (start, end, proto) in exposed_ranges {
             if start == end {
                 parts.push(format!("{}/{}", start, proto));
@@ -20429,71 +21152,6 @@ fn format_container_ports_and_exposed(
         }
     }
 
-    parts.join(", ")
-}
-
-fn format_container_and_exposed_ports(c: &ContainerRecord) -> String {
-    let mut parts: Vec<String> = c
-        .ports
-        .iter()
-        .map(|p| {
-            let host_ip = p.host_ip.as_deref().unwrap_or("0.0.0.0");
-            format!(
-                "{}:{}->{}/{}",
-                host_ip, p.host_port, p.container_port, p.protocol
-            )
-        })
-        .collect();
-    let published_set: std::collections::HashSet<String> = c
-        .ports
-        .iter()
-        .map(|p| format!("{}/{}", p.container_port, p.protocol))
-        .collect();
-    let mut exposed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for ep in &c.exposed_ports {
-        let key = if ep.contains('/') {
-            ep.clone()
-        } else {
-            format!("{}/tcp", ep)
-        };
-        if !published_set.contains(&key) {
-            exposed_set.insert(key);
-        }
-    }
-    if let Some(img) = ImageStore::new().find(&c.image) {
-        if let Some(img_ep) = img
-            .config
-            .config
-            .as_ref()
-            .and_then(|cfg| cfg.exposed_ports.as_ref())
-        {
-            for ep in img_ep.keys() {
-                let key = if ep.contains('/') {
-                    ep.clone()
-                } else {
-                    format!("{}/tcp", ep)
-                };
-                if !published_set.contains(&key) {
-                    exposed_set.insert(key);
-                }
-            }
-        }
-    }
-    let mut exposed_vec: Vec<String> = exposed_set.into_iter().collect();
-    exposed_vec.sort_by(|a, b| {
-        let pa = a
-            .split('/')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        let pb = b
-            .split('/')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        pa.cmp(&pb).then_with(|| a.cmp(b))
-    });
-    parts.extend(exposed_vec);
     parts.join(", ")
 }
 
@@ -20658,7 +21316,13 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
     }
     let mut cleaned = trimmed;
     if cleaned.starts_with("{{") && cleaned.ends_with("}}") {
-        cleaned = cleaned[2..cleaned.len() - 2].trim();
+        cleaned = cleaned[2..cleaned.len() - 2]
+            .trim()
+            .trim_start_matches('-')
+            .trim_end_matches('-')
+            .trim();
+    } else if !cleaned.starts_with('.') {
+        return cleaned.to_string();
     }
     if cleaned == "\"\\n\"" {
         return String::new();
@@ -21896,6 +22560,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         env: Vec::new(),
         unsetenv: Vec::new(),
         unsetenv_all: false,
+        env_merge: Vec::new(),
         systemd: None,
         ports: pod
             .ports
@@ -21955,6 +22620,7 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
         init: false,
         tmpfs: Vec::new(),
         devices: Vec::new(),
+        cdi_spec_dir: Vec::new(),
         security_opt: Vec::new(),
         cpu_shares: None,
         cpuset_cpus: None,
@@ -23409,8 +24075,24 @@ fn generate_systemd_for_container(
     let mut extra_envs = Vec::new();
     let mut add_envs = Vec::new();
     for e in extra_env_flags {
-        if e.contains('=') {
-            add_envs.push(escape_systemd_arg(e));
+        if let Some((k, v)) = e.split_once('=') {
+            if k.is_empty() {
+                cli::usage_errors::exit_usage_error(format!(
+                    "invalid variable {:?}: variable name is empty",
+                    e
+                ));
+            }
+            add_envs.push(escape_systemd_arg(&format!("{k}={v}")));
+        } else if e.is_empty() {
+            cli::usage_errors::exit_usage_error("invalid variable \"\": variable name is empty");
+        } else if let Some(prefix) = e.strip_suffix('*') {
+            let mut vars: Vec<(String, String)> = std::env::vars()
+                .filter(|(k, _)| k.starts_with(prefix))
+                .collect();
+            vars.sort_by(|a, b| a.0.cmp(&b.0));
+            for (k, v) in vars {
+                add_envs.push(escape_systemd_arg(&format!("{k}={v}")));
+            }
         } else if let Ok(v) = std::env::var(e) {
             add_envs.push(escape_systemd_arg(&format!("{}={}", e, v)));
         }
@@ -23427,6 +24109,30 @@ fn generate_systemd_for_container(
             if a == "create" || a == "run" {
                 sub_idx = Some(i + 1);
                 break;
+            }
+        }
+        let mut root_flags = Vec::new();
+        if !cli::podman_globals::podman_global_options().remote {
+            if let Some(idx) = sub_idx {
+                let pre = &create_cmd[1..idx - 1];
+                let mut m = 0;
+                while m < pre.len() {
+                    if pre[m] == "--root" || pre[m] == "--runroot" || pre[m] == "--storage-driver" || pre[m] == "--storage-opt" {
+                        if m + 1 < pre.len() {
+                            root_flags.push(pre[m].clone());
+                            root_flags.push(pre[m + 1].clone());
+                            m += 2;
+                            continue;
+                        }
+                    } else if pre[m].starts_with("--root=")
+                        || pre[m].starts_with("--runroot=")
+                        || pre[m].starts_with("--storage-driver=")
+                        || pre[m].starts_with("--storage-opt=")
+                    {
+                        root_flags.push(pre[m].clone());
+                    }
+                    m += 1;
+                }
             }
         }
         let remaining = if let Some(idx) = sub_idx {
@@ -23553,13 +24259,14 @@ fn generate_systemd_for_container(
             k += 1;
         }
 
-        let mut start_cmd = vec![
-            exe.clone(),
+        let mut start_cmd = vec![exe.clone()];
+        start_cmd.extend(root_flags.clone());
+        start_cmd.extend([
             "run".to_string(),
             "--cidfile=%t/%n.ctr-id".to_string(),
             "--cgroups=no-conmon".to_string(),
             "--rm".to_string(),
-        ];
+        ]);
         if let Some(pif) = pod_id_file {
             start_cmd.push("--pod-id-file".to_string());
             start_cmd.push(pif.to_string());
@@ -23594,16 +24301,19 @@ fn generate_systemd_for_container(
             }
         }
         let exec_start = format_systemd_options(&start_cmd);
-        let exec_stop = format_systemd_options(&[
-            exe.clone(),
+        let mut stop_cmd = vec![exe.clone()];
+        stop_cmd.extend(root_flags.clone());
+        stop_cmd.extend([
             "stop".to_string(),
             "--ignore".to_string(),
             "-t".to_string(),
             stop_timeout.to_string(),
             "--cidfile=%t/%n.ctr-id".to_string(),
         ]);
-        let exec_stop_post = format_systemd_options(&[
-            exe.clone(),
+        let exec_stop = format_systemd_options(&stop_cmd);
+        let mut rm_cmd = vec![exe.clone()];
+        rm_cmd.extend(root_flags);
+        rm_cmd.extend([
             "rm".to_string(),
             "-f".to_string(),
             "--ignore".to_string(),
@@ -23611,6 +24321,7 @@ fn generate_systemd_for_container(
             stop_timeout.to_string(),
             "--cidfile=%t/%n.ctr-id".to_string(),
         ]);
+        let exec_stop_post = format_systemd_options(&rm_cmd);
         (
             exec_start,
             exec_stop,
@@ -23620,15 +24331,11 @@ fn generate_systemd_for_container(
             "all".to_string(),
         )
     } else {
-        let conmon_pf = bundle_path.join("conmon.pid").to_string_lossy().to_string();
+        let userdata_dir = bundle_path.join("userdata");
+        let _ = fs::create_dir_all(&userdata_dir);
+        let conmon_pf = userdata_dir.join("conmon.pid").to_string_lossy().to_string();
         let exec_start = format!("{} start {}", exe, name_or_id);
-        let exec_stop = format_systemd_options(&[
-            exe.clone(),
-            "stop".to_string(),
-            "-t".to_string(),
-            stop_timeout.to_string(),
-            name_or_id.to_string(),
-        ]);
+        let exec_stop = format!("{} stop -t {} {}", exe, stop_timeout, name_or_id);
         let exec_stop_post = exec_stop.clone();
         (
             exec_start,
@@ -23662,7 +24369,12 @@ fn generate_systemd_for_container(
     out.push_str("Documentation=man:podman-generate-systemd(1)\n");
     out.push_str("Wants=network-online.target\n");
     out.push_str("After=network-online.target\n");
-    out.push_str("RequiresMountsFor=%t/containers\n");
+    let run_root = cli::podman_globals::podman_global_options()
+        .runroot
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "%t/containers".to_string());
+    out.push_str(&format!("RequiresMountsFor={}\n", run_root));
     if !bound_to_services.is_empty() {
         let joined = bound_to_services
             .iter()
@@ -23677,6 +24389,9 @@ fn generate_systemd_for_container(
             .join(" ");
         out.push_str(&format!("BindsTo={}\n", joined));
         out.push_str(&format!("After={}\n", joined));
+    }
+    if !wants.is_empty() || !after.is_empty() || !requires.is_empty() {
+        out.push_str("\n# User-defined dependencies\n");
     }
     if !wants.is_empty() {
         out.push_str(&format!("Wants={}\n", wants.join(" ")));
@@ -23750,12 +24465,39 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
             container_prefix,
             pod_prefix,
             separator,
-            format: _,
+            format,
             wants,
             after,
             requires,
             env,
         } => {
+            if let Some(st) = stop_timeout {
+                if st < 0 {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "invalid argument \"{}\" for \"-t, --time\" flag: strconv.ParseUint: parsing \"{}\": invalid syntax",
+                        st, st
+                    ));
+                }
+            }
+            let stop_timeout_u64 = stop_timeout.map(|st| st as u64);
+            let no_header = no_header.unwrap_or(false);
+            if let Some(ref rp) = restart_policy {
+                if !matches!(
+                    rp.as_str(),
+                    "no"
+                        | "on-success"
+                        | "on-failure"
+                        | "on-abnormal"
+                        | "on-watchdog"
+                        | "on-abort"
+                        | "always"
+                ) {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "{} is not a valid restart policy",
+                        rp
+                    ));
+                }
+            }
             eprint!(
                 "\nDEPRECATED command:\nIt is recommended to use Quadlets for running containers and pods under systemd.\n\nPlease refer to podman-systemd.unit(5) for details.\n"
             );
@@ -23770,6 +24512,8 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                 .as_ref()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let mut json_units: std::collections::BTreeMap<String, String> =
+                std::collections::BTreeMap::new();
 
             for target in containers {
                 if let Some(pod) = p_store.find(&target) {
@@ -23792,6 +24536,18 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                             continue;
                         }
                         if let Some(c) = c_store.find(cid) {
+                            let is_init = fs::read_to_string(
+                                PathBuf::from(&c.bundle_path).join("config.json"),
+                            )
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
+                            .and_then(|sp| sp.annotations)
+                            .is_some_and(|a| a.contains_key("boxr.init_ctr"));
+                            if is_init {
+                                cli::usage_errors::exit_usage_error(
+                                    "cannot generate systemd units for init containers",
+                                );
+                            }
                             let (c_svc, c_content) = generate_systemd_for_container(
                                 &c,
                                 name_flag,
@@ -23800,7 +24556,7 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                                 restart_policy.as_deref(),
                                 restart_sec,
                                 start_timeout,
-                                stop_timeout,
+                                stop_timeout_u64,
                                 no_header,
                                 &container_prefix,
                                 &separator,
@@ -23825,7 +24581,12 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                                 .unwrap_or_else(|_| "/usr/bin/podman".to_string())
                         });
                     let rp = restart_policy.as_deref().unwrap_or("on-failure");
-                    let timeout_stop = 60 + stop_timeout.unwrap_or(10);
+                    let timeout_stop = 60 + stop_timeout_u64.unwrap_or(10);
+                    let run_root = cli::podman_globals::podman_global_options()
+                        .runroot
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "%t/containers".to_string());
 
                     let mut pod_unit = String::new();
                     pod_unit.push_str(&format!("# {}.service\n", pod_service_name));
@@ -23840,20 +24601,44 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                     pod_unit.push_str("Documentation=man:podman-generate-systemd(1)\n");
                     pod_unit.push_str("Wants=network-online.target\n");
                     pod_unit.push_str("After=network-online.target\n");
-                    pod_unit.push_str("RequiresMountsFor=%t/containers\n");
+                    pod_unit.push_str(&format!("RequiresMountsFor={}\n", run_root));
                     if !req_services.is_empty() {
                         let joined = req_services.join(" ");
                         pod_unit.push_str(&format!("Wants={}\n", joined));
                         pod_unit.push_str(&format!("Before={}\n", joined));
                     }
+                    if !wants.is_empty() || !after.is_empty() || !requires.is_empty() {
+                        pod_unit.push_str("\n# User-defined dependencies\n");
+                    }
+                    if !wants.is_empty() {
+                        pod_unit.push_str(&format!("Wants={}\n", wants.join(" ")));
+                    }
+                    if !after.is_empty() {
+                        pod_unit.push_str(&format!("After={}\n", after.join(" ")));
+                    }
+                    if !requires.is_empty() {
+                        pod_unit.push_str(&format!("Requires={}\n", requires.join(" ")));
+                    }
                     pod_unit.push_str("\n[Service]\n");
                     pod_unit.push_str("Environment=PODMAN_SYSTEMD_UNIT=%n\n");
                     pod_unit.push_str(&format!("Restart={}\n", rp));
+                    if let Some(rs) = restart_sec {
+                        if rs > 0 {
+                            pod_unit.push_str(&format!("RestartSec={}\n", rs));
+                        }
+                    }
                     pod_unit.push_str(&format!("TimeoutStopSec={}\n", timeout_stop));
                     if is_new {
+                        let mut label_args = String::new();
+                        let mut sorted_labels: Vec<(&String, &String)> = pod.labels.iter().collect();
+                        sorted_labels.sort_by(|a, b| a.0.cmp(b.0));
+                        for (k, v) in sorted_labels {
+                            let kv = escape_systemd_arg(&format!("{k}={v}"));
+                            label_args.push_str(&format!(" --label {kv}"));
+                        }
                         pod_unit.push_str(&format!(
-                            "ExecStartPre={} pod create --infra-conmon-pidfile {} --pod-id-file {} --exit-policy=stop --name {} --replace\n",
-                            exe, pid_file, pod_id_file, pod.name
+                            "ExecStartPre={} pod create --infra-conmon-pidfile {} --pod-id-file {} --exit-policy=stop --name {}{} --replace\n",
+                            exe, pid_file, pod_id_file, pod.name, label_args
                         ));
                         pod_unit.push_str(&format!(
                             "ExecStart={} pod start --pod-id-file {}\n",
@@ -23869,13 +24654,49 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         ));
                         pod_unit.push_str(&format!("PIDFile={}\n", pid_file));
                     } else {
-                        pod_unit.push_str(&format!("ExecStart={} pod start {}\n", exe, pod.name));
-                        pod_unit.push_str(&format!("ExecStop={} pod stop {}\n", exe, pod.name));
-                        pod_unit.push_str(&format!("ExecStopPost={} pod stop {}\n", exe, pod.name));
+                        let infra_id_or_name = if name_flag {
+                            infra_name.clone()
+                        } else if !pod.infra_container_id.is_empty() {
+                            pod.infra_container_id.clone()
+                        } else {
+                            pod.name.clone()
+                        };
+                        let infra_pidfile = c_store
+                            .find(&pod.infra_container_id)
+                            .map(|ic| {
+                                let ud = PathBuf::from(&ic.bundle_path).join("userdata");
+                                let _ = fs::create_dir_all(&ud);
+                                ud.join("conmon.pid").to_string_lossy().to_string()
+                            })
+                            .unwrap_or_else(|| {
+                                format!("{}/userdata/conmon.pid", run_root)
+                            });
+                        pod_unit.push_str(&format!(
+                            "ExecStart={} start {}\n",
+                            exe, infra_id_or_name
+                        ));
+                        pod_unit.push_str(&format!(
+                            "ExecStop={} stop -t {} {}\n",
+                            exe,
+                            stop_timeout_u64.unwrap_or(10),
+                            infra_id_or_name
+                        ));
+                        pod_unit.push_str(&format!(
+                            "ExecStopPost={} stop -t {} {}\n",
+                            exe,
+                            stop_timeout_u64.unwrap_or(10),
+                            infra_id_or_name
+                        ));
+                        pod_unit.push_str(&format!("PIDFile={}\n", infra_pidfile));
                     }
                     pod_unit.push_str("Type=forking\n\n[Install]\nWantedBy=default.target\n");
 
-                    if files || output.is_some() {
+                    if format.as_deref() == Some("json") {
+                        json_units.insert(pod_service_name, pod_unit);
+                        for (c_svc, c_content) in ctr_units {
+                            json_units.insert(c_svc, c_content);
+                        }
+                    } else if files || output.is_some() {
                         let p_path = out_dir.join(format!("{}.service", pod_service_name));
                         fs::write(&p_path, &pod_unit)?;
                         println!("{}", p_path.display());
@@ -23891,6 +24712,17 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         }
                     }
                 } else if let Some(cont) = c_store.find(&target) {
+                    let is_init =
+                        fs::read_to_string(PathBuf::from(&cont.bundle_path).join("config.json"))
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
+                            .and_then(|sp| sp.annotations)
+                            .is_some_and(|a| a.contains_key("boxr.init_ctr"));
+                    if is_init {
+                        cli::usage_errors::exit_usage_error(
+                            "cannot generate systemd units for init containers",
+                        );
+                    }
                     let (svc_name, unit_content) = generate_systemd_for_container(
                         &cont,
                         name_flag,
@@ -23899,7 +24731,7 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         restart_policy.as_deref(),
                         restart_sec,
                         start_timeout,
-                        stop_timeout,
+                        stop_timeout_u64,
                         no_header,
                         &container_prefix,
                         &separator,
@@ -23910,7 +24742,9 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                         &[],
                         None,
                     )?;
-                    if files || output.is_some() {
+                    if format.as_deref() == Some("json") {
+                        json_units.insert(svc_name, unit_content);
+                    } else if files || output.is_some() {
                         let path = out_dir.join(format!("{}.service", svc_name));
                         fs::write(&path, unit_content)?;
                         println!("{}", path.display());
@@ -23919,10 +24753,13 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                     }
                 } else {
                     cli::usage_errors::exit_usage_error(format!(
-                        "no container or pod with name or ID \"{}\" found: no such container",
-                        target
+                        "{} does not refer to a container or pod: no pod with name or ID {} found: no such pod: no container with name or ID \"{}\" found: no such container",
+                        target, target, target
                     ));
                 }
+            }
+            if format.as_deref() == Some("json") {
+                println!("{}", serde_json::to_string_pretty(&json_units)?);
             }
         }
         GenerateAction::Spec(spec_args) => {
@@ -23941,6 +24778,69 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn handle_container_mount(args: &cli::MountArgs) -> Result<()> {
+    let mgr = mount::MountManager::new();
+    let store = ContainerStore::new();
+    if args.all {
+        for c in store.list() {
+            if let Ok(path) = mgr.mount_container(&c.id) {
+                println!("{}", path);
+            }
+        }
+        return Ok(());
+    }
+    if let Some(container) = &args.container {
+        let path = mgr.mount_container(container)?;
+        println!("{}", path);
+        return Ok(());
+    }
+    let mut active_mounts = mgr.list_mounts();
+    for c in store.list() {
+        if matches!(c.status, ContainerStatus::Running)
+            && !active_mounts.iter().any(|m| m.container_id == c.id)
+        {
+            let rootfs = PathBuf::from(&c.bundle_path).join("rootfs");
+            let mount_path = rootfs
+                .canonicalize()
+                .unwrap_or(rootfs)
+                .to_string_lossy()
+                .to_string();
+            active_mounts.push(mount::MountRecord {
+                container_id: c.id.clone(),
+                container_name: c.name.clone(),
+                mount_path,
+                mounted_at: String::new(),
+            });
+        }
+    }
+    for m in active_mounts {
+        let id_str = if args.no_trunc || m.container_id.len() <= 12 {
+            &m.container_id
+        } else {
+            &m.container_id[..12]
+        };
+        println!("{} {}", id_str, m.mount_path);
+    }
+    Ok(())
+}
+
+fn handle_container_unmount(args: &cli::UnmountArgs) -> Result<()> {
+    let mgr = mount::MountManager::new();
+    if args.all {
+        for m in mgr.list_mounts() {
+            let _ = mgr.unmount_container(&m.container_id);
+            println!("{}", m.container_id);
+        }
+        return Ok(());
+    }
+    if let Some(container) = &args.container {
+        mgr.unmount_container(container)?;
+        println!("{}", container);
+        return Ok(());
+    }
+    Err(anyhow!("you must provide at least one container name or ID"))
 }
 
 pub fn handle_unshare(args: UnshareArgs, output: &CliOutputPolicy) -> Result<i32> {

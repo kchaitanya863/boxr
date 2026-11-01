@@ -26,6 +26,7 @@ pub struct PodmanGlobalOptions {
     pub tls_key: Option<String>,
     pub tls_details: Option<String>,
     pub pull_options: Vec<String>,
+    pub cdi_spec_dirs: Vec<String>,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -70,6 +71,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--tls-key",
     "--tls-details",
     "--ssh",
+    "--cdi-spec-dir",
 ];
 
 fn is_global_value_flag(token: &str) -> bool {
@@ -319,6 +321,18 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
         if a == "--tls-key" {
             if i + 1 < argv.len() {
                 opts.tls_key = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--cdi-spec-dir=") {
+            opts.cdi_spec_dirs.push(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--cdi-spec-dir" {
+            if i + 1 < argv.len() {
+                opts.cdi_spec_dirs.push(argv[i + 1].clone());
                 i += 2;
                 continue;
             }

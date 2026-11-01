@@ -111,6 +111,25 @@ pub fn allocate_ephemeral_port_not(exclude: u16) -> u16 {
 
 /// Resolve a user-facing network flag to a NetworkStore name for bridge attachment.
 impl PortMapping {
+    fn allocate_ephemeral_port(avoid: u16) -> u16 {
+        for _ in 0..8 {
+            if let Ok(p) = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|l| l.local_addr())
+                .map(|a| a.port())
+            {
+                if p != avoid {
+                    return p;
+                }
+            }
+        }
+        let fallback = 32768 + ((std::process::id() as u16).wrapping_add(avoid) % 20000);
+        if fallback == avoid {
+            fallback.wrapping_add(1)
+        } else {
+            fallback
+        }
+    }
+
     fn parse_port_or_range(s: &str) -> Result<Vec<u16>> {
         if let Some((start, end)) = s.split_once('-') {
             let start = start.parse::<u16>()?;
@@ -217,7 +236,11 @@ impl PortMapping {
                     .zip(container_ports)
                     .map(|(h_port, c_port)| Self {
                         host_ip: None,
-                        host_port: h_port,
+                        host_port: if h_port == 0 {
+                            allocate_ephemeral_port_not(c_port)
+                        } else {
+                            h_port
+                        },
                         container_port: c_port,
                         protocol: proto.clone(),
                     })
@@ -249,7 +272,11 @@ impl PortMapping {
                     .zip(container_ports)
                     .map(|(h_port, c_port)| Self {
                         host_ip: ip.clone(),
-                        host_port: h_port,
+                        host_port: if h_port == 0 {
+                            allocate_ephemeral_port_not(c_port)
+                        } else {
+                            h_port
+                        },
                         container_port: c_port,
                         protocol: proto.clone(),
                     })

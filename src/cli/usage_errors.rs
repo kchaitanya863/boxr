@@ -229,6 +229,20 @@ fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
             help.push_str("      --compression-level int       compression level to use\n");
         }
     }
+    if sub_path.is_empty() {
+        let rt = crate::containers_conf_toml_value("runtime").unwrap_or_else(|| "crun".to_string());
+        help.push_str(&format!(
+            "      --runtime value          Path to the OCI-compatible binary used to run containers. (default {:?})\n",
+            rt
+        ));
+    }
+    if sub_path == ["system", "service"] {
+        let timeout = crate::containers_conf_toml_value("service_timeout").unwrap_or_else(|| "5".to_string());
+        help.push_str(&format!(
+            "  -t, --time uint              Set the time until the service session expires in seconds (default {})\n",
+            timeout
+        ));
+    }
     print!("{}", filter_remote_help(&help, argv));
     std::process::exit(0);
 }
@@ -568,7 +582,7 @@ fn print_unrecognized(argv: &[String]) {
     let mut parts = vec!["podman"];
     parts.extend(parents);
     parts.push(bad.as_str());
-    eprintln!("Error: unrecognized command \"{}\"", parts.join(" "));
+    eprintln!("Error: unrecognized command `{}`", parts.join(" "));
 }
 
 fn filter_remote_help(help: &str, argv: &[String]) -> String {

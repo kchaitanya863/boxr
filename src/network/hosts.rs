@@ -191,11 +191,55 @@ pub fn connect_container_to_bridge_network(
     connect_container_to_bridge_network_with_opts(network, container_id, container_name, &[], home)
 }
 
+pub fn connect_container_to_bridge_network_with_aliases(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    aliases: &[String],
+    ip_override: Option<&str>,
+    mac_override: Option<&str>,
+    home: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut cli_ips = Vec::new();
+    if let Some(ip) = ip_override.filter(|s| !s.trim().is_empty()) {
+        cli_ips.push(ip.trim().to_string());
+    }
+    connect_container_to_bridge_network_full(
+        network,
+        container_id,
+        container_name,
+        aliases,
+        &cli_ips,
+        mac_override,
+        home,
+    )
+}
+
 pub fn connect_container_to_bridge_network_with_opts(
     network: &str,
     container_id: &str,
     container_name: &str,
     cli_ips: &[String],
+    home: Option<&std::path::Path>,
+) -> Result<()> {
+    connect_container_to_bridge_network_full(
+        network,
+        container_id,
+        container_name,
+        &[],
+        cli_ips,
+        None,
+        home,
+    )
+}
+
+pub fn connect_container_to_bridge_network_full(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    aliases: &[String],
+    cli_ips: &[String],
+    mac_override: Option<&str>,
     home: Option<&std::path::Path>,
 ) -> Result<()> {
     let net_name = resolved_bridge_network_name(network)
@@ -207,9 +251,10 @@ pub fn connect_container_to_bridge_network_with_opts(
     if store.find(&net_name).is_none() {
         return Err(anyhow!("network {} not found", net_name));
     }
+    let mut all_aliases: Vec<String> = aliases.to_vec();
     let mut static_ips: Vec<String> = cli_ips.to_vec();
     let mut ifname_opt: Option<String> = None;
-    let mut mac_opt: Option<String> = None;
+    let mut mac_opt: Option<String> = mac_override.map(|s| s.to_string());
     if !network.starts_with("container:")
         && !network.starts_with("pasta:")
         && !network.starts_with("ns:")
@@ -219,24 +264,27 @@ pub fn connect_container_to_bridge_network_with_opts(
                 if let Some((k, v)) = kv.split_once('=') {
                     let kt = k.trim();
                     let vt = v.trim();
-                    if (kt == "ip" || kt == "ip6") && !vt.is_empty() {
+                    if kt == "alias" && !vt.is_empty() {
+                        all_aliases.push(vt.to_string());
+                    } else if (kt == "ip" || kt == "ip6") && !vt.is_empty() {
                         static_ips.push(vt.to_string());
                     } else if kt == "interface_name" && !vt.is_empty() {
                         ifname_opt = Some(vt.to_string());
-                    } else if kt == "mac" && !vt.is_empty() {
+                    } else if kt == "mac" && !vt.is_empty() && mac_opt.is_none() {
                         mac_opt = Some(vt.to_string());
                     }
                 }
             }
         }
     }
-    let _ = store.connect_container_with_ips(
+    let _ = store.connect_container_with_ips_and_aliases(
         &net_name,
         container_id,
         container_name,
         mac_opt.as_deref(),
         ifname_opt.as_deref(),
         &static_ips,
+        &all_aliases,
     )?;
     refresh_bridge_hosts_for_network(&net_name, home)?;
     Ok(())

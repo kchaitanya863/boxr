@@ -46,6 +46,10 @@ pub struct RunArgs {
     #[arg(long = "unsetenv-all")]
     pub unsetenv_all: bool,
 
+    /// Preprocess environment variables from image before injecting into container
+    #[arg(long = "env-merge")]
+    pub env_merge: Vec<String>,
+
     /// Run container in systemd mode (Podman-compatible flag; accepted for parity)
     #[arg(long = "systemd")]
     pub systemd: Option<String>,
@@ -231,6 +235,10 @@ pub struct RunArgs {
     /// Add a host device to the container
     #[arg(long = "device")]
     pub devices: Vec<String>,
+
+    /// Directories to scan for CDI spec files
+    #[arg(long = "cdi-spec-dir")]
+    pub cdi_spec_dir: Vec<String>,
 
     /// Security Options
     #[arg(long = "security-opt")]

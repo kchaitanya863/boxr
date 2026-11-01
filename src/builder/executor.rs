@@ -161,6 +161,7 @@ impl ImageBuilder {
         let mut has_layer_ops = false;
         let mut post_from_count = 0usize;
         let mut current_history: Vec<crate::oci::image::HistoryEntry> = Vec::new();
+        let mut seen_cmd_in_stage = false;
         let keep_on_fail = !opts
             .build_args
             .get("__BOXR_FORCE_RM")
@@ -193,6 +194,7 @@ impl ImageBuilder {
 
             match inst {
                 Instruction::From { image, as_stage } => {
+                    seen_cmd_in_stage = false;
                     let image_expanded = expand_build_vars(image, &arg_vars, &current_config.env);
                     let image = &image_expanded;
                     current_from_image = image.clone();
@@ -344,10 +346,21 @@ impl ImageBuilder {
                             .unwrap_or_else(|| "/".to_string());
                         current_rootfs.join(cur.trim_start_matches('/')).join(dir)
                     };
-                    let is_symlink = fs::symlink_metadata(&dest)
-                        .map(|m| m.file_type().is_symlink())
-                        .unwrap_or(false);
-                    if !is_symlink && !dest.exists() {
+                    if let Ok(meta) = fs::symlink_metadata(&dest) {
+                        if meta.file_type().is_symlink() {
+                            if let Ok(target) = fs::read_link(&dest) {
+                                let resolved = if target.is_absolute() {
+                                    current_rootfs
+                                        .join(target.to_string_lossy().trim_start_matches('/'))
+                                } else {
+                                    dest.parent().unwrap_or(&current_rootfs).join(target)
+                                };
+                                let _ = fs::create_dir_all(&resolved);
+                            }
+                        } else if !meta.is_dir() {
+                            fs::create_dir_all(&dest)?;
+                        }
+                    } else {
                         fs::create_dir_all(&dest)?;
                     }
                     current_config.working_dir = Some(dir.clone());
@@ -1237,6 +1250,7 @@ impl ImageBuilder {
                     }
                 }
                 Instruction::Cmd(args) => {
+                    seen_cmd_in_stage = true;
                     let expanded: Vec<String> = args
                         .iter()
                         .map(|a| expand_build_vars(a, &arg_vars, &current_config.env))
@@ -1249,6 +1263,9 @@ impl ImageBuilder {
                         .map(|a| expand_build_vars(a, &arg_vars, &current_config.env))
                         .collect();
                     current_config.entrypoint = Some(expanded);
+                    if !seen_cmd_in_stage {
+                        current_config.cmd = None;
+                    }
                 }
                 Instruction::Expose(port) => {
                     let mut exposed = current_config.exposed_ports.take().unwrap_or_default();

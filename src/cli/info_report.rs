@@ -37,6 +37,7 @@ pub fn build_podman_info_document() -> Value {
         .root
         .as_ref()
         .map(|p| p.display().to_string())
+        .or_else(storage_conf_rootless_storage_path)
         .unwrap_or_else(|| crate::storage::boxr_home().display().to_string());
     if let Some(rest) = remote_uri
         .strip_prefix("tcp://")
@@ -71,6 +72,66 @@ pub fn build_podman_info_document() -> Value {
             crate::cli::podman_globals::graph_options_from_storage_opts(&globals.storage_opts);
         serde_json::Value::Object(map.into_iter().collect())
     };
+    let default_network = crate::containers_conf_toml_value("default_network")
+        .unwrap_or_else(|| "podman".to_string());
+    let mut cdi_spec_dirs = crate::containers_conf_string_array("cdi_spec_dirs");
+    if !globals.cdi_spec_dirs.is_empty() {
+        cdi_spec_dirs = globals.cdi_spec_dirs.clone();
+    }
+    if cdi_spec_dirs.is_empty() {
+        cdi_spec_dirs = vec!["/etc/cdi".to_string(), "/var/run/cdi".to_string()];
+    }
+    let discovered_devices = discover_cdi_devices(&cdi_spec_dirs);
+    let service_is_remote = globals.remote
+        || globals.url.is_some()
+        || globals.connection.is_some()
+        || crate::containers_conf_toml_value("remote")
+            .is_some_and(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"));
+    if service_is_remote
+        && globals.url.is_none()
+        && globals.connection.is_none()
+        && std::env::var_os("CONTAINER_HOST").is_none()
+    {
+        let sock_path = remote_uri
+            .strip_prefix("unix://")
+            .unwrap_or(remote_uri.as_str());
+        if !Path::new(sock_path).exists() {
+            crate::cli::usage_errors::exit_usage_error(format!(
+                "unable to connect to Podman socket: Get \"http://d/v5.0.0/libpod/_ping\": dial unix {}: connect: no such file or directory",
+                sock_path
+            ));
+        }
+    }
+    let seccomp_profile_path = crate::containers_conf_toml_value("seccomp_profile")
+        .unwrap_or_else(|| "/usr/share/containers/seccomp.json".to_string());
+    let image_copy_tmp_dir = if let Ok(td) = std::env::var("TMPDIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or(())
+    {
+        td
+    } else if let Some(cfg_dir) = crate::containers_conf_toml_value("image_copy_tmp_dir") {
+        if !cfg_dir.starts_with('/') && cfg_dir != "storage" {
+            crate::cli::usage_errors::exit_usage_error(format!(
+                "invalid image_copy_tmp_dir value {:?} (relative paths are not accepted)",
+                cfg_dir
+            ));
+        }
+        cfg_dir
+    } else {
+        "/var/tmp".to_string()
+    };
+    let client_val = if service_is_remote {
+        json!({
+            "APIVersion": "1.45",
+            "Version": PODMAN_ENGINE_VERSION,
+            "Os": std::env::consts::OS,
+            "Arch": std::env::consts::ARCH
+        })
+    } else {
+        json!("<nil>")
+    };
+    let free_locks = 2048usize.saturating_sub(containers.len());
     let oci_path = resolve_oci_runtime_path();
     let oci_name = Path::new(&oci_path)
         .file_name()
@@ -107,9 +168,11 @@ pub fn build_podman_info_document() -> Value {
         "Driver": "overlay",
         "ServerVersion": env!("CARGO_PKG_VERSION"),
         "OSType": "linux",
+        "Client": client_val,
         "Host": {
             "Arch": go_arch,
             "BuildahVersion": "1.36.0",
+            "CDISpecDirs": cdi_spec_dirs,
             "CgroupManager": cgroup_manager,
             "CgroupsVersion": cgroup_version,
             "Conmon": {
@@ -118,12 +181,14 @@ pub fn build_podman_info_document() -> Value {
                 "Version": "conmon version 2.1.12, commit: unknown"
             },
             "DatabaseBackend": "sqlite",
+            "DiscoveredDevices": discovered_devices,
             "Distribution": {
                 "Distribution": dist_name,
                 "Version": dist_version
             },
             "EmulatedArchitectures": [],
             "EventLogger": "file",
+            "FreeLocks": free_locks,
             "Hostname": hostname(),
             "LogDriver": "k8s-file",
             "MemAvailable": mem.available,
@@ -132,6 +197,7 @@ pub fn build_podman_info_document() -> Value {
             "NetworkBackend": network_backend,
             "NetworkBackendInfo": {
                 "Backend": network_backend,
+                "DefaultNetwork": default_network,
                 "DNS": {
                     "Package": "aardvark-dns-1.12.0-1"
                 }
@@ -156,19 +222,25 @@ pub fn build_podman_info_document() -> Value {
                 "Exists": true
             },
             "Security": {
-                "Rootless": rootless
-            }
+                "Rootless": rootless,
+                "SECCOMPProfilePath": seccomp_profile_path
+            },
+            "ServiceIsRemote": service_is_remote
         },
         "Plugins": {
             "Volume": volume_plugin_list,
-            "Network": ["bridge", "host", "none"]
+            "Network": ["bridge", "host", "none"],
+            "Log": ["k8s-file", "none", "passthrough", "journald"]
         },
-        "Registries": {},
+        "Registries": {
+            "search": ["docker.io", "quay.io", "registry.fedoraproject.org"]
+        },
         "Store": {
             "GraphDriverName": "overlay",
             "GraphRoot": graph_root,
             "RunRoot": run_root,
             "VolumePath": volume_path,
+            "ImageCopyTmpDir": image_copy_tmp_dir,
             "GraphOptions": graph_options,
             "GraphStatus": {},
             "ImageStore": {
@@ -457,6 +529,69 @@ fn resolve_oci_runtime_path() -> String {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "/usr/bin/crun".to_string())
+}
+
+fn storage_conf_rootless_storage_path() -> Option<String> {
+    let conf_path = std::env::var("CONTAINERS_STORAGE_CONF").ok()?;
+    let content = std::fs::read_to_string(conf_path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == "rootless_storage_path" {
+                let mut val = v.trim().trim_matches('"').to_string();
+                if val.is_empty() {
+                    continue;
+                }
+                let home = std::env::var("HOME").unwrap_or_default();
+                let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+                let uid = unsafe { libc::getuid().to_string() };
+                val = val
+                    .replace("$HOME", &home)
+                    .replace("$USER", &user)
+                    .replace("$UID", &uid);
+                while val.contains("//") {
+                    val = val.replace("//", "/");
+                }
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+fn discover_cdi_devices(dirs: &[String]) -> Vec<String> {
+    let mut devices = Vec::new();
+    for dir in dirs {
+        let p = Path::new(dir);
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for entry in entries.flatten() {
+                let ep = entry.path();
+                if !ep.is_file() {
+                    continue;
+                }
+                if let Ok(raw) = std::fs::read_to_string(&ep) {
+                    if let Ok(val) = serde_json::from_str::<Value>(&raw) {
+                        let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                        if !kind.is_empty() {
+                            if let Some(devs) = val.get("devices").and_then(|v| v.as_array()) {
+                                for d in devs {
+                                    if let Some(name) = d.get("name").and_then(|v| v.as_str()) {
+                                        devices.push(format!("{kind}={name}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    devices.sort();
+    devices.dedup();
+    devices
 }
 
 #[cfg(test)]

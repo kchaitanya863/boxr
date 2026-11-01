@@ -422,7 +422,7 @@ fn collect_procs(bundle_path: &Path) -> Vec<ContainerProc> {
         }
     }
     let uid_map = read_uid_map(init_pid);
-    let (spec_uid, is_privileged) = fs::read_to_string(bundle_path.join("config.json"))
+    let (spec_uid, is_privileged, spec_caps) = fs::read_to_string(bundle_path.join("config.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<crate::oci::runtime::Spec>(&s).ok())
         .map(|sp| {
@@ -431,11 +431,22 @@ fn collect_procs(bundle_path: &Path) -> Vec<ContainerProc> {
                 .as_ref()
                 .and_then(|a| a.get("boxr.privileged"))
                 .is_some_and(|v| v == "true");
-            (sp.process.user.uid, priv_flag)
+            let caps = sp
+                .process
+                .capabilities
+                .and_then(|c| c.effective.or(c.bounding))
+                .unwrap_or_default();
+            (sp.process.user.uid, priv_flag, caps)
         })
-        .unwrap_or((0, false));
+        .unwrap_or((0, false, Vec::new()));
     let capeff_str = if is_privileged {
         "full".to_string()
+    } else if !spec_caps.is_empty() {
+        spec_caps
+            .iter()
+            .map(|c| c.strip_prefix("CAP_").unwrap_or(c.as_str()).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         "default".to_string()
     };

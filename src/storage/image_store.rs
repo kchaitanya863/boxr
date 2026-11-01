@@ -150,7 +150,16 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
                     || img.tag.ends_with(&format!("@{}", digest));
             }
             let (reg, repo, tag) = record_identity(img);
-            reg == r.registry && repo == r.repository && tag == r.tag
+            if tag == r.tag && repo == r.repository {
+                if reg == r.registry
+                    || reg == "localhost"
+                    || reg == "registry-1.docker.io"
+                    || r.registry == "localhost"
+                {
+                    return true;
+                }
+            }
+            false
         }
         Err(_) => {
             // Fall back to the historical raw comparison for unparseable queries.
@@ -273,6 +282,7 @@ impl ImageStore {
             let matching: Vec<ImageRecord> = data
                 .images
                 .into_iter()
+                .rev()
                 .filter(|img| query_matches_image(img, query_trimmed))
                 .collect();
             if matching.is_empty() {
@@ -935,13 +945,24 @@ pub fn load_untagged_image_history(home: &Path) -> std::collections::HashMap<Str
 }
 
 pub fn additional_image_store_roots_from_env() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let globals = crate::cli::podman_globals::podman_global_options();
+    for opt in &globals.storage_opts {
+        if let Some((k, v)) = opt.split_once('=') {
+            if k.ends_with(".imagestore") {
+                let p = PathBuf::from(v.trim());
+                if p.exists() && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+    }
     let Ok(conf_path) = std::env::var("CONTAINERS_STORAGE_CONF") else {
-        return Vec::new();
+        return out;
     };
     let Ok(content) = fs::read_to_string(&conf_path) else {
-        return Vec::new();
+        return out;
     };
-    let mut out = Vec::new();
     let mut in_list = false;
     let mut buf = String::new();
     for line in content.lines() {

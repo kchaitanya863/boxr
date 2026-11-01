@@ -372,7 +372,10 @@ impl UserNetEngine {
             let dns_reply = self
                 .bundle_path
                 .as_deref()
-                .and_then(|b| super::relay::dns_via_relay(b, udp_payload).ok())
+                .and_then(|b| {
+                    super::relay::try_resolve_aardvark_dns(udp_payload, b)
+                        .or_else(|| super::relay::dns_via_relay(b, udp_payload).ok())
+                })
                 .or_else(|| forward_dns_query(self.host_netns.as_ref(), udp_payload).ok());
             if let Some(dns_reply) = dns_reply {
                 return self.build_udp_reply(eth, ip, &udp, &dns_reply);

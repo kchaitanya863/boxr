@@ -690,11 +690,11 @@ pub enum GenerateAction {
         #[arg(long = "start-timeout")]
         start_timeout: Option<u64>,
         /// Stop timeout override
-        #[arg(long = "stop-timeout", short = 't', visible_alias = "time")]
-        stop_timeout: Option<u64>,
+        #[arg(long = "stop-timeout", short = 't', visible_alias = "time", allow_hyphen_values = true)]
+        stop_timeout: Option<i64>,
         /// Skip header generation
-        #[arg(long = "no-header")]
-        no_header: bool,
+        #[arg(long = "no-header", num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = clap::builder::BoolishValueParser::new())]
+        no_header: Option<bool>,
         /// Systemd unit name prefix for containers
         #[arg(long = "container-prefix", default_value = "container")]
         container_prefix: String,

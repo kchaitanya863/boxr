@@ -55,14 +55,10 @@ pub enum ContainerAction {
     /// Run a container using an image label command
     Runlabel(ContainerRunlabelArgs),
     /// Mount a container filesystem
-    Mount {
-        container: String,
-    },
+    Mount(MountArgs),
     /// Unmount a container filesystem
     #[command(alias = "umount")]
-    Unmount {
-        container: String,
-    },
+    Unmount(UnmountArgs),
     /// Return 0 if the container exists, 1 otherwise
     Exists(ContainerExistsArgs),
 }

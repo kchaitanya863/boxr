@@ -18,6 +18,8 @@ pub struct NetworkEndpoint {
     pub ips: Vec<(String, String, String)>,
     #[serde(default)]
     pub interface_name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -629,13 +631,38 @@ impl NetworkStore {
         container_name: &str,
         mac_override: Option<&str>,
     ) -> Result<NetworkEndpoint> {
-        self.connect_container_with_ips(
+        self.connect_container_with_ips_and_aliases(
             network_name,
             container_id,
             container_name,
             mac_override,
             None,
             &[],
+            &[],
+        )
+    }
+
+    pub fn connect_container_with_options(
+        &self,
+        network_name: &str,
+        container_id: &str,
+        container_name: &str,
+        mac_override: Option<&str>,
+        ip_override: Option<&str>,
+        aliases: &[String],
+    ) -> Result<NetworkEndpoint> {
+        let mut static_ips = Vec::new();
+        if let Some(ip) = ip_override.filter(|s| !s.trim().is_empty()) {
+            static_ips.push(ip.trim().to_string());
+        }
+        self.connect_container_with_ips_and_aliases(
+            network_name,
+            container_id,
+            container_name,
+            mac_override,
+            None,
+            &static_ips,
+            aliases,
         )
     }
 
@@ -648,6 +675,28 @@ impl NetworkStore {
         ifname_override: Option<&str>,
         requested_static_ips: &[String],
     ) -> Result<NetworkEndpoint> {
+        self.connect_container_with_ips_and_aliases(
+            network_name,
+            container_id,
+            container_name,
+            mac_override,
+            ifname_override,
+            requested_static_ips,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_container_with_ips_and_aliases(
+        &self,
+        network_name: &str,
+        container_id: &str,
+        container_name: &str,
+        mac_override: Option<&str>,
+        ifname_override: Option<&str>,
+        requested_static_ips: &[String],
+        aliases: &[String],
+    ) -> Result<NetworkEndpoint> {
         if mac_override == Some("00:00:00:00:00:00") {
             return Err(anyhow!("Cannot assign requested address"));
         }
@@ -659,8 +708,26 @@ impl NetworkStore {
                 .find(|n| n.name == network_name || n.id.starts_with(network_name))
                 .ok_or_else(|| anyhow!("Network '{}' not found", network_name))?;
 
-            if let Some(ep) = net.containers.get(container_id) {
-                return Ok(ep.clone());
+            if let Some(ep) = net.containers.get_mut(container_id) {
+                for a in aliases {
+                    for part in a.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        if !ep.aliases.iter().any(|x| x == part) {
+                            ep.aliases.push(part.to_string());
+                        }
+                    }
+                }
+                let res = ep.clone();
+                self.save_unlocked(&data)?;
+                return Ok(res);
+            }
+
+            let mut clean_aliases = Vec::new();
+            for a in aliases {
+                for part in a.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if !clean_aliases.iter().any(|x| x == part) {
+                        clean_aliases.push(part.to_string());
+                    }
+                }
             }
 
             let ifname = ifname_override
@@ -679,6 +746,7 @@ impl NetworkStore {
                     mac_address: mac,
                     ips: Vec::new(),
                     interface_name: ifname,
+                    aliases: clean_aliases,
                 };
                 net.containers
                     .insert(container_id.to_string(), endpoint.clone());
@@ -772,6 +840,7 @@ impl NetworkStore {
                 mac_address: mac,
                 ips: assigned_ips,
                 interface_name: ifname,
+                aliases: clean_aliases,
             };
 
             net.containers
@@ -870,14 +939,17 @@ impl NetworkStore {
             {
                 for (cid, ep) in &net.containers {
                     let short_id = if cid.len() >= 12 { &cid[..12] } else { cid };
-                    if ep.container_name == *cid || ep.container_name == short_id {
-                        lines.push(format!("{}\t{}", ep.ipv4_address, ep.container_name));
-                    } else {
-                        lines.push(format!(
-                            "{}\t{}\t{}",
-                            ep.ipv4_address, ep.container_name, cid
-                        ));
+                    let mut names = vec![ep.container_name.clone()];
+                    if ep.container_name != *cid && ep.container_name != short_id {
+                        names.push(cid.clone());
+                        names.push(short_id.to_string());
                     }
+                    for a in &ep.aliases {
+                        if !names.iter().any(|n| n == a) {
+                            names.push(a.clone());
+                        }
+                    }
+                    lines.push(format!("{}\t{}", ep.ipv4_address, names.join("\t")));
                 }
             }
 
