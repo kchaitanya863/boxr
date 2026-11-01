@@ -244,6 +244,9 @@ pub fn podman_subcommand_index(argv: &[String]) -> usize {
             || a == "--pull-option"
             || a == "--runtime"
             || a == "--log-level"
+            || a == "--cdi-spec-dir"
+            || a == "--url"
+            || a == "--connection"
         {
             i += 2;
             continue;
@@ -575,6 +578,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         {
             if a == "--no-hosts=false" {
                 let _ = RUN_NO_HOSTS_EXPLICIT_FALSE.set(true);
+                let _ = RUN_NO_HOSTS.set(false);
             } else {
                 let _ = RUN_NO_HOSTS.set(true);
             }

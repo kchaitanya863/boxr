@@ -97,11 +97,122 @@ pub fn boxr_home() -> PathBuf {
             }
         }
     }
+    if let Some(remote_root) = remote_service_graph_root(&globals) {
+        return remote_root;
+    }
+    if let Some(storage_conf_root) = storage_conf_graph_root() {
+        return storage_conf_root;
+    }
     if let Ok(custom) = std::env::var("BOXR_HOME") {
         return PathBuf::from(custom);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".boxr")
+}
+
+pub fn remote_service_meta_for_globals(
+    globals: &crate::cli::podman_globals::PodmanGlobalOptions,
+) -> Option<serde_json::Value> {
+    let uri = globals
+        .url
+        .clone()
+        .or_else(|| std::env::var("CONTAINER_HOST").ok())?;
+    let meta_path = if let Some(rest) = uri
+        .strip_prefix("tcp://")
+        .or_else(|| uri.strip_prefix("tcp:"))
+    {
+        let port = rest.rsplit(':').next().unwrap_or("0");
+        format!("/tmp/boxr-tcp-{}.meta", port)
+    } else if let Some(rest) = uri
+        .strip_prefix("unix://")
+        .or_else(|| uri.strip_prefix("unix:"))
+    {
+        format!("{}.meta", rest)
+    } else {
+        return None;
+    };
+    let raw = fs::read_to_string(meta_path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn remote_service_graph_root(
+    globals: &crate::cli::podman_globals::PodmanGlobalOptions,
+) -> Option<PathBuf> {
+    let meta = remote_service_meta_for_globals(globals)?;
+    let gr = meta.get("graph_root")?.as_str()?;
+    if !gr.is_empty() {
+        Some(PathBuf::from(gr))
+    } else {
+        None
+    }
+}
+
+fn storage_conf_graph_root() -> Option<PathBuf> {
+    let path = std::env::var("CONTAINERS_STORAGE_CONF").ok()?;
+    let content = fs::read_to_string(&path).ok()?;
+    let is_rootless = cfg!(unix) && unsafe { libc::getuid() != 0 };
+    let mut graphroot = None;
+    let mut rootless_path = None;
+    for line in content.lines() {
+        let trimmed = line.split('#').next().unwrap_or("").trim();
+        let Some((k, v)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        if k == "graphroot" && !v.is_empty() {
+            graphroot = Some(v.to_string());
+        } else if k == "rootless_storage_path" && !v.is_empty() {
+            rootless_path = Some(v.to_string());
+        }
+    }
+    let raw = if is_rootless {
+        rootless_path.or(graphroot)?
+    } else {
+        graphroot?
+    };
+    let home = std::env::var("HOME").unwrap_or_default();
+    let uid = if cfg!(unix) {
+        unsafe { libc::getuid().to_string() }
+    } else {
+        "0".to_string()
+    };
+    let user = std::env::var("USER").unwrap_or_else(|_| {
+        #[cfg(unix)]
+        unsafe {
+            let pwd = libc::getpwuid(libc::getuid());
+            if !pwd.is_null() {
+                return std::ffi::CStr::from_ptr((*pwd).pw_name)
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+        "root".to_string()
+    });
+    let expanded = raw
+        .replace("$HOME", &home)
+        .replace("${HOME}", &home)
+        .replace("$USER", &user)
+        .replace("${USER}", &user)
+        .replace("$UID", &uid)
+        .replace("${UID}", &uid);
+    let mut cleaned = String::with_capacity(expanded.len());
+    let mut prev_slash = false;
+    for ch in expanded.chars() {
+        if ch == '/' {
+            if !prev_slash {
+                cleaned.push(ch);
+            }
+            prev_slash = true;
+        } else {
+            cleaned.push(ch);
+            prev_slash = false;
+        }
+    }
+    if cleaned.len() > 1 && cleaned.ends_with('/') {
+        cleaned.pop();
+    }
+    Some(PathBuf::from(cleaned))
 }
 
 fn containers_conf_static_dir() -> Option<PathBuf> {

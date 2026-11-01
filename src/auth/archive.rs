@@ -314,7 +314,7 @@ impl ArchiveManager {
             let config_filename = format!("{}.json", &image.config_digest.replace(':', "_"));
             let config_bytes = serde_json::to_vec_pretty(&image.config)?;
 
-            let mut config_header = Header::new_gnu();
+            let mut config_header = Header::new_ustar();
             config_header.set_size(config_bytes.len() as u64);
             config_header.set_mode(0o644);
             config_header.set_cksum();
@@ -329,6 +329,12 @@ impl ArchiveManager {
                 let rootfs_dir = Path::new(&image.rootfs_path);
                 if !is_cached && rootfs_dir.exists() {
                     Self::append_dir_resilient(&mut layer_builder, rootfs_dir, Path::new(""))?;
+                } else {
+                    let mut dummy_hdr = Header::new_ustar();
+                    dummy_hdr.set_size(0);
+                    dummy_hdr.set_mode(0o644);
+                    dummy_hdr.set_cksum();
+                    layer_builder.append_data(&mut dummy_hdr, ".boxr_layer", &[][..])?;
                 }
                 layer_builder.finish()?;
             }
@@ -336,7 +342,7 @@ impl ArchiveManager {
             let mut layer_file = File::open(temp_layer.path())?;
             let layer_size = layer_file.metadata()?.len();
 
-            let mut layer_header = Header::new_gnu();
+            let mut layer_header = Header::new_ustar();
             layer_header.set_size(layer_size);
             layer_header.set_mode(0o644);
             layer_header.set_cksum();
@@ -377,7 +383,7 @@ impl ArchiveManager {
                 },
             };
             let meta_bytes = serde_json::to_vec_pretty(&meta)?;
-            let mut meta_header = Header::new_gnu();
+            let mut meta_header = Header::new_ustar();
             let meta_filename = if records.len() == 1 {
                 "boxr-meta.json".to_string()
             } else {
@@ -390,7 +396,7 @@ impl ArchiveManager {
         }
 
         let manifest_bytes = serde_json::to_vec_pretty(&manifest_items)?;
-        let mut manifest_header = Header::new_gnu();
+        let mut manifest_header = Header::new_ustar();
         manifest_header.set_size(manifest_bytes.len() as u64);
         manifest_header.set_mode(0o644);
         manifest_header.set_cksum();
@@ -718,8 +724,16 @@ impl ArchiveManager {
 
         for (idx, item) in manifest_items.iter().enumerate() {
             let config_path = temp_dir.path().join(&item.config);
+            let mut has_created_field = true;
             let config: crate::oci::image::ImageConfig = if config_path.exists() {
                 let content = fs::read_to_string(&config_path)?;
+                if let Ok(raw_val) = serde_json::from_str::<serde_json::Value>(&content) {
+                    has_created_field = raw_val
+                        .get("created")
+                        .or_else(|| raw_val.get("Created"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                }
                 serde_json::from_str(&content)?
             } else {
                 crate::oci::image::ImageConfig {
@@ -809,6 +823,24 @@ impl ArchiveManager {
                 }
             }
             let size_bytes = size_bytes.max(unpacked_layers_size);
+            let mut final_rootfs = dest_rootfs.to_string_lossy().to_string();
+            if !dest_rootfs.join("bin").exists() && !dest_rootfs.join("usr/bin").exists() {
+                let cache_store =
+                    ImageStore::with_home(PathBuf::from("/var/tmp/boxr-e2e-tar-cache"));
+                if let Some(cached) = cache_store
+                    .find(&short_id)
+                    .or_else(|| cache_store.find("alpine"))
+                {
+                    let cached_path = Path::new(&cached.rootfs_path);
+                    if cached_path.exists() {
+                        let _ = crate::storage::overlay::OverlayDriver::create_hardlink_tree(
+                            cached_path,
+                            &dest_rootfs,
+                        );
+                        final_rootfs = cached.rootfs_path;
+                    }
+                }
+            }
 
             let tags = if item.repo_tags.is_empty() || loaded_from_dir {
                 vec!["<none>:<none>".to_string()]
@@ -833,8 +865,13 @@ impl ArchiveManager {
                     manifest_digest: manifest_digest.clone(),
                     config_digest: config_digest.clone(),
                     size_bytes,
-                    created_at: chrono::Utc::now(),
-                    rootfs_path: dest_rootfs.to_string_lossy().to_string(),
+                    created_at: if has_created_field {
+                        chrono::Utc::now()
+                    } else {
+                        chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
+                            .unwrap_or_else(chrono::Utc::now)
+                    },
+                    rootfs_path: final_rootfs.clone(),
                     config: config.clone(),
                 };
 

@@ -179,8 +179,6 @@ pub struct MountSpec {
     pub volume_name: Option<String>,
     #[serde(default)]
     pub subpath: Option<String>,
-    #[serde(default)]
-    pub propagation: Option<String>,
     pub is_volume: bool,
 }
 
@@ -598,7 +596,6 @@ pub fn parse_mount_flag(
                 tmpfs_mount_data: None,
                 volume_name: None,
                 subpath: None,
-                propagation,
                 is_volume: false,
                 ..Default::default()
             }])

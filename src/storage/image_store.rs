@@ -228,7 +228,19 @@ impl ImageStore {
 
         let globals = crate::cli::podman_globals::podman_global_options();
         let mut alt_roots: Vec<PathBuf> = Vec::new();
-        for opt in &globals.storage_opts {
+        let mut storage_opts = globals.storage_opts.clone();
+        if storage_opts.is_empty() {
+            if let Some(meta) = crate::storage::remote_service_meta_for_globals(&globals) {
+                if let Some(arr) = meta.get("storage_opts").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            storage_opts.push(s.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        for opt in &storage_opts {
             if let Some((k, v)) = opt.split_once('=') {
                 if k.ends_with(".imagestore") {
                     alt_roots.push(PathBuf::from(v));
@@ -286,15 +298,23 @@ impl ImageStore {
                     .filter(|img| !Path::new(&img.rootfs_path).starts_with(is_dir))
                     .cloned()
                     .collect();
-                ImageStoreData { images: imgs }
+                ImageStoreData {
+                    images: imgs,
+                    intermediates: data.intermediates.clone(),
+                    parents: data.parents.clone(),
+                }
             } else {
                 ImageStoreData {
                     images: data.images.clone(),
+                    intermediates: data.intermediates.clone(),
+                    parents: data.parents.clone(),
                 }
             }
         } else {
             ImageStoreData {
                 images: data.images.clone(),
+                intermediates: data.intermediates.clone(),
+                parents: data.parents.clone(),
             }
         };
         let content = serde_json::to_string_pretty(&filtered)?;

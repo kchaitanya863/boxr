@@ -28,7 +28,6 @@ pub struct PodmanGlobalOptions {
     pub tls_key: Option<String>,
     pub tls_details: Option<String>,
     pub pull_options: Vec<String>,
-    pub network_config_dir: Option<PathBuf>,
     pub cdi_spec_dirs: Vec<PathBuf>,
 }
 

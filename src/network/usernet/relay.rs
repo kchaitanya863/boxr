@@ -411,6 +411,63 @@ pub fn run_in_netns_dns_server(bundle_path: &Path, bind_ip: Ipv4Addr) {
     }
 }
 
+fn parse_dns_question(query: &[u8]) -> Option<(String, u16, usize)> {
+    if query.len() < 17 {
+        return None;
+    }
+    let mut pos = 12usize;
+    let mut labels = Vec::new();
+    loop {
+        if pos >= query.len() {
+            return None;
+        }
+        let len = query[pos] as usize;
+        pos += 1;
+        if len == 0 {
+            break;
+        }
+        if (len & 0xc0) != 0 || pos + len > query.len() {
+            return None;
+        }
+        let label = String::from_utf8_lossy(&query[pos..pos + len]).to_ascii_lowercase();
+        labels.push(label);
+        pos += len;
+    }
+    if pos + 4 > query.len() {
+        return None;
+    }
+    let qtype = u16::from_be_bytes([query[pos], query[pos + 1]]);
+    Some((labels.join("."), qtype, pos + 4))
+}
+
+fn build_dns_a_response(query: &[u8], question_end: usize, ip: Ipv4Addr) -> Vec<u8> {
+    let mut resp = Vec::with_capacity(question_end + 16);
+    resp.extend_from_slice(&query[0..2]); // Transaction ID
+    resp.extend_from_slice(&[0x81, 0x80]); // Standard query response, NoError
+    resp.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+    resp.extend_from_slice(&[0x00, 0x01]); // ANCOUNT = 1
+    resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // NSCOUNT, ARCOUNT
+    resp.extend_from_slice(&query[12..question_end]);
+    resp.extend_from_slice(&[0xc0, 0x0c]); // Pointer to QNAME at offset 12
+    resp.extend_from_slice(&[0x00, 0x01]); // TYPE A
+    resp.extend_from_slice(&[0x00, 0x01]); // CLASS IN
+    resp.extend_from_slice(&60u32.to_be_bytes()); // TTL = 60s
+    resp.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH = 4
+    resp.extend_from_slice(&ip.octets());
+    resp
+}
+
+fn build_dns_empty_or_nxdomain(query: &[u8], question_end: usize, nxdomain: bool) -> Vec<u8> {
+    let mut resp = Vec::with_capacity(question_end);
+    resp.extend_from_slice(&query[0..2]);
+    let rcode = if nxdomain { 0x83 } else { 0x80 };
+    resp.extend_from_slice(&[0x81, rcode]);
+    resp.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+    resp.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    resp.extend_from_slice(&query[12..question_end]);
+    resp
+}
+
 fn forward_dns_on_host(bundle_path: &Path, query: &[u8]) -> Result<Vec<u8>> {
     use std::net::UdpSocket;
 

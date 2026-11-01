@@ -399,9 +399,6 @@ pub struct BuildArgs {
     #[arg(long = "metadata-file", hide = true)]
     pub metadata_file: Option<String>,
 
-    #[arg(long = "annotation", hide = true)]
-    pub annotations: Vec<String>,
-
     #[arg(long = "from", hide = true)]
     pub from: Option<String>,
 

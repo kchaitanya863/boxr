@@ -23,6 +23,45 @@ pub fn append_k8s_log_chunk(path: &Path, stream: &str, data: &[u8]) -> Result<()
     if !data.ends_with(b"\n") {
         file.write_all(b"\n")?;
     }
+    #[cfg(unix)]
+    if let Some(bundle_dir) = path.parent() {
+        let jmeta = bundle_dir.join("journald_meta.json");
+        if jmeta.exists() {
+            if let Ok(raw) = fs::read_to_string(&jmeta) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let cid_full = val
+                        .get("container_id_full")
+                        .or_else(|| val.get("container_id"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let cname = val
+                        .get("container_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let ctag = val
+                        .get("container_tag")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let short_id = &cid_full[..12.min(cid_full.len())];
+                    let text = String::from_utf8_lossy(data);
+                    if let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() {
+                        for line in text.lines() {
+                            let payload = format!(
+                                "MESSAGE={}\nSYSLOG_IDENTIFIER={}\nCONTAINER_ID={}\nCONTAINER_ID_FULL={}\nCONTAINER_NAME={}\nCONTAINER_TAG={}\nPRIORITY=6\n",
+                                line,
+                                if ctag.is_empty() { cname } else { ctag },
+                                short_id,
+                                cid_full,
+                                cname,
+                                ctag
+                            );
+                            let _ = sock.send_to(payload.as_bytes(), "/run/systemd/journal/socket");
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 

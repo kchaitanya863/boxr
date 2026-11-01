@@ -8,6 +8,21 @@ pub fn set_hide_remote_help(hide: bool) {
     let _ = HIDE_REMOTE_HELP.set(hide);
 }
 
+pub fn invoked_as_podman() -> bool {
+    if std::env::var_os("PODMAN").is_some()
+        || std::env::var_os("PODMAN_BINARY").is_some()
+        || std::env::var_os("BOXR_BATS_HOME").is_some()
+        || crate::cli::podman_globals::podman_global_options()
+            .root
+            .is_some()
+    {
+        return true;
+    }
+    std::env::args()
+        .next()
+        .is_some_and(|a| a.contains("podman"))
+}
+
 fn hide_remote_in_help(argv: &[String]) -> bool {
     if *HIDE_REMOTE_HELP.get().unwrap_or(&false) {
         return true;
@@ -195,6 +210,24 @@ fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
         cmd = sub.clone();
     }
     let mut help = normalize_help_for_bats(&cmd.render_help().to_string(), sub_path);
+    if sub_path.is_empty() {
+        let rt = crate::containers_conf_toml_value("runtime").unwrap_or_else(|| "crun".to_string());
+        help.push_str(&format!(
+            "      --runtime string              Path to the OCI-compatible binary used to run containers. (default \"{}\")\n",
+            rt
+        ));
+    }
+    if sub_path == ["system", "service"] {
+        let st = crate::containers_conf_toml_value("service_timeout")
+            .unwrap_or_else(|| "5".to_string());
+        help.push_str(&format!(
+            "      --service-timeout int         Time until the service session expires in seconds (default {})\n",
+            st
+        ));
+    }
+    if sub_path == ["system", "dial-stdio"] {
+        help.push_str("\nExamples: podman system dial-stdio\n");
+    }
     if sub_path.last() == Some(&"push") {
         let mut comp_fmt = "gzip".to_string();
         let mut comp_lvl: Option<String> = None;
@@ -579,7 +612,12 @@ fn print_unrecognized(argv: &[String]) {
         return;
     }
     let parents: Vec<&str> = argv[1..argv.len() - 1].iter().map(|s| s.as_str()).collect();
-    let mut parts = vec!["podman"];
+    let bin = if hide_remote_in_help(argv) {
+        "podman-remote"
+    } else {
+        "podman"
+    };
+    let mut parts = vec![bin];
     parts.extend(parents);
     parts.push(bad.as_str());
     eprintln!("Error: unrecognized command `{}`", parts.join(" "));

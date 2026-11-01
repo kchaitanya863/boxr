@@ -448,7 +448,7 @@ fn collect_procs(bundle_path: &Path) -> Vec<ContainerProc> {
             .collect::<Vec<_>>()
             .join(", ")
     } else {
-        "default".to_string()
+        "CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, NET_BIND_SERVICE, SETFCAP, SETGID, SETPCAP, SETUID, SYS_CHROOT".to_string()
     };
 
     let Ok(read_dir) = fs::read_dir("/proc") else {

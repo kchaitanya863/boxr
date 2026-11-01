@@ -171,7 +171,7 @@ pub struct RmArgs {
     pub time: Option<i32>,
 
     /// Ignore errors when a container cannot be removed
-    #[arg(long = "ignore")]
+    #[arg(short = 'i', long = "ignore")]
     pub ignore: bool,
 
     /// Remove dependent containers before removing the container
@@ -508,11 +508,23 @@ pub struct ExportArgs {
     pub container: String,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerCheckpointArgs {
     /// Container to checkpoint
+    #[arg(default_value = "")]
     pub container: String,
+
+    /// Additional containers to checkpoint
+    pub extra_containers: Vec<String>,
+
+    /// Checkpoint all running containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Export checkpoint to a tar.gz archive
     #[arg(short = 'e', long = "export")]
@@ -525,21 +537,117 @@ pub struct ContainerCheckpointArgs {
     /// Leave the container running after checkpoint
     #[arg(short = 'R', long = "leave-running")]
     pub leave_running: bool,
+
+    /// Checkpoint a container with established TCP connections
+    #[arg(long = "tcp-established")]
+    pub tcp_established: bool,
+
+    /// Do not include root file-system changes when exporting
+    #[arg(long = "ignore-rootfs")]
+    pub ignore_rootfs: bool,
+
+    /// Do not export volumes associated with container
+    #[arg(long = "ignore-volumes")]
+    pub ignore_volumes: bool,
+
+    /// Dump container's memory information only, leave the container running
+    #[arg(short = 'P', long = "pre-checkpoint")]
+    pub pre_checkpoint: bool,
+
+    /// Checkpoint container with pre-checkpoint images
+    #[arg(long = "with-previous")]
+    pub with_previous: bool,
+
+    /// Create checkpoint image with specified name
+    #[arg(long = "create-image")]
+    pub create_image: Option<String>,
+
+    /// Select compression algorithm (gzip, none, zstd) for checkpoint archive
+    #[arg(short = 'c', long = "compress")]
+    pub compress: Option<String>,
+
+    /// Checkpoint a container with file locks
+    #[arg(long = "file-locks")]
+    pub file_locks: bool,
+
+    /// Display checkpoint statistics
+    #[arg(long = "print-stats")]
+    pub print_stats: bool,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct ContainerRestoreArgs {
-    /// Container to restore
+    /// Container or checkpoint image to restore
+    #[arg(default_value = "")]
     pub container: String,
+
+    /// Additional containers or checkpoint images to restore
+    pub extra_containers: Vec<String>,
+
+    /// Restore all checkpointed containers
+    #[arg(short = 'a', long = "all")]
+    pub all: bool,
+
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
 
     /// Import checkpoint from a tar.gz archive
     #[arg(short = 'i', long = "import")]
     pub import: Option<String>,
 
+    /// Restore from pre-checkpoint images
+    #[arg(long = "import-previous")]
+    pub import_previous: Option<String>,
+
     /// Keep all temporary checkpoint files
     #[arg(short = 'k', long = "keep")]
     pub keep: bool,
+
+    /// Specify new name for container restored from exported checkpoint
+    #[arg(short = 'n', long = "name")]
+    pub name: Option<String>,
+
+    /// Restore a container with established TCP connections
+    #[arg(long = "tcp-established")]
+    pub tcp_established: bool,
+
+    /// Restore a container with TCP connections and close them during restore
+    #[arg(long = "tcp-close")]
+    pub tcp_close: bool,
+
+    /// Do not restore root file-system changes when importing
+    #[arg(long = "ignore-rootfs")]
+    pub ignore_rootfs: bool,
+
+    /// Do not restore volumes associated with container
+    #[arg(long = "ignore-volumes")]
+    pub ignore_volumes: bool,
+
+    /// Ignore IP address set via --ip
+    #[arg(long = "ignore-static-ip")]
+    pub ignore_static_ip: bool,
+
+    /// Ignore MAC address set via --mac-address
+    #[arg(long = "ignore-static-mac")]
+    pub ignore_static_mac: bool,
+
+    /// Restore a container with file locks
+    #[arg(long = "file-locks")]
+    pub file_locks: bool,
+
+    /// Display restore statistics
+    #[arg(long = "print-stats")]
+    pub print_stats: bool,
+
+    /// Publish a container's port(s) to the host
+    #[arg(short = 'p', long = "publish")]
+    pub publish: Vec<String>,
+
+    /// Pod to restore into
+    #[arg(long = "pod")]
+    pub pod: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]

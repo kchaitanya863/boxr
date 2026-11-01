@@ -692,6 +692,25 @@ impl EventManager {
         let _ = sink.emit(event);
     }
 
+    pub fn record_with_home(home: &Path, event: ContainerEvent) {
+        let _ = JsonlFileSink::new(home.join("events.jsonl")).emit(&event);
+    }
+
+    pub fn read_all_with_home(home: &Path) -> Vec<ContainerEvent> {
+        let path = home.join("events.jsonl");
+        let Ok(content) = fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        content
+            .lines()
+            .filter_map(|l| parse_event_line(l.trim()))
+            .collect()
+    }
+
+    pub fn read_all() -> Vec<ContainerEvent> {
+        Self::read_all_with_home(&boxr_home())
+    }
+
     /// Stream or read recorded events
     pub fn stream_events(since: Option<&str>, filter: Option<&str>) -> Result<()> {
         let filters: Vec<String> = filter.into_iter().map(|s| s.to_string()).collect();

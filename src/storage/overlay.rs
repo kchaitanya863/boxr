@@ -246,13 +246,16 @@ impl OverlayDriver {
                 #[cfg(unix)]
                 if !linked {
                     let _ = fs::copy(&from, &to);
+                    if let Ok(meta) = meta {
+                        Self::preserve_file_timestamps(&from, &to, &meta);
+                    }
                 }
                 #[cfg(not(unix))]
                 {
                     let _ = fs::copy(&from, &to);
-                }
-                if let Ok(meta) = meta {
-                    Self::preserve_file_timestamps(&from, &to, &meta);
+                    if let Ok(meta) = meta {
+                        Self::preserve_file_timestamps(&from, &to, &meta);
+                    }
                 }
             }
         }

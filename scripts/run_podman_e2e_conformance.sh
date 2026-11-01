@@ -213,6 +213,9 @@ SKOPEO_EOF
 fi
 
 cd "$SRC_DIR"
+if [[ -x "$SRC_DIR/bin/ginkgo" ]] && [[ ! -f "$SRC_DIR/.install.ginkgo" ]]; then
+  touch "$SRC_DIR/.install.ginkgo"
+fi
 if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; then
   echo "Installing ginkgo (first run)..."
   make -C "$SRC_DIR" .install.ginkgo
@@ -236,15 +239,16 @@ fi
 
 export PATH="$PATH:$SRC_DIR/hack"
 
-while IFS= read -r line || [[ -n "$line" ]]; do
+run_one_suite() {
+  local line="$1"
   line="${line%%#*}"
   line="$(echo "$line" | xargs)"
-  [[ -z "$line" ]] && continue
+  [[ -z "$line" ]] && return 0
   if [[ -n "${PODMAN_E2E_PATTERN:-}" ]] && [[ "$line" != *"$PODMAN_E2E_PATTERN"* ]]; then
-    continue
+    return 0
   fi
   echo "======== e2e FOCUS_FILE=$line ========"
-  focus_pat="$line"
+  local focus_pat="$line"
   if [[ "$focus_pat" != /* ]]; then
     focus_pat="/${focus_pat}$"
   fi
@@ -252,7 +256,20 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "${PODMAN_E2E_STRICT:-0}" == "1" ]]; then
       exit 1
     fi
+    return 1
   fi
-done <"$MANIFEST"
+}
+
+FAILED=0
+if [[ $# -gt 0 ]]; then
+  for suite in "$@"; do
+    run_one_suite "$suite" || FAILED=1
+  done
+else
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    run_one_suite "$line" || FAILED=1
+  done <"$MANIFEST"
+fi
 
 echo "e2e conformance run complete (see output; strict=${PODMAN_E2E_STRICT:-0})"
+exit "$FAILED"

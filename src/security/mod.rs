@@ -25,8 +25,6 @@ pub struct UsernsMappingMode {
     pub keep_id_uid: Option<u32>,
     pub keep_id_gid: Option<u32>,
     pub nomap: bool,
-    pub keep_id_uid: Option<u32>,
-    pub keep_id_gid: Option<u32>,
     pub max_size: Option<u32>,
 }
 

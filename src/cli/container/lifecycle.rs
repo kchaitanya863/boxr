@@ -188,10 +188,6 @@ pub struct ExecArgs {
     #[arg(long = "preserve-fd")]
     pub preserve_fd: Vec<String>,
 
-    /// Act on the latest container
-    #[arg(short = 'l', long = "latest")]
-    pub latest: bool,
-
     /// Read the container ID from the file
     #[arg(long = "cidfile")]
     pub cidfile: Option<String>,
