@@ -460,6 +460,9 @@ pub fn print_podman_info_text(doc: &Value) -> String {
     if let Some(i) = doc.get("Images") {
         append_yaml_kv(&mut out, 0, "Images", scalar_str(Some(i)));
     }
+    if let Some(os) = doc.get("OSType") {
+        append_yaml_kv(&mut out, 0, "Operating System", scalar_str(Some(os)));
+    }
     out.push_str("registries:\n");
     out.push_str("  search:\n");
     out.push_str("  insecure:\n");

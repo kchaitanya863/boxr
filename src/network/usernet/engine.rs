@@ -325,6 +325,9 @@ impl UserNetEngine {
         if payload.len() < 8 || payload[0] != 8 || payload[1] != 0 {
             return None;
         }
+        if ip.dst_ip != self.gateway_ip && self.bundle_path.is_none() {
+            return None;
+        }
 
         // Reply to ICMP Echo Request (type 8, code 0) with Echo Reply (type 0, code 0)
         {

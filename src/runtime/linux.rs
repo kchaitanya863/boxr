@@ -2854,7 +2854,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         || ports.iter().any(|p| {
                             p.host_ip.is_some() || !p.protocol.eq_ignore_ascii_case("tcp")
                         }));
-                if requires_netns && !ns_join.net && !pasta_ports_direct {
+                if requires_netns && !ns_join.net && (!use_pasta || !pasta_ports_direct) {
                     match unsafe { fork() } {
                         Ok(ForkResult::Child) => {
                             let _ =

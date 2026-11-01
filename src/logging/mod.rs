@@ -524,12 +524,26 @@ pub fn resolve_container_log_path(
     {
         if let Some(name) = bundle_path.file_name().and_then(|s| s.to_str()) {
             let ctr = bundle_path.join(format!("{name}-ctr.log"));
-            return Some(ctr);
+            if ctr.exists() {
+                return Some(ctr);
+            }
         }
     }
     let logs_txt = bundle_path.join("logs.txt");
     if logs_txt.exists() {
         return Some(logs_txt);
+    }
+    let rootfs_logs = bundle_path.join("rootfs/logs.txt");
+    if rootfs_logs.exists() {
+        return Some(rootfs_logs);
+    }
+    if annotations
+        .get("boxr.log_driver")
+        .is_some_and(|d| is_file_log_driver(Some(d.as_str())))
+    {
+        if let Some(name) = bundle_path.file_name().and_then(|s| s.to_str()) {
+            return Some(bundle_path.join(format!("{name}-ctr.log")));
+        }
     }
     None
 }
