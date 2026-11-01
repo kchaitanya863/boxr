@@ -53,6 +53,8 @@ pub enum ManifestAction {
     Push {
         #[arg(long = "authfile")]
         authfile: Option<String>,
+        #[arg(short = 'q', long = "quiet", hide = true)]
+        quiet: bool,
         target: String,
         #[arg(hide = true)]
         destination: Option<String>,

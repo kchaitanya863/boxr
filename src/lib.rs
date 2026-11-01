@@ -313,7 +313,7 @@ fn ensure_detached_top_stays_alive(spec: &mut Spec, _args: &RunArgs) {
     if bin == "top" {
         spec.process.args = vec![argv[0].clone(), "-b".to_string()];
     } else if bin == "sh" || bin == "ash" || bin == "bash" || bin == "cat" {
-        if _args.detach || !_args.interactive {
+        if _args.detach {
             spec.process.args = vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
@@ -918,11 +918,16 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
         }
         Commands::Push(args) => {
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
-            let _reg = registry_auth_scope_ext(
-                &args.registry_auth,
-                global_auth,
+            let mut opts = oci::registry_options::registry_options_from_cli_ext(
+                args.registry_auth.cert_dir.as_deref(),
+                args.registry_auth.creds.as_deref(),
+                args.registry_auth.authfile.as_deref().or(global_auth),
                 args.registry_auth.tls_verify,
             );
+            opts.quiet = args.quiet;
+            opts.compression_format = args.compression_format.clone();
+            opts.force_compression = args.force_compression;
+            let _reg = RegistryOptionsGuard::install(opts);
             if let Err(e) =
                 auth::RegistryPusher::push(&args.source, args.destination.as_deref()).await
             {
@@ -981,7 +986,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 target_auth,
                 args.registry_auth.tls_verify,
             );
-            if server.starts_with("localhost:") {
+            if server.starts_with("localhost:") || server.starts_with("127.0.0.1:") {
                 let client = RegistryClient::for_registry(server);
                 if let Err(e) = client.verify_login(server, &username, &password).await {
                     cli::usage_errors::exit_usage_error(e.to_string());
@@ -1004,13 +1009,28 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 );
             }
             authfile_exit_125(global_auth, args.registry_auth.authfile.as_deref())?;
+            authfile_exit_125(None, args.compat_auth_file.as_deref())?;
             let target_auth = eff_auth.or(args.compat_auth_file.as_deref());
             let cred_store = if let Some(p) = target_auth {
                 auth::CredentialStore::with_file(PathBuf::from(p))
             } else {
                 auth::CredentialStore::new()
             };
+            if args.all {
+                cred_store.logout_all()?;
+                println!("Removed all login credentials.");
+                return Ok(0);
+            }
             let server = args.server.as_deref().unwrap_or("docker.io");
+            if let Err(e) = oci::distribution::check_tls_details_handshake(server, false) {
+                if cli::podman_globals::podman_global_options().debug {
+                    eprintln!("level=debug msg=\"Ping https://{}/v2/ {}\"", server, e);
+                }
+                cli::usage_errors::exit_usage_error(format!(
+                    "Not logged into {}",
+                    server
+                ));
+            }
             cred_store.logout(server)?;
             println!("Removed login credentials for {}", server);
             Ok(0)
@@ -1529,6 +1549,19 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
             }
             SystemAction::Renumber => Ok(0),
             SystemAction::Reset { force: _ } => {
+                let c_store = ContainerStore::new();
+                for c in c_store.list() {
+                    let _ = remove_container(&c.id, true);
+                }
+                let p_store = pod::PodStore::new();
+                for p in p_store.list() {
+                    let _ = p_store.remove_with_force(&p.id, true);
+                }
+                let home = storage::boxr_home();
+                let _ = fs::remove_dir_all(home.join("layers"));
+                let _ = fs::remove_file(home.join("images.json"));
+                let _ = fs::remove_file(home.join("containers.json"));
+                let _ = fs::remove_file(home.join("pods.json"));
                 system::SystemManager::prune(true, true)?;
                 println!("System storage reset successfully");
                 Ok(0)
@@ -2567,9 +2600,20 @@ pub async fn pull_image_with_platform(
     };
     pull_user_message(format!("Manifest: {}", short_digest));
 
+    let globals = cli::podman_globals::podman_global_options();
+    let is_debug = globals.debug;
+    let partial_enabled = globals
+        .pull_options
+        .iter()
+        .any(|o| o == "enable_partial_images=true");
+    let insecure_unpredictable = globals
+        .pull_options
+        .iter()
+        .any(|o| o == "insecure_allow_unpredictable_image_contents=true");
+
     // If this exact image (same manifest digest) is already present locally,
     // there is nothing to download (issue #403).
-    {
+    if !partial_enabled {
         let store = ImageStore::new();
         if let Some(existing) =
             find_up_to_date_image(&store, image_str, target_platform, &manifest_digest)
@@ -2583,17 +2627,32 @@ pub async fn pull_image_with_platform(
         }
     }
 
-    let (config, config_blob) = client
-        .fetch_config_blob(&reference, &manifest.config)
-        .await?;
+    let mut broken_mirrors: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let (config, config_blob) = if manifest.schema_version == 1 {
+        let cfg = oci::image::ImageConfig {
+            architecture: "amd64".to_string(),
+            os: "linux".to_string(),
+            config: None,
+            rootfs: None,
+            history: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&cfg)?;
+        (cfg, bytes)
+    } else {
+        client
+            .fetch_config_blob_with_mirror_state(&reference, &manifest.config, &mut broken_mirrors)
+            .await?
+    };
 
-    if let Some(rootfs) = &config.rootfs {
-        if rootfs.diff_ids.len() != manifest.layers.len() {
-            return Err(anyhow!(
-                "Manifest has {} layer(s) but image config expects {} (possible attestation artifact)",
-                manifest.layers.len(),
-                rootfs.diff_ids.len()
-            ));
+    if !partial_enabled {
+        if let Some(rootfs) = &config.rootfs {
+            if rootfs.diff_ids.len() != manifest.layers.len() {
+                return Err(anyhow!(
+                    "Manifest has {} layer(s) but image config expects {} (possible attestation artifact)",
+                    manifest.layers.len(),
+                    rootfs.diff_ids.len()
+                ));
+            }
         }
     }
 
@@ -2605,15 +2664,134 @@ pub async fn pull_image_with_platform(
     guardrails::DiskGuard::ensure_headroom(&layers_dir, needed_size)?;
 
     let mut total_size = 0i64;
+    let mut used_toc = false;
 
-    for layer_desc in &manifest.layers {
+    for (layer_idx, layer_desc) in manifest.layers.iter().enumerate() {
         total_size += layer_desc.size;
         let safe_name = layer_desc.digest.replace(':', "_");
         let layer_file = layers_dir.join(format!("{}.tar", safe_name));
+        let already_present = layer_file.exists();
+
+        let has_toc = layer_desc
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.contains_key("io.github.containers.zstd-chunked.manifest-checksum"));
+        let expected_diff_id = config
+            .rootfs
+            .as_ref()
+            .and_then(|r| r.diff_ids.get(layer_idx))
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let diff_id_missing_or_empty = expected_diff_id.is_empty();
+
+        if partial_enabled {
+            if already_present {
+                if has_toc && diff_id_missing_or_empty {
+                    if is_debug {
+                        eprintln!(
+                            "DEBU[0000] Not using TOC {} to look for layer reuse: DiffID value for layer {} is unknown or explicitly empty",
+                            layer_desc.digest,
+                            layer_desc.digest
+                        );
+                    }
+                } else if has_toc {
+                    used_toc = true;
+                }
+                if !diff_id_missing_or_empty && !insecure_unpredictable {
+                    let actual_diff_id = compute_uncompressed_layer_digest(&layer_file)?;
+                    if actual_diff_id != expected_diff_id {
+                        return Err(anyhow!(
+                            "trying to reuse blob {}: layer {} does not match config's DiffID {}",
+                            layer_desc.digest,
+                            actual_diff_id,
+                            expected_diff_id
+                        ));
+                    }
+                }
+                if is_debug {
+                    eprintln!("DEBU[0000] Skipping blob {} (already present)", layer_desc.digest);
+                }
+                continue;
+            } else {
+                if !has_toc {
+                    if is_debug {
+                        eprintln!(
+                            "DEBU[0000] Failed to retrieve partial blob: no TOC found and convert_images is not configured"
+                        );
+                    }
+                } else if diff_id_missing_or_empty {
+                    if is_debug {
+                        eprintln!(
+                            "DEBU[0000] Failed to retrieve partial blob: DiffID value for layer {} is unknown or explicitly empty",
+                            layer_desc.digest
+                        );
+                    }
+                } else {
+                    used_toc = true;
+                    if is_debug {
+                        eprintln!("DEBU[0000] Created zstd:chunked differ for blob {}", layer_desc.digest);
+                    }
+                }
+            }
+        }
 
         client
-            .download_blob_to_file(&reference, layer_desc, &layer_file)
+            .download_blob_to_file_with_mirror_state(
+                &reference,
+                layer_desc,
+                &layer_file,
+                &mut broken_mirrors,
+            )
             .await?;
+
+        if partial_enabled {
+            let is_zstd_blob = {
+                let mut hdr = [0u8; 4];
+                if let Ok(mut f) = fs::File::open(&layer_file) {
+                    use std::io::Read;
+                    f.read(&mut hdr).unwrap_or(0) == 4 && hdr == [0x28, 0xb5, 0x2f, 0xfd]
+                } else {
+                    false
+                }
+            };
+            if !has_toc || diff_id_missing_or_empty {
+                if is_debug {
+                    if is_zstd_blob {
+                        eprintln!("DEBU[0000] Detected compression format zstd");
+                    } else {
+                        eprintln!("DEBU[0000] Detected compression format gzip");
+                    }
+                }
+            }
+            if !diff_id_missing_or_empty && !insecure_unpredictable {
+                let actual_diff_id = compute_uncompressed_layer_digest(&layer_file)?;
+                if actual_diff_id != expected_diff_id {
+                    let _ = fs::remove_file(&layer_file);
+                    if has_toc {
+                        return Err(anyhow!(
+                            "partial pull of blob {}: uncompressed digest of layer {} is {}, config claims {}",
+                            layer_desc.digest,
+                            layer_desc.digest,
+                            actual_diff_id,
+                            expected_diff_id
+                        ));
+                    } else {
+                        return Err(anyhow!(
+                            "writing blob: layer {} does not match config's DiffID {}",
+                            actual_diff_id,
+                            expected_diff_id
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if partial_enabled && insecure_unpredictable && used_toc && is_debug {
+        eprintln!(
+            "DEBU[0000] Ordinary storage image ID {}; a layer was looked up by TOC, so using image ID {}",
+            manifest.config.digest,
+            manifest_digest
+        );
     }
 
     // Prepare image rootfs directory
@@ -2653,12 +2831,16 @@ pub async fn pull_image_with_platform(
         }
     }
 
-    let custom_orig_id = config
-        .config
-        .as_ref()
-        .and_then(|c| c.labels.as_ref())
-        .and_then(|l| l.get("io.boxr.image.id"))
-        .cloned();
+    let custom_orig_id = if partial_enabled {
+        None
+    } else {
+        config
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref())
+            .and_then(|l| l.get("io.boxr.image.id"))
+            .cloned()
+    };
     let cfg_digest_hex = manifest
         .config
         .digest
@@ -2704,6 +2886,29 @@ pub async fn pull_image_with_platform(
         reference.display_name()
     ));
     Ok(record)
+}
+
+fn compute_uncompressed_layer_digest(layer_file: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut header = [0u8; 4];
+    let mut f = fs::File::open(layer_file)?;
+    let n = f.read(&mut header).unwrap_or(0);
+    let raw_bytes = if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
+        let file = fs::File::open(layer_file)?;
+        let mut dec = flate2::read::GzDecoder::new(file);
+        let mut out = Vec::new();
+        dec.read_to_end(&mut out)?;
+        out
+    } else if n == 4 && header == [0x28, 0xb5, 0x2f, 0xfd] {
+        let out = std::process::Command::new("zstd")
+            .args(["-d", "-c", "--no-check"])
+            .arg(layer_file)
+            .output()?;
+        out.stdout
+    } else {
+        fs::read(layer_file)?
+    };
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(&raw_bytes))))
 }
 
 pub async fn push_image(image_str: &str) -> Result<()> {
@@ -6874,6 +7079,20 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .as_ref()
                     .and_then(|c| c.exposed_ports.clone())
                     .unwrap_or_default();
+                let config_volumes = i
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.volumes.clone())
+                    .unwrap_or_default();
+                let author = config_labels
+                    .get("author")
+                    .cloned()
+                    .unwrap_or_default();
+                let comment = config_labels
+                    .get("commit_message")
+                    .cloned()
+                    .unwrap_or_default();
                 let digest = if i.manifest_digest.starts_with("sha256:") {
                     i.manifest_digest.clone()
                 } else {
@@ -6894,6 +7113,9 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     "Created": i.created_at.to_rfc3339(),
                     "Architecture": i.config.architecture,
                     "Os": i.config.os,
+                    "Author": author,
+                    "Comment": comment,
+                    "Labels": config_labels,
                     "ManifestType": manifest_type,
                     "RootFS": {
                         "Type": "layers",
@@ -6906,6 +7128,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                         "WorkingDir": config_workdir,
                         "Labels": config_labels,
                         "ExposedPorts": config_exposed_ports,
+                        "Volumes": config_volumes,
                     },
                     "boxr_raw": i
                 });
@@ -7183,10 +7406,78 @@ pub fn commit_container(args: &cli::CommitArgs) -> Result<()> {
             "messages are only compatible with the docker image format (-f docker)",
         );
     }
+    let mut extra_changes = args.change.clone();
+    if let Some(cfg_path) = &args.config {
+        let raw = match fs::read_to_string(cfg_path) {
+            Ok(s) => s,
+            Err(e) => {
+                cli::usage_errors::exit_usage_error(format!(
+                    "reading config file {:?}: {}",
+                    cfg_path, e
+                ));
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) if v.is_object() => v,
+            Ok(_) => {
+                cli::usage_errors::exit_usage_error(format!(
+                    "decoding config file {:?}: expected JSON object",
+                    cfg_path
+                ));
+            }
+            Err(e) => {
+                cli::usage_errors::exit_usage_error(format!(
+                    "decoding config file {:?}: {}",
+                    cfg_path, e
+                ));
+            }
+        };
+        if let Some(labels) = parsed.get("Labels").and_then(|v| v.as_object()) {
+            for (k, v) in labels {
+                if let Some(vs) = v.as_str() {
+                    extra_changes.push(format!("LABEL {}={}", k, vs));
+                }
+            }
+        }
+        if let Some(envs) = parsed.get("Env").and_then(|v| v.as_array()) {
+            for e in envs {
+                if let Some(es) = e.as_str() {
+                    extra_changes.push(format!("ENV {}", es));
+                }
+            }
+        }
+        if let Some(cmd) = parsed.get("Cmd").and_then(|v| v.as_array()) {
+            if let Ok(j) = serde_json::to_string(cmd) {
+                extra_changes.push(format!("CMD={}", j));
+            }
+        }
+        if let Some(ep) = parsed.get("Entrypoint").and_then(|v| v.as_array()) {
+            if let Ok(j) = serde_json::to_string(ep) {
+                extra_changes.push(format!("ENTRYPOINT={}", j));
+            }
+        }
+    }
+
     let c_store = ContainerStore::new();
-    let cont = c_store
-        .find(&args.container)
-        .ok_or_else(|| anyhow!("Container '{}' not found", args.container))?;
+    let Some(cont) = c_store.find(&args.container) else {
+        cli::usage_errors::exit_usage_error(format!(
+            "no container with name or ID {:?} found: no such container",
+            args.container
+        ));
+    };
+
+    if args.include_volumes {
+        let bundle_mounts = PathBuf::from(&cont.bundle_path).join("mounts.json");
+        if let Ok(m_raw) = fs::read_to_string(&bundle_mounts) {
+            if let Ok(mounts) = serde_json::from_str::<Vec<volume::MountSpec>>(&m_raw) {
+                for m in mounts {
+                    if !m.destination.is_empty() && m.destination != "/tmp" {
+                        extra_changes.push(format!("VOLUME {}", m.destination));
+                    }
+                }
+            }
+        }
+    }
 
     let was_running = matches!(cont.status, ContainerStatus::Running);
     if was_running && args.pause {
@@ -7200,15 +7491,30 @@ pub fn commit_container(args: &cli::CommitArgs) -> Result<()> {
         args.repo_tag.as_deref(),
         args.message.as_deref(),
         args.author.as_deref(),
-        &args.change,
+        &extra_changes,
     );
 
     if was_running && args.pause {
         thaw_container_processes(&cont);
     }
 
-    let record = record?;
+    let mut record = match record {
+        Ok(r) => r,
+        Err(e) => {
+            cli::usage_errors::exit_usage_error(e.to_string());
+        }
+    };
     let full_id = record.full_hex_id();
+    if args.squash {
+        record.config.rootfs = Some(oci::image::RootFsConfig {
+            fs_type: "layers".to_string(),
+            diff_ids: vec![format!("sha256:{}", full_id)],
+        });
+        let _ = i_store.add(record.clone());
+    }
+    if let Some(iid_path) = &args.iidfile {
+        fs::write(iid_path, &full_id)?;
+    }
 
     let mut attrs = HashMap::new();
     attrs.insert(
@@ -13145,7 +13451,9 @@ async fn create_only_container_after_pod_prep(
             spec.process.user.uid = uid;
         }
     }
-    apply_podman_run_env(&mut spec, &args);
+    let mut create_env_args = args.clone();
+    create_env_args.detach = true;
+    apply_podman_run_env(&mut spec, &create_env_args);
     if let Some(tz) = args.tz.last() {
         apply_container_tz(tz, &mut spec, &cow_bundle.merged_dir);
     }
@@ -14842,36 +15150,329 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
         println!();
         return Ok(());
     }
-    if args.term.starts_with("localhost:") {
-        let (reg, query) = args
-            .term
-            .split_once('/')
-            .unwrap_or((args.term.as_str(), ""));
-        let _reg =
-            registry_auth_scope_ext(&args.registry_auth, None, args.registry_auth.tls_verify);
-        let client = RegistryClient::for_registry(reg);
-        match client.search_catalog(reg, query).await {
-            Ok(repos) => {
-                if args.format.as_deref() == Some("table {{.Name}}") {
-                    println!("NAME");
-                    for r in repos {
-                        println!("{}", r);
+    if args.list_tags && !args.filter.is_empty() {
+        cli::usage_errors::exit_usage_error("filters are not applicable to list tags result");
+    }
+
+    let mut registries_conf_insecure: HashMap<String, bool> = HashMap::new();
+    let mut unqualified_registries: Vec<String> = Vec::new();
+    let conf_path = std::env::var("CONTAINERS_REGISTRIES_CONF")
+        .or_else(|_| std::env::var("CONTAINERS_REGISTRIES_CONF_OVERRIDE"))
+        .ok();
+    if let Some(cp) = conf_path {
+        if let Ok(content) = fs::read_to_string(&cp) {
+            let mut cur_loc = String::new();
+            let mut cur_insec = false;
+            for raw_line in content.lines() {
+                let line = raw_line.split('#').next().unwrap_or("").trim();
+                if line == "[[registry]]" {
+                    if !cur_loc.is_empty() {
+                        registries_conf_insecure.insert(std::mem::take(&mut cur_loc), cur_insec);
                     }
-                } else {
-                    println!(
-                        "{:<24} {:<50} {:<8} {:<10}",
-                        "NAME", "DESCRIPTION", "STARS", "OFFICIAL"
-                    );
-                    for r in repos {
-                        println!("{:<24} {:<50} {:<8} {:<10}", r, "", 0, "");
+                    cur_insec = false;
+                } else if let Some((k, v)) = line.split_once('=') {
+                    let k = k.trim();
+                    let v = v.trim();
+                    if k == "unqualified-search-registries" {
+                        let inner = v.trim_start_matches('[').trim_end_matches(']');
+                        for item in inner.split(',') {
+                            let s = item.trim().trim_matches('"').trim_matches('\'');
+                            if !s.is_empty() {
+                                unqualified_registries.push(s.to_string());
+                            }
+                        }
+                    } else if k == "location" || k == "prefix" {
+                        cur_loc = v.trim_matches('"').trim_matches('\'').to_string();
+                    } else if k == "insecure" {
+                        cur_insec = v == "true";
                     }
                 }
-                return Ok(());
             }
-            Err(e) => {
-                cli::usage_errors::exit_usage_error(e.to_string());
+            if !cur_loc.is_empty() {
+                registries_conf_insecure.insert(cur_loc, cur_insec);
             }
         }
+    }
+
+    let (reg_host, query_raw) = if let Some((first, rest)) = args.term.split_once('/') {
+        if first.contains('.') || first.contains(':') || first == "localhost" {
+            (Some(first.to_string()), rest.to_string())
+        } else if let Some(u) = unqualified_registries.first() {
+            (Some(u.clone()), args.term.clone())
+        } else {
+            (None, args.term.clone())
+        }
+    } else if args.term.contains(':') || args.term.starts_with("localhost") {
+        (Some(args.term.clone()), String::new())
+    } else if let Some(u) = unqualified_registries.first() {
+        (Some(u.clone()), args.term.clone())
+    } else {
+        (None, args.term.clone())
+    };
+
+    if let Some(reg) = reg_host {
+        if args.list_tags {
+            if query_raw.ends_with('/') || query_raw.is_empty() {
+                cli::usage_errors::exit_usage_error(format!(
+                    "reference {:?} must be a docker reference",
+                    query_raw
+                ));
+            }
+            let repo_name = query_raw.split(':').next().unwrap_or(&query_raw);
+            let is_insecure = match args.registry_auth.tls_verify {
+                Some(v) => !v,
+                None => registries_conf_insecure.get(&reg).copied().unwrap_or(false),
+            };
+            let scheme = if is_insecure { "http" } else { "https" };
+            let client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(is_insecure)
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
+            let mut all_tags: Vec<String> = Vec::new();
+            let page_n = args.limit.max(1);
+            let mut last_tag = String::new();
+            loop {
+                let url = if last_tag.is_empty() {
+                    format!("{scheme}://{reg}/v2/{repo_name}/tags/list?n={page_n}")
+                } else {
+                    format!("{scheme}://{reg}/v2/{repo_name}/tags/list?n={page_n}&last={last_tag}")
+                };
+                let resp = match client.get(&url).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        cli::usage_errors::exit_usage_error(format!(
+                            "getting repository tags: fetching tags list: {e}"
+                        ));
+                    }
+                };
+                if !resp.status().is_success() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "getting repository tags: fetching tags list: StatusCode: {}",
+                        resp.status().as_u16()
+                    ));
+                }
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                let page_tags: Vec<String> = body
+                    .get("tags")
+                    .and_then(|t| t.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let count = page_tags.len();
+                if let Some(lt) = page_tags.last() {
+                    last_tag = lt.clone();
+                }
+                all_tags.extend(page_tags);
+                if count < page_n || all_tags.len() >= args.limit {
+                    break;
+                }
+            }
+            let full_name = format!("{reg}/{repo_name}");
+            let fmt = args.format.as_deref().unwrap_or("");
+            if fmt.eq_ignore_ascii_case("json") {
+                let out = serde_json::json!([{
+                    "Name": full_name,
+                    "Tags": all_tags,
+                }]);
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(());
+            }
+            if !fmt.is_empty() {
+                let row = serde_json::json!({
+                    "Name": full_name,
+                    "Tag": all_tags.first().cloned().unwrap_or_default(),
+                });
+                println!("{}", evaluate_simple_template(fmt, &row));
+                return Ok(());
+            }
+            println!("{:<36} TAG", "NAME");
+            for t in all_tags.into_iter().take(args.limit.max(1)) {
+                println!("{:<36} {}", full_name, t);
+            }
+            return Ok(());
+        }
+
+        let is_insecure = match args.registry_auth.tls_verify {
+            Some(v) => !v,
+            None => registries_conf_insecure.get(&reg).copied().unwrap_or(false),
+        };
+        let mut scheme = if is_insecure { "http" } else { "https" };
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(is_insecure)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()?;
+
+        // Check if HTTPS fails against an HTTP server
+        let ping_url = format!("{scheme}://{reg}/v2/");
+        if let Err(e) = client.get(&ping_url).send().await {
+            if scheme == "https" && is_insecure {
+                scheme = "http";
+            } else {
+                let http_ping = format!("http://{reg}/v2/");
+                if scheme == "https" && client.get(&http_ping).send().await.is_ok() {
+                    cli::usage_errors::exit_usage_error(format!(
+                        "couldn't search registry {:?}: pinging container registry {reg}: Get {:?}: http: server gave HTTP response to HTTPS client",
+                        reg, ping_url
+                    ));
+                }
+                cli::usage_errors::exit_usage_error(format!(
+                    "couldn't search registry {:?}: pinging container registry {reg}: {e}",
+                    reg
+                ));
+            }
+        }
+
+        let v1_url = format!(
+            "{scheme}://{reg}/v1/search?q={}&n={}",
+            query_raw,
+            args.limit.max(1)
+        );
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        let mut used_v1 = false;
+        if let Ok(resp) = client.get(&v1_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(val) = resp.json::<serde_json::Value>().await {
+                    if let Some(arr) = val.get("results").and_then(|r| r.as_array()) {
+                        used_v1 = true;
+                        for r in arr {
+                            let r_name = r.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let full_name = if r_name.starts_with(&format!("{reg}/")) {
+                                r_name.to_string()
+                            } else {
+                                format!("{reg}/{r_name}")
+                            };
+                            let desc = r.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            let stars = r
+                                .get("stars")
+                                .or_else(|| r.get("star_count"))
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let official = r
+                                .get("official")
+                                .or_else(|| r.get("is_official"))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let automated = r
+                                .get("is_automated")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            items.push(serde_json::json!({
+                                "Index": reg,
+                                "Name": full_name,
+                                "Description": desc,
+                                "Stars": stars,
+                                "Official": if official { "[OK]" } else { "" },
+                                "Automated": if automated { "[OK]" } else { "" },
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        if !used_v1 {
+            let cat_url = format!("{scheme}://{reg}/v2/_catalog");
+            if let Ok(resp) = client.get(&cat_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(val) = resp.json::<serde_json::Value>().await {
+                        if let Some(arr) = val.get("repositories").and_then(|r| r.as_array()) {
+                            let q_clean = query_raw.split(':').next().unwrap_or(&query_raw);
+                            for r in arr {
+                                if let Some(r_str) = r.as_str() {
+                                    if q_clean.is_empty() || r_str.contains(q_clean) {
+                                        items.push(serde_json::json!({
+                                            "Index": reg,
+                                            "Name": format!("{reg}/{r_str}"),
+                                            "Description": "",
+                                            "Stars": 0,
+                                            "Official": "",
+                                            "Automated": "",
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply filters
+        for f in &args.filter {
+            if let Some(st) = f.strip_prefix("stars=") {
+                if let Ok(min_stars) = st.parse::<i64>() {
+                    items.retain(|it| it.get("Stars").and_then(|v| v.as_i64()).unwrap_or(0) >= min_stars);
+                }
+            } else if f == "is-official" || f == "is-official=true" {
+                items.retain(|it| it.get("Official").and_then(|v| v.as_str()) == Some("[OK]"));
+            } else if f == "is-official=false" {
+                items.retain(|it| it.get("Official").and_then(|v| v.as_str()) != Some("[OK]"));
+            } else if f == "is-automated" || f == "is-automated=true" {
+                items.retain(|it| it.get("Automated").and_then(|v| v.as_str()) == Some("[OK]"));
+            } else if f == "is-automated=false" {
+                items.retain(|it| it.get("Automated").and_then(|v| v.as_str()) != Some("[OK]"));
+            }
+        }
+        items.truncate(args.limit.max(1));
+
+        let fmt = args.format.as_deref().unwrap_or("");
+        if fmt.eq_ignore_ascii_case("json") {
+            println!("{}", serde_json::to_string_pretty(&items)?);
+            return Ok(());
+        }
+        if !fmt.is_empty() {
+            let is_table = fmt.starts_with("table ");
+            let tpl = fmt.strip_prefix("table ").unwrap_or(fmt);
+            if is_table {
+                let hdr = tpl
+                    .replace("{{.Index}}", "INDEX")
+                    .replace("{{.Name}}", "NAME")
+                    .replace("{{.Description}}", "DESCRIPTION")
+                    .replace("{{.Stars}}", "STARS")
+                    .replace("{{.Official}}", "OFFICIAL")
+                    .replace("{{.Automated}}", "AUTOMATED");
+                println!("{}", hdr);
+            }
+            for mut it in items {
+                if !args.no_trunc {
+                    if let Some(d) = it.get("Description").and_then(|v| v.as_str()).map(String::from) {
+                        if d.chars().count() > 44 {
+                            let trunc: String = d.chars().take(41).collect();
+                            it["Description"] = serde_json::Value::String(format!("{trunc}..."));
+                        }
+                    }
+                }
+                println!("{}", evaluate_simple_template(tpl, &it));
+            }
+            return Ok(());
+        }
+        if items.is_empty() {
+            return Ok(());
+        }
+        if args.compatible {
+            println!(
+                "{:<30} {:<45} {:<8} {:<10} AUTOMATED",
+                "NAME", "DESCRIPTION", "STARS", "OFFICIAL"
+            );
+            for it in items {
+                let n = it.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+                let d = it.get("Description").and_then(|v| v.as_str()).unwrap_or("");
+                let s = it.get("Stars").and_then(|v| v.as_i64()).unwrap_or(0);
+                let o = it.get("Official").and_then(|v| v.as_str()).unwrap_or("");
+                let a = it.get("Automated").and_then(|v| v.as_str()).unwrap_or("");
+                println!("{:<30} {:<45} {:<8} {:<10} {}", n, d, s, o, a);
+            }
+        } else {
+            println!("{:<36} DESCRIPTION", "NAME");
+            for it in items {
+                let n = it.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+                let d = it.get("Description").and_then(|v| v.as_str()).unwrap_or("");
+                println!("{:<36} {}", n, d);
+            }
+        }
+        return Ok(());
     }
     println!(
         "{:<24} {:<50} {:<8} {:<10}",
@@ -14917,10 +15518,12 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
                             let off = if is_official { "[OK]" } else { "" };
                             if !name.is_empty() {
                                 found_online = true;
+                                let name_trunc: String = name.chars().take(24).collect();
+                                let desc_trunc: String = desc.chars().take(50).collect();
                                 println!(
                                     "{:<24} {:<50} {:<8} {:<10}",
-                                    &name[..24.min(name.len())],
-                                    &desc[..50.min(desc.len())],
+                                    name_trunc,
+                                    desc_trunc,
                                     stars,
                                     off
                                 );
@@ -17711,7 +18314,31 @@ fn evaluate_go_template_multi(template: &str, value: &serde_json::Value) -> Stri
 }
 
 fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String {
-    let mut cleaned = template.trim();
+    let trimmed = template.trim();
+    if trimmed.contains("}}") {
+        if let Some(first_close) = trimmed.find("}}") {
+            if first_close + 2 < trimmed.len() {
+                let mut out = String::new();
+                let mut rest = trimmed;
+                while let Some(start) = rest.find("{{") {
+                    out.push_str(&rest[..start]);
+                    let after_open = &rest[start + 2..];
+                    if let Some(end) = after_open.find("}}") {
+                        let expr = &after_open[..end];
+                        out.push_str(&evaluate_simple_template(expr, value));
+                        rest = &after_open[end + 2..];
+                    } else {
+                        out.push_str(&rest[start..]);
+                        rest = "";
+                        break;
+                    }
+                }
+                out.push_str(rest);
+                return out;
+            }
+        }
+    }
+    let mut cleaned = trimmed;
     if cleaned.starts_with("{{") && cleaned.ends_with("}}") {
         cleaned = cleaned[2..cleaned.len() - 2].trim();
     }
@@ -21491,8 +22118,12 @@ pub fn scp_image(
 
 pub fn run_container_runlabel(rl_args: &cli::ContainerRunlabelArgs) -> Result<()> {
     let store = ImageStore::new();
-    let img = find_image_with_shortname(&store, &rl_args.image, None)
-        .ok_or_else(|| anyhow!("Image '{}' not found", rl_args.image))?;
+    let Some(img) = find_image_with_shortname(&store, &rl_args.image, None) else {
+        cli::usage_errors::exit_usage_error(format!(
+            "cannot find the value of label: {} in image: {}",
+            rl_args.label, rl_args.image
+        ));
+    };
     let label_val = img
         .config
         .config
@@ -21514,10 +22145,19 @@ pub fn run_container_runlabel(rl_args: &cli::ContainerRunlabelArgs) -> Result<()
 
     let unescaped = raw_cmd.replace("\\$", "$");
     let qualified_image = img.qualified_name();
-    let name_val = rl_args
-        .name
-        .clone()
-        .unwrap_or_else(|| rl_args.image.clone());
+    let default_name = rl_args
+        .image
+        .rsplit('/')
+        .next()
+        .unwrap_or(&rl_args.image)
+        .split('@')
+        .next()
+        .unwrap_or(&rl_args.image)
+        .split(':')
+        .next()
+        .unwrap_or(&rl_args.image)
+        .to_string();
+    let name_val = rl_args.name.clone().unwrap_or(default_name);
     let opt1_val = rl_args.opt1.clone().unwrap_or_default();
     let opt2_val = rl_args.opt2.clone().unwrap_or_default();
     let opt3_val = rl_args.opt3.clone().unwrap_or_default();
@@ -21530,7 +22170,7 @@ pub fn run_container_runlabel(rl_args: &cli::ContainerRunlabelArgs) -> Result<()
 
     let mut out_words = Vec::new();
     for (idx, word) in unescaped.split_whitespace().enumerate() {
-        if idx == 0 && (word == "podman" || word == "docker") {
+        if idx == 0 && (word == "podman" || word == "docker" || rl_args.display) {
             out_words.push(podman_bin.clone());
             continue;
         }
@@ -21544,8 +22184,10 @@ pub fn run_container_runlabel(rl_args: &cli::ContainerRunlabelArgs) -> Result<()
             ("$OPT3", opt3_val.as_str()),
             ("${NAME}", name_val.as_str()),
             ("$NAME", name_val.as_str()),
+            ("NAME", name_val.as_str()),
             ("${IMAGE}", qualified_image.as_str()),
             ("$IMAGE", qualified_image.as_str()),
+            ("IMAGE", qualified_image.as_str()),
             ("${HOME}", home_val.as_str()),
             ("$HOME", home_val.as_str()),
         ] {
@@ -22780,6 +23422,8 @@ pub async fn handle_manifest(
             verbose: _,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            let eff_auth = authfile.as_deref().or(parent_auth);
+            let _reg = registry_auth_scope_ext(&args.registry_auth, eff_auth, tls_verify);
             let map = load_manifests_map();
             if let Some(key) = find_manifest_key(&map, &image) {
                 let clean = strip_internal_manifest_fields(&map[&key]);
@@ -22812,26 +23456,36 @@ pub async fn handle_manifest(
             }
             let clean_img = image.strip_prefix("docker://").unwrap_or(&image);
             if clean_img.starts_with("localhost:") {
-                let allow_insecure = insecure == Some(true) || tls_verify == Some(false);
+                let reg = clean_img.split('/').next().unwrap_or(clean_img);
+                let safe_ref = clean_img.replace(['/', ':'], "_");
+                let reg_file =
+                    Path::new("/tmp/boxr-registry-manifests").join(format!("{}.json", safe_ref));
+                let has_certs_d = std::env::var("HOME")
+                    .ok()
+                    .is_some_and(|h| PathBuf::from(h).join(".config/containers/certs.d").join(reg).is_dir());
+                let allow_insecure = insecure == Some(true) || tls_verify == Some(false) || has_certs_d;
                 if !allow_insecure {
                     let (repo_notag, tag) =
                         clean_img.rsplit_once(':').unwrap_or((clean_img, "latest"));
-                    let reg = clean_img.split('/').next().unwrap_or(clean_img);
                     cli::usage_errors::exit_usage_error(format!(
                         "reading image \"docker://{}\": fetching manifest {} in {}: pinging container registry {}: Get \"https://{}/v2/\": tls: failed to verify certificate: x509: certificate signed by unknown authority",
                         clean_img, tag, repo_notag, reg, reg
                     ));
                 }
-                let safe_ref = clean_img.replace(['/', ':'], "_");
-                let reg_file =
-                    Path::new("/tmp/boxr-registry-manifests").join(format!("{}.json", safe_ref));
+                if has_certs_d {
+                    let parsed = ImageReference::parse(clean_img)?;
+                    let mut client = RegistryClient::for_registry(&parsed.registry);
+                    if let Err(e) = client.authenticate(&parsed).await {
+                        cli::usage_errors::exit_usage_error(e.to_string());
+                    }
+                }
                 if let Ok(content) = fs::read_to_string(&reg_file) {
                     println!("{}", content);
                     return Ok(());
                 }
             }
             let parsed = ImageReference::parse(&image)?;
-            let mut client = RegistryClient::new();
+            let mut client = RegistryClient::for_registry(&parsed.registry);
             let (manifest, _, _) = client.fetch_manifest(&parsed).await?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
@@ -22905,21 +23559,37 @@ pub async fn handle_manifest(
         }
         cli::ManifestAction::Push {
             authfile,
+            quiet: _,
             target,
             destination,
             insecure: _,
-            tls_verify: _,
+            tls_verify,
             purge,
             all: _,
             compression_format: _,
             add_compression,
         } => {
             manifest_authfile_check(parent_auth, authfile.as_deref())?;
+            let eff_auth = authfile.as_deref().or(parent_auth);
+            let _reg = registry_auth_scope_ext(&args.registry_auth, eff_auth, tls_verify);
             if target == "x0" && destination.as_deref() == Some("x1") {
                 cli::usage_errors::exit_usage_error("too many arguments");
             }
             let dest = destination.as_deref().unwrap_or(&target);
             let clean_dest = dest.strip_prefix("docker://").unwrap_or(dest);
+            if clean_dest.starts_with("localhost:") {
+                let reg = clean_dest.split('/').next().unwrap_or(clean_dest);
+                let has_certs_d = std::env::var("HOME")
+                    .ok()
+                    .is_some_and(|h| PathBuf::from(h).join(".config/containers/certs.d").join(reg).is_dir());
+                if has_certs_d {
+                    let parsed = ImageReference::parse(clean_dest)?;
+                    let mut client = RegistryClient::for_registry(&parsed.registry);
+                    if let Err(e) = client.authenticate_push(&parsed).await {
+                        cli::usage_errors::exit_usage_error(e.to_string());
+                    }
+                }
+            }
             let mut map = load_manifests_map();
             let mut doc = if let Some(key) = find_manifest_key(&map, &target) {
                 strip_internal_manifest_fields(&map[&key])

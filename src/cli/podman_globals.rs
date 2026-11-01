@@ -23,6 +23,8 @@ pub struct PodmanGlobalOptions {
     pub tls_ca: Option<String>,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    pub tls_details: Option<String>,
+    pub pull_options: Vec<String>,
 }
 
 static PARSED_GLOBALS: Mutex<Option<PodmanGlobalOptions>> = Mutex::new(None);
@@ -65,6 +67,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--tls-ca",
     "--tls-cert",
     "--tls-key",
+    "--tls-details",
     "--ssh",
 ];
 
@@ -103,10 +106,41 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 }
             }
         }
-        if a == "--debug" || a == "-D" {
+        if a == "--debug" || a == "-D" || a == "--log-level=debug" {
             opts.debug = true;
             i += 1;
             continue;
+        }
+        if a == "--log-level" {
+            if i + 1 < argv.len() && argv[i + 1] == "debug" {
+                opts.debug = true;
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--tls-details=") {
+            opts.tls_details = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--tls-details" {
+            if i + 1 < argv.len() {
+                opts.tls_details = Some(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+        }
+        if let Some(v) = a.strip_prefix("--pull-option=") {
+            opts.pull_options.push(v.to_string());
+            i += 1;
+            continue;
+        }
+        if a == "--pull-option" {
+            if i + 1 < argv.len() {
+                opts.pull_options.push(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
         }
         if let Some(v) = a.strip_prefix("--root=") {
             opts.root = Some(PathBuf::from(v));

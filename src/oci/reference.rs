@@ -18,7 +18,13 @@ impl ImageReference {
 
     /// Parse a string reference such as "hello-world", "alpine:3.19", or "ghcr.io/org/repo:tag".
     pub fn parse(input: &str) -> Result<Self> {
-        let input = input.trim();
+        let mut input = input.trim();
+        for prefix in ["docker://", "containers-storage:"] {
+            if let Some(stripped) = input.strip_prefix(prefix) {
+                input = stripped;
+                break;
+            }
+        }
         if input.is_empty() {
             return Err(anyhow!("Empty image reference"));
         }

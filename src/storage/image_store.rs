@@ -491,6 +491,7 @@ impl ImageStore {
         let _ = fs::remove_file(dest_rootfs.join("boxr-run.sh"));
         let _ = fs::remove_file(dest_rootfs.join("boxr-exitcode"));
         let _ = fs::remove_file(dest_rootfs.join("logs.txt"));
+        let _ = fs::remove_dir_all(dest_rootfs.join("run/secrets"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -550,20 +551,66 @@ impl ImageStore {
         if let Ok(content) = fs::read_to_string(&bundle_config) {
             if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&content) {
                 let run_args = spec.process.args;
+                let exec = base_config
+                    .config
+                    .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
                 if !run_args.is_empty() {
-                    let exec = base_config
-                        .config
-                        .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
                     exec.entrypoint = Some(run_args);
                     exec.cmd = None;
+                }
+                let masked: Vec<String> = spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.masked_env"))
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                if !spec.process.env.is_empty() {
+                    let filtered_env: Vec<String> = spec
+                        .process
+                        .env
+                        .into_iter()
+                        .filter(|e| {
+                            if let Some((k, _)) = e.split_once('=') {
+                                !masked.iter().any(|m| m == k)
+                            } else {
+                                true
+                            }
+                        })
+                        .collect();
+                    exec.env = Some(filtered_env);
+                }
+                let mut exp = exec.exposed_ports.take().unwrap_or_default();
+                for pm in &container.ports {
+                    let proto = if pm.protocol.is_empty() {
+                        "tcp"
+                    } else {
+                        pm.protocol.as_str()
+                    };
+                    exp.insert(format!("{}/{}", pm.container_port, proto), serde_json::json!({}));
+                }
+                for ep in &container.exposed_ports {
+                    let key = if ep.contains('/') {
+                        ep.clone()
+                    } else {
+                        format!("{}/tcp", ep)
+                    };
+                    exp.insert(key, serde_json::json!({}));
+                }
+                if !exp.is_empty() {
+                    exec.exposed_ports = Some(exp);
                 }
             }
         }
 
-        for ch in changes {
-            let ch = ch.trim();
-            let (key, val) = if let Some((k, v)) = ch.split_once('=') {
-                (k.trim(), v.trim())
+        for raw_ch in changes {
+            let ch = raw_ch.trim();
+            let (key, val) = if let Some(idx_eq) = ch.find('=') {
+                let idx_sp = ch.find(' ').unwrap_or(usize::MAX);
+                if idx_eq < idx_sp {
+                    (ch[..idx_eq].trim(), ch[idx_eq + 1..].trim())
+                } else {
+                    (ch[..idx_sp].trim(), ch[idx_sp + 1..].trim())
+                }
             } else if let Some((k, v)) = ch.split_once(' ') {
                 (k.trim(), v.trim())
             } else {
@@ -580,7 +627,7 @@ impl ImageStore {
                         continue;
                     }
                 }
-                exec.cmd = Some(vec![val.to_string()]);
+                exec.cmd = Some(vec!["/bin/sh".to_string(), "-c".to_string(), val.to_string()]);
                 exec.entrypoint = None;
             } else if key.eq_ignore_ascii_case("ENTRYPOINT") {
                 if val.starts_with('[') && val.ends_with(']') {
@@ -589,7 +636,69 @@ impl ImageStore {
                         continue;
                     }
                 }
-                exec.entrypoint = Some(vec![val.to_string()]);
+                exec.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string(), val.to_string()]);
+            } else if key.eq_ignore_ascii_case("LABEL") {
+                let mut labels = exec.labels.take().unwrap_or_default();
+                for token in val.split_whitespace() {
+                    if let Some((lk, lv)) = token.split_once('=') {
+                        labels.insert(
+                            lk.trim_matches('"').to_string(),
+                            lv.trim_matches('"').to_string(),
+                        );
+                    }
+                }
+                if labels.is_empty() {
+                    if let Some((lk, lv)) = val.split_once(' ') {
+                        labels.insert(
+                            lk.trim_matches('"').to_string(),
+                            lv.trim().trim_matches('"').to_string(),
+                        );
+                    }
+                }
+                exec.labels = Some(labels);
+            } else if key.eq_ignore_ascii_case("ENV") {
+                let mut envs = exec.env.take().unwrap_or_default();
+                if let Some((ek, ev)) = val.split_once('=').or_else(|| val.split_once(' ')) {
+                    let ek = ek.trim();
+                    let ev = ev.trim().trim_matches('"');
+                    envs.retain(|e| !e.starts_with(&format!("{ek}=")));
+                    envs.push(format!("{ek}={ev}"));
+                }
+                exec.env = Some(envs);
+            } else if key.eq_ignore_ascii_case("EXPOSE") {
+                let mut exp = exec.exposed_ports.take().unwrap_or_default();
+                for p in val.split_whitespace() {
+                    let k = if p.contains('/') {
+                        p.to_string()
+                    } else {
+                        format!("{p}/tcp")
+                    };
+                    exp.insert(k, serde_json::json!({}));
+                }
+                exec.exposed_ports = Some(exp);
+            } else if key.eq_ignore_ascii_case("USER") {
+                exec.user = Some(val.to_string());
+            } else if key.eq_ignore_ascii_case("WORKDIR") {
+                exec.working_dir = Some(val.to_string());
+            } else if key.eq_ignore_ascii_case("VOLUME") {
+                let mut vols = exec.volumes.take().unwrap_or_default();
+                for v in val.trim_matches(|c| c == '[' || c == ']').split(|c: char| c == ',' || c.is_whitespace()) {
+                    let v = v.trim().trim_matches('"');
+                    if !v.is_empty() {
+                        vols.insert(v.to_string(), serde_json::json!({}));
+                    }
+                }
+                exec.volumes = Some(vols);
+            } else if key.eq_ignore_ascii_case("STOPSIGNAL") {
+                exec.stop_signal = Some(val.to_string());
+            } else if key.eq_ignore_ascii_case("ONBUILD") {
+            } else {
+                let norm = format!("{} {}", key, val);
+                return Err(anyhow!(
+                    "applying changes: processing change {:?}: did not understand change instruction {:?}",
+                    norm.trim(),
+                    norm.trim()
+                ));
             }
         }
 

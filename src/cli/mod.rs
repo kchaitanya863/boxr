@@ -285,6 +285,18 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             println!("buildah 1.36.0");
             std::process::exit(0);
         }
+        if sub2_name == "inspect" {
+            let go_arch = match std::env::consts::ARCH {
+                "x86_64" => "amd64",
+                "aarch64" => "arm64",
+                other => other,
+            };
+            println!(
+                "Name:          default\nDriver:        container\n\nNodes:\nName:      default\nEndpoint:  default\nStatus:    running\nPlatforms: linux/{}",
+                go_arch
+            );
+            std::process::exit(0);
+        }
         if sub2_name == "build" {
             let mut rewritten = Vec::new();
             for (idx, tok) in argv.into_iter().enumerate() {

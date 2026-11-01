@@ -53,13 +53,12 @@ pub struct KubePlayArgs {
     /// Build images even if they are found in the local storage
     #[arg(
         long = "build",
-        default_value_t = false,
         num_args = 0..=1,
         default_missing_value = "true",
         require_equals = true,
         action = clap::ArgAction::Set
     )]
-    pub build: bool,
+    pub build: Option<bool>,
     /// Use directory at path to find Containerfile for --build
     #[arg(long = "context-dir")]
     pub context_dir: Option<String>,

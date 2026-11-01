@@ -112,6 +112,35 @@ pub struct PushArgs {
     pub format: Option<String>,
     #[arg(long = "compression-format", hide = true)]
     pub compression_format: Option<String>,
+    #[arg(long = "compression-level", hide = true)]
+    pub compression_level: Option<i32>,
+    #[arg(
+        long = "force-compression",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new(),
+        hide = true
+    )]
+    pub force_compression: Option<bool>,
+    #[arg(long = "remove-signatures", hide = true)]
+    pub remove_signatures: bool,
+    #[arg(long = "digestfile", hide = true)]
+    pub digestfile: Option<String>,
+    #[arg(long = "encryption-key", hide = true)]
+    pub encryption_key: Vec<String>,
+    #[arg(long = "encrypt-layer", hide = true)]
+    pub encrypt_layer: Vec<String>,
+    #[arg(long = "sign-by", hide = true)]
+    pub sign_by: Option<String>,
+    #[arg(long = "sign-by-sigstore", hide = true)]
+    pub sign_by_sigstore: Option<String>,
+    #[arg(long = "sign-by-sigstore-private-key", hide = true)]
+    pub sign_by_sigstore_private_key: Option<String>,
+    #[arg(long = "sign-passphrase-file", hide = true)]
+    pub sign_passphrase_file: Option<String>,
+    #[arg(long = "sign-by-sq-fingerprint", hide = true)]
+    pub sign_by_sq_fingerprint: Option<String>,
     #[arg(short = 'q', long = "quiet", hide = true)]
     pub quiet: bool,
     /// Source image
@@ -820,8 +849,21 @@ pub struct SearchArgs {
     #[arg(long = "format")]
     pub format: Option<String>,
 
-    #[arg(long = "no-trunc")]
+    #[arg(
+        long = "no-trunc",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub no_trunc: bool,
+
+    #[arg(long = "compatible")]
+    pub compatible: bool,
+
+    #[arg(long = "list-tags")]
+    pub list_tags: bool,
 
     /// Search term
     pub term: String,

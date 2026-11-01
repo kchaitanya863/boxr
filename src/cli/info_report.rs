@@ -92,6 +92,12 @@ pub fn build_podman_info_document() -> Value {
         json!(volume_plugins)
     };
 
+    let go_arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+
     json!({
         "Containers": containers.len(),
         "ContainersRunning": running,
@@ -102,7 +108,7 @@ pub fn build_podman_info_document() -> Value {
         "ServerVersion": env!("CARGO_PKG_VERSION"),
         "OSType": "linux",
         "Host": {
-            "Arch": std::env::consts::ARCH,
+            "Arch": go_arch,
             "BuildahVersion": "1.36.0",
             "CgroupManager": cgroup_manager,
             "CgroupsVersion": cgroup_version,
@@ -116,6 +122,7 @@ pub fn build_podman_info_document() -> Value {
                 "Distribution": dist_name,
                 "Version": dist_version
             },
+            "EmulatedArchitectures": [],
             "EventLogger": "file",
             "Hostname": hostname(),
             "LogDriver": "k8s-file",
@@ -136,6 +143,7 @@ pub fn build_podman_info_document() -> Value {
                     "mode": "sync"
                 }
             },
+            "OS": "linux",
             "Os": "linux",
             "Rootless": rootless,
             "Pasta": {

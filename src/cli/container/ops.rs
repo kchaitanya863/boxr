@@ -255,6 +255,22 @@ pub struct CommitArgs {
     )]
     pub pause: bool,
 
+    /// File containing a container configuration to merge into the image
+    #[arg(long = "config")]
+    pub config: Option<String>,
+
+    /// Squash newly built layers into a single new layer
+    #[arg(short = 's', long = "squash")]
+    pub squash: bool,
+
+    /// Include container volumes as image volumes
+    #[arg(long = "include-volumes")]
+    pub include_volumes: bool,
+
+    /// Write the image ID to the file
+    #[arg(long = "iidfile")]
+    pub iidfile: Option<String>,
+
     /// Container to commit
     pub container: String,
 
