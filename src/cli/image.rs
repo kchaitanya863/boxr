@@ -59,8 +59,14 @@ pub struct PullArgs {
     pub retry_delay: String,
 
     /// Suppress output information when pulling images
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
+
+    #[arg(short = 'a', long = "all-tags", hide = true)]
+    pub all_tags: bool,
+
+    #[arg(long = "decryption-key", hide = true)]
+    pub decryption_key: Vec<String>,
 
     #[arg(long = "signature-policy", hide = true)]
     pub signature_policy: Option<String>,
@@ -69,6 +75,9 @@ pub struct PullArgs {
     pub registry_auth: RegistryAuthArgs,
 
     pub image: String,
+
+    #[arg(hide = true)]
+    pub extra_images: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -76,7 +85,7 @@ pub struct PullArgs {
 pub struct SaveArgs {
     #[arg(short = 'o', long = "output")]
     pub output: Option<String>,
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
     #[arg(long = "format")]
     pub format: Option<String>,
@@ -100,7 +109,7 @@ pub struct SaveArgs {
 pub struct LoadArgs {
     #[arg(short = 'i', long = "input")]
     pub input: Option<String>,
-    #[arg(short = 'q', long = "quiet")]
+    #[arg(short = 'q', long = "quiet", overrides_with = "quiet")]
     pub quiet: bool,
     #[arg(long = "signature-policy", hide = true)]
     pub signature_policy: Option<String>,
@@ -121,7 +130,7 @@ pub struct PushArgs {
     pub format: Option<String>,
     #[arg(long = "compression-format", hide = true)]
     pub compression_format: Option<String>,
-    #[arg(long = "compression-level", hide = true)]
+    #[arg(long = "compression-level", allow_hyphen_values = true, hide = true)]
     pub compression_level: Option<i32>,
     #[arg(
         long = "force-compression",
@@ -140,6 +149,8 @@ pub struct PushArgs {
     pub encryption_key: Vec<String>,
     #[arg(long = "encrypt-layer", hide = true)]
     pub encrypt_layer: Vec<String>,
+    #[arg(long = "signature-policy", hide = true)]
+    pub signature_policy: Option<String>,
     #[arg(long = "sign-by", hide = true)]
     pub sign_by: Option<String>,
     #[arg(long = "sign-by-sigstore", hide = true)]
@@ -150,6 +161,8 @@ pub struct PushArgs {
     pub sign_passphrase_file: Option<String>,
     #[arg(long = "sign-by-sq-fingerprint", hide = true)]
     pub sign_by_sq_fingerprint: Option<String>,
+    #[arg(long = "platform", hide = true)]
+    pub platform: Option<String>,
     #[arg(short = 'q', long = "quiet", hide = true)]
     pub quiet: bool,
     /// Source image
@@ -197,6 +210,12 @@ pub struct BuildArgs {
     pub registry_auth: RegistryAuthArgs,
     #[arg(short = 't', long = "tag")]
     pub tags: Vec<String>,
+
+    #[arg(long = "manifest", hide = true)]
+    pub manifest: Option<String>,
+
+    #[arg(long = "annotation", hide = true)]
+    pub annotations: Vec<String>,
 
     #[arg(short = 'f', long = "file", default_value = "Dockerfile")]
     pub file: String,
@@ -335,6 +354,10 @@ pub struct BuildArgs {
 
     #[arg(long = "pull-never", hide = true)]
     pub pull_never: bool,
+
+    /// User namespace to use for build containers
+    #[arg(long = "userns")]
+    pub userns: Option<String>,
 
     /// Sets the configuration for network namespaces when handling RUN instructions
     #[arg(long = "network", alias = "net", hide = true)]

@@ -64,20 +64,132 @@ export BOXR_BATS_HOME="$BOXR_HOME"
 
 if ! command -v skopeo >/dev/null 2>&1; then
   mkdir -p "$CACHE_DIR/bin"
-  cat >"$CACHE_DIR/bin/skopeo" <<EOF
+  cat >"$CACHE_DIR/bin/skopeo" <<'SKOPEO_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "\${1:-}" == "inspect" ]]; then
-  shift
-  args=()
-  for a in "\$@"; do
-    [[ "\$a" == "--raw" ]] && continue
-    args+=("\$a")
+subcmd="${1:-}"
+shift || true
+if [[ "$subcmd" == "inspect" ]]; then
+  raw=0
+  ref=""
+  for a in "$@"; do
+    case "$a" in
+      --raw) raw=1 ;;
+      docker://*) ref="${a#docker://}" ;;
+    esac
   done
-  exec "$BOXR_BIN" manifest inspect "\${args[@]}"
+  if [[ -n "$ref" ]]; then
+    host="${ref%%/*}"
+    rest="${ref#*/}"
+    if [[ "$rest" == *:* ]]; then
+      repo="${rest%:*}"
+      tag="${rest##*:}"
+    else
+      repo="$rest"
+      tag="latest"
+    fi
+    manifest="$(curl -fsSL -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" "http://${host}/v2/${repo}/manifests/${tag}")"
+    if [[ "$raw" == "1" ]]; then
+      printf '%s\n' "$manifest"
+      exit 0
+    fi
+    cfg_digest="$(printf '%s' "$manifest" | jq -r '.config.digest // empty')"
+    if [[ -n "$cfg_digest" ]]; then
+      cfg="$(curl -fsSL "http://${host}/v2/${repo}/blobs/${cfg_digest}")"
+      arch="$(printf '%s' "$cfg" | jq -r '.architecture // .Architecture // "amd64"')"
+      os_name="$(printf '%s' "$cfg" | jq -r '.os // .Os // "linux"')"
+      jq -n --arg name "${host}/${repo}" --arg arch "$arch" --arg os "$os_name" '{Name: $name, Architecture: $arch, Os: $os}'
+      exit 0
+    fi
+    printf '%s\n' "$manifest"
+    exit 0
+  fi
+  exit 1
 fi
-exec "$BOXR_BIN" "\$@"
-EOF
+
+if [[ "$subcmd" == "copy" ]]; then
+  pos=()
+  fmt=""
+  for a in "$@"; do
+    case "$a" in
+      --format=*) fmt="${a#--format=}" ;;
+      -*) ;;
+      *) pos+=("$a") ;;
+    esac
+  done
+  src="${pos[0]:-}"
+  dst="${pos[1]:-}"
+  if [[ "$src" == docker://* && "$dst" == dir:* ]]; then
+    ref="${src#docker://}"
+    dir="${dst#dir:}"
+    mkdir -p "$dir"
+    host="${ref%%/*}"
+    rest="${ref#*/}"
+    if [[ "$rest" == *:* ]]; then
+      repo="${rest%:*}"
+      tag="${rest##*:}"
+    else
+      repo="$rest"
+      tag="latest"
+    fi
+    manifest="$(curl -fsSL -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" "http://${host}/v2/${repo}/manifests/${tag}")"
+    printf '%s\n' "$manifest" >"$dir/manifest.json"
+    cfg_digest="$(printf '%s' "$manifest" | jq -r '.config.digest')"
+    cfg_hex="${cfg_digest#sha256:}"
+    curl -fsSL "http://${host}/v2/${repo}/blobs/${cfg_digest}" -o "$dir/$cfg_hex"
+    for ldig in $(printf '%s' "$manifest" | jq -r '.layers[].digest'); do
+      lhex="${ldig#sha256:}"
+      curl -fsSL "http://${host}/v2/${repo}/blobs/${ldig}" -o "$dir/$lhex"
+    done
+    exit 0
+  fi
+  if [[ "$src" == dir:* && "$dst" == dir:* ]]; then
+    sdir="${src#dir:}"
+    ddir="${dst#dir:}"
+    mkdir -p "$ddir"
+    cp -a "$sdir/." "$ddir/"
+    if [[ "$fmt" == "v2s1" ]]; then
+      jq 'del(.layers[].annotations)' "$ddir/manifest.json" >"$ddir/manifest.json.tmp" && mv "$ddir/manifest.json.tmp" "$ddir/manifest.json"
+    fi
+    exit 0
+  fi
+  if [[ "$src" == dir:* && "$dst" == docker://* ]]; then
+    sdir="${src#dir:}"
+    ref="${dst#docker://}"
+    host="${ref%%/*}"
+    rest="${ref#*/}"
+    if [[ "$rest" == *:* ]]; then
+      repo="${rest%:*}"
+      tag="${rest##*:}"
+    else
+      repo="$rest"
+      tag="latest"
+    fi
+    upload_blob() {
+      local hex="$1"
+      local file="$sdir/$hex"
+      [[ -f "$file" ]] || return 0
+      local loc
+      loc="$(curl -fsSI -X POST "http://${host}/v2/${repo}/blobs/uploads/" | awk 'tolower($1)=="location:" {gsub(/\r/,"",$2); print $2}')"
+      if [[ "$loc" != http* ]]; then
+        loc="http://${host}${loc}"
+      fi
+      local sep="?"
+      [[ "$loc" == *\?* ]] && sep="&"
+      curl -fsSL -X PUT -H "Content-Type: application/octet-stream" --data-binary "@$file" "${loc}${sep}digest=sha256:${hex}" >/dev/null
+    }
+    cfg_digest="$(jq -r '.config.digest' "$sdir/manifest.json")"
+    upload_blob "${cfg_digest#sha256:}"
+    for ldig in $(jq -r '.layers[].digest' "$sdir/manifest.json"); do
+      upload_blob "${ldig#sha256:}"
+    done
+    mt="$(jq -r '.mediaType // "application/vnd.oci.image.manifest.v1+json"' "$sdir/manifest.json")"
+    curl -fsSL -X PUT -H "Content-Type: $mt" --data-binary "@$sdir/manifest.json" "http://${host}/v2/${repo}/manifests/${tag}" >/dev/null
+    exit 0
+  fi
+fi
+exit 1
+SKOPEO_EOF
   chmod +x "$CACHE_DIR/bin/skopeo"
   export PATH="$CACHE_DIR/bin:$PATH"
 fi
@@ -87,15 +199,20 @@ if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; th
   echo "Installing ginkgo (first run)..."
   make -C "$SRC_DIR" .install.ginkgo
 fi
+[[ -x "$SRC_DIR/bin/ginkgo" ]] && touch "$SRC_DIR/.install.ginkgo"
+
 if [[ ! -x "$SRC_DIR/bin/quadlet" ]]; then
   echo "Building bin/quadlet..."
   make -C "$SRC_DIR" bin/quadlet
 fi
 export QUADLET_BINARY="$SRC_DIR/bin/quadlet"
 
+if [[ ! -x "$SRC_DIR/test/checkseccomp/checkseccomp" ]] || [[ ! -x "$SRC_DIR/test/goecho/goecho" ]] || [[ ! -x "$SRC_DIR/test/version/version" ]]; then
+  make -C "$SRC_DIR" test-binaries
+fi
+
 if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]] || [[ ! -x "$SRC_DIR/test/checkseccomp/checkseccomp" ]]; then
   echo "Prebuilding test/e2e/e2e.test..."
-  make -C "$SRC_DIR" test-binaries
   (cd "$SRC_DIR" && ./bin/ginkgo build --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" test/e2e/.)
 fi
 

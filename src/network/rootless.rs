@@ -537,6 +537,10 @@ pub fn forward_udp_sock_path(bundle_path: &Path, container_port: u16) -> PathBuf
 /// Unix only; Windows has no network namespaces.
 #[cfg(unix)]
 pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMapping]) -> Result<()> {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     use std::io::{Read, Write};
     use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
     use std::os::unix::net::UnixListener;
@@ -685,6 +689,10 @@ pub fn run_forward_helper(bundle_path: &Path, ports: &[crate::network::PortMappi
 /// Persistent port forwarder daemon for a running container bundle.
 /// Runs in a background process decoupled from the short-lived CLI process.
 pub async fn run_port_forward_daemon(bundle_path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     let ports_path = bundle_path.join("ports.json");
     if !ports_path.exists() {
         return Ok(());

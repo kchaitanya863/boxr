@@ -725,7 +725,7 @@ impl VolumeStore {
             };
 
         if dest_str.trim().is_empty() {
-            return Err(anyhow!("Volume destination path cannot be empty"));
+            crate::cli::usage_errors::exit_usage_error("container directory cannot be empty");
         }
 
         if !dest_str.starts_with('/') || dest_str.contains("..") {
@@ -736,6 +736,9 @@ impl VolumeStore {
         }
 
         if source_str.is_empty() {
+            if trimmed.starts_with(':') {
+                crate::cli::usage_errors::exit_usage_error("host directory cannot be empty");
+            }
             // Create anonymous volume
             let vol = self.create(None, None)?;
             return Ok(MountSpec {
@@ -784,20 +787,42 @@ impl VolumeStore {
                 stub
             };
 
+            let extra = trimmed
+                .find(':')
+                .map(|idx| parse_volume_extra_options(&trimmed[idx + 1..]))
+                .unwrap_or_default();
             Ok(MountSpec {
                 source: canonical_source,
                 destination: dest_str.to_string(),
                 read_only,
                 noexec,
                 chown_u,
+                idmap: extra.idmap,
+                nocopy: extra.nocopy,
+                overlay: extra.overlay,
+                overlay_upperdir: extra.overlay_upperdir,
+                overlay_workdir: extra.overlay_workdir,
+                propagation: extra.propagation,
                 is_volume: false,
                 ..Default::default()
             })
         } else {
             // Named volume
+            let extra = trimmed
+                .find(':')
+                .map(|idx| parse_volume_extra_options(&trimmed[idx + 1..]))
+                .unwrap_or_default();
             let record = match self.find(&source_str) {
                 Some(v) => v,
-                None => self.create(Some(&source_str), None)?,
+                None => {
+                    if extra.nocreate {
+                        crate::cli::usage_errors::exit_usage_error(format!(
+                            "volume {} does not exist",
+                            source_str
+                        ));
+                    }
+                    self.create(Some(&source_str), None)?
+                }
             };
             let tmpfs_mount_data = tmpfs_mount_data_from_volume_options(&record.options);
             Ok(MountSpec {
@@ -806,11 +831,18 @@ impl VolumeStore {
                 read_only,
                 noexec,
                 chown_u,
+                idmap: extra.idmap,
+                nocopy: extra.nocopy,
+                overlay: extra.overlay,
+                overlay_upperdir: extra.overlay_upperdir,
+                overlay_workdir: extra.overlay_workdir,
+                propagation: extra.propagation,
                 tmpfs_mount_data,
                 volume_name: Some(record.name.clone()),
                 subpath: None,
                 propagation: None,
                 is_volume: true,
+                ..Default::default()
             })
         }
     }

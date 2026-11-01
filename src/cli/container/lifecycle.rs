@@ -153,6 +153,10 @@ pub struct ExecArgs {
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
 
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
     /// Give extended privileges to the command
     #[arg(long = "privileged")]
     pub privileged: bool,

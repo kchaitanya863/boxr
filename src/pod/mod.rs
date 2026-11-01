@@ -776,7 +776,10 @@ pub fn resolve_namespace_spec(spec: &str, ns_type: &str) -> Result<Option<String
         }
         return Ok(Some(trimmed.to_string()));
     }
-    Ok(None)
+    Err(anyhow::anyhow!(
+        "unrecognized namespace mode {} passed",
+        trimmed
+    ))
 }
 
 /// Apply pod namespace sharing settings onto run arguments.
@@ -925,6 +928,23 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
     if (args.restart.is_empty() || args.restart == "no") && pod.restart_policy.is_some() {
         if let Some(rp) = &pod.restart_policy {
             args.restart = rp.clone();
+        }
+    }
+    if let Some(uidmap_json) = pod.labels.get("boxr.pod.uidmap") {
+        if let Ok(um) = serde_json::from_str::<Vec<String>>(uidmap_json) {
+            if args.uidmap.is_empty() {
+                args.uidmap = um.clone();
+            }
+            if let Some(first) = um.first() {
+                args.annotations.push(format!("boxr.pod_uidmap={}", first));
+            }
+        }
+    }
+    if let Some(gidmap_json) = pod.labels.get("boxr.pod.gidmap") {
+        if let Ok(gm) = serde_json::from_str::<Vec<String>>(gidmap_json) {
+            if args.gidmap.is_empty() {
+                args.gidmap = gm;
+            }
         }
     }
     if args.memory.is_none() {

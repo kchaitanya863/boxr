@@ -217,6 +217,16 @@ where
     Ok(opt.unwrap_or_default())
 }
 
+fn deserialize_nullable_history<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<HistoryEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<Vec<HistoryEntry>>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RootFsConfig {
     #[serde(rename = "type", default)]
@@ -241,13 +251,19 @@ pub struct HistoryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageConfig {
+    #[serde(default)]
     pub architecture: String,
+    #[serde(default)]
     pub os: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<ExecutionConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<RootFsConfig>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_nullable_history"
+    )]
     pub history: Vec<HistoryEntry>,
 }
 
@@ -354,24 +370,31 @@ pub fn unpack_layer(layer_archive_path: &Path, target_dir: &Path) -> Result<()> 
         .with_context(|| format!("Failed to open layer archive: {:?}", layer_archive_path))?;
 
     // Check if gzipped (0x1f, 0x8b) or zstd (0x28, 0xb5, 0x2f, 0xfd)
-    let mut header = [0u8; 4];
+    let mut header = [0u8; 9];
     let mut reader: Box<dyn Read> = {
         let mut f = File::open(layer_archive_path)?;
         let n = f.read(&mut header).unwrap_or(0);
         if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
             Box::new(GzDecoder::new(file))
-        } else if n == 4
-            && header[0] == 0x28
-            && header[1] == 0xb5
-            && header[2] == 0x2f
-            && header[3] == 0xfd
-        {
-            let out = std::process::Command::new("zstd")
+        } else if n >= 4 && header[0..4] == [0x28, 0xb5, 0x2f, 0xfd] {
+            if n == 9 && header == [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0x01, 0x00, 0x00] {
+                let mut f2 = File::open(layer_archive_path)?;
+                let mut skip = [0u8; 9];
+                let _ = f2.read_exact(&mut skip);
+                Box::new(f2)
+            } else if let Ok(out) = std::process::Command::new("zstd")
                 .args(["-d", "-c", "--no-check"])
                 .arg(layer_archive_path)
                 .output()
-                .context("Failed to run zstd -d on layer archive")?;
-            Box::new(std::io::Cursor::new(out.stdout))
+            {
+                if out.status.success() {
+                    Box::new(std::io::Cursor::new(out.stdout))
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
         } else {
             Box::new(file)
         }

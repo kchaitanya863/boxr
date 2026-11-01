@@ -67,6 +67,23 @@ pub static DOCKER_CONFIG_DIR: OnceLock<String> = OnceLock::new();
 /// Podman `--default-mounts-file` global option
 pub static GLOBAL_DEFAULT_MOUNTS_FILE: OnceLock<String> = OnceLock::new();
 
+/// Podman `--hooks-dir` global option
+pub static GLOBAL_HOOKS_DIR: OnceLock<String> = OnceLock::new();
+
+/// File descriptors (3..64) that were already open when `boxr` started (before Tokio init).
+pub static INHERITED_FDS: OnceLock<std::collections::HashSet<u32>> = OnceLock::new();
+
+pub fn record_inherited_fds() {
+    let mut set = std::collections::HashSet::new();
+    #[cfg(unix)]
+    for fd in 3..64u32 {
+        if unsafe { libc::fcntl(fd as i32, libc::F_GETFD) } != -1 {
+            set.insert(fd);
+        }
+    }
+    let _ = INHERITED_FDS.set(set);
+}
+
 /// Podman `--runtime` global option
 pub static GLOBAL_RUNTIME: OnceLock<String> = OnceLock::new();
 
@@ -218,6 +235,7 @@ pub fn podman_subcommand_index(argv: &[String]) -> usize {
             || a == "--runroot"
             || a == "--tmpdir"
             || a == "--volumepath"
+            || a == "--imagestore"
             || a == "--storage-driver"
             || a == "--storage-opt"
             || a == "--pull-option"
@@ -402,6 +420,16 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 i += 1;
                 continue;
             }
+            if a == "--hooks-dir" && i + 1 < argv.len() {
+                let _ = GLOBAL_HOOKS_DIR.set(argv[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            if let Some(v) = a.strip_prefix("--hooks-dir=") {
+                let _ = GLOBAL_HOOKS_DIR.set(v.to_string());
+                i += 1;
+                continue;
+            }
             if a == "--runtime" && i + 1 < argv.len() {
                 let _ = GLOBAL_RUNTIME.set(argv[i + 1].clone());
                 i += 2;
@@ -417,6 +445,14 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                 continue;
             }
             if a.starts_with("--pull-option=") {
+                i += 1;
+                continue;
+            }
+            if a == "--imagestore" && i + 1 < argv.len() {
+                i += 2;
+                continue;
+            }
+            if a.starts_with("--imagestore=") {
                 i += 1;
                 continue;
             }
@@ -664,23 +700,18 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                             | "--secret"
                             | "--hostuser"
                             | "--group-entry"
-                            | "--unsetenv"
-                            | "--systemd"
-                            | "--preserve-fds"
-                            | "--preserve-fd"
-                            | "--authfile"
-                            | "--cert-dir"
-                            | "--creds"
-                            | "--rdt-class"
+                            | "--passwd-entry"
+                            | "--seccomp-policy"
+                            | "--subuidname"
+                            | "--subgidname"
                             | "--signature-policy"
-                            | "--chrootdirs"
+                            | "--init-path"
+                            | "--hosts-file"
+                            | "--requires"
                             | "--pidfile"
-                            | "--expose"
-                            | "--ip"
-                            | "--ip6"
-                            | "--mac-address"
-                            | "--link"
-                            | "--network-alias"
+                            | "--personality"
+                            | "--shm-size-systemd"
+                            | "--decryption-key"
                             | "--cgroups"
                             | "--cgroup-conf"
                             | "--pod-id-file"
@@ -700,6 +731,28 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                             | "--health-max-log-count"
                             | "--health-max-log-size"
                             | "--health-log-destination"
+                            | "--device-cgroup-rule"
+                            | "--device-read-bps"
+                            | "--device-write-bps"
+                            | "--device-read-iops"
+                            | "--device-write-iops"
+                            | "--blkio-weight"
+                            | "--blkio-weight-device"
+                            | "--unsetenv"
+                            | "--systemd"
+                            | "--preserve-fds"
+                            | "--preserve-fd"
+                            | "--authfile"
+                            | "--cert-dir"
+                            | "--creds"
+                            | "--rdt-class"
+                            | "--chrootdirs"
+                            | "--expose"
+                            | "--ip"
+                            | "--ip6"
+                            | "--mac-address"
+                            | "--link"
+                            | "--network-alias"
                             | "--isolation"
                             | "--gpus"
                             | "--kernel-memory"
@@ -708,8 +761,6 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
                             | "--io-maxbandwidth"
                             | "--io-maxiops"
                             | "--init-ctr"
-                            | "--subuidname"
-                            | "--subgidname"
                     );
                 if !prev_takes_val {
                     seen_positional_after_sub = true;

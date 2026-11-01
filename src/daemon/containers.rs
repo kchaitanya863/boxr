@@ -272,7 +272,6 @@ pub async fn create_container(
         timeout: None,
         image: payload.image,
         command: payload.cmd.unwrap_or_default(),
-        passwd: true,
         ..Default::default()
     };
 

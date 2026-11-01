@@ -91,7 +91,13 @@ impl DockerfileParser {
 
         match keyword.as_str() {
             "FROM" => {
-                let parts: Vec<&str> = rest.split_whitespace().collect();
+                let mut parts: Vec<&str> = rest.split_whitespace().collect();
+                while parts.first().is_some_and(|p| p.starts_with("--")) {
+                    let flag = parts.remove(0);
+                    if !flag.contains('=') && !parts.is_empty() {
+                        parts.remove(0);
+                    }
+                }
                 if parts.is_empty() {
                     return Err(anyhow!("FROM instruction requires an image name"));
                 }

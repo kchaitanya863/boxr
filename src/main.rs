@@ -6,6 +6,7 @@ fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    boxr::cli::record_inherited_fds();
 
     let args: Vec<String> = std::env::args().collect();
     if args

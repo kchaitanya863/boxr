@@ -20,6 +20,7 @@ pub struct RegistryClient {
     token: Option<String>,
     basic_auth: Option<String>,
     use_http: bool,
+    pub last_list_digest: Option<String>,
 }
 
 /// Open/Closed & Dependency Inversion: OCI Image distribution client contract
@@ -403,11 +404,14 @@ impl RegistryClient {
         } else {
             Some(registry)
         };
+        let endpoints = resolve_registry_endpoints(registry);
+        let insecure = endpoints.first().is_some_and(|e| e.insecure);
         Self {
             client: build_registry_http_client(resolve),
             token: None,
             basic_auth: None,
-            use_http: false,
+            use_http: insecure,
+            last_list_digest: None,
         }
     }
 
@@ -429,7 +433,6 @@ impl RegistryClient {
         }
         false
     }
-
     fn inline_credentials(&self) -> Option<(String, String)> {
         crate::oci::registry_options::registry_options_snapshot().inline_creds
     }
@@ -806,13 +809,13 @@ impl RegistryClient {
             self.scheme(),
             registry_connect_host(&reference.registry)
         );
+        let opts = crate::oci::registry_options::registry_options_snapshot();
         let mut req = self.client.get(&ping_url);
         if let Some(auth) = &self.basic_auth {
             if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
                 req = req.header(AUTHORIZATION, val);
             }
         }
-        let opts = crate::oci::registry_options::registry_options_snapshot();
         let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -1041,19 +1044,28 @@ impl RegistryClient {
         let _ = fs::create_dir_all(&layers_dir);
 
         let opts = crate::oci::registry_options::registry_options_snapshot();
-        let want_zstd = opts
-            .compression_format
-            .as_deref()
-            .is_some_and(|f| f.contains("zstd"));
-        let want_chunked = opts
-            .compression_format
-            .as_deref()
-            .is_some_and(|f| f.contains("chunked"));
-        let force_comp = opts.force_compression == Some(true);
+        let is_encrypt = std::env::var_os("BOXR_PUSH_ENCRYPT").is_some();
+        let req_comp = std::env::var("BOXR_PUSH_COMPRESSION_FORMAT")
+            .ok()
+            .or_else(|| opts.compression_format.clone());
+        let force_comp = std::env::var("BOXR_PUSH_FORCE_COMPRESSION")
+            .ok()
+            .map(|v| v == "1")
+            .or(opts.force_compression)
+            .unwrap_or(false);
+        let plat_os_override = std::env::var("BOXR_PUSH_PLATFORM_OS").ok();
+        let plat_arch_override = std::env::var("BOXR_PUSH_PLATFORM_ARCH").ok();
+        let want_zstd = req_comp.as_deref().is_some_and(|f| f.contains("zstd"));
+        let want_chunked = req_comp.as_deref().is_some_and(|f| f.contains("chunked"));
+        let use_gzip_forced = req_comp.as_deref() == Some("gzip") && force_comp;
 
-        let need_synth = if force_comp && want_zstd {
-            true
-        } else if !manifest_path.exists() {
+        let need_synth = if is_encrypt
+            || (force_comp && want_zstd)
+            || use_gzip_forced
+            || plat_os_override.is_some()
+            || plat_arch_override.is_some()
+            || !manifest_path.exists()
+        {
             true
         } else if let Ok(bytes) = fs::read(&manifest_path) {
             if let Ok(m) = serde_json::from_slice::<ImageManifest>(&bytes) {
@@ -1124,6 +1136,12 @@ impl RegistryClient {
             fs::write(layers_dir.join(format!("{}.tar", safe_layer)), &comp_tar)?;
 
             let mut synth_cfg = image.config.clone();
+            if let Some(os_ov) = plat_os_override {
+                synth_cfg.os = os_ov;
+            }
+            if let Some(arch_ov) = plat_arch_override {
+                synth_cfg.architecture = arch_ov;
+            }
             synth_cfg.rootfs = Some(crate::oci::image::RootFsConfig {
                 fs_type: "layers".to_string(),
                 diff_ids: vec![diff_id],
@@ -1133,6 +1151,12 @@ impl RegistryClient {
                 .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
             let labels = exec.labels.get_or_insert_with(Default::default);
             labels.insert("io.boxr.image.id".to_string(), image.full_hex_id());
+            if is_encrypt {
+                labels.insert("io.boxr.encrypted".to_string(), "true".to_string());
+                if let Ok(kstem) = std::env::var("BOXR_PUSH_ENCRYPT_KEY") {
+                    labels.insert("io.boxr.encrypted_key_stem".to_string(), kstem);
+                }
+            }
 
             let cfg_bytes = serde_json::to_vec(&synth_cfg)?;
             let cfg_digest = format!("sha256:{}", hex::encode(Sha256::digest(&cfg_bytes)));
@@ -1432,6 +1456,10 @@ impl RegistryClient {
             || serde_json::from_slice::<ManifestListOrIndex>(&body_bytes).is_ok()
         {
             if let Ok(index) = serde_json::from_slice::<ManifestListOrIndex>(&body_bytes) {
+                if self.last_list_digest.is_none() {
+                    self.last_list_digest =
+                        Some(format!("sha256:{}", hex::encode(Sha256::digest(&body_bytes))));
+                }
                 // Determine target architecture
                 let (target_os, target_arch) = if let Some(plat) = target_platform {
                     if let Some((os_p, arch_p)) = plat.split_once('/') {
@@ -1693,7 +1721,8 @@ impl RegistryClient {
         dest_path: &Path,
         broken_mirrors: &mut std::collections::HashSet<usize>,
     ) -> Result<()> {
-        if dest_path.exists() {
+        let endpoints = resolve_registry_endpoints(&reference.registry);
+        if endpoints.len() <= 1 && dest_path.exists() {
             // Verify existing cached file matches the expected SHA-256 digest
             if let Ok(mut f) = File::open(dest_path) {
                 let mut hasher = Sha256::new();
@@ -1708,7 +1737,6 @@ impl RegistryClient {
             let _ = std::fs::remove_file(dest_path);
         }
 
-        let endpoints = resolve_registry_endpoints(&reference.registry);
         let is_zstd_chunked = descriptor
             .annotations
             .as_ref()
@@ -1783,8 +1811,7 @@ impl RegistryClient {
                         Err(e) => {
                             return Err(anyhow!("fetching blob {}: {}", descriptor.digest, e));
                         }
-                        Ok(r_resp) => {
-                            // Range request succeeded! Now fetch full blob and save it directly
+                        Ok(_r_resp) => {
                             let full_resp = self
                                 .client
                                 .get(&url)

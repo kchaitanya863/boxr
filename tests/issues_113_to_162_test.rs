@@ -245,7 +245,6 @@ fn default_run_args(image: &str) -> RunArgs {
         timeout: None,
         image: image.to_string(),
         command: vec!["true".to_string()],
-        passwd: true,
         ..Default::default()
     }
 }

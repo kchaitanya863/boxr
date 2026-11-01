@@ -118,8 +118,16 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     if !cfg_hex.is_empty() && (cfg_hex.starts_with(query) || img.config_digest == query) {
         return true;
     }
+    let list_digest = img
+        .config
+        .config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .and_then(|l| l.get("io.boxr.list_digest"))
+        .map(|s| s.as_str());
     if let Some(hex) = query.strip_prefix("sha256:") {
         return img.manifest_digest == query
+            || list_digest == Some(query)
             || img.tag == query
             || img.tag.ends_with(&format!("@{}", query))
             || img.id.starts_with(hex)
@@ -135,17 +143,11 @@ pub fn query_matches_image(img: &ImageRecord, query: &str) -> bool {
     {
         return true;
     }
-    if img.registry == "localhost" {
-        if query == format!("{}:{}", img.reference, img.tag)
-            || (query == img.reference && img.tag == ImageReference::DEFAULT_TAG)
-        {
-            return true;
-        }
-    }
     match ImageReference::parse(query) {
         Ok(r) => {
             if let Some(digest) = r.digest {
                 return img.manifest_digest == digest
+                    || list_digest == Some(digest.as_str())
                     || img.tag == digest
                     || img.tag.ends_with(&format!("@{}", digest));
             }
@@ -225,22 +227,46 @@ impl ImageStore {
         };
 
         let globals = crate::cli::podman_globals::podman_global_options();
+        let mut alt_roots: Vec<PathBuf> = Vec::new();
         for opt in &globals.storage_opts {
             if let Some((k, v)) = opt.split_once('=') {
                 if k.ends_with(".imagestore") {
-                    let alt_file = PathBuf::from(v).join("images.json");
-                    if alt_file.exists() && alt_file != self.index_file {
-                        if let Ok(content) = fs::read_to_string(&alt_file) {
-                            if let Ok(alt_data) = serde_json::from_str::<ImageStoreData>(&content) {
-                                for alt_img in alt_data.images {
-                                    if !data.images.iter().any(|i| {
-                                        i.id == alt_img.id
-                                            && i.reference == alt_img.reference
-                                            && i.tag == alt_img.tag
-                                    }) {
-                                        data.images.push(alt_img);
-                                    }
+                    alt_roots.push(PathBuf::from(v));
+                }
+            }
+        }
+        if let Some(ref is_dir) = globals.imagestore {
+            alt_roots.push(is_dir.clone());
+        }
+        for env_key in ["CONTAINERS_STORAGE_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF"] {
+            if let Ok(conf_path) = std::env::var(env_key) {
+                if let Ok(content) = fs::read_to_string(&conf_path) {
+                    for line in content.lines() {
+                        let trimmed = line.split('#').next().unwrap_or("").trim();
+                        if let Some((k, v)) = trimmed.split_once('=') {
+                            if k.trim() == "imagestore" {
+                                let clean = v.trim().trim_matches('"').trim_matches('\'').trim();
+                                if !clean.is_empty() {
+                                    alt_roots.push(PathBuf::from(clean));
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for alt_root in alt_roots {
+            let alt_file = alt_root.join("images.json");
+            if alt_file.exists() && alt_file != self.index_file {
+                if let Ok(content) = fs::read_to_string(&alt_file) {
+                    if let Ok(alt_data) = serde_json::from_str::<ImageStoreData>(&content) {
+                        for alt_img in alt_data.images {
+                            if !data.images.iter().any(|i| {
+                                i.id == alt_img.id
+                                    && i.reference == alt_img.reference
+                                    && i.tag == alt_img.tag
+                            }) {
+                                data.images.push(alt_img);
                             }
                         }
                     }
@@ -251,7 +277,27 @@ impl ImageStore {
     }
 
     fn save_unlocked(&self, data: &ImageStoreData) -> Result<()> {
-        let content = serde_json::to_string_pretty(data)?;
+        let globals = crate::cli::podman_globals::podman_global_options();
+        let filtered = if let Some(ref is_dir) = globals.imagestore {
+            if self.index_file.parent() != Some(is_dir.as_path()) {
+                let imgs = data
+                    .images
+                    .iter()
+                    .filter(|img| !Path::new(&img.rootfs_path).starts_with(is_dir))
+                    .cloned()
+                    .collect();
+                ImageStoreData { images: imgs }
+            } else {
+                ImageStoreData {
+                    images: data.images.clone(),
+                }
+            }
+        } else {
+            ImageStoreData {
+                images: data.images.clone(),
+            }
+        };
+        let content = serde_json::to_string_pretty(&filtered)?;
         let rand_suffix = hex::encode(crate::storage::container_store::rand_id());
         let temp_file = self
             .index_file
@@ -765,6 +811,24 @@ impl ImageStore {
             }
         }
 
+        let bundle_labels_path = PathBuf::from(&container.bundle_path).join("labels.json");
+        if let Ok(content) = fs::read_to_string(&bundle_labels_path) {
+            if let Ok(ctr_labels) = serde_json::from_str::<Vec<String>>(&content) {
+                let exec = base_config
+                    .config
+                    .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+                let mut labels = exec.labels.take().unwrap_or_default();
+                for l in ctr_labels {
+                    if let Some((k, v)) = l.split_once('=') {
+                        labels.insert(k.trim().to_string(), v.trim().to_string());
+                    } else {
+                        labels.insert(l.trim().to_string(), String::new());
+                    }
+                }
+                exec.labels = Some(labels);
+            }
+        }
+
         for raw_ch in changes {
             let ch = raw_ch.trim();
             let (key, val) = if let Some(idx_eq) = ch.find('=') {
@@ -799,23 +863,29 @@ impl ImageStore {
                         continue;
                     }
                 }
-                exec.entrypoint = Some(vec!["/bin/sh".to_string(), "-c".to_string(), val.to_string()]);
+                exec.entrypoint = Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    val.to_string(),
+                ]);
             } else if key.eq_ignore_ascii_case("LABEL") {
                 let mut labels = exec.labels.take().unwrap_or_default();
                 for token in val.split_whitespace() {
                     if let Some((lk, lv)) = token.split_once('=') {
                         labels.insert(
-                            lk.trim_matches('"').to_string(),
-                            lv.trim_matches('"').to_string(),
+                            lk.trim_matches('"').trim_matches('\'').to_string(),
+                            lv.trim_matches('"').trim_matches('\'').to_string(),
                         );
                     }
                 }
                 if labels.is_empty() {
                     if let Some((lk, lv)) = val.split_once(' ') {
                         labels.insert(
-                            lk.trim_matches('"').to_string(),
-                            lv.trim().trim_matches('"').to_string(),
+                            lk.trim_matches('"').trim_matches('\'').to_string(),
+                            lv.trim().trim_matches('"').trim_matches('\'').to_string(),
                         );
+                    } else if !val.is_empty() {
+                        labels.insert(val.to_string(), String::new());
                     }
                 }
                 exec.labels = Some(labels);
@@ -845,7 +915,10 @@ impl ImageStore {
                 exec.working_dir = Some(val.to_string());
             } else if key.eq_ignore_ascii_case("VOLUME") {
                 let mut vols = exec.volumes.take().unwrap_or_default();
-                for v in val.trim_matches(|c| c == '[' || c == ']').split(|c: char| c == ',' || c.is_whitespace()) {
+                for v in val
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                {
                     let v = v.trim().trim_matches('"');
                     if !v.is_empty() {
                         vols.insert(v.to_string(), serde_json::json!({}));

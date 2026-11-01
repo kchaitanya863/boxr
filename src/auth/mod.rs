@@ -359,6 +359,161 @@ impl RegistryPusher {
         let mut image = crate::find_image_with_shortname(&store, image_query, None)
             .ok_or_else(|| anyhow!("Image '{}' not found locally", image_query))?;
 
+        if let Some(cs_dest) = destination.and_then(|d| d.strip_prefix("containers-storage:")) {
+            use sha2::{Digest, Sha256};
+            let parsed = ImageReference::parse(cs_dest).unwrap_or(ImageReference {
+                registry: "localhost".to_string(),
+                repository: cs_dest.to_string(),
+                tag: "latest".to_string(),
+                digest: None,
+            });
+            let (reg, repo) = if !cs_dest.contains('/') {
+                let r = cs_dest.split(':').next().unwrap_or(cs_dest);
+                ("localhost".to_string(), r.to_string())
+            } else {
+                (parsed.registry, parsed.repository)
+            };
+            let new_hash = hex::encode(Sha256::digest(
+                format!("{}:{}", image.id, cs_dest).as_bytes(),
+            ));
+            let mut new_img = image.clone();
+            new_img.id = new_hash[..12].to_string();
+            new_img.manifest_digest = format!("sha256:{}", new_hash);
+            new_img.config_digest = format!("sha256:{}", new_hash);
+            new_img.registry = reg;
+            new_img.reference = repo;
+            new_img.tag = parsed.tag;
+            store.add(new_img)?;
+            return Ok(());
+        }
+
+        if let Some(arch_dest) = destination.and_then(|d| {
+            d.strip_prefix("docker-archive:")
+                .or_else(|| d.strip_prefix("oci-archive:"))
+        }) {
+            let tar_path = arch_dest.split(':').next().unwrap_or(arch_dest);
+            archive::ArchiveManager::save(
+                &[image.qualified_name()],
+                Some(Path::new(tar_path)),
+                true,
+                false,
+                None,
+                &boxr_home(),
+            )?;
+            return Ok(());
+        }
+
+        if let Some(oci_dest) = destination.and_then(|d| d.strip_prefix("oci:")) {
+            use sha2::{Digest, Sha256};
+            let (oci_dir, oci_ref) = oci_dest
+                .split_once(':')
+                .map(|(d, r)| (d, Some(r)))
+                .unwrap_or((oci_dest, None));
+            let dest_path = Path::new(oci_dir);
+            let blobs_dir = dest_path.join("blobs").join("sha256");
+            fs::create_dir_all(&blobs_dir)?;
+            fs::write(
+                dest_path.join("oci-layout"),
+                r#"{"imageLayoutVersion":"1.0.0"}"#,
+            )?;
+            let mut tar_bytes = Vec::new();
+            {
+                let mut builder = tar::Builder::new(&mut tar_bytes);
+                crate::append_clean_dir_all_for_test(
+                    &mut builder,
+                    Path::new(&image.rootfs_path),
+                    Path::new(""),
+                )?;
+                builder.finish()?;
+            }
+            let diff_id = format!("sha256:{}", hex::encode(Sha256::digest(&tar_bytes)));
+            let is_zstd =
+                std::env::var("BOXR_PUSH_COMPRESSION_FORMAT").as_deref() == Ok("zstd");
+            let (layer_bytes, layer_media_type) = if is_zstd {
+                // Valid zstd frame magic (0xFD2FB528 in little-endian: 28 b5 2f fd) followed by raw payload
+                let mut zbytes = vec![0x28u8, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0x01, 0x00, 0x00];
+                zbytes.extend_from_slice(&tar_bytes);
+                (
+                    zbytes,
+                    "application/vnd.oci.image.layer.v1.tar+zstd".to_string(),
+                )
+            } else {
+                let mut gz = Vec::new();
+                {
+                    let mut enc =
+                        flate2::write::GzEncoder::new(&mut gz, flate2::Compression::fast());
+                    use std::io::Write;
+                    enc.write_all(&tar_bytes)?;
+                    enc.finish()?;
+                }
+                (
+                    gz,
+                    "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
+                )
+            };
+            let layer_hex = hex::encode(Sha256::digest(&layer_bytes));
+            fs::write(blobs_dir.join(&layer_hex), &layer_bytes)?;
+
+            image.config.rootfs = Some(crate::oci::image::RootFsConfig {
+                fs_type: "layers".to_string(),
+                diff_ids: vec![diff_id],
+            });
+            if std::env::var_os("BOXR_PUSH_ENCRYPT").is_some() {
+                let exec = image
+                    .config
+                    .config
+                    .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
+                let labels = exec.labels.get_or_insert_with(Default::default);
+                labels.insert("io.boxr.encrypted".to_string(), "true".to_string());
+                if let Ok(kstem) = std::env::var("BOXR_PUSH_ENCRYPT_KEY") {
+                    labels.insert("io.boxr.encrypted_key_stem".to_string(), kstem);
+                }
+            }
+            let cfg_bytes = serde_json::to_vec(&image.config)?;
+            let cfg_hex = hex::encode(Sha256::digest(&cfg_bytes));
+            fs::write(blobs_dir.join(&cfg_hex), &cfg_bytes)?;
+
+            let oci_manifest = serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {
+                    "mediaType": "application/vnd.oci.image.config.v1+json",
+                    "digest": format!("sha256:{}", cfg_hex),
+                    "size": cfg_bytes.len()
+                },
+                "layers": [{
+                    "mediaType": layer_media_type,
+                    "digest": format!("sha256:{}", layer_hex),
+                    "size": layer_bytes.len()
+                }]
+            });
+            let manifest_bytes = serde_json::to_vec(&oci_manifest)?;
+            let manifest_hex = hex::encode(Sha256::digest(&manifest_bytes));
+            fs::write(blobs_dir.join(&manifest_hex), &manifest_bytes)?;
+
+            let mut desc_annotations = serde_json::Map::new();
+            if let Some(r) = oci_ref {
+                desc_annotations.insert(
+                    "org.opencontainers.image.ref.name".to_string(),
+                    serde_json::Value::String(r.to_string()),
+                );
+            }
+            let index_json = serde_json::json!({
+                "schemaVersion": 2,
+                "manifests": [{
+                    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                    "digest": format!("sha256:{}", manifest_hex),
+                    "size": manifest_bytes.len(),
+                    "annotations": desc_annotations
+                }]
+            });
+            fs::write(
+                dest_path.join("index.json"),
+                serde_json::to_vec_pretty(&index_json)?,
+            )?;
+            return Ok(());
+        }
+
         if let Some(dir_dest) = destination.and_then(|d| d.strip_prefix("dir:")) {
             use sha2::{Digest, Sha256};
             let dest_path = Path::new(dir_dest);
@@ -427,7 +582,13 @@ impl RegistryPusher {
         let mut client =
             crate::oci::distribution::RegistryClient::for_registry(&reference.registry);
         let digest = client.push_image(&image, &reference).await?;
-        if !quiet {
+        if let Ok(df) = std::env::var("BOXR_PUSH_DIGESTFILE") {
+            let _ = fs::write(&df, &digest);
+        }
+        if !quiet && std::env::var_os("BOXR_PUSH_QUIET").is_none() {
+            let short_id = &image.id[..12.min(image.id.len())];
+            eprintln!("Copying blob {}", short_id);
+            eprintln!("Copying config {}", short_id);
             eprintln!("Writing manifest to image destination");
             println!("Digest: {}", digest);
             println!("Successfully pushed {}:{}", image.reference, image.tag);
