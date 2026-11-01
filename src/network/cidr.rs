@@ -113,9 +113,7 @@ pub fn ip_in_subnet(ip_str: &str, subnet_str: &str) -> bool {
         } else {
             false
         }
-    } else if let (Ok(ip), Ok((start, end))) =
-        (ip_t.parse::<Ipv4Addr>(), parse_cidr_range(sub_t))
-    {
+    } else if let (Ok(ip), Ok((start, end))) = (ip_t.parse::<Ipv4Addr>(), parse_cidr_range(sub_t)) {
         let v = u32::from(ip);
         v >= start && v <= end
     } else {

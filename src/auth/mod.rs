@@ -202,11 +202,19 @@ impl CredentialStore {
         Ok(())
     }
 
-    pub fn get_credentials_for_ref(&self, registry: &str, repository: &str) -> Option<(String, String)> {
+    pub fn get_credentials_for_ref(
+        &self,
+        registry: &str,
+        repository: &str,
+    ) -> Option<(String, String)> {
         let full = if repository.is_empty() {
             registry.to_string()
         } else {
-            format!("{}/{}", registry.trim_end_matches('/'), repository.trim_start_matches('/'))
+            format!(
+                "{}/{}",
+                registry.trim_end_matches('/'),
+                repository.trim_start_matches('/')
+            )
         };
         let mut cur = full.as_str();
         loop {
@@ -427,8 +435,7 @@ impl RegistryPusher {
                 builder.finish()?;
             }
             let diff_id = format!("sha256:{}", hex::encode(Sha256::digest(&tar_bytes)));
-            let is_zstd =
-                std::env::var("BOXR_PUSH_COMPRESSION_FORMAT").as_deref() == Ok("zstd");
+            let is_zstd = std::env::var("BOXR_PUSH_COMPRESSION_FORMAT").as_deref() == Ok("zstd");
             let (layer_bytes, layer_media_type) = if is_zstd {
                 // Valid zstd frame magic (0xFD2FB528 in little-endian: 28 b5 2f fd) followed by raw payload
                 let mut zbytes = vec![0x28u8, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0x01, 0x00, 0x00];
@@ -565,7 +572,10 @@ impl RegistryPusher {
         let creds = crate::oci::registry_options::registry_options_snapshot()
             .inline_creds
             .clone()
-            .or_else(|| CredentialStore::new().get_credentials_for_ref(&reference.registry, &reference.repository));
+            .or_else(|| {
+                CredentialStore::new()
+                    .get_credentials_for_ref(&reference.registry, &reference.repository)
+            });
 
         let quiet = crate::oci::registry_options::registry_options_snapshot().quiet;
         if !quiet {

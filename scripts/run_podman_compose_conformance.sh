@@ -25,6 +25,10 @@ SHARED_IMG_HOME="$CACHE_DIR/compose-image-cache"
 if [[ ! -d "$SRC_DIR/.git" ]]; then
   git clone --depth 1 "$PODMAN_TESTS_REPO" "$SRC_DIR"
 fi
+if [[ -d "$REPO_ROOT/tests/podman_upstream/compose" ]]; then
+  mkdir -p "$SRC_DIR/test/compose"
+  rsync -a "$REPO_ROOT/tests/podman_upstream/compose/" "$SRC_DIR/test/compose/"
+fi
 
 mkdir -p "$CACHE_DIR" "$SHARED_IMG_HOME" "$SRC_DIR/bin"
 cat >"$WRAPPER" <<EOF

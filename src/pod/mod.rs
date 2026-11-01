@@ -258,7 +258,8 @@ impl PodStore {
                 return custom.clone();
             }
         }
-        if pod.labels.get("boxr.kube_pod").map(|s| s.as_str()) == Some("true") && !pod.id.is_empty() {
+        if pod.labels.get("boxr.kube_pod").map(|s| s.as_str()) == Some("true") && !pod.id.is_empty()
+        {
             return format!("{}-infra", &pod.id[..12.min(pod.id.len())]);
         }
         format!("{}-infra", pod.name)
@@ -509,12 +510,20 @@ impl PodStore {
         }
         if let Some(anon_vols) = removed.labels.get("boxr.pod.anon_volumes") {
             let v_store = crate::volume::VolumeStore::with_home(self.home.clone());
-            for v in anon_vols.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            for v in anon_vols
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 let _ = v_store.remove(v);
             }
         }
         if let Some(mem_dirs) = removed.labels.get("boxr.pod.mem_dirs") {
-            for d in mem_dirs.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            for d in mem_dirs
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 let _ = fs::remove_dir_all(d);
             }
         }
@@ -539,10 +548,7 @@ impl PodStore {
                     c_store
                         .find(cid)
                         .map(|c| {
-                            matches!(
-                                c.status,
-                                ContainerStatus::Running | ContainerStatus::Paused
-                            )
+                            matches!(c.status, ContainerStatus::Running | ContainerStatus::Paused)
                         })
                         .unwrap_or(false)
                 });
@@ -570,7 +576,8 @@ impl PodStore {
                         }
                     }
                     pruned.push(p.name.clone());
-                    infra_to_remove.push((p.infra_container_id.clone(), format!("{}-infra", p.name)));
+                    infra_to_remove
+                        .push((p.infra_container_id.clone(), format!("{}-infra", p.name)));
                     false
                 } else {
                     true

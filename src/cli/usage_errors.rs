@@ -218,8 +218,8 @@ fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
         ));
     }
     if sub_path == ["system", "service"] {
-        let st = crate::containers_conf_toml_value("service_timeout")
-            .unwrap_or_else(|| "5".to_string());
+        let st =
+            crate::containers_conf_toml_value("service_timeout").unwrap_or_else(|| "5".to_string());
         help.push_str(&format!(
             "      --service-timeout int         Time until the service session expires in seconds (default {})\n",
             st
@@ -270,7 +270,8 @@ fn render_command_help(sub_path: &[&str], argv: &[String]) -> ! {
         ));
     }
     if sub_path == ["system", "service"] {
-        let timeout = crate::containers_conf_toml_value("service_timeout").unwrap_or_else(|| "5".to_string());
+        let timeout =
+            crate::containers_conf_toml_value("service_timeout").unwrap_or_else(|| "5".to_string());
         help.push_str(&format!(
             "  -t, --time uint              Set the time until the service session expires in seconds (default {})\n",
             timeout
@@ -559,7 +560,10 @@ fn positional_args(argv: &[String]) -> Vec<&str> {
 
 fn print_extra_positional_error(argv: &[String]) {
     if argv.iter().any(|a| a == "attach") {
-        let cmd_str = if argv.windows(2).any(|w| w[0] == "container" && w[1] == "attach") {
+        let cmd_str = if argv
+            .windows(2)
+            .any(|w| w[0] == "container" && w[1] == "attach")
+        {
             "podman container attach"
         } else {
             "podman attach"

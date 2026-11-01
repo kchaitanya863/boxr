@@ -453,10 +453,7 @@ pub fn parse_event_timestamp(input: &str) -> Result<DateTime<Utc>> {
     parse_event_timestamp_with_direction(input, false)
 }
 
-pub fn parse_event_timestamp_with_direction(
-    input: &str,
-    is_until: bool,
-) -> Result<DateTime<Utc>> {
+pub fn parse_event_timestamp_with_direction(input: &str, is_until: bool) -> Result<DateTime<Utc>> {
     let s = input.trim();
     if s.is_empty() {
         return Err(anyhow!("failed to parse event filters: empty timestamp"));

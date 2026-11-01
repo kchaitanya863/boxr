@@ -34,6 +34,11 @@ else
   export PATH="$CACHE_DIR/bin:$PATH"
 fi
 
+if [[ -d "$REPO_ROOT/tests/podman_upstream/python" ]]; then
+  mkdir -p "$SRC_DIR/test/python"
+  rsync -a "$REPO_ROOT/tests/podman_upstream/python/" "$SRC_DIR/test/python/"
+fi
+
 cd "$SRC_DIR"
 touch test/__init__.py
 trap 'rm -f "$SRC_DIR/test/__init__.py"' EXIT

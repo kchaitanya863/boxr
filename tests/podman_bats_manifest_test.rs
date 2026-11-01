@@ -95,9 +95,10 @@ fn curated_e2e_manifest_contains_31_suites() {
         .map(|l| l.split('#').next().unwrap_or(l).trim())
         .filter(|l| !l.is_empty())
         .collect();
-    assert!(
-        suites.len() >= 31,
-        "expected at least 31 Ginkgo E2E suites in e2e_manifest.txt, got {}",
+    assert_eq!(
+        suites.len(),
+        141,
+        "expected all 141 portable Ginkgo E2E suites in e2e_manifest.txt, got {}",
         suites.len()
     );
 }

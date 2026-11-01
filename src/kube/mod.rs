@@ -156,17 +156,9 @@ pub struct KubePodSpec {
         skip_serializing_if = "Option::is_none"
     )]
     pub host_network: Option<bool>,
-    #[serde(
-        rename = "hostPID",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "hostPID", default, skip_serializing_if = "Option::is_none")]
     pub host_pid: Option<bool>,
-    #[serde(
-        rename = "hostIPC",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "hostIPC", default, skip_serializing_if = "Option::is_none")]
     pub host_ipc: Option<bool>,
     #[serde(rename = "hostUsers", default, skip_serializing_if = "Option::is_none")]
     pub host_users: Option<bool>,
@@ -342,11 +334,7 @@ pub struct KubeEnvFromSource {
         skip_serializing_if = "Option::is_none"
     )]
     pub config_map_ref: Option<KubeEnvSource>,
-    #[serde(
-        rename = "secretRef",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "secretRef", default, skip_serializing_if = "Option::is_none")]
     pub secret_ref: Option<KubeEnvSource>,
 }
 
@@ -736,10 +724,7 @@ impl KubeManager {
                 let content = match fs::read_to_string(p) {
                     Ok(c) => c,
                     Err(e) => {
-                        crate::cli::usage_errors::exit_usage_error(format!(
-                            "open {}: {}",
-                            p, e
-                        ));
+                        crate::cli::usage_errors::exit_usage_error(format!("open {}: {}", p, e));
                     }
                 };
                 Self::extract_configmaps_from_str_with_names(&content, &mut map, &mut seen_names)?;
@@ -771,14 +756,8 @@ impl KubeManager {
                 Ok(v) => v,
                 Err(e) => {
                     let msg = e.to_string();
-                    let line_num = e
-                        .location()
-                        .map(|l| l.line())
-                        .unwrap_or(1);
-                    let clean_msg = msg
-                        .split(" at line ")
-                        .next()
-                        .unwrap_or(&msg);
+                    let line_num = e.location().map(|l| l.line()).unwrap_or(1);
+                    let clean_msg = msg.split(" at line ").next().unwrap_or(&msg);
                     crate::cli::usage_errors::exit_usage_error(format!(
                         "multi doc yaml could not be split: yaml: line {}: {}",
                         line_num, clean_msg
@@ -797,7 +776,10 @@ impl KubeManager {
                         cm_name
                     ));
                 }
-                map.insert((cm_name.clone(), "__cm_exists__".to_string()), "1".to_string());
+                map.insert(
+                    (cm_name.clone(), "__cm_exists__".to_string()),
+                    "1".to_string(),
+                );
                 if let Some(data) = val.get("data").and_then(|d| d.as_mapping()) {
                     for (k, v) in data {
                         if let Some(k_str) = k.as_str() {
@@ -814,8 +796,9 @@ impl KubeManager {
                 if let Some(bdata) = val.get("binaryData").and_then(|d| d.as_mapping()) {
                     for (k, v) in bdata {
                         if let (Some(k_str), Some(b64)) = (k.as_str(), v.as_str()) {
-                            let decoded = String::from_utf8_lossy(&decode_base64_simple(b64.trim()))
-                                .into_owned();
+                            let decoded =
+                                String::from_utf8_lossy(&decode_base64_simple(b64.trim()))
+                                    .into_owned();
                             map.insert((cm_name.clone(), k_str.to_string()), decoded);
                         }
                     }
@@ -856,10 +839,7 @@ impl KubeManager {
 
     pub async fn play_kube_with_args(args: &KubePlayArgs) -> Result<()> {
         if let Some(ref val_mode) = args.validate {
-            if !matches!(
-                val_mode.as_str(),
-                "strict" | "warn" | "ignore" | "noop"
-            ) {
+            if !matches!(val_mode.as_str(), "strict" | "warn" | "ignore" | "noop") {
                 crate::cli::usage_errors::exit_usage_error(format!(
                     "{:?} is not a valid value for --validate",
                     val_mode
@@ -951,14 +931,8 @@ impl KubeManager {
                 Ok(v) => v,
                 Err(e) => {
                     let msg = e.to_string();
-                    let line_num = e
-                        .location()
-                        .map(|l| l.line())
-                        .unwrap_or(1);
-                    let clean_msg = msg
-                        .split(" at line ")
-                        .next()
-                        .unwrap_or(&msg);
+                    let line_num = e.location().map(|l| l.line()).unwrap_or(1);
+                    let clean_msg = msg.split(" at line ").next().unwrap_or(&msg);
                     crate::cli::usage_errors::exit_usage_error(format!(
                         "multi doc yaml could not be split: yaml: line {}: {}",
                         line_num, clean_msg
@@ -1324,7 +1298,9 @@ impl KubeManager {
                     }
                     1usize
                 } else {
-                    if args.multiple_pods && !pub_items.is_empty() && pub_items.len() != raw_replicas
+                    if args.multiple_pods
+                        && !pub_items.is_empty()
+                        && pub_items.len() != raw_replicas
                     {
                         crate::cli::usage_errors::exit_usage_error(format!(
                             "number of Pod replicas aren't equal to the number of published ports: {} replicas, {} published ports",
@@ -1388,13 +1364,8 @@ impl KubeManager {
                         spec: pod_spec.clone(),
                         status: None,
                     };
-                    Self::play_pod_with_args(
-                        pod_yaml,
-                        &replica_args,
-                        configmaps,
-                        service_ctr_name,
-                    )
-                    .await?;
+                    Self::play_pod_with_args(pod_yaml, &replica_args, configmaps, service_ctr_name)
+                        .await?;
                 }
             }
             "List" => {
@@ -1404,8 +1375,10 @@ impl KubeManager {
                         if item.get("kind").and_then(|k| k.as_str()) == Some("ConfigMap") {
                             let cm_name =
                                 item["metadata"]["name"].as_str().unwrap_or("").to_string();
-                            merged_cms
-                                .insert((cm_name.clone(), "__cm_exists__".to_string()), "1".to_string());
+                            merged_cms.insert(
+                                (cm_name.clone(), "__cm_exists__".to_string()),
+                                "1".to_string(),
+                            );
                             if let Some(data) = item.get("data").and_then(|d| d.as_mapping()) {
                                 for (k, v) in data {
                                     if let Some(k_str) = k.as_str() {
@@ -1415,11 +1388,13 @@ impl KubeManager {
                                             serde_yaml::Value::Bool(b) => b.to_string(),
                                             _ => String::new(),
                                         };
-                                        merged_cms.insert((cm_name.clone(), k_str.to_string()), v_str);
+                                        merged_cms
+                                            .insert((cm_name.clone(), k_str.to_string()), v_str);
                                     }
                                 }
                             }
-                            if let Some(bdata) = item.get("binaryData").and_then(|d| d.as_mapping()) {
+                            if let Some(bdata) = item.get("binaryData").and_then(|d| d.as_mapping())
+                            {
                                 for (k, v) in bdata {
                                     if let (Some(k_str), Some(b64)) = (k.as_str(), v.as_str()) {
                                         let decoded = String::from_utf8_lossy(
@@ -1551,8 +1526,9 @@ impl KubeManager {
                 if let Some(data_map) = val.get("data").and_then(|d| d.as_mapping()) {
                     for (k, v) in data_map {
                         if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
-                            let decoded = String::from_utf8_lossy(&decode_base64_simple(b64.trim()))
-                                .into_owned();
+                            let decoded =
+                                String::from_utf8_lossy(&decode_base64_simple(b64.trim()))
+                                    .into_owned();
                             kv_map.insert(ks.to_string(), decoded);
                         }
                     }
@@ -1567,9 +1543,7 @@ impl KubeManager {
                 if let Ok(json_map) = serde_json::to_string(&kv_map) {
                     labels.insert("boxr.kube_secret_map".to_string(), json_map);
                 }
-                let secret_bytes = serde_yaml::to_string(&val)
-                    .unwrap_or_default()
-                    .into_bytes();
+                let secret_bytes = serde_yaml::to_string(&val).unwrap_or_default().into_bytes();
                 let filedriver_dir = crate::storage::boxr_home()
                     .join("secrets")
                     .join("filedriver");
@@ -1596,33 +1570,38 @@ impl KubeManager {
         Ok(())
     }
 
-fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$' && i + 2 < chars.len() && chars[i + 2] == '(' {
-            out.push_str("$(");
-            i += 3;
-            continue;
-        }
-        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
-            if let Some(rel_end) = chars[i + 2..].iter().position(|&c| c == ')') {
-                let var_name: String = chars[i + 2..i + 2 + rel_end].iter().collect();
-                if let Some(val) = env_map.get(&var_name) {
-                    out.push_str(val);
-                } else {
-                    out.push_str(&format!("$({var_name})"));
-                }
-                i += 2 + rel_end + 1;
+    fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '$'
+                && i + 1 < chars.len()
+                && chars[i + 1] == '$'
+                && i + 2 < chars.len()
+                && chars[i + 2] == '('
+            {
+                out.push_str("$(");
+                i += 3;
                 continue;
             }
+            if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+                if let Some(rel_end) = chars[i + 2..].iter().position(|&c| c == ')') {
+                    let var_name: String = chars[i + 2..i + 2 + rel_end].iter().collect();
+                    if let Some(val) = env_map.get(&var_name) {
+                        out.push_str(val);
+                    } else {
+                        out.push_str(&format!("$({var_name})"));
+                    }
+                    i += 2 + rel_end + 1;
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
         }
-        out.push(chars[i]);
-        i += 1;
+        out
     }
-    out
-}
 
     pub async fn play_pod(pod_yaml: KubePodYaml) -> Result<()> {
         let default_args = KubePlayArgs {
@@ -1658,8 +1637,8 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 "specifying mac-address multiple times is not supported",
             );
         }
-        let is_host_network = pod_yaml.spec.host_network == Some(true)
-            || args.network.iter().any(|n| n == "host");
+        let is_host_network =
+            pod_yaml.spec.host_network == Some(true) || args.network.iter().any(|n| n == "host");
         if pod_yaml.spec.host_network == Some(true) {
             if !args.network.is_empty() && args.network.iter().any(|n| n != "host") {
                 crate::cli::usage_errors::exit_usage_error(
@@ -1672,9 +1651,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 );
             }
             if !args.ip.is_empty() {
-                crate::cli::usage_errors::exit_usage_error(
-                    "cannot set static IP with HostNetwork",
-                );
+                crate::cli::usage_errors::exit_usage_error("cannot set static IP with HostNetwork");
             }
         }
         let pod_store = PodStore::new();
@@ -1993,8 +1970,8 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                 "ro" => force_ro = true,
                                 "rw" | "z" | "Z" | "noexec" | "exec" | "nosuid" | "suid"
                                 | "nodev" | "dev" | "shared" | "rshared" | "slave" | "rslave"
-                                | "private" | "rprivate" | "unbindable" | "runbindable"
-                                | "U" | "O" | " rbind" | "rbind" | "bind" => {}
+                                | "private" | "rprivate" | "unbindable" | "runbindable" | "U"
+                                | "O" | " rbind" | "rbind" | "bind" => {}
                                 unknown => {
                                     crate::cli::usage_errors::exit_usage_error(format!(
                                         "unknown mount option {:?}",
@@ -2044,7 +2021,8 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     volume_sources.insert(v.name.clone(), (img_rec.rootfs_path, true, false));
                 } else if let Some(cm_vol) = &v.config_map {
                     let cm_name = cm_vol.name.as_deref().unwrap_or(&v.name);
-                    let cm_exists = configmaps.contains_key(&(cm_name.to_string(), "__cm_exists__".to_string()))
+                    let cm_exists = configmaps
+                        .contains_key(&(cm_name.to_string(), "__cm_exists__".to_string()))
                         || configmaps.keys().any(|(n, _)| n == cm_name);
                     let is_opt = cm_vol.optional.unwrap_or(false);
                     if !cm_exists && !is_opt {
@@ -2063,9 +2041,14 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     if cm_exists {
                         if let Some(items) = &cm_vol.items {
                             for item in items {
-                                if let Some(val) = configmaps.get(&(cm_name.to_string(), item.key.clone())) {
+                                if let Some(val) =
+                                    configmaps.get(&(cm_name.to_string(), item.key.clone()))
+                                {
                                     let dst = mp.join(&item.path);
-                                    if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                    if fs::symlink_metadata(&dst)
+                                        .map(|m| m.file_type().is_symlink())
+                                        .unwrap_or(false)
+                                    {
                                         crate::cli::usage_errors::exit_usage_error(format!(
                                             "cannot create file {:?} at volume mountpoint",
                                             item.path
@@ -2080,7 +2063,9 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                         use std::os::unix::fs::PermissionsExt;
                                         let _ = fs::set_permissions(
                                             &dst,
-                                            fs::Permissions::from_mode(item.mode.unwrap_or(def_mode)),
+                                            fs::Permissions::from_mode(
+                                                item.mode.unwrap_or(def_mode),
+                                            ),
                                         );
                                     }
                                 } else if !is_opt {
@@ -2094,7 +2079,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                             for ((n, k), val) in configmaps {
                                 if n == cm_name && k != "__cm_exists__" {
                                     let dst = mp.join(k);
-                                    if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                    if fs::symlink_metadata(&dst)
+                                        .map(|m| m.file_type().is_symlink())
+                                        .unwrap_or(false)
+                                    {
                                         crate::cli::usage_errors::exit_usage_error(format!(
                                             "cannot create file {:?} at volume mountpoint",
                                             k
@@ -2107,7 +2095,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                     #[cfg(unix)]
                                     {
                                         use std::os::unix::fs::PermissionsExt;
-                                        let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(def_mode));
+                                        let _ = fs::set_permissions(
+                                            &dst,
+                                            fs::Permissions::from_mode(def_mode),
+                                        );
                                     }
                                 }
                             }
@@ -2137,24 +2128,34 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     let mp = PathBuf::from(&vol.mountpoint);
                     let def_mode = sec_vol.default_mode.unwrap_or(0o644);
                     if let Some(rec) = sec_rec {
-                        let is_kube_sec = rec.labels.get("boxr.kube_secret").map(|s| s.as_str()) == Some("true");
-                        let kv_map: HashMap<String, String> = if let Some(json_str) = rec.labels.get("boxr.kube_secret_map") {
+                        let is_kube_sec =
+                            rec.labels.get("boxr.kube_secret").map(|s| s.as_str()) == Some("true");
+                        let kv_map: HashMap<String, String> = if let Some(json_str) =
+                            rec.labels.get("boxr.kube_secret_map")
+                        {
                             serde_json::from_str(json_str).unwrap_or_default()
                         } else if let Ok(raw) = s_store.read_data(sec_name) {
                             if let Ok(val) = serde_yaml::from_slice::<serde_yaml::Value>(&raw) {
                                 if val.get("kind").and_then(|k| k.as_str()) == Some("Secret") {
                                     let mut m = HashMap::new();
-                                    if let Some(dmap) = val.get("data").and_then(|d| d.as_mapping()) {
+                                    if let Some(dmap) = val.get("data").and_then(|d| d.as_mapping())
+                                    {
                                         for (k, v) in dmap {
-                                            if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
+                                            if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str())
+                                            {
                                                 m.insert(
                                                     ks.to_string(),
-                                                    String::from_utf8_lossy(&decode_base64_simple(b64.trim())).into_owned(),
+                                                    String::from_utf8_lossy(&decode_base64_simple(
+                                                        b64.trim(),
+                                                    ))
+                                                    .into_owned(),
                                                 );
                                             }
                                         }
                                     }
-                                    if let Some(smap) = val.get("stringData").and_then(|d| d.as_mapping()) {
+                                    if let Some(smap) =
+                                        val.get("stringData").and_then(|d| d.as_mapping())
+                                    {
                                         for (k, v) in smap {
                                             if let (Some(ks), Some(vs)) = (k.as_str(), v.as_str()) {
                                                 m.insert(ks.to_string(), vs.to_string());
@@ -2184,7 +2185,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                             for item in items {
                                 if let Some(val) = kv_map.get(&item.key) {
                                     let dst = mp.join(&item.path);
-                                    if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                    if fs::symlink_metadata(&dst)
+                                        .map(|m| m.file_type().is_symlink())
+                                        .unwrap_or(false)
+                                    {
                                         crate::cli::usage_errors::exit_usage_error(format!(
                                             "cannot create file {:?} at volume mountpoint",
                                             item.path
@@ -2199,7 +2203,9 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                         use std::os::unix::fs::PermissionsExt;
                                         let _ = fs::set_permissions(
                                             &dst,
-                                            fs::Permissions::from_mode(item.mode.unwrap_or(def_mode)),
+                                            fs::Permissions::from_mode(
+                                                item.mode.unwrap_or(def_mode),
+                                            ),
                                         );
                                     }
                                 } else if !is_opt {
@@ -2212,7 +2218,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                         } else {
                             for (k, val) in &kv_map {
                                 let dst = mp.join(k);
-                                if fs::symlink_metadata(&dst).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+                                if fs::symlink_metadata(&dst)
+                                    .map(|m| m.file_type().is_symlink())
+                                    .unwrap_or(false)
+                                {
                                     crate::cli::usage_errors::exit_usage_error(format!(
                                         "cannot create file {:?} at volume mountpoint",
                                         k
@@ -2225,7 +2234,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                 #[cfg(unix)]
                                 {
                                     use std::os::unix::fs::PermissionsExt;
-                                    let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(def_mode));
+                                    let _ = fs::set_permissions(
+                                        &dst,
+                                        fs::Permissions::from_mode(def_mode),
+                                    );
                                 }
                             }
                         }
@@ -2259,10 +2271,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
             );
         }
         if !mem_dirs_created.is_empty() {
-            pod_labels.insert(
-                "boxr.pod.mem_dirs".to_string(),
-                mem_dirs_created.join(","),
-            );
+            pod_labels.insert("boxr.pod.mem_dirs".to_string(), mem_dirs_created.join(","));
         }
 
         let mut pod_dns = Vec::new();
@@ -2449,7 +2458,9 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     break;
                 }
             }
-            let image_in_store = crate::storage::ImageStore::new().find(&c_spec.image).is_some();
+            let image_in_store = crate::storage::ImageStore::new()
+                .find(&c_spec.image)
+                .is_some();
             let should_build = match args.build {
                 Some(true) => true,
                 Some(false) => false,
@@ -2540,7 +2551,8 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 }
             };
             if let Some(img_rec) = crate::storage::ImageStore::new().find(&c_spec.image) {
-                if let Some(img_envs) = img_rec.config.config.as_ref().and_then(|c| c.env.as_ref()) {
+                if let Some(img_envs) = img_rec.config.config.as_ref().and_then(|c| c.env.as_ref())
+                {
                     for ie in img_envs {
                         if let Some((k, v)) = ie.split_once('=') {
                             upsert_env(&mut env_map, k.to_string(), v.to_string());
@@ -2554,7 +2566,8 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     if let Some(cm_src) = &ef.config_map_ref {
                         let cm_name = cm_src.name.as_deref().unwrap_or("");
                         let is_opt = cm_src.optional.unwrap_or(false);
-                        let cm_exists = configmaps.contains_key(&(cm_name.to_string(), "__cm_exists__".to_string()))
+                        let cm_exists = configmaps
+                            .contains_key(&(cm_name.to_string(), "__cm_exists__".to_string()))
                             || configmaps.keys().any(|(n, _)| n == cm_name);
                         if !cm_exists {
                             if !is_opt {
@@ -2600,7 +2613,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                         if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
                                             m.insert(
                                                 ks.to_string(),
-                                                String::from_utf8_lossy(&decode_base64_simple(b64.trim())).into_owned(),
+                                                String::from_utf8_lossy(&decode_base64_simple(
+                                                    b64.trim(),
+                                                ))
+                                                .into_owned(),
                                             );
                                         }
                                     }
@@ -2666,10 +2682,9 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     if let Some(vf) = &e.value_from {
                         if let Some(cm_ref) = &vf.config_map_key_ref {
                             let is_opt = cm_ref.optional.unwrap_or(false);
-                            let cm_exists = configmaps.contains_key(&(
-                                cm_ref.name.clone(),
-                                "__cm_exists__".to_string(),
-                            )) || configmaps.keys().any(|(n, _)| n == &cm_ref.name);
+                            let cm_exists = configmaps
+                                .contains_key(&(cm_ref.name.clone(), "__cm_exists__".to_string()))
+                                || configmaps.keys().any(|(n, _)| n == &cm_ref.name);
                             if !cm_exists {
                                 if is_opt {
                                     continue;
@@ -2712,12 +2727,17 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                             } else if let Ok(raw) = s_store.read_data(&sec_ref.name) {
                                 let mut m = HashMap::new();
                                 if let Ok(val) = serde_yaml::from_slice::<serde_yaml::Value>(&raw) {
-                                    if let Some(dmap) = val.get("data").and_then(|d| d.as_mapping()) {
+                                    if let Some(dmap) = val.get("data").and_then(|d| d.as_mapping())
+                                    {
                                         for (k, v) in dmap {
-                                            if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str()) {
+                                            if let (Some(ks), Some(b64)) = (k.as_str(), v.as_str())
+                                            {
                                                 m.insert(
                                                     ks.to_string(),
-                                                    String::from_utf8_lossy(&decode_base64_simple(b64.trim())).into_owned(),
+                                                    String::from_utf8_lossy(&decode_base64_simple(
+                                                        b64.trim(),
+                                                    ))
+                                                    .into_owned(),
                                                 );
                                             }
                                         }
@@ -2831,11 +2851,16 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     volumes_vec.push(v);
                 }
             }
-            if let Some(vf_val) =
-                pod_annotations.get(&format!("io.podman.annotations.volumes-from/{}", c_spec.name))
-            {
+            if let Some(vf_val) = pod_annotations.get(&format!(
+                "io.podman.annotations.volumes-from/{}",
+                c_spec.name
+            )) {
                 let c_store = ContainerStore::new();
-                for spec_item in vf_val.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                for spec_item in vf_val
+                    .split(';')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
                     let (src_name, opt_ro) = if let Some((n, mode)) = spec_item.split_once(':') {
                         (n.trim(), mode.eq_ignore_ascii_case("ro"))
                     } else {
@@ -2857,7 +2882,8 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                     };
                                     let is_ro = m.read_only || opt_ro;
                                     if is_ro {
-                                        volumes_vec.push(format!("{}:{}:ro", src_str, m.destination));
+                                        volumes_vec
+                                            .push(format!("{}:{}:ro", src_str, m.destination));
                                     } else {
                                         volumes_vec.push(format!("{}:{}", src_str, m.destination));
                                     }
@@ -2882,7 +2908,9 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                         if let Some(sub) = &vm.sub_path {
                             if !sub.is_empty() {
                                 if *is_named_vol {
-                                    if let Some(vol) = crate::volume::VolumeStore::new().find(src_path) {
+                                    if let Some(vol) =
+                                        crate::volume::VolumeStore::new().find(src_path)
+                                    {
                                         let mut cur = PathBuf::from(&vol.mountpoint);
                                         for comp in Path::new(sub).components() {
                                             if let std::path::Component::Normal(c) = comp {
@@ -2897,11 +2925,18 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                                                                         .trim_start_matches('/'),
                                                                 )
                                                             } else {
-                                                                cur.parent().unwrap_or(&cur).join(target)
+                                                                cur.parent()
+                                                                    .unwrap_or(&cur)
+                                                                    .join(target)
                                                             };
                                                             if !resolved.exists() {
-                                                                let full_sub_p = PathBuf::from(&vol.mountpoint).join(sub);
-                                                                let _ = pod_store.remove_with_force(&pod.id, true);
+                                                                let full_sub_p =
+                                                                    PathBuf::from(&vol.mountpoint)
+                                                                        .join(sub);
+                                                                let _ = pod_store
+                                                                    .remove_with_force(
+                                                                        &pod.id, true,
+                                                                    );
                                                                 crate::cli::usage_errors::exit_usage_error(format!(
                                                                     "securejoin.OpenInRoot {}: openat2 {}: no such file or directory",
                                                                     sub,
@@ -2957,7 +2992,12 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
             let mut labels_vec: Vec<String> = Vec::new();
             let mut merged_labels = HashMap::new();
             if let Some(img_rec) = crate::storage::ImageStore::new().find(&c_spec.image) {
-                if let Some(img_labels) = img_rec.config.config.as_ref().and_then(|c| c.labels.as_ref()) {
+                if let Some(img_labels) = img_rec
+                    .config
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.labels.as_ref())
+                {
                     for (k, v) in img_labels {
                         merged_labels.insert(k.clone(), v.clone());
                     }
@@ -2976,7 +3016,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 labels_vec.push(format!("io.containers.autoupdate={}", au));
             }
             if let Some(au_auth) = pod_annotations
-                .get(&format!("io.containers.autoupdate.authfile/{}", c_spec.name))
+                .get(&format!(
+                    "io.containers.autoupdate.authfile/{}",
+                    c_spec.name
+                ))
                 .or_else(|| pod_annotations.get("io.containers.autoupdate.authfile"))
             {
                 labels_vec.push(format!("io.containers.autoupdate.authfile={}", au_auth));
@@ -2995,13 +3038,17 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
 
             let mut annotations_vec: Vec<String> = Vec::new();
             for (k, v) in &pod_annotations {
-                if let Some(ctr_suffix) = k.strip_prefix("io.podman.annotations.keep-original-groups/") {
+                if let Some(ctr_suffix) =
+                    k.strip_prefix("io.podman.annotations.keep-original-groups/")
+                {
                     if ctr_suffix == c_spec.name {
                         annotations_vec.push(format!("run.oci.keep_original_groups={}", v));
                     }
                     continue;
                 }
-                if let Some(ctr_suffix) = k.strip_prefix("io.podman.annotations.mount-context-type/") {
+                if let Some(ctr_suffix) =
+                    k.strip_prefix("io.podman.annotations.mount-context-type/")
+                {
                     if ctr_suffix == c_spec.name {
                         annotations_vec.push(format!("run.oci.mount_context_type={}", v));
                     }
@@ -3052,7 +3099,8 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                             exec.command.join(" ")
                         };
                         health_startup_cmd = Some(cmd_str);
-                        health_startup_interval = Some(format!("{}s", sp.period_seconds.unwrap_or(10)));
+                        health_startup_interval =
+                            Some(format!("{}s", sp.period_seconds.unwrap_or(10)));
                         if let Some(t) = sp.timeout_seconds {
                             health_startup_timeout = Some(format!("{}s", t));
                         }
@@ -3310,11 +3358,38 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                     let stripped = clean.strip_prefix("SIG").unwrap_or(&clean);
                     let valid = matches!(
                         stripped,
-                        "HUP" | "INT" | "QUIT" | "ILL" | "TRAP" | "ABRT" | "IOT" | "BUS"
-                            | "FPE" | "KILL" | "USR1" | "SEGV" | "USR2" | "PIPE" | "ALRM"
-                            | "TERM" | "STKFLT" | "CHLD" | "CONT" | "STOP" | "TSTP" | "TTIN"
-                            | "TTOU" | "URG" | "XCPU" | "XFSZ" | "VTALRM" | "PROF" | "WINCH"
-                            | "IO" | "PWR" | "SYS"
+                        "HUP"
+                            | "INT"
+                            | "QUIT"
+                            | "ILL"
+                            | "TRAP"
+                            | "ABRT"
+                            | "IOT"
+                            | "BUS"
+                            | "FPE"
+                            | "KILL"
+                            | "USR1"
+                            | "SEGV"
+                            | "USR2"
+                            | "PIPE"
+                            | "ALRM"
+                            | "TERM"
+                            | "STKFLT"
+                            | "CHLD"
+                            | "CONT"
+                            | "STOP"
+                            | "TSTP"
+                            | "TTIN"
+                            | "TTOU"
+                            | "URG"
+                            | "XCPU"
+                            | "XFSZ"
+                            | "VTALRM"
+                            | "PROF"
+                            | "WINCH"
+                            | "IO"
+                            | "PWR"
+                            | "SYS"
                     ) || stripped.parse::<u32>().is_ok_and(|n| n > 0 && n <= 64);
                     if !valid {
                         let _ = pod_store.remove_with_force(&pod.id, true);
@@ -3341,7 +3416,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 .cloned();
             let pub_all_flag = args.publish_all
                 || pod_annotations
-                    .get(&format!("io.podman.annotations.publish-all/{}", c_spec.name))
+                    .get(&format!(
+                        "io.podman.annotations.publish-all/{}",
+                        c_spec.name
+                    ))
                     .or_else(|| pod_annotations.get("io.podman.annotations.publish-all"))
                     .is_some_and(|v| v.eq_ignore_ascii_case("true"));
             if pub_all_flag {
@@ -3634,12 +3712,7 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
                 if let Some(c) = c_store.find(cid) {
                     if matches!(c.status, ContainerStatus::Running) {
                         let _ = crate::stop_container_with_home_and_timeout(
-                            &c.id,
-                            None,
-                            None,
-                            None,
-                            true,
-                            None,
+                            &c.id, None, None, None, true, None,
                         );
                     }
                 }
@@ -3649,18 +3722,10 @@ fn expand_kube_command_env(s: &str, env_map: &HashMap<String, String>) -> String
             println!("Pods stopped:\n{}\nPods removed:\n{}", pod.id, pod.id);
         }
         for c_spec in containers {
-            for candidate in [
-                format!("{}-{}", pod_name, c_spec.name),
-                c_spec.name.clone(),
-            ] {
+            for candidate in [format!("{}-{}", pod_name, c_spec.name), c_spec.name.clone()] {
                 if c_store.find(&candidate).is_some() {
                     let _ = crate::stop_container_with_home_and_timeout(
-                        &candidate,
-                        None,
-                        None,
-                        None,
-                        true,
-                        None,
+                        &candidate, None, None, None, true, None,
                     );
                     let _ = crate::remove_container(&candidate, true);
                 }

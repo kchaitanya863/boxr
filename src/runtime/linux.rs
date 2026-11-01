@@ -901,7 +901,10 @@ fn journal_line_with_capture(line: &str, capture: Option<&Path>) {
                             msg.push_str(&format!("CONTAINER_NAME={}\n", cname));
                         }
                         if let Some(tag) = ann.get("boxr.log_tag") {
-                            msg.push_str(&format!("CONTAINER_TAG={}\nSYSLOG_IDENTIFIER={}\n", tag, tag));
+                            msg.push_str(&format!(
+                                "CONTAINER_TAG={}\nSYSLOG_IDENTIFIER={}\n",
+                                tag, tag
+                            ));
                         }
                         if let Some(lbls_json) = ann.get("boxr.log_labels") {
                             if let Ok(lbls) = serde_json::from_str::<Vec<String>>(lbls_json) {
@@ -916,7 +919,10 @@ fn journal_line_with_capture(line: &str, capture: Option<&Path>) {
                 }
             }
         }
-        if sock.send_to(msg.as_bytes(), "/run/systemd/journal/socket").is_ok() {
+        if sock
+            .send_to(msg.as_bytes(), "/run/systemd/journal/socket")
+            .is_ok()
+        {
             return;
         }
         let payload = format!("<6>{}", line);
@@ -1199,17 +1205,20 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
             .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
             .is_some_and(|sp| {
                 sp.process.terminal
-                    || sp.process.args.iter().any(|a| {
-                        a.ends_with("/init") || a == "init" || a.ends_with("/systemd")
-                    })
+                    || sp
+                        .process
+                        .args
+                        .iter()
+                        .any(|a| a.ends_with("/init") || a == "init" || a.ends_with("/systemd"))
             });
         let runs_systemd_init = fs::read_to_string(bundle_path.join("config.json"))
             .ok()
             .and_then(|s| serde_json::from_str::<Spec>(&s).ok())
             .is_some_and(|sp| {
-                sp.process.args.iter().any(|a| {
-                    a.ends_with("/init") || a == "init" || a.ends_with("/systemd")
-                })
+                sp.process
+                    .args
+                    .iter()
+                    .any(|a| a.ends_with("/init") || a == "init" || a.ends_with("/systemd"))
             });
         let mut payload_cg_dir: Option<PathBuf> = None;
         if runs_systemd_init {
@@ -1322,10 +1331,12 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
                 let stderr = child.stderr.take();
                 let cap_out = capture_path.clone();
                 let cap_err = capture_path.clone();
-                let h_out =
-                    stdout.map(|pipe| thread::spawn(move || tee_reader_to_journal(pipe, cap_out, "stdout")));
-                let h_err =
-                    stderr.map(|pipe| thread::spawn(move || tee_reader_to_journal(pipe, cap_err, "stderr")));
+                let h_out = stdout.map(|pipe| {
+                    thread::spawn(move || tee_reader_to_journal(pipe, cap_out, "stdout"))
+                });
+                let h_err = stderr.map(|pipe| {
+                    thread::spawn(move || tee_reader_to_journal(pipe, cap_err, "stderr"))
+                });
                 let status = child.wait()?;
                 if let Some(h) = h_out {
                     let _ = h.join();
@@ -1405,7 +1416,9 @@ pub fn run_conmon_supervisor(args: &[String]) -> Result<i32> {
         let path_err = k8s_log_path;
         let h_out = stdout.map(|pipe| {
             thread::spawn(move || {
-                crate::logging::tee_k8s_stream_with_tty(pipe, path_out, "stdout", out_attach, is_tty);
+                crate::logging::tee_k8s_stream_with_tty(
+                    pipe, path_out, "stdout", out_attach, is_tty,
+                );
             })
         });
         let h_err = stderr.map(|pipe| {
@@ -1665,9 +1678,11 @@ pub fn execute_bundle(
                     .and_then(|a| a.get("boxr.stop_signal"))
                     .and_then(|s| crate::runtime::kill::ContainerKiller::parse_signal(s).ok())
                     .map(|sig| format!("KillSignal={}", sig));
-                let runs_systemd_init = _spec.process.args.iter().any(|a| {
-                    a.ends_with("/init") || a == "init" || a.ends_with("/systemd")
-                });
+                let runs_systemd_init = _spec
+                    .process
+                    .args
+                    .iter()
+                    .any(|a| a.ends_with("/init") || a == "init" || a.ends_with("/systemd"));
                 if stop_timeout_arg.is_some() || kill_signal_arg.is_some() || runs_systemd_init {
                     let mut scope_cmd = std::process::Command::new("systemd-run");
                     if unsafe { libc::getuid() != 0 } {
@@ -1691,7 +1706,9 @@ pub fn execute_bundle(
                         .arg(bundle_path);
                     scope_cmd.stdin(Stdio::null());
                     scrub_conmon_parent_env(&mut scope_cmd);
-                    if std::env::var_os("XDG_RUNTIME_DIR").is_none() && unsafe { libc::getuid() != 0 } {
+                    if std::env::var_os("XDG_RUNTIME_DIR").is_none()
+                        && unsafe { libc::getuid() != 0 }
+                    {
                         scope_cmd.env(
                             "XDG_RUNTIME_DIR",
                             format!("/run/user/{}", unsafe { libc::getuid() }),
@@ -2260,7 +2277,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                                     child.as_raw().to_string(),
                                 );
                                 for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
-                                    let _ = fs::write(parent_cg.join("cgroup.subtree_control"), ctl);
+                                    let _ =
+                                        fs::write(parent_cg.join("cgroup.subtree_control"), ctl);
                                 }
                                 let _ = fs::write(
                                     bundle_path.join("container.cgroup"),
@@ -2320,18 +2338,14 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             .and_then(|a| a.get("boxr.pasta_options"))
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or_default();
-                        let pasta_ports_direct =
-                            network_mode == crate::network::pasta::NetworkMode::Pasta
-                                && (raw_net.trim().starts_with("pasta:")
-                                    || ports.iter().any(|p| {
-                                        p.host_ip.is_some()
-                                            || !p.protocol.eq_ignore_ascii_case("tcp")
-                                    }));
-                        let pasta_ports: &[PortMapping] = if pasta_ports_direct {
-                            &ports
-                        } else {
-                            &[]
-                        };
+                        let pasta_ports_direct = network_mode
+                            == crate::network::pasta::NetworkMode::Pasta
+                            && (raw_net.trim().starts_with("pasta:")
+                                || ports.iter().any(|p| {
+                                    p.host_ip.is_some() || !p.protocol.eq_ignore_ascii_case("tcp")
+                                }));
+                        let pasta_ports: &[PortMapping] =
+                            if pasta_ports_direct { &ports } else { &[] };
                         let pasta_cfg = crate::network::pasta::PastaConfig::for_container(
                             child.as_raw(),
                             pasta_ports,
@@ -2398,7 +2412,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     }
                     WaitStatus::Signaled(_, sig, _) => {
                         let code = 128 + sig as i32;
-                        if (sig == nix::sys::signal::Signal::SIGKILL || code == 137) && has_mem_limit
+                        if (sig == nix::sys::signal::Signal::SIGKILL || code == 137)
+                            && has_mem_limit
                         {
                             let _ = fs::write(bundle_path.join("oom_killed"), "1");
                         }
@@ -2569,7 +2584,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             .ok()
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default();
-                    if !has_explicit_ifaces_file || !net_ifaces.is_empty() || !net_ifaces_v2.is_empty() {
+                    if !has_explicit_ifaces_file
+                        || !net_ifaces.is_empty()
+                        || !net_ifaces_v2.is_empty()
+                    {
                         let primary_ifname = net_ifaces_v2
                             .first()
                             .map(|(ifn, _, _)| ifn.as_str())
@@ -2759,7 +2777,8 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                                 Ok(ForkResult::Child) => {
                                     unsafe {
                                         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                                        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                                        let devnull =
+                                            libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
                                         if devnull >= 0 {
                                             libc::dup2(devnull, libc::STDIN_FILENO);
                                             libc::dup2(devnull, libc::STDOUT_FILENO);
@@ -2849,14 +2868,14 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if !uts_host && !ns_join.uts {
                     flags |= CloneFlags::CLONE_NEWUTS;
                 }
-                        let cgroup_host = spec
-                            .annotations
-                            .as_ref()
-                            .and_then(|a| a.get("boxr.cgroupns"))
-                            .map(|s| s == "host")
-                            .unwrap_or(false);
+                let cgroup_host = spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.cgroupns"))
+                    .map(|s| s == "host")
+                    .unwrap_or(false);
 
-                        if let Err(e) = unshare(flags) {
+                if let Err(e) = unshare(flags) {
                     eprintln!("Failed to unshare container namespaces: {:?}", e);
                     std::process::exit(1);
                 }
@@ -3035,9 +3054,7 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                                 .stdout(Stdio::null())
                                 .stderr(Stdio::null())
                                 .status();
-                        } else if !ips.is_empty()
-                            && !(ips.len() == 1 && ips[0].0 == "10.0.2.15")
-                        {
+                        } else if !ips.is_empty() && !(ips.len() == 1 && ips[0].0 == "10.0.2.15") {
                             for (ip_str, prefix_str, _) in ips {
                                 if ip_str.is_empty() {
                                     continue;
@@ -4642,7 +4659,10 @@ fn exec_in_bundle_via_setns(
         for line in cg_text.lines() {
             if let Some(rel) = line.strip_prefix("0::/") {
                 let target_cg = Path::new("/sys/fs/cgroup").join(rel.trim());
-                let _ = fs::write(target_cg.join("cgroup.procs"), std::process::id().to_string());
+                let _ = fs::write(
+                    target_cg.join("cgroup.procs"),
+                    std::process::id().to_string(),
+                );
                 break;
             }
         }
@@ -5731,7 +5751,14 @@ fn run_container_child(
                     } else {
                         MsFlags::MS_RDONLY
                     };
-                    mount(Some("cgroup2"), &cg_path, Some("cgroup2"), flags, None::<&str>).is_ok()
+                    mount(
+                        Some("cgroup2"),
+                        &cg_path,
+                        Some("cgroup2"),
+                        flags,
+                        None::<&str>,
+                    )
+                    .is_ok()
                 }
             }
             _ => {
@@ -5884,7 +5911,13 @@ fn run_container_child(
     if let Ok(pty_name) = fs::read_to_string(bundle_path.join("attach-pty")) {
         let p = Path::new(pty_name.trim());
         if p.exists() {
-            let _ = mount(Some(p), &console_dev, None::<&str>, MsFlags::MS_BIND, None::<&str>);
+            let _ = mount(
+                Some(p),
+                &console_dev,
+                None::<&str>,
+                MsFlags::MS_BIND,
+                None::<&str>,
+            );
         } else {
             let _ = mount(
                 Some(Path::new("/proc/self/fd/1")),
@@ -5906,11 +5939,7 @@ fn run_container_child(
 
     for m in &spec.mounts {
         if let Some(rel_dev) = m.destination.strip_prefix("/dev/") {
-            if !rel_dev.is_empty()
-                && rel_dev != "pts"
-                && rel_dev != "shm"
-                && rel_dev != "mqueue"
-            {
+            if !rel_dev.is_empty() && rel_dev != "pts" && rel_dev != "shm" && rel_dev != "mqueue" {
                 let guest_dev = dev_path.join(rel_dev);
                 if let Some(parent) = guest_dev.parent() {
                     let _ = fs::create_dir_all(parent);
@@ -5959,7 +5988,15 @@ fn run_container_child(
                 let name_str = name.to_string_lossy();
                 if matches!(
                     name_str.as_ref(),
-                    "pts" | "shm" | "mqueue" | "fd" | "stdin" | "stdout" | "stderr" | "ptmx" | "core"
+                    "pts"
+                        | "shm"
+                        | "mqueue"
+                        | "fd"
+                        | "stdin"
+                        | "stdout"
+                        | "stderr"
+                        | "ptmx"
+                        | "core"
                 ) {
                     continue;
                 }
@@ -6507,7 +6544,8 @@ fn run_container_child(
             let opts = m.options.as_deref().unwrap_or(&[]);
             let has_suid = opts.iter().any(|o| o == "suid");
             let has_dev = opts.iter().any(|o| o == "dev");
-            let has_noexec = opts.iter().any(|o| o == "noexec") && !opts.iter().any(|o| o == "exec");
+            let has_noexec =
+                opts.iter().any(|o| o == "noexec") && !opts.iter().any(|o| o == "exec");
             let has_noatime = opts.iter().any(|o| o == "noatime");
             let has_ro = opts.iter().any(|o| o == "ro");
             let mut tmpfs_flags = MsFlags::empty();
@@ -6667,10 +6705,6 @@ fn run_container_child(
                 dns_content.push_str("nameserver 1.1.1.1\n");
             }
         }
-        let dns_search_file = bundle_dir.join("dns_search.json");
-        if dns_search_file.exists() {
-            if let Ok(content) = fs::read_to_string(&dns_search_file) {
-                if let Ok(domains) = serde_json::from_str::<Vec<String>>(&content) {
         let dns_search_file = bundle_dir.join("dns_search.json");
         if dns_search_file.exists() {
             if let Ok(content) = fs::read_to_string(&dns_search_file) {
@@ -6893,8 +6927,7 @@ fn run_container_child(
                             if let Some(parent) = sys_path.parent() {
                                 let _ = fs::create_dir_all(parent);
                             }
-                            let tmp_file =
-                                PathBuf::from(format!("/tmp/.boxr-sysctl-{}", k.trim()));
+                            let tmp_file = PathBuf::from(format!("/tmp/.boxr-sysctl-{}", k.trim()));
                             if fs::write(&tmp_file, format!("{}\n", val_norm)).is_ok() {
                                 let _ = mount(
                                     Some(&tmp_file),
@@ -7163,7 +7196,10 @@ fn run_container_child(
     };
     if let Err(err) = chdir(cwd) {
         if err == nix::errno::Errno::ENOENT {
-            eprintln!("Error: chdir to `{}`: No such file or directory", cwd.display());
+            eprintln!(
+                "Error: chdir to `{}`: No such file or directory",
+                cwd.display()
+            );
             std::process::exit(127);
         }
         return Err(anyhow!(std::io::Error::from_raw_os_error(libc::ENOTDIR)));

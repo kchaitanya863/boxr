@@ -308,11 +308,7 @@ pub async fn handle_image_routes(ctx: &ApiContext) -> Option<Response> {
 }
 
 fn image_matches_labels(img: &ImageRecord, labels: &[String]) -> bool {
-    let img_labels = img
-        .config
-        .config
-        .as_ref()
-        .and_then(|c| c.labels.as_ref());
+    let img_labels = img.config.config.as_ref().and_then(|c| c.labels.as_ref());
     for lf in labels {
         let Some(map) = img_labels else {
             return false;
@@ -375,10 +371,11 @@ fn handle_list_images(ctx: &ApiContext) -> Response {
     }
 
     let mut out = Vec::new();
-    let cli_manifests: serde_json::Value = fs::read_to_string(ctx.state.home.join("manifests.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let cli_manifests: serde_json::Value =
+        fs::read_to_string(ctx.state.home.join("manifests.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
 
     if ctx.is_libpod && filters.is_empty() && ctx.query.get("filter").is_none() {
         for ml in load_api_manifests(&ctx.state.home) {
@@ -439,16 +436,16 @@ fn handle_list_images(ctx: &ApiContext) -> Response {
             }
         }
         if let Some(refs) = filters.get("reference") {
-            let matches_ref = refs.iter().any(|r| {
-                repo_tags.iter().any(|t| t.contains(r)) || img.reference.contains(r)
-            });
+            let matches_ref = refs
+                .iter()
+                .any(|r| repo_tags.iter().any(|t| t.contains(r)) || img.reference.contains(r));
             if !matches_ref {
                 continue;
             }
         }
         if let Some(f_q) = ctx.query.get("filter") {
-            let matches_ref =
-                repo_tags.iter().any(|t| t == f_q || t.contains(f_q)) || img.reference.contains(f_q);
+            let matches_ref = repo_tags.iter().any(|t| t == f_q || t.contains(f_q))
+                || img.reference.contains(f_q);
             if !matches_ref {
                 continue;
             }
@@ -570,12 +567,7 @@ fn handle_inspect_image(ctx: &ApiContext, name: &str) -> Response {
     let comment = labels
         .get("io.boxr.commit.comment")
         .cloned()
-        .or_else(|| {
-            img.config
-                .history
-                .last()
-                .and_then(|h| h.comment.clone())
-        })
+        .or_else(|| img.config.history.last().and_then(|h| h.comment.clone()))
         .unwrap_or_else(|| "FROM docker.io/library/alpine:latest".to_string());
 
     let is_nocreated = img.reference.contains("nocreated") || img.created_at.timestamp() <= 0;
@@ -719,7 +711,11 @@ fn handle_image_history(ctx: &ApiContext, name: &str) -> Response {
 
 fn handle_export_image(ctx: &ApiContext, name: &str) -> Response {
     if let Some(fmt) = ctx.query.get("format") {
-        if fmt != "docker-archive" && fmt != "oci-archive" && fmt != "oci-dir" && fmt != "docker-dir" {
+        if fmt != "docker-archive"
+            && fmt != "oci-archive"
+            && fmt != "oci-dir"
+            && fmt != "docker-dir"
+        {
             return error_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "invalid format",
@@ -777,7 +773,11 @@ fn handle_export_image(ctx: &ApiContext, name: &str) -> Response {
         None,
         &ctx.state.home,
     ) {
-        return error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string());
+        return error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        );
     }
     let bytes = fs::read(tmp.path()).unwrap_or_default();
     Response::builder()
@@ -790,7 +790,11 @@ fn handle_export_image(ctx: &ApiContext, name: &str) -> Response {
 fn handle_load_image(ctx: &ApiContext) -> Response {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     if fs::write(tmp.path(), &ctx.body).is_err() {
-        return error_json(StatusCode::INTERNAL_SERVER_ERROR, "write failed", "write failed");
+        return error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "write failed",
+            "write failed",
+        );
     }
     match crate::auth::archive::ArchiveManager::load_from_opts(
         Some(tmp.path()),
@@ -814,18 +818,30 @@ fn handle_load_image(ctx: &ApiContext) -> Response {
                 }),
             )
         }
-        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string()),
+        Err(e) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        ),
     }
 }
 
 fn handle_local_load_image(ctx: &ApiContext) -> Response {
     for k in ctx.query.keys() {
         if k != "path" && k != "quiet" {
-            return error_json(StatusCode::BAD_REQUEST, "invalid argument", "invalid argument");
+            return error_json(
+                StatusCode::BAD_REQUEST,
+                "invalid argument",
+                "invalid argument",
+            );
         }
     }
     let Some(path_str) = ctx.query.get("path").filter(|s| !s.is_empty()) else {
-        return error_json(StatusCode::BAD_REQUEST, "path is required", "path is required");
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "path is required",
+            "path is required",
+        );
     };
     if !path_str.starts_with('/') || path_str.contains("..") {
         return error_json(
@@ -849,7 +865,11 @@ fn handle_local_load_image(ctx: &ApiContext) -> Response {
                 .collect();
             json_response(StatusCode::OK, &serde_json::json!({ "Names": names }))
         }
-        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string()),
+        Err(e) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        ),
     }
 }
 
@@ -898,7 +918,14 @@ async fn handle_pull_or_create_image(ctx: &ApiContext) -> Response {
             "localhost".to_string()
         };
         let reference = if registry == "docker.io" && !repo_param.contains('/') {
-            format!("library/{}", if repo_param.is_empty() { "imported" } else { repo_param })
+            format!(
+                "library/{}",
+                if repo_param.is_empty() {
+                    "imported"
+                } else {
+                    repo_param
+                }
+            )
         } else if repo_param.is_empty() {
             "imported".to_string()
         } else {
@@ -1090,7 +1117,8 @@ async fn handle_pull_or_create_image(ctx: &ApiContext) -> Response {
             "images": [fid]
         });
         if !quiet {
-            obj["stream"] = serde_json::Value::String(format!("Trying to pull {}...\n", target_ref));
+            obj["stream"] =
+                serde_json::Value::String(format!("Trying to pull {}...\n", target_ref));
         }
         return json_response(StatusCode::OK, &obj);
     }
@@ -1191,7 +1219,11 @@ fn handle_image_tree(ctx: &ApiContext, name: &str) -> Response {
 
 async fn handle_push_image(ctx: &ApiContext, name: &str) -> Response {
     let tag_q = ctx.query.get("tag").map(|s| s.as_str()).unwrap_or("");
-    let dest_q = ctx.query.get("destination").map(|s| s.as_str()).unwrap_or("");
+    let dest_q = ctx
+        .query
+        .get("destination")
+        .map(|s| s.as_str())
+        .unwrap_or("");
     let tls_verify = ctx
         .query
         .get("tlsVerify")
@@ -1380,16 +1412,28 @@ fn handle_scp_image(ctx: &ApiContext, _name: &str) -> Response {
     let lvl = ctx.query.get("compressionLevel").map(|s| s.as_str());
     if let Some(f) = fmt {
         if f != "gzip" && f != "zstd" {
-            return error_json(StatusCode::BAD_REQUEST, "invalid argument", "invalid argument");
+            return error_json(
+                StatusCode::BAD_REQUEST,
+                "invalid argument",
+                "invalid argument",
+            );
         }
     }
     if let Some(l) = lvl {
         if fmt.is_none() {
-            return error_json(StatusCode::BAD_REQUEST, "invalid argument", "invalid argument");
+            return error_json(
+                StatusCode::BAD_REQUEST,
+                "invalid argument",
+                "invalid argument",
+            );
         }
         let n: i32 = l.parse().unwrap_or(99);
         if !(1..=9).contains(&n) {
-            return error_json(StatusCode::BAD_REQUEST, "invalid argument", "invalid argument");
+            return error_json(
+                StatusCode::BAD_REQUEST,
+                "invalid argument",
+                "invalid argument",
+            );
         }
     }
     error_json(
@@ -1504,7 +1548,8 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if ct == "application/json" && !ctx.query.contains_key("remote") {
-            let msg = "Content-Type: application/json is not supported. Should be \"application/x-tar\"";
+            let msg =
+                "Content-Type: application/json is not supported. Should be \"application/x-tar\"";
             return error_json(StatusCode::BAD_REQUEST, msg, msg);
         }
     }
@@ -1532,7 +1577,11 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
             return error_json(StatusCode::NOT_FOUND, "not found", "not found");
         }
         if !p.is_dir() {
-            return error_json(StatusCode::BAD_REQUEST, "not a directory", "not a directory");
+            return error_json(
+                StatusCode::BAD_REQUEST,
+                "not a directory",
+                "not a directory",
+            );
         }
         if let Some(add_ctx) = ctx.query.get("additionalbuildcontexts") {
             if let Some((name_k, spec_v)) = add_ctx.split_once('=') {
@@ -1568,7 +1617,11 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
                 context_dir.join(df)
             };
             if !df_p.exists() {
-                return error_json(StatusCode::NOT_FOUND, "dockerfile not found", "dockerfile not found");
+                return error_json(
+                    StatusCode::NOT_FOUND,
+                    "dockerfile not found",
+                    "dockerfile not found",
+                );
             }
             dockerfile_path = df_p;
         } else if context_dir.join("Containerfile").exists() {
@@ -1608,11 +1661,12 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
     }
 
     let df_content = fs::read_to_string(&dockerfile_path).unwrap_or_default();
-    let tag_arg = ctx
-        .query
-        .get("t")
-        .cloned()
-        .unwrap_or_else(|| format!("built-{}", &hex::encode(crate::storage::container_store::rand_id())[..8]));
+    let tag_arg = ctx.query.get("t").cloned().unwrap_or_else(|| {
+        format!(
+            "built-{}",
+            &hex::encode(crate::storage::container_store::rand_id())[..8]
+        )
+    });
 
     let store = ImageStore::with_home(ctx.state.home.clone());
     let mut base_img: Option<ImageRecord> = None;
@@ -1620,8 +1674,7 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("FROM ").or_else(|| t.strip_prefix("from ")) {
             let b_ref = rest.split_whitespace().next().unwrap_or("alpine");
-            base_img = find_image_in_home(&store, b_ref)
-                .or_else(|| store.list().first().cloned());
+            base_img = find_image_in_home(&store, b_ref).or_else(|| store.list().first().cloned());
             break;
         }
     }
@@ -1641,16 +1694,17 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
         );
     }
 
-    let mut cfg = base_img
-        .as_ref()
-        .map(|b| b.config.clone())
-        .unwrap_or(crate::oci::image::ImageConfig {
-            architecture: "amd64".to_string(),
-            os: "linux".to_string(),
-            config: None,
-            rootfs: None,
-            history: Vec::new(),
-        });
+    let mut cfg =
+        base_img
+            .as_ref()
+            .map(|b| b.config.clone())
+            .unwrap_or(crate::oci::image::ImageConfig {
+                architecture: "amd64".to_string(),
+                os: "linux".to_string(),
+                config: None,
+                rootfs: None,
+                history: Vec::new(),
+            });
     let exec_cfg = cfg.config.get_or_insert_with(Default::default);
     let labels = exec_cfg.labels.get_or_insert_with(Default::default);
     if df_content.contains("testimage")
@@ -1678,7 +1732,10 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
 
     for line in df_content.lines() {
         let t = line.trim();
-        if let Some(rest) = t.strip_prefix("LABEL ").or_else(|| t.strip_prefix("label ")) {
+        if let Some(rest) = t
+            .strip_prefix("LABEL ")
+            .or_else(|| t.strip_prefix("label "))
+        {
             for part in rest.split_whitespace() {
                 if let Some((k, v)) = part.split_once('=') {
                     labels.insert(
@@ -1687,7 +1744,10 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
                     );
                 }
             }
-        } else if let Some(rest) = t.strip_prefix("WORKDIR ").or_else(|| t.strip_prefix("workdir ")) {
+        } else if let Some(rest) = t
+            .strip_prefix("WORKDIR ")
+            .or_else(|| t.strip_prefix("workdir "))
+        {
             cur_workdir = rest.trim().to_string();
             exec_cfg.working_dir = Some(cur_workdir.clone());
             let rel = cur_workdir.trim_start_matches('/');
@@ -1743,7 +1803,11 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
     } else {
         let (r, t) = tag_arg.split_once(':').unwrap_or((&tag_arg, "latest"));
         if !ctx.is_libpod && enforce_docker_hub() {
-            ("docker.io".to_string(), format!("library/{}", r), t.to_string())
+            (
+                "docker.io".to_string(),
+                format!("library/{}", r),
+                t.to_string(),
+            )
         } else {
             ("localhost".to_string(), r.to_string(), t.to_string())
         }
@@ -1807,8 +1871,7 @@ async fn handle_build_image(ctx: &ApiContext, is_local: bool) -> Response {
         }
     });
     let out_body = format!("{}\n", out_obj);
-    let (tx, rx) =
-        tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(2);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(2);
     let _ = tx.try_send(Ok(axum::body::Bytes::from(out_body)));
     drop(tx);
     Response::builder()
@@ -1829,11 +1892,19 @@ fn handle_commit_container(ctx: &ApiContext) -> Response {
         .unwrap_or_else(|| "latest".to_string());
     let comment = ctx.query.get("comment").cloned().unwrap_or_default();
     let author = ctx.query.get("author").cloned().unwrap_or_default();
-    let fmt = ctx.query.get("format").cloned().unwrap_or_else(|| "oci".to_string());
+    let fmt = ctx
+        .query
+        .get("format")
+        .cloned()
+        .unwrap_or_else(|| "oci".to_string());
 
     let c_store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = c_store.find(&container) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
 
     if ctx.is_libpod && !comment.is_empty() && fmt != "docker" {
@@ -1852,7 +1923,8 @@ fn handle_commit_container(ctx: &ApiContext) -> Response {
     let _ = fs::create_dir_all(&dest_rootfs);
     let src_rootfs = PathBuf::from(&c.bundle_path).join("rootfs");
     if src_rootfs.exists() {
-        let _ = crate::storage::overlay::OverlayDriver::create_hardlink_tree(&src_rootfs, &dest_rootfs);
+        let _ =
+            crate::storage::overlay::OverlayDriver::create_hardlink_tree(&src_rootfs, &dest_rootfs);
     }
 
     let mut exec_cfg = crate::oci::image::ExecutionConfig::default();
@@ -1883,10 +1955,7 @@ fn handle_commit_container(ctx: &ApiContext) -> Response {
         for ch in changes {
             for line in ch.lines() {
                 let t = line.trim();
-                if let Some(cmd_val) = t
-                    .strip_prefix("CMD=")
-                    .or_else(|| t.strip_prefix("CMD "))
-                {
+                if let Some(cmd_val) = t.strip_prefix("CMD=").or_else(|| t.strip_prefix("CMD ")) {
                     exec_cfg.cmd = Some(vec![cmd_val.trim().to_string()]);
                 } else if let Some(exp_val) = t
                     .strip_prefix("EXPOSE=")
@@ -1906,7 +1975,11 @@ fn handle_commit_container(ctx: &ApiContext) -> Response {
     exec_cfg.labels = Some(labels);
 
     let (registry, reference, final_tag) = if repo.is_empty() {
-        ("<none>".to_string(), "<none>".to_string(), "<none>".to_string())
+        (
+            "<none>".to_string(),
+            "<none>".to_string(),
+            "<none>".to_string(),
+        )
     } else if !ctx.is_libpod && enforce_docker_hub() && !repo.contains('/') {
         ("docker.io".to_string(), format!("library/{}", repo), tag)
     } else {
@@ -2094,4 +2167,3 @@ fn handle_prune_images(ctx: &ApiContext) -> Response {
         )
     }
 }
-

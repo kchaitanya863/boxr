@@ -63,6 +63,10 @@ impl MountManager {
                 "cannot mount using driver overlay in rootless mode. You must execute `podman unshare` first",
             );
         }
+        self.record_container_mount(query)
+    }
+
+    pub fn record_container_mount(&self, query: &str) -> Result<String> {
         let store = ContainerStore::new();
         let cont = store
             .find(query)

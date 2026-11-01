@@ -501,7 +501,10 @@ fn attach_standard_headers(req_headers: &HeaderMap, mut resp: Response) -> Respo
     let h = resp.headers_mut();
     h.insert("Api-Version", HeaderValue::from_static("1.44"));
     h.insert("Libpod-Api-Version", HeaderValue::from_static("6.3.0-dev"));
-    h.insert("Server", HeaderValue::from_static("Libpod/6.3.0-dev (linux)"));
+    h.insert(
+        "Server",
+        HeaderValue::from_static("Libpod/6.3.0-dev (linux)"),
+    );
     h.insert("Ostype", HeaderValue::from_static("linux"));
     h.insert("Builder-Version", HeaderValue::from_static("1"));
     h.insert("Docker-Experimental", HeaderValue::from_static("true"));
@@ -881,7 +884,8 @@ pub async fn run_podman_system_service(
             use std::os::unix::io::FromRawFd;
             let (so_type, sa_family) = unsafe {
                 let mut st: libc::c_int = 0;
-                let mut len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                let mut len: libc::socklen_t =
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t;
                 let r = libc::getsockopt(
                     3,
                     libc::SOL_SOCKET,
@@ -897,7 +901,8 @@ pub async fn run_podman_system_service(
                 let mut storage: libc::sockaddr_storage = std::mem::zeroed();
                 let mut slen: libc::socklen_t =
                     std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-                let _ = libc::getsockname(3, &mut storage as *mut _ as *mut libc::sockaddr, &mut slen);
+                let _ =
+                    libc::getsockname(3, &mut storage as *mut _ as *mut libc::sockaddr, &mut slen);
                 (st, storage.ss_family as i32)
             };
             let _ = so_type;
@@ -1158,10 +1163,8 @@ async fn down_kube_endpoint(
         .get("force")
         .map(|s| s.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let _ = crate::kube::KubeManager::play_kube_down_str_with_force(
-        &tmp_path.to_string_lossy(),
-        force,
-    );
+    let _ =
+        crate::kube::KubeManager::play_kube_down_str_with_force(&tmp_path.to_string_lossy(), force);
     let _ = fs::remove_file(&tmp_path);
     (
         axum::http::StatusCode::OK,
@@ -1303,8 +1306,12 @@ mod tests {
             reference: "library/alpine".to_string(),
             tag: "latest".to_string(),
             registry: "docker.io".to_string(),
-            manifest_digest: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string(),
-            config_digest: "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string(),
+            manifest_digest:
+                "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+                    .to_string(),
+            config_digest:
+                "sha256:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+                    .to_string(),
             size_bytes: 1024,
             created_at: chrono::Utc::now(),
             rootfs_path: rootfs.to_string_lossy().to_string(),
@@ -1334,7 +1341,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(response.status(), StatusCode::OK | StatusCode::CREATED));
+        assert!(matches!(
+            response.status(),
+            StatusCode::OK | StatusCode::CREATED
+        ));
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -1357,7 +1367,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(response.status(), StatusCode::OK | StatusCode::CREATED));
+        assert!(matches!(
+            response.status(),
+            StatusCode::OK | StatusCode::CREATED
+        ));
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();

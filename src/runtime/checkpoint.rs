@@ -258,9 +258,12 @@ impl CheckpointManager {
         args: &crate::cli::ContainerCheckpointArgs,
     ) -> Result<PathBuf> {
         let store = ContainerStore::new();
-        let cont = store
-            .find(query)
-            .ok_or_else(|| anyhow!("no container with name or ID {:?} found: no such container", query))?;
+        let cont = store.find(query).ok_or_else(|| {
+            anyhow!(
+                "no container with name or ID {:?} found: no such container",
+                query
+            )
+        })?;
 
         let bundle = PathBuf::from(&cont.bundle_path);
         let cp_dir = Self::checkpoint_dir(&bundle).join("default");
@@ -378,7 +381,10 @@ impl CheckpointManager {
         );
         let registry = if image_name.contains('/')
             && (image_name.starts_with("localhost/")
-                || image_name.split('/').next().is_some_and(|p| p.contains('.')))
+                || image_name
+                    .split('/')
+                    .next()
+                    .is_some_and(|p| p.contains('.')))
         {
             parsed.registry
         } else {
@@ -519,8 +525,9 @@ impl CheckpointManager {
                 if Self::is_checkpoint_image(&img) {
                     let cp_json = Path::new(&img.rootfs_path).join("checkpoint.json");
                     if cp_json.exists() {
-                        let id = Self::restore_from_checkpoint_dir(Path::new(&img.rootfs_path), args)
-                            .await?;
+                        let id =
+                            Self::restore_from_checkpoint_dir(Path::new(&img.rootfs_path), args)
+                                .await?;
                         outputs.push(id);
                         continue;
                     }
@@ -594,7 +601,10 @@ impl CheckpointManager {
                 .iter()
                 .map(|p| {
                     if let Some(ref hip) = p.host_ip {
-                        format!("{}:{}:{}/{}", hip, p.host_port, p.container_port, p.protocol)
+                        format!(
+                            "{}:{}:{}/{}",
+                            hip, p.host_port, p.container_port, p.protocol
+                        )
                     } else {
                         format!("{}:{}/{}", p.host_port, p.container_port, p.protocol)
                     }

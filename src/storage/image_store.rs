@@ -250,7 +250,10 @@ impl ImageStore {
         if let Some(ref is_dir) = globals.imagestore {
             alt_roots.push(is_dir.clone());
         }
-        for env_key in ["CONTAINERS_STORAGE_CONF_OVERRIDE", "CONTAINERS_STORAGE_CONF"] {
+        for env_key in [
+            "CONTAINERS_STORAGE_CONF_OVERRIDE",
+            "CONTAINERS_STORAGE_CONF",
+        ] {
             if let Ok(conf_path) = std::env::var(env_key) {
                 if let Ok(content) = fs::read_to_string(&conf_path) {
                     for line in content.lines() {
@@ -537,9 +540,10 @@ impl ImageStore {
     pub fn has_children(&self, parent_id: &str) -> bool {
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let data = self.load_unlocked();
-            Ok(data.parents.iter().any(|(child, p)| {
-                p == parent_id && data.images.iter().any(|i| &i.id == child)
-            }))
+            Ok(data
+                .parents
+                .iter()
+                .any(|(child, p)| p == parent_id && data.images.iter().any(|i| &i.id == child)))
         })
         .unwrap_or(false)
     }
@@ -769,7 +773,9 @@ impl ImageStore {
                 .unwrap_or(full_tag);
             let first_comp = full_tag.split('/').next().unwrap_or("");
             let has_registry = full_tag.contains('/')
-                && (first_comp.contains('.') || first_comp.contains(':') || first_comp == "localhost");
+                && (first_comp.contains('.')
+                    || first_comp.contains(':')
+                    || first_comp == "localhost");
             if !has_registry {
                 let repo_part = name_only.strip_prefix("localhost/").unwrap_or(name_only);
                 (
@@ -850,7 +856,10 @@ impl ImageStore {
                     } else {
                         pm.protocol.as_str()
                     };
-                    exp.insert(format!("{}/{}", pm.container_port, proto), serde_json::json!({}));
+                    exp.insert(
+                        format!("{}/{}", pm.container_port, proto),
+                        serde_json::json!({}),
+                    );
                 }
                 for ep in &container.exposed_ports {
                     let key = if ep.contains('/') {
@@ -926,7 +935,11 @@ impl ImageStore {
                         continue;
                     }
                 }
-                exec.cmd = Some(vec!["/bin/sh".to_string(), "-c".to_string(), val.to_string()]);
+                exec.cmd = Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    val.to_string(),
+                ]);
                 exec.entrypoint = None;
             } else if key.eq_ignore_ascii_case("ENTRYPOINT") {
                 if val.starts_with('[') && val.ends_with(']') {

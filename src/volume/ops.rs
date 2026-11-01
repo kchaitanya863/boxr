@@ -152,11 +152,7 @@ impl VolumeOps {
                 }
                 let is_symlink = entry.header().entry_type().is_symlink();
                 let rel_path_opt = entry.path().ok().map(|p| p.into_owned());
-                let link_target_opt = entry
-                    .link_name()
-                    .ok()
-                    .flatten()
-                    .map(|p| p.into_owned());
+                let link_target_opt = entry.link_name().ok().flatten().map(|p| p.into_owned());
                 if entry.unpack_in(&mountpoint).unwrap_or(false) == false && is_symlink {
                     if let (Some(rel_path), Some(link_target)) = (rel_path_opt, link_target_opt) {
                         let dst = mountpoint.join(&rel_path);

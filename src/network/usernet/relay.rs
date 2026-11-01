@@ -194,7 +194,11 @@ fn parse_dns_qname(pkt: &[u8], start: usize) -> Option<(String, usize)> {
 }
 
 fn encode_dns_name(name: &str, out: &mut Vec<u8>) {
-    for label in name.trim_end_matches('.').split('.').filter(|s| !s.is_empty()) {
+    for label in name
+        .trim_end_matches('.')
+        .split('.')
+        .filter(|s| !s.is_empty())
+    {
         let bytes = label.as_bytes();
         let l = bytes.len().min(63);
         out.push(l as u8);
@@ -554,11 +558,7 @@ fn forward_dns_on_host(bundle_path: &Path, query: &[u8]) -> Result<Vec<u8>> {
                             if qtype == 1 {
                                 return Ok(build_dns_a_response(query, question_end, ip));
                             } else {
-                                return Ok(build_dns_empty_or_nxdomain(
-                                    query,
-                                    question_end,
-                                    false,
-                                ));
+                                return Ok(build_dns_empty_or_nxdomain(query, question_end, false));
                             }
                         }
                     }
@@ -756,9 +756,10 @@ fn try_connect_peer_container(bundle_path: &Path, ip: Ipv4Addr, port: u16) -> Op
                         if let Ok(ifaces) =
                             serde_json::from_str::<Vec<(String, String, String)>>(&ifaces_raw)
                         {
-                            if ifaces.iter().any(|(_, cidr, _)| {
-                                cidr.split('/').next().unwrap_or("") == ip_str
-                            }) {
+                            if ifaces
+                                .iter()
+                                .any(|(_, cidr, _)| cidr.split('/').next().unwrap_or("") == ip_str)
+                            {
                                 matches_ip = true;
                             }
                         }

@@ -690,10 +690,7 @@ fn append_containerenv_mount(
     #[cfg(not(unix))]
     let rootless = 0;
     let has_root_mount = mounts.iter().any(|m| m.source == Path::new("/"))
-        || spec
-            .mounts
-            .iter()
-            .any(|m| m.source == "/");
+        || spec.mounts.iter().any(|m| m.source == "/");
     let mut body = if privileged {
         format!(
             "engine=\"podman-{}\"\nname=\"{}\"\nid=\"{}\"\nimage=\"{}\"\nimageid=\"{}\"\nrootless={}\n",
@@ -1006,7 +1003,9 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     }
                 }
             }
-            if args.platform.is_none() && find_manifest_key(&load_manifests_map(), &args.source).is_some() {
+            if args.platform.is_none()
+                && find_manifest_key(&load_manifests_map(), &args.source).is_some()
+            {
                 handle_manifest(
                     cli::ManifestSubcommands {
                         registry_auth: args.registry_auth.clone(),
@@ -1175,10 +1174,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                 if cli::podman_globals::podman_global_options().debug {
                     eprintln!("level=debug msg=\"Ping https://{}/v2/ {}\"", server, e);
                 }
-                cli::usage_errors::exit_usage_error(format!(
-                    "Not logged into {}",
-                    server
-                ));
+                cli::usage_errors::exit_usage_error(format!("Not logged into {}", server));
             }
             cred_store.logout(server)?;
             println!("Removed login credentials for {}", server);
@@ -1488,11 +1484,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     let _ = fs::remove_dir_all(storage::boxr_home().join("cache_mounts"));
                     let _ = fs::remove_dir_all("/tmp/boxr-buildkit-cache");
                 }
-                prune_images_with_filter(
-                    prune_args.all,
-                    prune_args.external,
-                    &prune_args.filter,
-                )?;
+                prune_images_with_filter(prune_args.all, prune_args.external, &prune_args.filter)?;
                 Ok(0)
             }
             cli::ImageAction::Exists { image } => {
@@ -2134,8 +2126,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                                 .iter()
                                 .map(|a| {
                                     let (_, repo, tag) = artifact::normalize_artifact_name(&a.name);
-                                    let hex =
-                                        a.digest.strip_prefix("sha256:").unwrap_or(&a.digest);
+                                    let hex = a.digest.strip_prefix("sha256:").unwrap_or(&a.digest);
                                     let dig = if no_trunc {
                                         hex.to_string()
                                     } else {
@@ -2161,8 +2152,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                             } else {
                                 hex[..12.min(hex.len())].to_string()
                             };
-                            let elapsed_secs =
-                                (now - a.created_at).num_seconds().max(0) as u64;
+                            let elapsed_secs = (now - a.created_at).num_seconds().max(0) as u64;
                             let created_human = if elapsed_secs == 0 {
                                 "Less than a second ago".to_string()
                             } else if elapsed_secs == 1 {
@@ -2174,8 +2164,10 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                             } else {
                                 format!("{} hours ago", elapsed_secs / 3600)
                             };
-                            let created_at_str =
-                                a.created_at.format("%Y-%m-%d %H:%M:%S%.9f +0000 UTC").to_string();
+                            let created_at_str = a
+                                .created_at
+                                .format("%Y-%m-%d %H:%M:%S%.9f +0000 UTC")
+                                .to_string();
                             let mut line = fmt.clone();
                             line = line.replace("{{.Repository}}", &repo);
                             line = line.replace("{{.Tag}}", &tag);
@@ -2263,11 +2255,7 @@ pub async fn run_cli(cli: Cli) -> Result<i32> {
                     let mut attrs = HashMap::new();
                     attrs.insert("name".to_string(), reference.clone());
                     EventManager::record(ContainerEvent::new(
-                        "artifact",
-                        "push",
-                        &reference,
-                        &reference,
-                        attrs,
+                        "artifact", "push", &reference, &reference, attrs,
                     ));
                 }
                 cli::ArtifactAction::Rm { all, ignore, names } => {
@@ -2422,7 +2410,10 @@ pub fn init_containers(args: &cli::InitArgs) -> Result<()> {
         for c in store.list() {
             let bundle_path = PathBuf::from(&c.bundle_path);
             validate_bundle_host_gateway(&bundle_path);
-            if matches!(c.status, ContainerStatus::Created | ContainerStatus::Exited(_)) {
+            if matches!(
+                c.status,
+                ContainerStatus::Created | ContainerStatus::Exited(_)
+            ) {
                 let _ = store.update_status(&c.id, ContainerStatus::Initialized);
             }
             println!("{}", c.id);
@@ -2509,14 +2500,17 @@ pub fn validate_image_record(record: &ImageRecord) -> bool {
             }
         }
     }
-    if !record.rootfs_path.starts_with("/var/tmp/boxr-e2e-tar-cache")
+    if !record
+        .rootfs_path
+        .starts_with("/var/tmp/boxr-e2e-tar-cache")
         && !record.rootfs_path.starts_with("/tmp/boxr-e2e-tar-cache")
     {
         if let Some(rootfs_cfg) = &record.config.rootfs {
             let manifest_path = rootfs.parent().map(|p| p.join("manifest.json"));
             if let Some(manifest_path) = manifest_path.filter(|p| p.exists()) {
                 if let Ok(content) = fs::read_to_string(&manifest_path) {
-                    if let Ok(manifest) = serde_json::from_str::<oci::image::ImageManifest>(&content)
+                    if let Ok(manifest) =
+                        serde_json::from_str::<oci::image::ImageManifest>(&content)
                     {
                         let non_empty_diffs = rootfs_cfg
                             .diff_ids
@@ -2671,7 +2665,10 @@ pub fn load_image_archive_transport(path: &Path, home: &Path) -> Result<ImageRec
 fn load_dir_transport(dir_path: &Path, home: &Path, emit_stderr: bool) -> Result<ImageRecord> {
     let manifest_file = dir_path.join("manifest.json");
     if !manifest_file.exists() {
-        return Err(anyhow!("open {}: no such file or directory", manifest_file.display()));
+        return Err(anyhow!(
+            "open {}: no such file or directory",
+            manifest_file.display()
+        ));
     }
     let cfg_bytes = fs::read(&manifest_file)?;
     let config: oci::image::ImageConfig = serde_json::from_slice(&cfg_bytes)?;
@@ -3084,11 +3081,14 @@ async fn run_single_pull_command(args: &cli::PullArgs, global_auth: Option<&str>
         Some(p.clone())
     } else if args.arch.is_some() || args.os.is_some() {
         let os_part = args.os.as_deref().unwrap_or("linux");
-        let arch_part = args.arch.as_deref().unwrap_or(match std::env::consts::ARCH {
-            "aarch64" => "arm64",
-            "x86_64" => "amd64",
-            other => other,
-        });
+        let arch_part = args
+            .arch
+            .as_deref()
+            .unwrap_or(match std::env::consts::ARCH {
+                "aarch64" => "arm64",
+                "x86_64" => "amd64",
+                other => other,
+            });
         Some(format!("{}/{}", os_part, arch_part))
     } else {
         None
@@ -3247,8 +3247,7 @@ async fn run_single_pull_command(args: &cli::PullArgs, global_auth: Option<&str>
             if args.all_tags {
                 let mut extra_rec = r.clone();
                 extra_rec.tag = "20200210".to_string();
-                let alt_hash =
-                    hex::encode(Sha256::digest(format!("{}:20200210", r.id).as_bytes()));
+                let alt_hash = hex::encode(Sha256::digest(format!("{}:20200210", r.id).as_bytes()));
                 extra_rec.id = alt_hash[..12].to_string();
                 extra_rec.manifest_digest = format!("sha256:{}", alt_hash);
                 let _ = store.add(extra_rec);
@@ -3367,8 +3366,7 @@ pub async fn pull_image_with_platform(
         let cache_root = PathBuf::from("/var/tmp/boxr-e2e-tar-cache");
         if cache_root.join("images.json").exists() {
             let cache_store = ImageStore::with_home(cache_root);
-            if let Some(mut cached) =
-                find_image_with_shortname(&cache_store, clean_image_str, None)
+            if let Some(mut cached) = find_image_with_shortname(&cache_store, clean_image_str, None)
             {
                 if Path::new(&cached.rootfs_path).exists() {
                     let store = ImageStore::new();
@@ -3522,8 +3520,7 @@ pub async fn pull_image_with_platform(
                     if is_debug {
                         eprintln!(
                             "DEBU[0000] Not using TOC {} to look for layer reuse: DiffID value for layer {} is unknown or explicitly empty",
-                            layer_desc.digest,
-                            layer_desc.digest
+                            layer_desc.digest, layer_desc.digest
                         );
                     }
                 } else if has_toc {
@@ -3541,7 +3538,10 @@ pub async fn pull_image_with_platform(
                     }
                 }
                 if is_debug {
-                    eprintln!("DEBU[0000] Skipping blob {} (already present)", layer_desc.digest);
+                    eprintln!(
+                        "DEBU[0000] Skipping blob {} (already present)",
+                        layer_desc.digest
+                    );
                 }
                 continue;
             } else {
@@ -3561,7 +3561,10 @@ pub async fn pull_image_with_platform(
                 } else {
                     used_toc = true;
                     if is_debug {
-                        eprintln!("DEBU[0000] Created zstd:chunked differ for blob {}", layer_desc.digest);
+                        eprintln!(
+                            "DEBU[0000] Created zstd:chunked differ for blob {}",
+                            layer_desc.digest
+                        );
                     }
                 }
             }
@@ -3621,8 +3624,7 @@ pub async fn pull_image_with_platform(
     if partial_enabled && insecure_unpredictable && used_toc && is_debug {
         eprintln!(
             "DEBU[0000] Ordinary storage image ID {}; a layer was looked up by TOC, so using image ID {}",
-            manifest.config.digest,
-            manifest_digest
+            manifest.config.digest, manifest_digest
         );
     }
 
@@ -3756,7 +3758,10 @@ fn compute_uncompressed_layer_digest(layer_file: &Path) -> Result<String> {
     } else {
         fs::read(layer_file)?
     };
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(&raw_bytes))))
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(&raw_bytes))
+    ))
 }
 
 pub async fn push_image(image_str: &str) -> Result<()> {
@@ -4914,10 +4919,7 @@ pub async fn run_container_with_output(
             .and_then(|c| c.labels.as_ref())
             .is_some_and(|l| l.get("io.boxr.encrypted").map(|s| s.as_str()) == Some("true"))
         {
-            let has_valid_key = args
-                .decryption_key
-                .iter()
-                .any(|k| Path::new(k).exists());
+            let has_valid_key = args.decryption_key.iter().any(|k| Path::new(k).exists());
             if !has_valid_key {
                 let store = ImageStore::new();
                 let _ = store.remove(&rec.qualified_name());
@@ -5084,7 +5086,9 @@ pub async fn run_container_with_output(
         limits.pids_max = Some(if pids == 0 { -1 } else { pids });
     }
 
-    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref()) {
+    if let Ok(cgroup_mgr) =
+        cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref())
+    {
         let _ = cgroup_mgr.apply_limits(&limits);
     }
 
@@ -5368,7 +5372,10 @@ pub async fn run_container_with_output(
         .clone()
         .or_else(|| containers_conf_toml_value("umask"));
     if let Some(umask_str) = &effective_umask {
-        let octal_str = umask_str.trim().strip_prefix("0o").unwrap_or(umask_str.trim());
+        let octal_str = umask_str
+            .trim()
+            .strip_prefix("0o")
+            .unwrap_or(umask_str.trim());
         let u = u32::from_str_radix(octal_str, 8).unwrap_or(0o022);
         spec.process.umask = Some(u);
         annotations.insert("boxr.umask".to_string(), format!("{:04o}", u));
@@ -5549,7 +5556,11 @@ pub async fn run_container_with_output(
     if !args.group_add.is_empty() {
         let gids = parse_group_add_gids_with_rootfs(&args.group_add, Some(&cow_bundle.merged_dir));
         if !gids.is_empty() {
-            let existing = spec.process.user.additional_gids.get_or_insert_with(Vec::new);
+            let existing = spec
+                .process
+                .user
+                .additional_gids
+                .get_or_insert_with(Vec::new);
             for g in gids {
                 if !existing.contains(&g) {
                     existing.push(g);
@@ -5838,7 +5849,9 @@ pub async fn run_container_with_output(
                 cli::usage_errors::exit_usage_error("cannot set ro or rw options more than once");
             }
             if z_count > 1 {
-                cli::usage_errors::exit_usage_error("cannot set :z more than once in mount options");
+                cli::usage_errors::exit_usage_error(
+                    "cannot set :z more than once in mount options",
+                );
             }
         }
         let c_lookup = ContainerStore::new();
@@ -5870,7 +5883,10 @@ pub async fn run_container_with_output(
                         } else if is_rw {
                             m.read_only = false;
                         }
-                        if !parsed_mounts.iter().any(|pm| pm.destination == m.destination) {
+                        if !parsed_mounts
+                            .iter()
+                            .any(|pm| pm.destination == m.destination)
+                        {
                             parsed_mounts.push(m);
                         }
                     }
@@ -6169,7 +6185,7 @@ pub async fn run_container_with_output(
         event_attrs.clone(),
     ));
     add_container_record(&container_store, record, &ephemeral_new_pod)?;
-    let _ = mount::MountManager::new().mount_container(&container_id);
+    let _ = mount::MountManager::new().record_container_mount(&container_id);
 
     if args.detach {
         if let Some((code, msg)) = check_custom_systemd_run_for_healthcheck(&health_cfg) {
@@ -6436,7 +6452,9 @@ pub async fn run_container_with_output(
     #[cfg(target_os = "linux")]
     if parsed_mounts.iter().any(|m| m.idmap) {
         if let Some(ann) = &spec.annotations {
-            if let (Some(u_json), Some(g_json)) = (ann.get("boxr.uid_maps"), ann.get("boxr.gid_maps")) {
+            if let (Some(u_json), Some(g_json)) =
+                (ann.get("boxr.uid_maps"), ann.get("boxr.gid_maps"))
+            {
                 if let (Ok(u_maps), Ok(g_maps)) = (
                     serde_json::from_str::<Vec<security::IdMapping>>(u_json),
                     serde_json::from_str::<Vec<security::IdMapping>>(g_json),
@@ -6571,8 +6589,7 @@ pub async fn run_container_with_output(
 
     event_attrs.insert("exitCode".to_string(), exit_code.to_string());
     if !args.detach {
-        let oom = cgroups::CgroupV2Manager::was_oom_killed(&container_id)
-            || exit_code == 137;
+        let oom = cgroups::CgroupV2Manager::was_oom_killed(&container_id) || exit_code == 137;
         if oom {
             let _ = fs::write(bundle_dir.join("oom_killed"), "1");
         }
@@ -7539,9 +7556,7 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<i32> {
         || cli::podman_globals::podman_global_options().remote;
     if args.pidfile.is_some() {
         if is_remote {
-            cli::usage_errors::exit_usage_error(
-                "--pidfile is not supported on remote connections",
-            );
+            cli::usage_errors::exit_usage_error("--pidfile is not supported on remote connections");
         }
         if args.attach {
             cli::usage_errors::exit_usage_error("--pidfile cannot be used with --attach");
@@ -7664,7 +7679,10 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<i32> {
         }
         if let Ok(content) = fs::read_to_string(bundle_path.join("config.json")) {
             if let Ok(spec) = serde_json::from_str::<Spec>(&content) {
-                if let Some(create_pf) = spec.annotations.as_ref().and_then(|a| a.get("boxr.pidfile"))
+                if let Some(create_pf) = spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.pidfile"))
                 {
                     if !create_pf.is_empty() {
                         write_container_pidfile(&bundle_path, create_pf);
@@ -7716,7 +7734,9 @@ pub async fn start_containers(args: &cli::StartArgs) -> Result<i32> {
             }
             if !matches!(
                 c.status,
-                ContainerStatus::Exited(_) | ContainerStatus::Created | ContainerStatus::Initialized
+                ContainerStatus::Exited(_)
+                    | ContainerStatus::Created
+                    | ContainerStatus::Initialized
             ) {
                 continue;
             }
@@ -8016,7 +8036,11 @@ pub async fn start_container_with_home(
     let config_file = bundle_path.join("config.json");
     let content = fs::read_to_string(&config_file)?;
     let mut spec: Spec = serde_json::from_str(&content)?;
-    if let Some(reqs_json) = spec.annotations.as_ref().and_then(|a| a.get("boxr.requires")) {
+    if let Some(reqs_json) = spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.requires"))
+    {
         if let Ok(reqs) = serde_json::from_str::<Vec<String>>(reqs_json) {
             for dep in reqs {
                 Box::pin(start_container_with_home(&dep, home_opt, prepare_pod)).await?;
@@ -8046,14 +8070,16 @@ pub async fn start_container_with_home(
             Some(h) => ImageStore::with_home(h.to_path_buf()),
             None => ImageStore::new(),
         };
-        if let Some(img_rec) = find_image_with_shortname(&img_store, &rec.image, None).or_else(|| {
-            if rec.image.contains("podman-pause") {
-                find_image_with_shortname(&img_store, "alpine", None)
-                    .or_else(|| img_store.list().into_iter().next())
-            } else {
-                None
-            }
-        }) {
+        if let Some(img_rec) =
+            find_image_with_shortname(&img_store, &rec.image, None).or_else(|| {
+                if rec.image.contains("podman-pause") {
+                    find_image_with_shortname(&img_store, "alpine", None)
+                        .or_else(|| img_store.list().into_iter().next())
+                } else {
+                    None
+                }
+            })
+        {
             let _ = OverlayDriver::create_hardlink_tree(Path::new(&img_rec.rootfs_path), &rootfs);
         }
     }
@@ -8220,9 +8246,7 @@ pub fn container_logs(args: &LogsArgs) -> Result<()> {
         }
     }
     if args.containers.is_empty() {
-        cli::usage_errors::exit_usage_error(
-            "you must provide at least one container name or ID",
-        );
+        cli::usage_errors::exit_usage_error("you must provide at least one container name or ID");
     }
     if args.containers.len() == 1 {
         return container_logs_one(&args, &args.containers[0]);
@@ -8741,7 +8765,12 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 };
                 let mut labels_map = HashMap::new();
                 if let Some(img) = i_store.find(&c.image) {
-                    if let Some(img_labels) = img.config.config.as_ref().and_then(|cfg| cfg.labels.as_ref()) {
+                    if let Some(img_labels) = img
+                        .config
+                        .config
+                        .as_ref()
+                        .and_then(|cfg| cfg.labels.as_ref())
+                    {
                         for (k, v) in img_labels {
                             labels_map.insert(k.clone(), v.clone());
                         }
@@ -8940,8 +8969,8 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                 if let Some(first) = create_command.first_mut() {
                     *first = "podman".to_string();
                 }
-                let state_error = fs::read_to_string(bundle_path.join("state_error.txt"))
-                    .unwrap_or_default();
+                let state_error =
+                    fs::read_to_string(bundle_path.join("state_error.txt")).unwrap_or_default();
                 let is_init_ctr = annotations.contains_key("boxr.init_ctr");
                 let init_container_type = annotations
                     .get("boxr.init_ctr")
@@ -8973,16 +9002,17 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                             .and_then(|img| img.config.config.as_ref()?.entrypoint.clone())
                     })
                     .unwrap_or_default();
-                let config_cmd: Vec<String> = if let Some(cmd_json) = annotations.get("boxr.explicit_command") {
-                    serde_json::from_str::<Vec<String>>(cmd_json).unwrap_or_default()
-                } else if annotations.contains_key("boxr.explicit_entrypoint") {
-                    Vec::new()
-                } else {
-                    i_store
-                        .find(&c.image)
-                        .and_then(|img| img.config.config.as_ref()?.cmd.clone())
-                        .unwrap_or_else(|| c.command.clone())
-                };
+                let config_cmd: Vec<String> =
+                    if let Some(cmd_json) = annotations.get("boxr.explicit_command") {
+                        serde_json::from_str::<Vec<String>>(cmd_json).unwrap_or_default()
+                    } else if annotations.contains_key("boxr.explicit_entrypoint") {
+                        Vec::new()
+                    } else {
+                        i_store
+                            .find(&c.image)
+                            .and_then(|img| img.config.config.as_ref()?.cmd.clone())
+                            .unwrap_or_else(|| c.command.clone())
+                    };
                 let config_stop_signal = annotations
                     .get("boxr.stop_signal")
                     .cloned()
@@ -8996,10 +9026,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .get("boxr.memory_reservation")
                     .and_then(|v| v.parse::<i64>().ok())
                     .unwrap_or(0);
-                let cidfile = annotations
-                    .get("boxr.cidfile")
-                    .cloned()
-                    .unwrap_or_default();
+                let cidfile = annotations.get("boxr.cidfile").cloned().unwrap_or_default();
                 let publish_all = annotations
                     .get("boxr.publish_all")
                     .map(|v| v == "true")
@@ -9098,10 +9125,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .get("boxr.rdt_class")
                     .cloned()
                     .unwrap_or_default();
-                let pidfile_str = annotations
-                    .get("boxr.pidfile")
-                    .cloned()
-                    .unwrap_or_default();
+                let pidfile_str = annotations.get("boxr.pidfile").cloned().unwrap_or_default();
                 let started_at_str = fs::read_to_string(bundle_path.join("started_at.txt"))
                     .ok()
                     .map(|s| s.trim().to_string())
@@ -9228,8 +9252,11 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     }
                     if let Some(tag) = annotations.get("boxr.log_tag") {
                         log_obj["Tag"] = serde_json::Value::String(tag.clone());
-                        if let Some(cfg_map) = log_obj.get_mut("Config").and_then(|v| v.as_object_mut()) {
-                            cfg_map.insert("tag".to_string(), serde_json::Value::String(tag.clone()));
+                        if let Some(cfg_map) =
+                            log_obj.get_mut("Config").and_then(|v| v.as_object_mut())
+                        {
+                            cfg_map
+                                .insert("tag".to_string(), serde_json::Value::String(tag.clone()));
                         }
                     }
                     log_obj
@@ -9327,31 +9354,34 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     })
                     .collect();
 
-                let (inspect_path, inspect_args) =
-                    if annotations.get("boxr.init").map(|v| v == "true").unwrap_or(false) {
-                        let mut a = vec!["--".to_string()];
-                        a.extend(c.command.clone());
-                        ("/run/podman-init".to_string(), a)
-                    } else if annotations.contains_key("boxr.infra_entrypoint") {
-                        let p = config_entrypoint.first().cloned().unwrap_or_default();
-                        let a = if config_entrypoint.len() > 1 {
-                            config_entrypoint[1..].to_vec()
+                let (inspect_path, inspect_args) = if annotations
+                    .get("boxr.init")
+                    .map(|v| v == "true")
+                    .unwrap_or(false)
+                {
+                    let mut a = vec!["--".to_string()];
+                    a.extend(c.command.clone());
+                    ("/run/podman-init".to_string(), a)
+                } else if annotations.contains_key("boxr.infra_entrypoint") {
+                    let p = config_entrypoint.first().cloned().unwrap_or_default();
+                    let a = if config_entrypoint.len() > 1 {
+                        config_entrypoint[1..].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    (p, a)
+                } else if annotations.get("boxr.init").map(|v| v == "true") == Some(true) {
+                    ("/run/podman-init".to_string(), c.command.clone())
+                } else {
+                    (
+                        c.command.first().cloned().unwrap_or_default(),
+                        if c.command.len() > 1 {
+                            c.command[1..].to_vec()
                         } else {
                             Vec::new()
-                        };
-                        (p, a)
-                    } else if annotations.get("boxr.init").map(|v| v == "true") == Some(true) {
-                        ("/run/podman-init".to_string(), c.command.clone())
-                    } else {
-                        (
-                            c.command.first().cloned().unwrap_or_default(),
-                            if c.command.len() > 1 {
-                                c.command[1..].to_vec()
-                            } else {
-                                Vec::new()
-                            },
-                        )
-                    };
+                        },
+                    )
+                };
                 let secrets_inspect_val: serde_json::Value = annotations
                     .get("boxr.secrets")
                     .and_then(|s| serde_json::from_str(s).ok())
@@ -9378,27 +9408,19 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .join("config.json")
                     .to_string_lossy()
                     .to_string();
-                let rootfs_inspect_path =
-                    bundle_path.join("rootfs").to_string_lossy().to_string();
+                let rootfs_inspect_path = bundle_path.join("rootfs").to_string_lossy().to_string();
 
                 let exposed_ports_val = if exposed_map.is_empty() {
                     serde_json::Value::Null
                 } else {
                     serde_json::Value::Object(exposed_map)
                 };
-                let size_root_fs = if args.size {
-                    size_bytes.max(4096)
-                } else {
-                    0
-                };
+                let size_root_fs = if args.size { size_bytes.max(4096) } else { 0 };
                 let pid_file = bundle_path
                     .join("container.pid")
                     .to_string_lossy()
                     .to_string();
-                let conmon_pid_file = bundle_path
-                    .join("conmon.pid")
-                    .to_string_lossy()
-                    .to_string();
+                let conmon_pid_file = bundle_path.join("conmon.pid").to_string_lossy().to_string();
 
                 let cp_state = runtime::CheckpointManager::load_state(&bundle_path);
                 let conmon_pid_file = annotations
@@ -9702,10 +9724,7 @@ pub fn inspect_target(args: &cli::InspectArgs) -> Result<()> {
                     .as_ref()
                     .and_then(|c| c.volumes.clone())
                     .unwrap_or_default();
-                let author = config_labels
-                    .get("author")
-                    .cloned()
-                    .unwrap_or_default();
+                let author = config_labels.get("author").cloned().unwrap_or_default();
                 let comment = config_labels
                     .get("commit_message")
                     .cloned()
@@ -10606,8 +10625,8 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
                     if exitcode_file.exists() {
                         if let Ok(code_str) = std::fs::read_to_string(&exitcode_file) {
                             if let Ok(code) = code_str.trim().parse::<i32>() {
-                                let _ = c_store
-                                    .update_status(&cont.id, ContainerStatus::Exited(code));
+                                let _ =
+                                    c_store.update_status(&cont.id, ContainerStatus::Exited(code));
                                 println!("{}", code);
                                 return Ok(0);
                             }
@@ -10722,20 +10741,22 @@ pub fn wait_container(args: &cli::WaitArgs) -> Result<i32> {
 
             if conds.iter().any(|c| c == "next-exit") {
                 let bundle_path = std::path::PathBuf::from(&cont.bundle_path);
-                let is_alive = if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
-                    pid_str
-                        .trim()
-                        .parse::<i32>()
-                        .map(|p| unsafe { libc::kill(p, 0) == 0 })
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
+                let is_alive =
+                    if let Ok(pid_str) = std::fs::read_to_string(bundle_path.join("vm.pid")) {
+                        pid_str
+                            .trim()
+                            .parse::<i32>()
+                            .map(|p| unsafe { libc::kill(p, 0) == 0 })
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
                 if matches!(cont.status, ContainerStatus::Running) || is_alive {
                     seen_running_for_next_exit = true;
                 }
                 if !seen_running_for_next_exit {
-                    if let Ok(code_str) = std::fs::read_to_string(bundle_path.join("boxr-exitcode")) {
+                    if let Ok(code_str) = std::fs::read_to_string(bundle_path.join("boxr-exitcode"))
+                    {
                         if let Ok(code) = code_str.trim().parse::<i32>() {
                             println!("{}", code);
                             last_code = code;
@@ -11100,7 +11121,9 @@ pub fn update_container(args: &cli::UpdateArgs) -> Result<()> {
                 let resolved = if env_spec.contains('=') {
                     Some(env_spec.clone())
                 } else {
-                    std::env::var(env_spec).ok().map(|v| format!("{}={}", env_spec, v))
+                    std::env::var(env_spec)
+                        .ok()
+                        .map(|v| format!("{}={}", env_spec, v))
                 };
                 if let Some(kv) = resolved {
                     spec.process.env.push(kv.clone());
@@ -11825,15 +11848,12 @@ fn write_prebuilt_resolv_and_hosts(
 
     let mut hosts_lines: Vec<String> = Vec::new();
     let mut known_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let pod_hosts_file_opt = args
-        .hosts_file
-        .as_deref()
-        .or_else(|| {
-            pod_rec_opt
-                .as_ref()
-                .and_then(|p| p.labels.get("boxr.pod.hosts_file"))
-                .map(|s| s.as_str())
-        });
+    let pod_hosts_file_opt = args.hosts_file.as_deref().or_else(|| {
+        pod_rec_opt
+            .as_ref()
+            .and_then(|p| p.labels.get("boxr.pod.hosts_file"))
+            .map(|s| s.as_str())
+    });
     let base_hosts_raw: Option<String> = match pod_hosts_file_opt {
         Some("none") => Some(String::new()),
         Some("image") => pod_rec_opt
@@ -12164,10 +12184,7 @@ fn apply_container_devices(
                 host_path
             };
             if !Path::new(host_path).exists() {
-                return Err(anyhow!(
-                    "stat {}: no such file or directory",
-                    host_path
-                ));
+                return Err(anyhow!("stat {}: no such file or directory", host_path));
             }
             spec.mounts.push(oci::runtime::Mount {
                 destination: cont_path.to_string(),
@@ -12392,7 +12409,10 @@ fn apply_log_config_annotations(
     }
     let mut cfg_map = serde_json::Map::new();
     if let Some(mf) = &max_file_opt {
-        cfg_map.insert("max-file".to_string(), serde_json::Value::String(mf.clone()));
+        cfg_map.insert(
+            "max-file".to_string(),
+            serde_json::Value::String(mf.clone()),
+        );
         cfg_map.insert(
             "log-rotate".to_string(),
             serde_json::Value::String("true".to_string()),
@@ -12536,7 +12556,10 @@ fn apply_run_user_spec(
                 }
             } else if add_passwd {
                 let mut lines: Vec<String> = existing.lines().map(String::from).collect();
-                lines.push(format!("{}:x:{}:{}:container user:/:/bin/sh", uid, uid, gid));
+                lines.push(format!(
+                    "{}:x:{}:{}:container user:/:/bin/sh",
+                    uid, uid, gid
+                ));
                 if let Some(parent) = passwd_path.parent() {
                     let _ = fs::create_dir_all(parent);
                 }
@@ -12657,14 +12680,21 @@ fn apply_passwd_and_group_management(
     };
 
     if let Some(u_str) = &effective_user {
-        let user_set_home = args.env.iter().any(|e| e.starts_with("HOME=") || e == "HOME");
+        let user_set_home = args
+            .env
+            .iter()
+            .any(|e| e.starts_with("HOME=") || e == "HOME");
         apply_run_user_spec(merged_rootfs, u_str, spec, false, user_set_home);
     }
 
     let uid = spec.process.user.uid;
     let gid = spec.process.user.gid;
     if gid != 0 {
-        let gids = spec.process.user.additional_gids.get_or_insert_with(Vec::new);
+        let gids = spec
+            .process
+            .user
+            .additional_gids
+            .get_or_insert_with(Vec::new);
         if !gids.contains(&gid) {
             gids.insert(0, gid);
         }
@@ -13253,7 +13283,9 @@ fn apply_env_merge(spec: &mut oci::runtime::Spec, env_merges: &[String]) {
             ));
         };
         let expanded = expand_env_merge_value(raw_val, &spec.process.env);
-        spec.process.env.retain(|e| e.split('=').next() != Some(key));
+        spec.process
+            .env
+            .retain(|e| e.split('=').next() != Some(key));
         spec.process.env.push(format!("{}={}", key, expanded));
     }
 }
@@ -13324,11 +13356,13 @@ fn resolve_cdi_device_mounts(
                         if let Some(m_arr) = edits.get("mounts").and_then(|v| v.as_array()) {
                             for m in m_arr {
                                 let hp = m.get("hostPath").and_then(|v| v.as_str()).unwrap_or("");
-                                let cp = m.get("containerPath").and_then(|v| v.as_str()).unwrap_or(hp);
-                                let ro = m
-                                    .get("options")
-                                    .and_then(|v| v.as_array())
-                                    .is_some_and(|opts| opts.iter().any(|o| o.as_str() == Some("ro")));
+                                let cp = m
+                                    .get("containerPath")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(hp);
+                                let ro = m.get("options").and_then(|v| v.as_array()).is_some_and(
+                                    |opts| opts.iter().any(|o| o.as_str() == Some("ro")),
+                                );
                                 if !hp.is_empty() && !cp.is_empty() {
                                     mounts.push((hp.to_string(), cp.to_string(), ro));
                                 }
@@ -13338,7 +13372,10 @@ fn resolve_cdi_device_mounts(
                             for d in d_arr {
                                 let cp = d.get("path").and_then(|v| v.as_str()).unwrap_or("");
                                 let hp = d.get("hostPath").and_then(|v| v.as_str()).unwrap_or(cp);
-                                let perms = d.get("permissions").and_then(|v| v.as_str()).unwrap_or("rwm");
+                                let perms = d
+                                    .get("permissions")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("rwm");
                                 let ro = !perms.contains('w');
                                 if !hp.is_empty() && !cp.is_empty() {
                                     mounts.push((hp.to_string(), cp.to_string(), ro));
@@ -13426,7 +13463,10 @@ fn apply_devices_to_spec(spec: &mut Spec, devices: &[String], cdi_dirs: &[String
                 (*h, eff_c, *m)
             }
             _ => {
-                cli::usage_errors::exit_usage_error(format!("invalid device specification: {}", dev_str));
+                cli::usage_errors::exit_usage_error(format!(
+                    "invalid device specification: {}",
+                    dev_str
+                ));
             }
         };
         if !Path::new(host_path).exists() {
@@ -13745,14 +13785,8 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
         cli::usage_errors::exit_usage_error("cannot specify --squash-all with --squash");
     }
     if let Some(iso) = &args.isolation {
-        if !matches!(
-            iso.as_str(),
-            "default" | "oci" | "chroot" | "rootless" | ""
-        ) {
-            cli::usage_errors::exit_usage_error(format!(
-                "unrecognized isolation type {:?}",
-                iso
-            ));
+        if !matches!(iso.as_str(), "default" | "oci" | "chroot" | "rootless" | "") {
+            cli::usage_errors::exit_usage_error(format!("unrecognized isolation type {:?}", iso));
         }
     }
     if let Some(out_opt) = &args.output {
@@ -13828,7 +13862,9 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
         if raw_ctx_path.exists() && raw_ctx_path.is_file() {
             cli::usage_errors::exit_usage_error(format!(
                 "context must be a directory: {:?}",
-                raw_ctx_path.canonicalize().unwrap_or_else(|_| raw_ctx_path.to_path_buf())
+                raw_ctx_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| raw_ctx_path.to_path_buf())
             ));
         }
         let ctx = if args.path == "." && args.file != "Dockerfile" && Path::new(&args.file).exists()
@@ -14089,7 +14125,11 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
     if let Some(sbom_out) = &args.sbom_output {
         fs::write(
             sbom_out,
-            format!("SCANNED ROOT {}\nSCANNED BUILD CONTEXT {}\n", record.rootfs_path, context_dir.display()),
+            format!(
+                "SCANNED ROOT {}\nSCANNED BUILD CONTEXT {}\n",
+                record.rootfs_path,
+                context_dir.display()
+            ),
         )?;
     }
     if let Some(purl_out) = &args.sbom_purl_output {
@@ -14100,7 +14140,8 @@ pub async fn build_image(args: BuildArgs) -> Result<()> {
             if let Some(dest) = kv.strip_prefix("dest=") {
                 let dest_p = Path::new(dest);
                 let _ = fs::create_dir_all(dest_p);
-                let _ = builder::executor::copy_dir_all_public(Path::new(&record.rootfs_path), dest_p);
+                let _ =
+                    builder::executor::copy_dir_all_public(Path::new(&record.rootfs_path), dest_p);
             }
         }
     }
@@ -14877,10 +14918,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     }
                     return Ok(());
                 }
-                cli::usage_errors::exit_usage_error(format!(
-                    "network already exists {}",
-                    eff_name
-                ));
+                cli::usage_errors::exit_usage_error(format!("network already exists {}", eff_name));
             }
             let net = match store.create_with_full_options(
                 &eff_name,
@@ -15115,8 +15153,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                     if n.name == NetworkStore::DEFAULT_NETWORK && !want_boxr0 {
                         return false;
                     }
-                    if !driver_filters.is_empty()
-                        && !driver_filters.iter().any(|d| n.driver == *d)
+                    if !driver_filters.is_empty() && !driver_filters.iter().any(|d| n.driver == *d)
                     {
                         return false;
                     }
@@ -15500,11 +15537,7 @@ pub fn handle_network(args: NetworkSubcommands) -> Result<()> {
                 if let Some((k, v)) = f.split_once('=') {
                     if k.trim() == "until" {
                         if let Ok(ts) = v.trim().parse::<i64>() {
-                            until_cutoff = Some(if ts > 100_000_000_000 {
-                                ts / 1000
-                            } else {
-                                ts
-                            });
+                            until_cutoff = Some(if ts > 100_000_000_000 { ts / 1000 } else { ts });
                         }
                     }
                 }
@@ -16007,9 +16040,10 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
             .map(|img| img.created_at)
     };
 
-    let has_inter_filter = args.filter.iter().any(|f| {
-        f.trim().starts_with("intermediate=") || f.trim().starts_with("intermediate!=")
-    });
+    let has_inter_filter = args
+        .filter
+        .iter()
+        .any(|f| f.trim().starts_with("intermediate=") || f.trim().starts_with("intermediate!="));
     let mut filtered: Vec<(ImageRecord, bool)> = all_entries
         .iter()
         .filter(|(img, ro)| {
@@ -16170,7 +16204,8 @@ pub fn list_images(args: cli::ImagesArgs) -> Result<()> {
             filtered.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
         }
         Some("created") => {
-            filtered.sort_by(|(a, _), (b, _)| effective_created_dt(b).cmp(&effective_created_dt(a)));
+            filtered
+                .sort_by(|(a, _), (b, _)| effective_created_dt(b).cmp(&effective_created_dt(a)));
         }
         Some("size") => {
             filtered.sort_by(|(a, _), (b, _)| a.size_bytes.cmp(&b.size_bytes));
@@ -16617,8 +16652,9 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
     if args.external {
         if let Ok(exts) = storage::external::list_storage_containers() {
             for ext in exts {
-                let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(ext.created_unix as i64, 0)
-                    .unwrap_or_else(chrono::Utc::now);
+                let dt =
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(ext.created_unix as i64, 0)
+                        .unwrap_or_else(chrono::Utc::now);
                 containers.push(ContainerRecord {
                     id: ext.id,
                     name: ext.name,
@@ -16919,9 +16955,8 @@ pub fn list_containers(args: PsArgs, command_name: &str) -> Result<()> {
             });
         }
         Some("pod") => {
-            filtered.sort_by(|a, b| {
-                pod_name_for_container(&a.id).cmp(&pod_name_for_container(&b.id))
-            });
+            filtered
+                .sort_by(|a, b| pod_name_for_container(&a.id).cmp(&pod_name_for_container(&b.id)));
         }
         Some("command") => {
             filtered.sort_by(|a, b| a.command.join(" ").cmp(&b.command.join(" ")));
@@ -17265,7 +17300,10 @@ fn rm_container_resolving_depend_no_exit(
         None => {
             return Err((
                 1,
-                anyhow!("no container with ID or name \"{}\" found: no such container", target),
+                anyhow!(
+                    "no container with ID or name \"{}\" found: no such container",
+                    target
+                ),
             ));
         }
     };
@@ -18021,7 +18059,11 @@ fn remove_image_inner(
         } else {
             img_store.remove(&remove_query)?
         };
-        println!("Untagged: {}:{}", untagged.display_reference(), untagged.tag);
+        println!(
+            "Untagged: {}:{}",
+            untagged.display_reference(),
+            untagged.tag
+        );
         EventManager::record(ContainerEvent::new(
             "image",
             "untag",
@@ -18165,11 +18207,7 @@ pub fn prune_images_with_filter(all: bool, external: bool, filters: &[String]) -
         if is_used {
             continue;
         }
-        let labels = img
-            .config
-            .config
-            .as_ref()
-            .and_then(|c| c.labels.as_ref());
+        let labels = img.config.config.as_ref().and_then(|c| c.labels.as_ref());
         let mut filter_ok = true;
         for f in filters {
             if let Some(rest) = f.strip_prefix("label!=") {
@@ -18526,7 +18564,9 @@ async fn create_only_container_after_pod_prep(
         }
         limits.pids_max = Some(if pids == 0 { -1 } else { pids });
     }
-    if let Ok(cgroup_mgr) = cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref()) {
+    if let Ok(cgroup_mgr) =
+        cgroups::CgroupV2Manager::new_with_parent(&container_id, args.cgroup_parent.as_deref())
+    {
         let _ = cgroup_mgr.apply_limits(&limits);
     }
 
@@ -18706,7 +18746,10 @@ async fn create_only_container_after_pod_prep(
         .clone()
         .or_else(|| containers_conf_toml_value("umask"));
     if let Some(umask_str) = &effective_umask {
-        let octal_str = umask_str.trim().strip_prefix("0o").unwrap_or(umask_str.trim());
+        let octal_str = umask_str
+            .trim()
+            .strip_prefix("0o")
+            .unwrap_or(umask_str.trim());
         let u = u32::from_str_radix(octal_str, 8).unwrap_or(0o022);
         spec.process.umask = Some(u);
         annotations.insert("boxr.umask".to_string(), format!("{:04o}", u));
@@ -18950,7 +18993,10 @@ async fn create_only_container_after_pod_prep(
                         } else if is_rw {
                             m.read_only = false;
                         }
-                        if !parsed_mounts.iter().any(|pm| pm.destination == m.destination) {
+                        if !parsed_mounts
+                            .iter()
+                            .any(|pm| pm.destination == m.destination)
+                        {
                             parsed_mounts.push(m);
                         }
                     }
@@ -19115,7 +19161,11 @@ async fn create_only_container_after_pod_prep(
     if !args.group_add.is_empty() {
         let gids = parse_group_add_gids_with_rootfs(&args.group_add, Some(&cow_bundle.merged_dir));
         if !gids.is_empty() {
-            let existing = spec.process.user.additional_gids.get_or_insert_with(Vec::new);
+            let existing = spec
+                .process
+                .user
+                .additional_gids
+                .get_or_insert_with(Vec::new);
             for g in gids {
                 if !existing.contains(&g) {
                     existing.push(g);
@@ -19318,7 +19368,10 @@ async fn create_only_container_after_pod_prep(
 
     let restart_policy = health::parse_restart_policy(&args.restart)?;
     let mut health_cfg = if !args.no_healthcheck && args.health_cmd.as_deref() != Some("none") {
-        image_record.config.effective_healthcheck().unwrap_or_default()
+        image_record
+            .config
+            .effective_healthcheck()
+            .unwrap_or_default()
     } else {
         health::HealthConfig::default()
     };
@@ -19538,9 +19591,7 @@ async fn create_only_container_after_pod_prep(
                         }
                     }
                     let ep_opt = net_rec.containers.get(&container_id);
-                    let ip_str = ep_opt
-                        .map(|ep| ep.ipv4_address.clone())
-                        .unwrap_or_default();
+                    let ip_str = ep_opt.map(|ep| ep.ipv4_address.clone()).unwrap_or_default();
                     let ipam_none = net_rec.ipam_driver.eq_ignore_ascii_case("none");
                     let prefix_len = net_rec
                         .subnet
@@ -19689,9 +19740,7 @@ pub async fn restart_container(args: &cli::RestartArgs) -> Result<()> {
             .map(|c| vec![(c.id.clone(), c.id.clone())])
             .unwrap_or_default()
     } else if args.containers.is_empty() {
-        cli::usage_errors::exit_usage_error(
-            "you must provide at least one container name or ID",
-        );
+        cli::usage_errors::exit_usage_error("you must provide at least one container name or ID");
     } else {
         args.containers
             .iter()
@@ -20702,7 +20751,9 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
         for f in &args.filter {
             if let Some(st) = f.strip_prefix("stars=") {
                 if let Ok(min_stars) = st.parse::<i64>() {
-                    items.retain(|it| it.get("Stars").and_then(|v| v.as_i64()).unwrap_or(0) >= min_stars);
+                    items.retain(|it| {
+                        it.get("Stars").and_then(|v| v.as_i64()).unwrap_or(0) >= min_stars
+                    });
                 }
             } else if f == "is-official" || f == "is-official=true" {
                 items.retain(|it| it.get("Official").and_then(|v| v.as_str()) == Some("[OK]"));
@@ -20736,7 +20787,11 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
             }
             for mut it in items {
                 if !args.no_trunc {
-                    if let Some(d) = it.get("Description").and_then(|v| v.as_str()).map(String::from) {
+                    if let Some(d) = it
+                        .get("Description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                    {
                         if d.chars().count() > 44 {
                             let trunc: String = d.chars().take(41).collect();
                             it["Description"] = serde_json::Value::String(format!("{trunc}..."));
@@ -20821,10 +20876,7 @@ pub async fn search_hub(args: &cli::SearchArgs) -> Result<()> {
                                 let desc_trunc: String = desc.chars().take(50).collect();
                                 println!(
                                     "{:<24} {:<50} {:<8} {:<10}",
-                                    name_trunc,
-                                    desc_trunc,
-                                    stars,
-                                    off
+                                    name_trunc, desc_trunc, stars, off
                                 );
                                 count += 1;
                             }
@@ -20983,8 +21035,8 @@ pub fn info_system(args: &cli::FormatArgs) -> Result<()> {
         let default_sock = if uid == 0 {
             "/run/podman/podman.sock".to_string()
         } else {
-            let xdg = std::env::var("XDG_RUNTIME_DIR")
-                .unwrap_or_else(|_| format!("/run/user/{}", uid));
+            let xdg =
+                std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", uid));
             format!("{}/podman/podman.sock", xdg)
         };
         if std::os::unix::net::UnixStream::connect(&default_sock).is_err() {
@@ -21424,8 +21476,10 @@ fn apply_podman_userns(
                 if args.user.is_none() {
                     spec.process.user.uid = target_uid;
                     spec.process.user.gid = target_gid;
-                    let user_set_home =
-                        args.env.iter().any(|e| e.starts_with("HOME=") || e == "HOME");
+                    let user_set_home = args
+                        .env
+                        .iter()
+                        .any(|e| e.starts_with("HOME=") || e == "HOME");
                     if !user_set_home {
                         spec.process.env.retain(|e| !e.starts_with("HOME="));
                         spec.process.env.push(format!("HOME={}", home));
@@ -21673,9 +21727,9 @@ fn pod_matches_filters(p: &pod::PodRecord, filters: &[String], c_store: &Contain
     }
     if !network_filters.is_empty() {
         let matched = network_filters.iter().any(|pat| {
-            p.network.as_deref().is_some_and(|n| {
-                n.split(',').any(|part| part.trim() == *pat)
-            })
+            p.network
+                .as_deref()
+                .is_some_and(|n| n.split(',').any(|part| part.trim() == *pat))
         });
         if !matched {
             return false;
@@ -21771,8 +21825,8 @@ fn build_pod_inspect_json(
             if Some(c.id.as_str()) == infra_cont.as_ref().map(|ic| ic.id.as_str()) {
                 continue;
             }
-            let is_init_ctr = load_container_labels_from_bundle(&c.bundle_path)
-                .contains_key("boxr.init_ctr");
+            let is_init_ctr =
+                load_container_labels_from_bundle(&c.bundle_path).contains_key("boxr.init_ctr");
             if matches!(c.status, ContainerStatus::Running) {
                 num_workload_running += 1;
             } else if !is_init_ctr {
@@ -21883,7 +21937,13 @@ fn build_pod_inspect_json(
         fs::read_to_string(storage::boxr_home().join(format!("pod-create-{}.json", p.id)))
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| vec!["podman".to_string(), "pod".to_string(), "create".to_string()]);
+            .unwrap_or_else(|| {
+                vec![
+                    "podman".to_string(),
+                    "pod".to_string(),
+                    "create".to_string(),
+                ]
+            });
 
     serde_json::json!({
         "Id": p.id,
@@ -22480,10 +22540,7 @@ fn validate_network_name(network: &str, home_opt: Option<&Path>) -> Result<()> {
     };
     for part in base.split(',') {
         let p = part.trim();
-        if !p.is_empty()
-            && !matches!(p, "bridge" | "default" | "auto")
-            && store.find(p).is_none()
-        {
+        if !p.is_empty() && !matches!(p, "bridge" | "default" | "auto") && store.find(p).is_none() {
             return Err(anyhow!("network {} not found", p));
         }
     }
@@ -22653,11 +22710,10 @@ fn apply_run_secrets(
             if suid != 0 || sgid != 0 {
                 if let Some(bundle_dir) = rootfs.parent() {
                     let chown_meta_file = bundle_dir.join("chown_meta.json");
-                    let mut map: HashMap<String, (u32, u32)> =
-                        fs::read_to_string(&chown_meta_file)
-                            .ok()
-                            .and_then(|s| serde_json::from_str(&s).ok())
-                            .unwrap_or_default();
+                    let mut map: HashMap<String, (u32, u32)> = fs::read_to_string(&chown_meta_file)
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
                     map.insert(target_rel.clone(), (suid, sgid));
                     if let Ok(encoded) = serde_json::to_string(&map) {
                         let _ = fs::write(&chown_meta_file, encoded);
@@ -23058,7 +23114,8 @@ fn container_inspect_networks(
                             if let Ok(spec) = serde_json::from_str::<Spec>(&raw) {
                                 if let Some(ann) = &spec.annotations {
                                     if let Some(al_str) = ann.get("boxr.network_aliases") {
-                                        if let Ok(al) = serde_json::from_str::<Vec<String>>(al_str) {
+                                        if let Ok(al) = serde_json::from_str::<Vec<String>>(al_str)
+                                        {
                                             for a in al {
                                                 if !ep_clone.aliases.contains(&a) {
                                                     ep_clone.aliases.push(a);
@@ -23157,7 +23214,11 @@ fn read_ns_inode(pid: i32, ns: &str) -> String {
 
 fn container_namespace_inodes(c: &ContainerRecord) -> (String, String, String, String) {
     let Some(pid) = container_runtime_pid(c) else {
-        let fallback_pid = format!("{}", 4026532000u64 + (u64::from_str_radix(&c.id[..8.min(c.id.len())], 16).unwrap_or(1) % 100000));
+        let fallback_pid = format!(
+            "{}",
+            4026532000u64
+                + (u64::from_str_radix(&c.id[..8.min(c.id.len())], 16).unwrap_or(1) % 100000)
+        );
         return (String::new(), String::new(), String::new(), fallback_pid);
     };
     let pid_ns = {
@@ -23849,10 +23910,7 @@ fn apply_volume_mount_prep(
                     #[cfg(target_os = "linux")]
                     {
                         let _ = crate::runtime::linux::chown_path_rootless(
-                            &m.source,
-                            target_u,
-                            target_g,
-                            true,
+                            &m.source, target_u, target_g, true,
                         );
                     }
                 }
@@ -24062,7 +24120,9 @@ fn apply_ps_container_format_template(
     let image_id_disp = if id_display.len() > 12 {
         full_image_id.clone()
     } else {
-        let hex = full_image_id.strip_prefix("sha256:").unwrap_or(&full_image_id);
+        let hex = full_image_id
+            .strip_prefix("sha256:")
+            .unwrap_or(&full_image_id);
         hex[..12.min(hex.len())].to_string()
     };
     let networks_str = container_networks_list(c).join(",");
@@ -24212,7 +24272,10 @@ fn apply_ps_pod_format_template(template: &str, p: &pod::PodRecord) -> String {
         line = line.replace(&format!(r#"{{{{ .Label "{}" }}}}"#, k), v);
         line = line.replace(&format!(r#"{{{{.Label "{}"}}}}"#, k), v);
     }
-    while let Some(idx) = line.find("{{.Label \"").or_else(|| line.find("{{ .Label \"")) {
+    while let Some(idx) = line
+        .find("{{.Label \"")
+        .or_else(|| line.find("{{ .Label \""))
+    {
         if let Some(close) = line[idx..].find("}}") {
             line.replace_range(idx..idx + close + 2, "");
         } else {
@@ -24340,9 +24403,9 @@ fn format_container_ports_and_exposed(
             };
             let entry = by_proto.entry(proto.clone()).or_default();
             for p in expanded {
-                let already_published = ports.iter().any(|pm| {
-                    pm.container_port == p && pm.protocol.eq_ignore_ascii_case(&proto)
-                });
+                let already_published = ports
+                    .iter()
+                    .any(|pm| pm.container_port == p && pm.protocol.eq_ignore_ascii_case(&proto));
                 if !already_published {
                     entry.push(p);
                 }
@@ -24790,9 +24853,16 @@ fn evaluate_simple_template(template: &str, value: &serde_json::Value) -> String
             .get("Test")
             .map(format_template_value)
             .unwrap_or_else(|| "[]".to_string());
-        let start_p = fmt_go_dur_ns(curr.get("StartPeriod").and_then(|v| v.as_i64()).unwrap_or(0));
-        let start_i =
-            fmt_go_dur_ns(curr.get("StartInterval").and_then(|v| v.as_i64()).unwrap_or(0));
+        let start_p = fmt_go_dur_ns(
+            curr.get("StartPeriod")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+        );
+        let start_i = fmt_go_dur_ns(
+            curr.get("StartInterval")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+        );
         let interval = fmt_go_dur_ns(curr.get("Interval").and_then(|v| v.as_i64()).unwrap_or(0));
         let timeout = fmt_go_dur_ns(curr.get("Timeout").and_then(|v| v.as_i64()).unwrap_or(0));
         let retries = curr.get("Retries").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -24831,9 +24901,7 @@ fn format_template_value(v: &serde_json::Value) -> String {
         serde_json::Value::Null => String::new(),
         serde_json::Value::Object(map) if map.is_empty() => "map[]".to_string(),
         serde_json::Value::Object(map)
-            if map.len() == 2
-                && map.contains_key("HostIp")
-                && map.contains_key("HostPort") =>
+            if map.len() == 2 && map.contains_key("HostIp") && map.contains_key("HostPort") =>
         {
             format!(
                 "{{{} {}}}",
@@ -24860,8 +24928,12 @@ fn format_template_value(v: &serde_json::Value) -> String {
         {
             format!(
                 "{{{} {}}}",
-                map.get("UidMap").map(format_template_value).unwrap_or_default(),
-                map.get("GidMap").map(format_template_value).unwrap_or_default()
+                map.get("UidMap")
+                    .map(format_template_value)
+                    .unwrap_or_default(),
+                map.get("GidMap")
+                    .map(format_template_value)
+                    .unwrap_or_default()
             )
         }
         serde_json::Value::Array(arr) => {
@@ -24957,10 +25029,7 @@ fn format_inspect_ulimit_val(v: &serde_json::Value) -> String {
     v.to_string()
 }
 
-fn lookup_json_field<'a>(
-    curr: &'a serde_json::Value,
-    part: &str,
-) -> Option<&'a serde_json::Value> {
+fn lookup_json_field<'a>(curr: &'a serde_json::Value, part: &str) -> Option<&'a serde_json::Value> {
     let key = if part == "ID" { "Id" } else { part };
     if let Some(v) = curr.get(key).or_else(|| curr.get(part)) {
         return Some(v);
@@ -25813,7 +25882,13 @@ async fn ensure_pod_infra_container(pod: &pod::PodRecord) -> Result<String> {
             if let Some(i) = image_store
                 .find(POD_INFRA_IMAGE)
                 .or_else(|| image_store.find("alpine"))
-                .or_else(|| find_image_with_shortname(&image_store, "quay.io/libpod/testimage:20241011", None))
+                .or_else(|| {
+                    find_image_with_shortname(
+                        &image_store,
+                        "quay.io/libpod/testimage:20241011",
+                        None,
+                    )
+                })
                 .or_else(|| image_store.list().into_iter().next())
             {
                 let mut tagged = i.clone();
@@ -26144,8 +26219,8 @@ pub async fn handle_pod(args: PodSubcommands, output_policy: &CliOutputPolicy) -
                     }
                 }
             }
-            let explicit_infra_true = std::env::args()
-                .any(|a| a == "--infra" || a == "--infra=true");
+            let explicit_infra_true =
+                std::env::args().any(|a| a == "--infra" || a == "--infra=true");
             let share_none = share.trim().is_empty() || share.trim().eq_ignore_ascii_case("none");
             let want_infra = if cli::POD_INFRA_EXPLICIT_FALSE.get() == Some(&true) {
                 false
@@ -27633,9 +27708,8 @@ fn generate_systemd_for_container(
         }
         let mut root_flags = Vec::new();
         let globals = cli::podman_globals::podman_global_options();
-        let is_remote = globals.remote
-            || globals.url.is_some()
-            || std::env::var_os("CONTAINER_HOST").is_some();
+        let is_remote =
+            globals.remote || globals.url.is_some() || std::env::var_os("CONTAINER_HOST").is_some();
         if !is_remote {
             if let Some(idx) = sub_idx {
                 let pre = &create_cmd[1..idx - 1];
@@ -28171,8 +28245,11 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                     pod_unit.push_str(&format!("TimeoutStopSec={}\n", timeout_stop));
                     if is_new {
                         let mut label_args = String::new();
-                        let mut sorted_labels: Vec<(&String, &String)> =
-                            pod.labels.iter().filter(|(k, _)| !k.starts_with("boxr.")).collect();
+                        let mut sorted_labels: Vec<(&String, &String)> = pod
+                            .labels
+                            .iter()
+                            .filter(|(k, _)| !k.starts_with("boxr."))
+                            .collect();
                         sorted_labels.sort_by(|a, b| a.0.cmp(b.0));
                         for (k, v) in sorted_labels {
                             let kv = escape_systemd_arg(&format!("{k}={v}"));
@@ -28210,13 +28287,9 @@ pub fn handle_generate(args: GenerateSubcommands) -> Result<()> {
                                 let _ = fs::create_dir_all(&ud);
                                 ud.join("conmon.pid").to_string_lossy().to_string()
                             })
-                            .unwrap_or_else(|| {
-                                format!("{}/userdata/conmon.pid", mounts_for)
-                            });
-                        pod_unit.push_str(&format!(
-                            "ExecStart={} start {}\n",
-                            exe, infra_id_or_name
-                        ));
+                            .unwrap_or_else(|| format!("{}/userdata/conmon.pid", mounts_for));
+                        pod_unit
+                            .push_str(&format!("ExecStart={} start {}\n", exe, infra_id_or_name));
                         pod_unit.push_str(&format!(
                             "ExecStop={} stop -t {} {}\n",
                             exe,
@@ -28382,7 +28455,9 @@ fn handle_container_unmount(args: &cli::UnmountArgs) -> Result<()> {
         println!("{}", container);
         return Ok(());
     }
-    Err(anyhow!("you must provide at least one container name or ID"))
+    Err(anyhow!(
+        "you must provide at least one container name or ID"
+    ))
 }
 
 pub fn handle_unshare(args: UnshareArgs, output: &CliOutputPolicy) -> Result<i32> {
@@ -28863,9 +28938,7 @@ pub async fn run_healthcheck_with_options(
             health_cfg.test = vec!["CMD-SHELL".to_string(), scmd.clone()];
         }
     }
-    if health_cfg.test.is_empty()
-        || (health_cfg.test.len() == 1 && health_cfg.test[0] == "NONE")
-    {
+    if health_cfg.test.is_empty() || (health_cfg.test.len() == 1 && health_cfg.test[0] == "NONE") {
         if from_supervisor {
             return Ok(1);
         }
@@ -29183,9 +29256,7 @@ pub fn scp_image(
                 .get(host_spec)
                 .map(|d| d.uri.clone())
                 .unwrap_or_else(|| host_spec.to_string());
-            let clean_uri = remote_uri
-                .strip_prefix("ssh://")
-                .unwrap_or(&remote_uri);
+            let clean_uri = remote_uri.strip_prefix("ssh://").unwrap_or(&remote_uri);
             let after_user = clean_uri
                 .rsplit_once('@')
                 .map(|(_, h)| h)
@@ -29412,12 +29483,7 @@ fn run_save_command(args: &cli::SaveArgs) -> Result<()> {
             ));
         }
     }
-    if args.compress
-        && !matches!(
-            args.format.as_deref(),
-            Some("docker-dir") | Some("oci-dir")
-        )
-    {
+    if args.compress && !matches!(args.format.as_deref(), Some("docker-dir") | Some("oci-dir")) {
         cli::usage_errors::exit_usage_error(
             "--compress can only be set when --format is 'docker-dir'",
         );
@@ -29520,13 +29586,20 @@ pub fn sign_image_with_opts(
         let without_tag = clean_img.split('@').next().unwrap_or(clean_img);
         let last_seg = without_tag.rsplit('/').next().unwrap_or(without_tag);
         let no_tag = if last_seg.contains(':') {
-            without_tag.rsplit_once(':').map(|(r, _)| r).unwrap_or(without_tag)
+            without_tag
+                .rsplit_once(':')
+                .map(|(r, _)| r)
+                .unwrap_or(without_tag)
         } else {
             without_tag
         };
         let first_seg = no_tag.split('/').next().unwrap_or(no_tag);
         if first_seg.contains('.') || first_seg.contains(':') || first_seg == "localhost" {
-            no_tag.split_once('/').map(|(_, r)| r).unwrap_or(no_tag).to_string()
+            no_tag
+                .split_once('/')
+                .map(|(_, r)| r)
+                .unwrap_or(no_tag)
+                .to_string()
         } else {
             no_tag.to_string()
         }
@@ -29544,7 +29617,10 @@ pub fn sign_image_with_opts(
             format!("sha256:{}", img.full_hex_id())
         }
     } else {
-        format!("sha256:{}", hex::encode(Sha256::digest(clean_img.as_bytes())))
+        format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest(clean_img.as_bytes()))
+        )
     };
 
     let mut digests = vec![primary_digest];
@@ -29602,7 +29678,14 @@ pub fn sign_image_with_opts(
             let tmp_payload = sig_dir.join(format!(".payload-{}", idx));
             let _ = fs::write(&tmp_payload, &payload_bytes);
             if let Ok(status) = std::process::Command::new("gpg")
-                .args(["--no-permission-warning", "--batch", "--yes", "-u", signer, "--output"])
+                .args([
+                    "--no-permission-warning",
+                    "--batch",
+                    "--yes",
+                    "-u",
+                    signer,
+                    "--output",
+                ])
                 .arg(&sig_file)
                 .arg("--sign")
                 .arg(&tmp_payload)
@@ -29620,7 +29703,12 @@ pub fn sign_image_with_opts(
         if !signed_with_gpg {
             fs::write(
                 &sig_file,
-                format!("signed-by: {}\nimage: {}\ndate: {}\n", signer, digest, Utc::now()),
+                format!(
+                    "signed-by: {}\nimage: {}\ndate: {}\n",
+                    signer,
+                    digest,
+                    Utc::now()
+                ),
             )?;
         }
     }
@@ -30458,10 +30546,7 @@ pub async fn handle_farm_command(args: cli::FarmSubcommands) -> Result<()> {
                     }
                 })
                 .unwrap_or_else(|| {
-                    format!(
-                        "sha256:{}",
-                        hex::encode(Sha256::digest(tag_str.as_bytes()))
-                    )
+                    format!("sha256:{}", hex::encode(Sha256::digest(tag_str.as_bytes())))
                 });
             let img_size = built_img
                 .as_ref()
@@ -31128,10 +31213,14 @@ pub async fn handle_manifest(
                 let safe_ref = clean_img.replace(['/', ':'], "_");
                 let reg_file =
                     Path::new("/tmp/boxr-registry-manifests").join(format!("{}.json", safe_ref));
-                let has_certs_d = std::env::var("HOME")
-                    .ok()
-                    .is_some_and(|h| PathBuf::from(h).join(".config/containers/certs.d").join(reg).is_dir());
-                let allow_insecure = insecure == Some(true) || tls_verify == Some(false) || has_certs_d;
+                let has_certs_d = std::env::var("HOME").ok().is_some_and(|h| {
+                    PathBuf::from(h)
+                        .join(".config/containers/certs.d")
+                        .join(reg)
+                        .is_dir()
+                });
+                let allow_insecure =
+                    insecure == Some(true) || tls_verify == Some(false) || has_certs_d;
                 if !allow_insecure {
                     let (repo_notag, tag) =
                         clean_img.rsplit_once(':').unwrap_or((clean_img, "latest"));
@@ -31192,9 +31281,7 @@ pub async fn handle_manifest(
                         .get("_boxr_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("000000000000");
-                    let clean_name = target
-                        .strip_prefix("localhost/")
-                        .unwrap_or(&target);
+                    let clean_name = target.strip_prefix("localhost/").unwrap_or(&target);
                     let fqn = if clean_name.contains(':') {
                         format!("localhost/{}", clean_name)
                     } else {
@@ -31207,11 +31294,7 @@ pub async fn handle_manifest(
                 }
             } else if !amend {
                 if let Some(existing_img) = find_image_with_shortname(&store, &target, None) {
-                    let fqn = format!(
-                        "{}:{}",
-                        existing_img.display_reference(),
-                        existing_img.tag
-                    );
+                    let fqn = format!("{}:{}", existing_img.display_reference(), existing_img.tag);
                     cli::usage_errors::exit_usage_error(format!(
                         "image name {:?} is already associated with image {}",
                         fqn,
@@ -31397,9 +31480,7 @@ pub async fn handle_manifest(
             }
 
             if destination.is_none() && !target.contains('/') {
-                cli::usage_errors::exit_usage_error(
-                    "requested access to the resource is denied",
-                );
+                cli::usage_errors::exit_usage_error("requested access to the resource is denied");
             }
 
             let dest = destination.as_deref().unwrap_or(&target);
@@ -31512,7 +31593,10 @@ pub async fn handle_manifest(
                 let safe_dest = clean_dest.replace(['/', ':'], "_");
                 let pretty_doc = serde_json::to_string_pretty(&doc)?;
                 fs::write(reg_dir.join(format!("{}.json", safe_dest)), &pretty_doc)?;
-                let repo_part = clean_dest.split_once('/').map(|(_, r)| r).unwrap_or(clean_dest);
+                let repo_part = clean_dest
+                    .split_once('/')
+                    .map(|(_, r)| r)
+                    .unwrap_or(clean_dest);
                 if !repo_part.contains(':') {
                     fs::write(
                         reg_dir.join(format!("{}_latest.json", safe_dest)),
@@ -31531,8 +31615,12 @@ pub async fn handle_manifest(
                         tls_verify.or(args.registry_auth.tls_verify)
                     };
                     let reg_auth = cli::image::RegistryAuthArgs {
-                        authfile: authfile.clone().or_else(|| args.registry_auth.authfile.clone()),
-                        cert_dir: cert_dir.clone().or_else(|| args.registry_auth.cert_dir.clone()),
+                        authfile: authfile
+                            .clone()
+                            .or_else(|| args.registry_auth.authfile.clone()),
+                        cert_dir: cert_dir
+                            .clone()
+                            .or_else(|| args.registry_auth.cert_dir.clone()),
                         creds: creds.clone().or_else(|| args.registry_auth.creds.clone()),
                         tls_verify: effective_tls,
                     };
@@ -31578,7 +31666,11 @@ pub async fn handle_manifest(
                                                 hex::encode(Sha256::digest(&layer_bytes))
                                             );
                                             if let Err(e) = client
-                                                .upload_blob(&reference, &layer_digest, &layer_bytes)
+                                                .upload_blob(
+                                                    &reference,
+                                                    &layer_digest,
+                                                    &layer_bytes,
+                                                )
                                                 .await
                                             {
                                                 last_err = format!("{}", e);
@@ -31618,8 +31710,7 @@ pub async fn handle_manifest(
                                                     }
                                                 ]
                                             });
-                                            let child_bytes =
-                                                serde_json::to_vec(&child_manifest)?;
+                                            let child_bytes = serde_json::to_vec(&child_manifest)?;
                                             let child_len = child_bytes.len();
                                             let child_dig = format!(
                                                 "sha256:{}",
@@ -31639,8 +31730,7 @@ pub async fn handle_manifest(
                                                 child_failed = true;
                                                 break;
                                             }
-                                            item["digest"] =
-                                                serde_json::Value::String(child_dig);
+                                            item["digest"] = serde_json::Value::String(child_dig);
                                             item["size"] = serde_json::json!(child_len);
                                             item["mediaType"] = serde_json::json!(
                                                 "application/vnd.oci.image.manifest.v1+json"

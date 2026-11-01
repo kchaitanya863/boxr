@@ -60,7 +60,11 @@ pub async fn handle_container_routes(ctx: &ApiContext) -> Option<Response> {
             return if store.find(id).is_some() {
                 Some(StatusCode::NO_CONTENT.into_response())
             } else {
-                Some(error_json(StatusCode::NOT_FOUND, "no such container", "no such container"))
+                Some(error_json(
+                    StatusCode::NOT_FOUND,
+                    "no such container",
+                    "no such container",
+                ))
             };
         }
         if let Some(id) = rest.strip_suffix("/json") {
@@ -252,7 +256,8 @@ fn handle_list_containers(ctx: &ApiContext) -> Response {
         .collect();
 
     if !show_all {
-        containers.retain(|c| matches!(c.status, ContainerStatus::Running | ContainerStatus::Paused));
+        containers
+            .retain(|c| matches!(c.status, ContainerStatus::Running | ContainerStatus::Paused));
     }
 
     if let Some(ids) = filters.get("id") {
@@ -440,7 +445,9 @@ fn container_has_labels(
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     for lf in labels {
-        let found = raw_labels.iter().any(|l| l == lf || l.starts_with(&format!("{}=", lf)));
+        let found = raw_labels
+            .iter()
+            .any(|l| l == lf || l.starts_with(&format!("{}=", lf)));
         if expect_present && !found {
             return false;
         }
@@ -476,7 +483,9 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
     if let Some(ref n) = name {
         if let Some(existing) = c_store.find(n) {
             if val.get("command").is_some()
-                || val.get("image").is_some() && val.get("Image").is_none() && ctx.query.get("name").is_none()
+                || val.get("image").is_some()
+                    && val.get("Image").is_none()
+                    && ctx.query.get("name").is_none()
             {
                 return json_response(
                     StatusCode::CREATED,
@@ -511,7 +520,11 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
                     .and_then(|v| v.as_str())
                     .unwrap_or("bind");
                 if mtype == "bind" {
-                    if let Some(opts) = m.get("options").or_else(|| m.get("Options")).and_then(|v| v.as_array()) {
+                    if let Some(opts) = m
+                        .get("options")
+                        .or_else(|| m.get("Options"))
+                        .and_then(|v| v.as_array())
+                    {
                         if opts.iter().any(|o| o.as_str() == Some("noatime")) {
                             return error_json(
                                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -624,7 +637,11 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
             if v.is_object() {
                 Some(v.clone())
             } else if let Some(s) = v.as_str() {
-                let s_clean = s.trim().strip_suffix("}}").map(|p| format!("{}}}", p)).unwrap_or_else(|| s.to_string());
+                let s_clean = s
+                    .trim()
+                    .strip_suffix("}}")
+                    .map(|p| format!("{}}}", p))
+                    .unwrap_or_else(|| s.to_string());
                 serde_json::from_str::<serde_json::Value>(&s_clean).ok()
             } else {
                 None
@@ -728,10 +745,7 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
             pb_inspect.insert(norm_key.clone(), host_arr.clone());
             if let Some(arr) = host_arr.as_array() {
                 for item in arr {
-                    let hp = item
-                        .get("HostPort")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let hp = item.get("HostPort").and_then(|v| v.as_str()).unwrap_or("");
                     let cport_num = norm_key.split('/').next().unwrap_or("80");
                     if let Ok(hp_u16) = hp.parse::<u16>() {
                         if hp_u16 > 0 {
@@ -755,8 +769,14 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
         }
     }
 
-    let mut memory_limit: Option<i64> = hc_obj.get("Memory").and_then(|v| v.as_i64()).filter(|&m| m > 0);
-    if let Some(rl) = val.get("Resource_Limits").or_else(|| val.get("resource_limits")) {
+    let mut memory_limit: Option<i64> = hc_obj
+        .get("Memory")
+        .and_then(|v| v.as_i64())
+        .filter(|&m| m > 0);
+    if let Some(rl) = val
+        .get("Resource_Limits")
+        .or_else(|| val.get("resource_limits"))
+    {
         if let Some(m) = rl
             .get("Memory")
             .or_else(|| rl.get("memory"))
@@ -842,10 +862,18 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
                     Some(nc.clone())
                 }
             })
-            .and_then(|nc| nc.get("EndpointsConfig")?.get("default")?.get("IPAMConfig")?.get("IPv4Address")?.as_str().map(|s| !s.is_empty()))
+            .and_then(|nc| {
+                nc.get("EndpointsConfig")?
+                    .get("default")?
+                    .get("IPAMConfig")?
+                    .get("IPv4Address")?
+                    .as_str()
+                    .map(|s| !s.is_empty())
+            })
             .unwrap_or(false);
         if has_static_ip {
-            let msg = "networks and static ip/mac address can only be used with Bridge mode networking";
+            let msg =
+                "networks and static ip/mac address can only be used with Bridge mode networking";
             return error_json(StatusCode::INTERNAL_SERVER_ERROR, msg, msg);
         }
     }
@@ -885,8 +913,14 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
                 v.to_string()
             }
         });
-    let security_opt = hc_obj.get("SecurityOpt").cloned().unwrap_or(serde_json::Value::Null);
-    let nano_cpus = hc_obj.get("NanoCpus").cloned().unwrap_or(serde_json::Value::Null);
+    let security_opt = hc_obj
+        .get("SecurityOpt")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let nano_cpus = hc_obj
+        .get("NanoCpus")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let restart_policy_name = hc_obj
         .get("RestartPolicy")
         .and_then(|rp| rp.get("Name"))
@@ -988,7 +1022,11 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
     };
 
     let mut labels_vec = Vec::new();
-    if let Some(lobj) = val.get("Labels").or_else(|| val.get("labels")).and_then(|v| v.as_object()) {
+    if let Some(lobj) = val
+        .get("Labels")
+        .or_else(|| val.get("labels"))
+        .and_then(|v| v.as_object())
+    {
         for (k, v) in lobj {
             if let Some(s) = v.as_str() {
                 labels_vec.push(format!("{}={}", k, s));
@@ -1021,7 +1059,11 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
     let cid = match crate::create_only_container_with_home(run_args, Some(&ctx.state.home)).await {
         Ok(id) => id,
         Err(e) => {
-            return error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string());
+            return error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &e.to_string(),
+                &e.to_string(),
+            );
         }
     };
     let _ = c_store.set_image(&cid, &resolved_image_name);
@@ -1065,7 +1107,11 @@ async fn handle_create_container(ctx: &ApiContext) -> Response {
 fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(mut c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     let bp = PathBuf::from(&c.bundle_path);
@@ -1081,8 +1127,8 @@ fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let is_initialized = bp.join("initialized.flag").exists()
-        && matches!(c.status, ContainerStatus::Created);
+    let is_initialized =
+        bp.join("initialized.flag").exists() && matches!(c.status, ContainerStatus::Created);
     let status_str = if is_initialized && ctx.is_libpod {
         "initialized"
     } else {
@@ -1108,8 +1154,15 @@ fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
             ContainerStatus::Failed(_) => "dead",
         }
     };
-    let is_running = matches!(c.status, ContainerStatus::Running | ContainerStatus::Stopping);
-    let pid = if is_running || is_initialized { 1234 } else { 0 };
+    let is_running = matches!(
+        c.status,
+        ContainerStatus::Running | ContainerStatus::Stopping
+    );
+    let pid = if is_running || is_initialized {
+        1234
+    } else {
+        0
+    };
     let exit_code = read_container_exit_code(&c);
 
     let userdata_dir = bp.join("userdata");
@@ -1121,7 +1174,10 @@ fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
     let no_hosts = crate::containers_conf_toml_value("no_hosts").as_deref() == Some("true");
     let (resolv_path, hostname_path, hosts_path) = if is_running || is_initialized {
         (
-            userdata_dir.join("resolv.conf").to_string_lossy().to_string(),
+            userdata_dir
+                .join("resolv.conf")
+                .to_string_lossy()
+                .to_string(),
             userdata_dir.join("hostname").to_string_lossy().to_string(),
             if no_hosts {
                 String::new()
@@ -1271,14 +1327,18 @@ fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
 
-    let hc_cfg = api_meta.get("healthcheck").cloned().unwrap_or(serde_json::Value::Null);
+    let hc_cfg = api_meta
+        .get("healthcheck")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let state_health = if matches!(c.health_status, crate::health::HealthStatus::Healthy) {
         serde_json::json!({
             "Status": "healthy",
             "FailingStreak": 0,
             "Log": []
         })
-    } else if !hc_cfg.is_null() || matches!(c.health_status, crate::health::HealthStatus::Starting) {
+    } else if !hc_cfg.is_null() || matches!(c.health_status, crate::health::HealthStatus::Starting)
+    {
         serde_json::json!({
             "Status": "starting",
             "FailingStreak": 0,
@@ -1302,7 +1362,8 @@ fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
     let mut nets_map = serde_json::Map::new();
     for net in n_store.list() {
         let is_primary = net.name == net_mode;
-        let is_connected = net.containers.contains_key(&c.id) || net.containers.contains_key(&c.name);
+        let is_connected =
+            net.containers.contains_key(&c.id) || net.containers.contains_key(&c.name);
         if is_primary || is_connected {
             use sha2::{Digest, Sha256};
             let nid = if net.id.len() >= 64 {
@@ -1373,7 +1434,9 @@ fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
     } else {
         format!("/{}", c.name)
     };
-    let ts_utc = c.created_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let ts_utc = c
+        .created_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
     let obj = serde_json::json!({
         "Id": c.id,
@@ -1459,7 +1522,11 @@ fn handle_inspect_container(ctx: &ApiContext, id: &str) -> Response {
 async fn handle_start_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let bp = PathBuf::from(&c.bundle_path);
     let _ = fs::remove_file(bp.join("initialized.flag"));
@@ -1470,7 +1537,10 @@ async fn handle_start_container(ctx: &ApiContext, id: &str) -> Response {
     let has_seccomp_errno = api_meta
         .get("security_opt")
         .and_then(|v| v.as_array())
-        .is_some_and(|arr| arr.iter().any(|s| s.as_str().is_some_and(|x| x.contains("SCMP_ACT_ERRNO"))));
+        .is_some_and(|arr| {
+            arr.iter()
+                .any(|s| s.as_str().is_some_and(|x| x.contains("SCMP_ACT_ERRNO")))
+        });
     if has_seccomp_errno {
         let _ = fs::write(bp.join("boxr-exitcode"), "1");
         let _ = store.update_status(&c.id, ContainerStatus::Exited(1));
@@ -1501,7 +1571,11 @@ async fn handle_start_container(ctx: &ApiContext, id: &str) -> Response {
 fn handle_stop_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let bp = PathBuf::from(&c.bundle_path);
     if !bp.join("vm.pid").exists() && !bp.join("container.pid").exists() {
@@ -1537,7 +1611,11 @@ fn handle_stop_container(ctx: &ApiContext, id: &str) -> Response {
 async fn handle_restart_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(mut c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     if !matches!(c.status, ContainerStatus::Running) {
@@ -1563,7 +1641,11 @@ async fn handle_restart_container(ctx: &ApiContext, id: &str) -> Response {
 fn handle_kill_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(mut c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     if !matches!(c.status, ContainerStatus::Running) {
@@ -1593,7 +1675,11 @@ fn handle_kill_container(ctx: &ApiContext, id: &str) -> Response {
 fn handle_pause_container(ctx: &ApiContext, id: &str, pause: bool) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(mut c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     if pause && !matches!(c.status, ContainerStatus::Running) {
@@ -1617,7 +1703,11 @@ fn handle_pause_container(ctx: &ApiContext, id: &str, pause: bool) -> Response {
 fn handle_init_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let bp = PathBuf::from(&c.bundle_path);
     let _ = fs::write(bp.join("initialized.flag"), "1");
@@ -1632,7 +1722,11 @@ fn handle_init_container(ctx: &ApiContext, id: &str) -> Response {
 fn handle_mount_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let merged = PathBuf::from(&c.bundle_path).join("merged");
     let _ = fs::create_dir_all(&merged);
@@ -1642,7 +1736,11 @@ fn handle_mount_container(ctx: &ApiContext, id: &str) -> Response {
 fn handle_export_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(_c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let mut tar_bytes = Vec::new();
     {
@@ -1664,7 +1762,11 @@ fn handle_export_container(ctx: &ApiContext, id: &str) -> Response {
 fn handle_update_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let val: serde_json::Value = serde_json::from_slice(&ctx.body).unwrap_or_default();
     let bp = PathBuf::from(&c.bundle_path);
@@ -1672,10 +1774,10 @@ fn handle_update_container(ctx: &ApiContext, id: &str) -> Response {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(m) = val
-        .get("Memory")
-        .and_then(|v| v.as_i64().or_else(|| v.get("Limit").and_then(|l| l.as_i64())))
-    {
+    if let Some(m) = val.get("Memory").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.get("Limit").and_then(|l| l.as_i64()))
+    }) {
         api_meta["memory"] = serde_json::Value::from(m);
     }
     if let Some(rp) = val.get("RestartPolicy") {
@@ -1700,7 +1802,11 @@ fn handle_update_container(ctx: &ApiContext, id: &str) -> Response {
 }
 
 async fn handle_wait_container(ctx: &ApiContext, id: &str) -> Response {
-    let conds = ctx.query_multi.get("condition").cloned().unwrap_or_default();
+    let conds = ctx
+        .query_multi
+        .get("condition")
+        .cloned()
+        .unwrap_or_default();
     for cond in &conds {
         if !matches!(
             cond.as_str(),
@@ -1732,7 +1838,11 @@ async fn handle_wait_container(ctx: &ApiContext, id: &str) -> Response {
                 }
             }
         }
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     let cid = c.id.clone();
@@ -1765,7 +1875,10 @@ async fn handle_wait_container(ctx: &ApiContext, id: &str) -> Response {
                     last_code = read_container_exit_code(&cur);
                     if matches!(cur.status, ContainerStatus::Running) {
                         saw_running = true;
-                    } else if is_next_exit && saw_running && matches!(cur.status, ContainerStatus::Exited(_)) {
+                    } else if is_next_exit
+                        && saw_running
+                        && matches!(cur.status, ContainerStatus::Exited(_))
+                    {
                         break;
                     }
                 } else {
@@ -1883,7 +1996,11 @@ fn collect_container_log_lines(c: &crate::storage::ContainerRecord) -> Vec<Strin
 fn handle_logs_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let follow = ctx
         .query
@@ -1940,7 +2057,11 @@ fn handle_logs_container(ctx: &ApiContext, id: &str) -> Response {
 async fn handle_attach_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(mut c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     let content_type = if (!ctx.is_libpod && ctx.api_version <= (1, 40, 0))
@@ -2021,7 +2142,11 @@ fn read_host_system_cpu_ns() -> u64 {
 fn handle_container_stats(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(mut c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     if ctx.path != "/containers/stats" && !matches!(c.status, ContainerStatus::Running) {
@@ -2053,7 +2178,10 @@ fn handle_container_stats(ctx: &ApiContext, id: &str) -> Response {
             .unwrap_or_default();
     let mut nets_obj = serde_json::Map::new();
     if net_ifaces.is_empty() {
-        nets_obj.insert("eth0".to_string(), serde_json::json!({ "rx_bytes": 0, "tx_bytes": 0 }));
+        nets_obj.insert(
+            "eth0".to_string(),
+            serde_json::json!({ "rx_bytes": 0, "tx_bytes": 0 }),
+        );
     } else {
         for (idx, (ifname, _, _)) in net_ifaces.iter().enumerate() {
             let key = if nets_obj.contains_key(ifname) {
@@ -2103,8 +2231,11 @@ fn handle_container_stats(ctx: &ApiContext, id: &str) -> Response {
     };
 
     if stream_q.eq_ignore_ascii_case("true") || stream_q == "1" {
-        let s1 = serde_json::to_string(&build_sample(sys_ns, precpu_sys)).unwrap_or_default() + "\n";
-        let s2 = serde_json::to_string(&build_sample(sys_ns + 1_000_000_000, sys_ns)).unwrap_or_default() + "\n";
+        let s1 =
+            serde_json::to_string(&build_sample(sys_ns, precpu_sys)).unwrap_or_default() + "\n";
+        let s2 = serde_json::to_string(&build_sample(sys_ns + 1_000_000_000, sys_ns))
+            .unwrap_or_default()
+            + "\n";
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
         tokio::spawn(async move {
             let _ = tx.send(Ok(Bytes::from(s1))).await;
@@ -2126,7 +2257,11 @@ fn handle_container_stats(ctx: &ApiContext, id: &str) -> Response {
 fn handle_container_top(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     if let Some(ps_args) = ctx.query.get("ps_args") {
         if ps_args.contains("--invalid") {
@@ -2169,7 +2304,11 @@ fn handle_container_top(ctx: &ApiContext, id: &str) -> Response {
 fn handle_container_archive(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let req_path = ctx.query.get("path").map(|s| s.as_str()).unwrap_or("/");
     let bp = PathBuf::from(&c.bundle_path);
@@ -2293,7 +2432,11 @@ fn handle_create_exec(ctx: &ApiContext, id: &str) -> Response {
     use sha2::{Digest, Sha256};
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let val: serde_json::Value = serde_json::from_slice(&ctx.body).unwrap_or_default();
     let eid = hex::encode(Sha256::digest(crate::storage::container_store::rand_id()));
@@ -2412,15 +2555,18 @@ fn handle_exec_inspect(ctx: &ApiContext, eid: &str) -> Response {
 fn handle_delete_container(ctx: &ApiContext, id: &str) -> Response {
     let store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(mut c) = store.find(id) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     sync_live_status(&store, &mut c);
     let force = ctx
         .query
         .get("force")
         .is_some_and(|v| v == "true" || v == "1" || v.eq_ignore_ascii_case("true"));
-    let is_active =
-        matches!(c.status, ContainerStatus::Running | ContainerStatus::Paused);
+    let is_active = matches!(c.status, ContainerStatus::Running | ContainerStatus::Paused);
     if is_active && !force {
         let status = if ctx.api_version == (1, 45, 0) && ctx.query.get("v").is_none() {
             StatusCode::CONFLICT

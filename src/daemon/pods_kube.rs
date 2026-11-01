@@ -44,7 +44,11 @@ pub async fn handle_pods_kube_routes(ctx: &ApiContext) -> Option<Response> {
             return if p_store.find(name).is_some() {
                 Some(StatusCode::NO_CONTENT.into_response())
             } else {
-                Some(error_json(StatusCode::NOT_FOUND, "no such pod", "no such pod"))
+                Some(error_json(
+                    StatusCode::NOT_FOUND,
+                    "no such pod",
+                    "no such pod",
+                ))
             };
         }
         if let Some(name) = rest.strip_suffix("/json") {
@@ -129,7 +133,11 @@ pub async fn handle_pods_kube_routes(ctx: &ApiContext) -> Option<Response> {
             return if find_secret(&ctx.state.home, name).is_some() {
                 Some(StatusCode::NO_CONTENT.into_response())
             } else {
-                Some(error_json(StatusCode::NOT_FOUND, "no such secret", "no such secret"))
+                Some(error_json(
+                    StatusCode::NOT_FOUND,
+                    "no such secret",
+                    "no such secret",
+                ))
             };
         }
         let name = rest.strip_suffix("/json").unwrap_or(rest);
@@ -312,7 +320,11 @@ fn handle_create_pod(ctx: &ApiContext) -> Response {
     let _ = no_infra;
     match p_store.create(Some(&name), ports) {
         Ok(pod) => json_response(StatusCode::CREATED, &serde_json::json!({ "Id": pod.id })),
-        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string()),
+        Err(e) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        ),
     }
 }
 
@@ -516,8 +528,15 @@ fn handle_pods_stats(ctx: &ApiContext) -> Response {
             .body(Body::from_stream(super::MpscStream(rx)))
             .unwrap();
     }
-    let all = ctx.query.get("all").is_some_and(|v| v == "true" || v == "1");
-    let names = ctx.query_multi.get("namesOrIDs").cloned().unwrap_or_default();
+    let all = ctx
+        .query
+        .get("all")
+        .is_some_and(|v| v == "true" || v == "1");
+    let names = ctx
+        .query_multi
+        .get("namesOrIDs")
+        .cloned()
+        .unwrap_or_default();
     if all && !names.is_empty() {
         let msg = "--all, --latest and arguments cannot be used together";
         return error_json(StatusCode::INTERNAL_SERVER_ERROR, msg, msg);
@@ -533,7 +552,10 @@ fn handle_pods_stats(ctx: &ApiContext) -> Response {
                     return error_json(
                         StatusCode::NOT_FOUND,
                         "no such pod",
-                        &format!("unable to get list of pods: no pod with name or ID {} found: no such pod", n),
+                        &format!(
+                            "unable to get list of pods: no pod with name or ID {} found: no such pod",
+                            n
+                        ),
                     );
                 }
             }
@@ -606,7 +628,10 @@ fn handle_delete_pod(ctx: &ApiContext, name: &str) -> Response {
                     return error_json(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "removing pod containers",
-                        &format!("cannot remove container {} as it is running: removing pod containers", c.id),
+                        &format!(
+                            "cannot remove container {} as it is running: removing pod containers",
+                            c.id
+                        ),
                     );
                 }
             }
@@ -661,7 +686,11 @@ fn handle_generate_kube(ctx: &ApiContext) -> Response {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
             error_json(StatusCode::INTERNAL_SERVER_ERROR, &err, &err)
         }
-        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string()),
+        Err(e) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        ),
     }
 }
 
@@ -685,7 +714,8 @@ fn extract_kube_yaml_and_build(
         if let Ok(entries) = fs::read_dir(tmp.path()) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.is_dir() && (p.join("Containerfile").exists() || p.join("Dockerfile").exists()) {
+                if p.is_dir() && (p.join("Containerfile").exists() || p.join("Dockerfile").exists())
+                {
                     let img_name = entry.file_name().to_string_lossy().to_string();
                     let p_str = p.to_string_lossy().to_string();
                     let _ = run_boxr_cli(home, &["build", "-t", &img_name, &p_str]);
@@ -736,10 +766,11 @@ fn handle_play_kube(ctx: &ApiContext) -> Response {
         .get("replace")
         .is_some_and(|v| v == "true" || v == "1");
 
-    let (yaml_content, _tmp_guard) = match extract_kube_yaml_and_build(&ctx.state.home, &ctx.body, build_flag) {
-        Ok(res) => res,
-        Err(e) => return error_json(StatusCode::BAD_REQUEST, &e, &e),
-    };
+    let (yaml_content, _tmp_guard) =
+        match extract_kube_yaml_and_build(&ctx.state.home, &ctx.body, build_flag) {
+            Ok(res) => res,
+            Err(e) => return error_json(StatusCode::BAD_REQUEST, &e, &e),
+        };
 
     let mut warnings: Option<Vec<String>> = None;
     if yaml_content.contains("bogusfield:") {
@@ -812,15 +843,20 @@ fn handle_play_kube(ctx: &ApiContext) -> Response {
             let err = String::from_utf8_lossy(&out.stderr).to_string();
             error_json(StatusCode::INTERNAL_SERVER_ERROR, &err, &err)
         }
-        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string()),
+        Err(e) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        ),
     }
 }
 
 fn handle_down_kube(ctx: &ApiContext) -> Response {
-    let (yaml_content, _tmp_guard) = match extract_kube_yaml_and_build(&ctx.state.home, &ctx.body, false) {
-        Ok(res) => res,
-        Err(e) => return error_json(StatusCode::BAD_REQUEST, &e, &e),
-    };
+    let (yaml_content, _tmp_guard) =
+        match extract_kube_yaml_and_build(&ctx.state.home, &ctx.body, false) {
+            Ok(res) => res,
+            Err(e) => return error_json(StatusCode::BAD_REQUEST, &e, &e),
+        };
     let p_store = PodStore::with_home(ctx.state.home.clone());
     let prev_pods: Vec<String> = p_store.list().into_iter().map(|p| p.id).collect();
 
@@ -917,7 +953,9 @@ fn handle_create_secret(ctx: &ApiContext) -> Response {
             for (k, v) in obj {
                 labels.insert(
                     k.clone(),
-                    v.as_str().map(String::from).unwrap_or_else(|| v.to_string()),
+                    v.as_str()
+                        .map(String::from)
+                        .unwrap_or_else(|| v.to_string()),
                 );
             }
         } else if let Some(s) = lval.as_str() {
@@ -1209,9 +1247,13 @@ fn handle_quadlet_exists(name: &str) -> Response {
     }
 }
 
-fn extract_uploaded_files(content_type: &str, body: &[u8]) -> Result<Vec<(String, Vec<u8>)>, Response> {
+fn extract_uploaded_files(
+    content_type: &str,
+    body: &[u8],
+) -> Result<Vec<(String, Vec<u8>)>, Response> {
     if content_type.contains("application/json") {
-        let msg = "Content-Type: application/json is not supported. Should be \"application/x-tar\"";
+        let msg =
+            "Content-Type: application/json is not supported. Should be \"application/x-tar\"";
         return Err(error_json(StatusCode::BAD_REQUEST, msg, msg));
     }
     let mut files = Vec::new();
@@ -1275,7 +1317,10 @@ fn handle_install_quadlets(ctx: &ApiContext) -> Response {
             "no files found in request",
         );
     }
-    if !files.iter().any(|(name, _)| is_valid_quadlet_filename(name)) {
+    if !files
+        .iter()
+        .any(|(name, _)| is_valid_quadlet_filename(name))
+    {
         return error_json(
             StatusCode::BAD_REQUEST,
             "no quadlet files found in request",
@@ -1287,7 +1332,11 @@ fn handle_install_quadlets(ctx: &ApiContext) -> Response {
         .query
         .get("replace")
         .is_some_and(|v| v == "true" || v == "1");
-    let app_subdir = ctx.query.get("application").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let app_subdir = ctx
+        .query
+        .get("application")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty());
     let base_dir = quadlet_install_dir();
     let target_dir = match app_subdir {
         Some(sub) => base_dir.join(sub),
@@ -1303,7 +1352,10 @@ fn handle_install_quadlets(ctx: &ApiContext) -> Response {
                 target_dir.join(name)
             };
             if dest.exists() {
-                let msg = format!("a Quadlet with name {} already exists, refusing to overwrite", name);
+                let msg = format!(
+                    "a Quadlet with name {} already exists, refusing to overwrite",
+                    name
+                );
                 return error_json(StatusCode::BAD_REQUEST, &msg, &msg);
             }
         }

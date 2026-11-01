@@ -261,7 +261,11 @@ pub async fn handle_volume_network_routes(ctx: &ApiContext) -> Option<Response> 
             return if store.find(name).is_some() {
                 Some(StatusCode::NO_CONTENT.into_response())
             } else {
-                Some(error_json(StatusCode::NOT_FOUND, "no such volume", "no such volume"))
+                Some(error_json(
+                    StatusCode::NOT_FOUND,
+                    "no such volume",
+                    "no such volume",
+                ))
             };
         }
         let name = rest.strip_suffix("/json").unwrap_or(rest);
@@ -308,7 +312,11 @@ pub async fn handle_volume_network_routes(ctx: &ApiContext) -> Option<Response> 
             return if store.find(id).is_some() {
                 Some(StatusCode::NO_CONTENT.into_response())
             } else {
-                Some(error_json(StatusCode::NOT_FOUND, "network not found", "network not found"))
+                Some(error_json(
+                    StatusCode::NOT_FOUND,
+                    "network not found",
+                    "network not found",
+                ))
             };
         }
         let id = rest.strip_suffix("/json").unwrap_or(rest);
@@ -335,7 +343,10 @@ fn handle_create_volume(ctx: &ApiContext) -> Response {
             return error_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "volume already exists",
-                &format!("volume with name {} already exists: volume already exists", n),
+                &format!(
+                    "volume with name {} already exists: volume already exists",
+                    n
+                ),
             );
         }
     }
@@ -352,7 +363,9 @@ fn handle_create_volume(ctx: &ApiContext) -> Response {
                 for (k, v) in obj {
                     labels.insert(
                         k.clone(),
-                        v.as_str().map(String::from).unwrap_or_else(|| v.to_string()),
+                        v.as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| v.to_string()),
                     );
                 }
             } else if let Some(s) = lval.as_str() {
@@ -370,11 +383,17 @@ fn handle_create_volume(ctx: &ApiContext) -> Response {
                 for (k, v) in obj {
                     options.insert(
                         k.clone(),
-                        v.as_str().map(String::from).unwrap_or_else(|| v.to_string()),
+                        v.as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| v.to_string()),
                     );
                 }
             } else if let Some(s) = oval.as_str() {
-                let s_clean = s.trim().strip_suffix("}}").map(|p| format!("{}}}", p)).unwrap_or_else(|| s.to_string());
+                let s_clean = s
+                    .trim()
+                    .strip_suffix("}}")
+                    .map(|p| format!("{}}}", p))
+                    .unwrap_or_else(|| s.to_string());
                 if let Ok(parsed) = serde_json::from_str::<HashMap<String, String>>(&s_clean) {
                     options.extend(parsed);
                 }
@@ -389,8 +408,15 @@ fn handle_create_volume(ctx: &ApiContext) -> Response {
         "local",
         Some(options),
     ) {
-        Ok(vol) => json_response(StatusCode::CREATED, &format_volume_json(&vol, ctx.is_libpod)),
-        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string()),
+        Ok(vol) => json_response(
+            StatusCode::CREATED,
+            &format_volume_json(&vol, ctx.is_libpod),
+        ),
+        Err(e) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        ),
     }
 }
 
@@ -450,7 +476,13 @@ fn handle_inspect_volume(ctx: &ApiContext, name: &str) -> Response {
 fn handle_rename_volume(ctx: &ApiContext, old_name: &str) -> Response {
     let new_name = match ctx.query.get("newName") {
         Some(n) if !n.is_empty() => n.as_str(),
-        _ => return error_json(StatusCode::BAD_REQUEST, "missing newName", "missing newName"),
+        _ => {
+            return error_json(
+                StatusCode::BAD_REQUEST,
+                "missing newName",
+                "missing newName",
+            );
+        }
     };
     let store = VolumeStore::with_home(ctx.state.home.clone());
     let vol = match store.find(old_name) {
@@ -466,7 +498,11 @@ fn handle_rename_volume(ctx: &ApiContext, old_name: &str) -> Response {
         Some(vol.options),
     ) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => error_json(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string(), &e.to_string()),
+        Err(e) => error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &e.to_string(),
+            &e.to_string(),
+        ),
     }
 }
 
@@ -615,11 +651,7 @@ fn format_compat_network(
     home: &std::path::Path,
 ) -> serde_json::Value {
     let nid = full_net_id(&net.id);
-    let prefix = net
-        .subnet
-        .split_once('/')
-        .map(|(_, p)| p)
-        .unwrap_or("24");
+    let prefix = net.subnet.split_once('/').map(|(_, p)| p).unwrap_or("24");
     let c_store = ContainerStore::with_home(home.to_path_buf());
     let mut containers_map = serde_json::Map::new();
     for (cid, ep) in &net.containers {
@@ -628,7 +660,11 @@ fn format_compat_network(
             let bp = PathBuf::from(&c.bundle_path);
             if let Ok(cfg_str) = fs::read_to_string(bp.join("config.json")) {
                 if let Ok(spec) = serde_json::from_str::<crate::oci::runtime::Spec>(&cfg_str) {
-                    if let Some(m) = spec.annotations.as_ref().and_then(|a| a.get("boxr.mac_address")) {
+                    if let Some(m) = spec
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.get("boxr.mac_address"))
+                    {
                         mac = m.clone();
                     }
                 }
@@ -797,7 +833,9 @@ fn handle_create_network(ctx: &ApiContext) -> Response {
                 for (k, v) in obj {
                     labels.insert(
                         k.clone(),
-                        v.as_str().map(String::from).unwrap_or_else(|| v.to_string()),
+                        v.as_str()
+                            .map(String::from)
+                            .unwrap_or_else(|| v.to_string()),
                     );
                 }
             } else if let Some(s) = lval.as_str() {
@@ -898,7 +936,8 @@ fn handle_list_networks(ctx: &ApiContext) -> Response {
     if let Some(ids) = filters.get("id") {
         nets.retain(|n| {
             let fid = full_net_id(&n.id);
-            ids.iter().any(|i| fid == *i || fid.starts_with(i) || n.id == *i)
+            ids.iter()
+                .any(|i| fid == *i || fid.starts_with(i) || n.id == *i)
         });
     }
     if let Some(labels) = filters.get("label") {
@@ -918,7 +957,11 @@ fn handle_list_networks(ctx: &ApiContext) -> Response {
             if ctx.is_libpod || ctx.path == "/networks/json" {
                 format_libpod_network(n)
             } else {
-                let disp = if n.name == "podman" { "bridge" } else { &n.name };
+                let disp = if n.name == "podman" {
+                    "bridge"
+                } else {
+                    &n.name
+                };
                 format_compat_network(n, disp, &ctx.state.home)
             }
         })
@@ -959,14 +1002,22 @@ fn handle_inspect_network(ctx: &ApiContext, id: &str) -> Response {
                 )
             }
         }
-        None => error_json(StatusCode::NOT_FOUND, "network not found", "network not found"),
+        None => error_json(
+            StatusCode::NOT_FOUND,
+            "network not found",
+            "network not found",
+        ),
     }
 }
 
 fn handle_delete_network(ctx: &ApiContext, id: &str) -> Response {
     let store = NetworkStore::with_home(ctx.state.home.clone());
     let Some((net, _)) = find_network_by_name_or_id(&store, id) else {
-        return error_json(StatusCode::NOT_FOUND, "network not found", "network not found");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "network not found",
+            "network not found",
+        );
     };
     match store.remove(&net.name) {
         Ok(_) => {
@@ -986,11 +1037,12 @@ fn handle_delete_network(ctx: &ApiContext, id: &str) -> Response {
         }
         Err(e) => {
             let msg = e.to_string().to_lowercase();
-            let status = if msg.contains("active") || msg.contains("in use") || msg.contains("default") {
-                StatusCode::CONFLICT
-            } else {
-                StatusCode::NOT_FOUND
-            };
+            let status =
+                if msg.contains("active") || msg.contains("in use") || msg.contains("default") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::NOT_FOUND
+                };
             error_json(status, &e.to_string(), &e.to_string())
         }
     }
@@ -1005,11 +1057,19 @@ fn handle_connect_network(ctx: &ApiContext, id: &str) -> Response {
         .unwrap_or("");
     let store = NetworkStore::with_home(ctx.state.home.clone());
     let Some((net, _)) = find_network_by_name_or_id(&store, id) else {
-        return error_json(StatusCode::NOT_FOUND, "network not found", "network not found");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "network not found",
+            "network not found",
+        );
     };
     let c_store = ContainerStore::with_home(ctx.state.home.clone());
     let Some(c) = c_store.find(container) else {
-        return error_json(StatusCode::NOT_FOUND, "no such container", "no such container");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such container",
+            "no such container",
+        );
     };
     let already_connected = net.containers.contains_key(&c.id);
     if already_connected && matches!(c.status, ContainerStatus::Running) {
@@ -1036,7 +1096,11 @@ fn handle_disconnect_network(ctx: &ApiContext, id: &str) -> Response {
         .unwrap_or("");
     let store = NetworkStore::with_home(ctx.state.home.clone());
     let Some((net, _)) = find_network_by_name_or_id(&store, id) else {
-        return error_json(StatusCode::NOT_FOUND, "network not found", "network not found");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "network not found",
+            "network not found",
+        );
     };
     match store.disconnect_container(&net.name, container) {
         Ok(_) => StatusCode::OK.into_response(),
@@ -1059,7 +1123,10 @@ fn handle_prune_networks(ctx: &ApiContext) -> Response {
     let mut libpod_reports = Vec::new();
 
     for net in store.list() {
-        if net.name == NetworkStore::DEFAULT_NETWORK || net.name == "podman" || !net.containers.is_empty() {
+        if net.name == NetworkStore::DEFAULT_NETWORK
+            || net.name == "podman"
+            || !net.containers.is_empty()
+        {
             continue;
         }
         if let Some(labels) = filters.get("label") {
@@ -1095,4 +1162,3 @@ fn handle_prune_networks(ctx: &ApiContext) -> Response {
         )
     }
 }
-

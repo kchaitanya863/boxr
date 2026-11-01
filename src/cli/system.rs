@@ -736,7 +736,12 @@ pub enum GenerateAction {
         #[arg(long = "start-timeout")]
         start_timeout: Option<u64>,
         /// Stop timeout override
-        #[arg(long = "stop-timeout", short = 't', visible_alias = "time", allow_hyphen_values = true)]
+        #[arg(
+            long = "stop-timeout",
+            short = 't',
+            visible_alias = "time",
+            allow_hyphen_values = true
+        )]
         stop_timeout: Option<String>,
         /// Skip header generation
         #[arg(long = "no-header", default_value_t = false, num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set, value_parser = clap::builder::BoolishValueParser::new())]

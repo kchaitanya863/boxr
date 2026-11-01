@@ -658,16 +658,14 @@ impl ImageBuilder {
                     }
 
                     let source_root: PathBuf = if let Some(from_s) = from_stage {
-                        let ctx_match = build_contexts_vec
-                            .iter()
-                            .find_map(|entry| {
-                                let (k, v) = entry.split_once('=')?;
-                                if k == from_s {
-                                    Some(v.to_string())
-                                } else {
-                                    None
-                                }
-                            });
+                        let ctx_match = build_contexts_vec.iter().find_map(|entry| {
+                            let (k, v) = entry.split_once('=')?;
+                            if k == from_s {
+                                Some(v.to_string())
+                            } else {
+                                None
+                            }
+                        });
                         if let Some(ctx_val) = ctx_val_from_opt(ctx_match) {
                             if let Some(img_ref) = ctx_val
                                 .strip_prefix("docker-image://")
@@ -685,9 +683,7 @@ impl ImageBuilder {
                             } else if ctx_val.starts_with("http://")
                                 || ctx_val.starts_with("https://")
                             {
-                                let dl_dir = temp_dir
-                                    .path()
-                                    .join(format!("urlctx-{}", step_count));
+                                let dl_dir = temp_dir.path().join(format!("urlctx-{}", step_count));
                                 fs::create_dir_all(&dl_dir)?;
                                 if ctx_val.ends_with(".git") {
                                     let _ = std::process::Command::new("git")
@@ -1206,16 +1202,12 @@ impl ImageBuilder {
                                 ));
                                 let _ = crate::storage::external::add_storage_container(
                                     &s1,
-                                    current_parent_id
-                                        .as_deref()
-                                        .unwrap_or(&current_from_image),
+                                    current_parent_id.as_deref().unwrap_or(&current_from_image),
                                     "buildah-stage-1",
                                 );
                                 let _ = crate::storage::external::add_storage_container(
                                     &s2,
-                                    current_parent_id
-                                        .as_deref()
-                                        .unwrap_or(&current_from_image),
+                                    current_parent_id.as_deref().unwrap_or(&current_from_image),
                                     "buildah-stage-2",
                                 );
                                 let inter_dig = format!("sha256:{}", s1);
@@ -1525,7 +1517,11 @@ impl ImageBuilder {
                 .next()
                 .unwrap_or(full_tag);
             if !full_tag.contains('/') {
-                ("localhost".to_string(), name_only.to_string(), parsed_tag.tag)
+                (
+                    "localhost".to_string(),
+                    name_only.to_string(),
+                    parsed_tag.tag,
+                )
             } else {
                 (parsed_tag.registry, parsed_tag.repository, parsed_tag.tag)
             }

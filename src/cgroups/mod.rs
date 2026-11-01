@@ -126,15 +126,16 @@ impl CgroupV2Manager {
 
     pub fn new_with_parent(container_id: &str, cgroup_parent: Option<&str>) -> Result<Self> {
         let base_cgroup = Self::detect_cgroup_root();
-        let parent_cgroup = if let Some(parent) = cgroup_parent.map(str::trim).filter(|s| !s.is_empty()) {
-            if parent.starts_with('/') {
-                PathBuf::from("/sys/fs/cgroup").join(parent.trim_start_matches('/'))
+        let parent_cgroup =
+            if let Some(parent) = cgroup_parent.map(str::trim).filter(|s| !s.is_empty()) {
+                if parent.starts_with('/') {
+                    PathBuf::from("/sys/fs/cgroup").join(parent.trim_start_matches('/'))
+                } else {
+                    base_cgroup.join("app.slice").join(parent)
+                }
             } else {
-                base_cgroup.join("app.slice").join(parent)
-            }
-        } else {
-            base_cgroup.join("boxr")
-        };
+                base_cgroup.join("boxr")
+            };
         let container_cgroup = parent_cgroup.join(container_id);
 
         if base_cgroup.exists() {
@@ -164,7 +165,7 @@ impl CgroupV2Manager {
         })
     }
 
-    pub fn for_bundle(bundle_path: & std::path::Path) -> Result<Self> {
+    pub fn for_bundle(bundle_path: &std::path::Path) -> Result<Self> {
         let container_id = bundle_path
             .file_name()
             .and_then(|s| s.to_str())
@@ -401,11 +402,7 @@ impl CgroupV2Manager {
         self.add_process_with_limits(pid, None)
     }
 
-    pub fn add_process_with_limits(
-        &self,
-        pid: i32,
-        limits: Option<&ResourceLimits>,
-    ) -> Result<()> {
+    pub fn add_process_with_limits(&self, pid: i32, limits: Option<&ResourceLimits>) -> Result<()> {
         if let Some(parent) = self.cgroup_path.parent() {
             let _ = fs::create_dir_all(parent);
             for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
@@ -466,11 +463,7 @@ impl CgroupV2Manager {
                     if let Some(shares) = lim.cpu_shares {
                         let weight =
                             (1 + ((shares.saturating_sub(2)) * 9999) / 262142).clamp(1, 10000);
-                        props.push((
-                            "CPUWeight".to_string(),
-                            "t".to_string(),
-                            weight.to_string(),
-                        ));
+                        props.push(("CPUWeight".to_string(), "t".to_string(), weight.to_string()));
                     }
                     if let Some(pids) = lim.pids_max.filter(|&p| p > 0) {
                         props.push(("TasksMax".to_string(), "t".to_string(), pids.to_string()));

@@ -138,64 +138,59 @@ impl ComposeProject {
         let default_net_name = format!("{}_default", self.name);
         let mut created = Vec::new();
 
-        let apply_net_cfg = |scoped_net: &str, cfg_opt: Option<&ComposeNetworkConfig>| -> Result<()> {
-            let cfg = cfg_opt.cloned().unwrap_or_default();
-            let driver = cfg.driver.as_deref().unwrap_or("bridge");
-            let first_pool = cfg.ipam.as_ref().and_then(|i| i.config.first());
-            let subnet = first_pool.and_then(|p| p.subnet.as_deref());
-            let gateway = first_pool.and_then(|p| p.gateway.as_deref());
-            let internal = cfg.internal.unwrap_or(false);
-            let attachable = cfg.attachable.unwrap_or(false);
-            let mut label_map = std::collections::HashMap::new();
-            if let Some(lbls) = &cfg.labels {
-                for l in lbls.to_vec() {
-                    if let Some((k, v)) = l.split_once('=') {
-                        label_map.insert(k.to_string(), v.to_string());
+        let apply_net_cfg =
+            |scoped_net: &str, cfg_opt: Option<&ComposeNetworkConfig>| -> Result<()> {
+                let cfg = cfg_opt.cloned().unwrap_or_default();
+                let driver = cfg.driver.as_deref().unwrap_or("bridge");
+                let first_pool = cfg.ipam.as_ref().and_then(|i| i.config.first());
+                let subnet = first_pool.and_then(|p| p.subnet.as_deref());
+                let gateway = first_pool.and_then(|p| p.gateway.as_deref());
+                let internal = cfg.internal.unwrap_or(false);
+                let attachable = cfg.attachable.unwrap_or(false);
+                let mut label_map = std::collections::HashMap::new();
+                if let Some(lbls) = &cfg.labels {
+                    for l in lbls.to_vec() {
+                        if let Some((k, v)) = l.split_once('=') {
+                            label_map.insert(k.to_string(), v.to_string());
+                        }
                     }
                 }
-            }
-            if net_store.find(scoped_net).is_none() {
-                let _ = net_store.create_with_options(
-                    scoped_net,
-                    driver,
-                    subnet,
-                    gateway,
-                    internal,
-                    attachable,
-                    label_map,
-                )?;
-            }
-            let raw_opts = cfg.driver_opts_map();
-            let mut net_iface = None;
-            let mut norm_opts = std::collections::HashMap::new();
-            for (k, v) in raw_opts {
-                if k == "com.docker.network.bridge.name" {
-                    net_iface = Some(v);
-                } else if k == "com.docker.network.driver.mtu" {
-                    norm_opts.insert("mtu".to_string(), v);
-                } else if k == "parent" && (driver == "macvlan" || driver == "ipvlan") {
-                    net_iface = Some(v);
-                } else {
-                    norm_opts.insert(k, v);
+                if net_store.find(scoped_net).is_none() {
+                    let _ = net_store.create_with_options(
+                        scoped_net, driver, subnet, gateway, internal, attachable, label_map,
+                    )?;
                 }
-            }
-            if net_iface.is_some() || !norm_opts.is_empty() || cfg.enable_ipv6.is_some() {
-                let _ = net_store.configure_network_details(
-                    scoped_net,
-                    net_iface,
-                    if norm_opts.is_empty() {
-                        None
+                let raw_opts = cfg.driver_opts_map();
+                let mut net_iface = None;
+                let mut norm_opts = std::collections::HashMap::new();
+                for (k, v) in raw_opts {
+                    if k == "com.docker.network.bridge.name" {
+                        net_iface = Some(v);
+                    } else if k == "com.docker.network.driver.mtu" {
+                        norm_opts.insert("mtu".to_string(), v);
+                    } else if k == "parent" && (driver == "macvlan" || driver == "ipvlan") {
+                        net_iface = Some(v);
                     } else {
-                        Some(norm_opts)
-                    },
-                    None,
-                    None,
-                    None,
-                    cfg.enable_ipv6,
-                );
-            }
-            Ok(())
-        };
+                        norm_opts.insert(k, v);
+                    }
+                }
+                if net_iface.is_some() || !norm_opts.is_empty() || cfg.enable_ipv6.is_some() {
+                    let _ = net_store.configure_network_details(
+                        scoped_net,
+                        net_iface,
+                        if norm_opts.is_empty() {
+                            None
+                        } else {
+                            Some(norm_opts)
+                        },
+                        None,
+                        None,
+                        None,
+                        cfg.enable_ipv6,
+                    );
+                }
+                Ok(())
+            };
 
         let def_cfg = self
             .compose

@@ -43,8 +43,10 @@ pub(crate) fn resolve_cdi_device_mounts(device_id: &str) -> Vec<String> {
                         {
                             for m in m_arr {
                                 let hp = m.get("hostPath").and_then(|s| s.as_str()).unwrap_or("");
-                                let cp =
-                                    m.get("containerPath").and_then(|s| s.as_str()).unwrap_or("");
+                                let cp = m
+                                    .get("containerPath")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("");
                                 if !hp.is_empty() && !cp.is_empty() {
                                     mounts.push(format!("{}:{}", hp, cp));
                                 }
@@ -268,11 +270,7 @@ impl ComposeProject {
             user: None,
             hostuser: Vec::new(),
             group_entry: Vec::new(),
-            hostname: Some(
-                svc.hostname
-                    .clone()
-                    .unwrap_or_else(|| svc_name.to_string()),
-            ),
+            hostname: Some(svc.hostname.clone().unwrap_or_else(|| svc_name.to_string())),
             no_hostname: false,
             add_host,
             shm_size: None,

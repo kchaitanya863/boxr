@@ -344,7 +344,8 @@ pub fn check_container_health_with_output(
             if !done_clone.load(std::sync::atomic::Ordering::SeqCst) {
                 to_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 #[cfg(unix)]
-                if let Ok(pid_str) = std::fs::read_to_string(bp_clone.join("healthcheck_exec.pid")) {
+                if let Ok(pid_str) = std::fs::read_to_string(bp_clone.join("healthcheck_exec.pid"))
+                {
                     if let Ok(pid) = pid_str.trim().parse::<i32>() {
                         if pid > 0 {
                             let children_file = format!("/proc/{pid}/task/{pid}/children");

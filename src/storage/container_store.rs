@@ -154,7 +154,11 @@ impl ContainerStore {
         let home = self.index_file.parent().map(Path::to_path_buf);
         crate::storage::index_lock::with_index_lock(&self.index_file, || {
             let containers = self.load_unlocked().containers;
-            if let Some(exact) = containers.iter().find(|c| c.name == q || c.id == q).cloned() {
+            if let Some(exact) = containers
+                .iter()
+                .find(|c| c.name == q || c.id == q)
+                .cloned()
+            {
                 return Ok(Some(exact));
             }
             if let Some(found) = containers.iter().find(|c| c.id.starts_with(&q)).cloned() {
@@ -166,14 +170,10 @@ impl ContainerStore {
                         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
                             if let Some(pods_arr) = val.get("pods").and_then(|v| v.as_array()) {
                                 for p_val in pods_arr {
-                                    let pid = p_val
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    let pname = p_val
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
+                                    let pid =
+                                        p_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                    let pname =
+                                        p_val.get("name").and_then(|v| v.as_str()).unwrap_or("");
                                     let infra_cid = p_val
                                         .get("infra_container_id")
                                         .and_then(|v| v.as_str())

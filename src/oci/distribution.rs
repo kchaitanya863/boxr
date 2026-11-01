@@ -230,10 +230,8 @@ pub fn check_tls_details_handshake(host_port: &str, has_cert: bool) -> Result<()
 fn send_tls13_pqc_only_client_hello(host_port: &str) -> Result<Vec<u8>> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    let mut stream = TcpStream::connect_timeout(
-        &host_port.parse()?,
-        std::time::Duration::from_secs(2),
-    )?;
+    let mut stream =
+        TcpStream::connect_timeout(&host_port.parse()?, std::time::Duration::from_secs(2))?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
 
     let mut exts = Vec::new();
@@ -577,10 +575,7 @@ impl RegistryClient {
                         || is_insecure_ep
                         || Self::allow_http_fallback())
                 {
-                    let http_ping = format!(
-                        "http://{}/v2/",
-                        registry_connect_host(primary_host)
-                    );
+                    let http_ping = format!("http://{}/v2/", registry_connect_host(primary_host));
                     if let Ok(r) = self.client.get(&http_ping).send().await {
                         self.use_http = true;
                         r
@@ -596,10 +591,8 @@ impl RegistryClient {
                         || detail.contains("received corrupt message")
                         || detail.contains("tls")
                     {
-                        let http_ping = format!(
-                            "http://{}/v2/",
-                            registry_connect_host(&reference.registry)
-                        );
+                        let http_ping =
+                            format!("http://{}/v2/", registry_connect_host(&reference.registry));
                         if self.client.get(&http_ping).send().await.is_ok() {
                             return Err(anyhow!(
                                 "pinging container registry {}: Get \"{}\": http: server gave HTTP response to HTTPS client",
@@ -652,7 +645,9 @@ impl RegistryClient {
                     .fetch_bearer_token(auth_str, reference, creds.as_ref())
                     .await?;
                 if token.is_none() && creds.is_some() {
-                    if reference.registry == "docker.io" || reference.registry.ends_with(".docker.io") {
+                    if reference.registry == "docker.io"
+                        || reference.registry.ends_with(".docker.io")
+                    {
                         self.basic_auth = None;
                         self.token = self.fetch_bearer_token(auth_str, reference, None).await?;
                     } else {
@@ -826,13 +821,10 @@ impl RegistryClient {
                     detail.push_str(&format!("; {s}"));
                     src = s.source();
                 }
-                if !self.use_http
-                    && (opts.tls_verify == Some(false) || Self::allow_http_fallback())
+                if !self.use_http && (opts.tls_verify == Some(false) || Self::allow_http_fallback())
                 {
-                    let http_ping = format!(
-                        "http://{}/v2/",
-                        registry_connect_host(&reference.registry)
-                    );
+                    let http_ping =
+                        format!("http://{}/v2/", registry_connect_host(&reference.registry));
                     let mut hreq = self.client.get(&http_ping);
                     if let Some(auth) = &self.basic_auth {
                         if let Ok(val) = HeaderValue::from_str(&format!("Basic {}", auth)) {
@@ -854,10 +846,8 @@ impl RegistryClient {
                         || detail.contains("received corrupt message")
                         || detail.contains("tls")
                     {
-                        let http_ping = format!(
-                            "http://{}/v2/",
-                            registry_connect_host(&reference.registry)
-                        );
+                        let http_ping =
+                            format!("http://{}/v2/", registry_connect_host(&reference.registry));
                         if self.client.get(&http_ping).send().await.is_ok() {
                             return Err(anyhow!(
                                 "pinging container registry {}: Get \"{}\": http: server gave HTTP response to HTTPS client",
@@ -1124,11 +1114,7 @@ impl RegistryClient {
                     enc.write_all(&raw_tar)?;
                     enc.finish()?;
                 }
-                (
-                    gz_tar,
-                    media_types::DOCKER_LAYER_TAR_GZIP.to_string(),
-                    None,
-                )
+                (gz_tar, media_types::DOCKER_LAYER_TAR_GZIP.to_string(), None)
             };
             let layer_digest = format!("sha256:{}", hex::encode(Sha256::digest(&comp_tar)));
             let diff_id = format!("sha256:{}", hex::encode(Sha256::digest(&raw_tar)));
@@ -1457,8 +1443,10 @@ impl RegistryClient {
         {
             if let Ok(index) = serde_json::from_slice::<ManifestListOrIndex>(&body_bytes) {
                 if self.last_list_digest.is_none() {
-                    self.last_list_digest =
-                        Some(format!("sha256:{}", hex::encode(Sha256::digest(&body_bytes))));
+                    self.last_list_digest = Some(format!(
+                        "sha256:{}",
+                        hex::encode(Sha256::digest(&body_bytes))
+                    ));
                 }
                 // Determine target architecture
                 let (target_os, target_arch) = if let Some(plat) = target_platform {
@@ -1628,8 +1616,9 @@ impl RegistryClient {
                                 if let Some(cc) = raw_val.get("container_config") {
                                     if let Ok(exec_cfg) = serde_json::from_value::<
                                         crate::oci::image::ExecutionConfig,
-                                    >(cc.clone())
-                                    {
+                                    >(
+                                        cc.clone()
+                                    ) {
                                         if let Some(hc) = exec_cfg.healthcheck {
                                             config
                                                 .config
@@ -1672,11 +1661,7 @@ impl RegistryClient {
                         break;
                     }
                     Err(e) => {
-                        return Err(anyhow!(
-                            "fetching blob {}: {}",
-                            config_descriptor.digest,
-                            e
-                        ));
+                        return Err(anyhow!("fetching blob {}: {}", config_descriptor.digest, e));
                     }
                 }
             }
@@ -1767,10 +1752,7 @@ impl RegistryClient {
             );
             let mut should_fallback = false;
             for _ in 0..max_tries {
-                if is_zstd_chunked
-                    && partial_enabled
-                    && reference.registry == "mirrortest.local"
-                {
+                if is_zstd_chunked && partial_enabled && reference.registry == "mirrortest.local" {
                     let range_res = self
                         .client
                         .get(&url)
@@ -1818,7 +1800,9 @@ impl RegistryClient {
                                 .headers(self.auth_headers())
                                 .send()
                                 .await
-                                .map_err(|e| anyhow!("fetching blob {}: {}", descriptor.digest, e))?;
+                                .map_err(|e| {
+                                    anyhow!("fetching blob {}: {}", descriptor.digest, e)
+                                })?;
                             if full_resp.status().is_success() {
                                 let temp_path = dest_path.with_extension("download");
                                 let mut file = File::create(&temp_path)?;

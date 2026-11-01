@@ -353,8 +353,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let is_run_or_create = sub_name == "run"
         || sub_name == "create"
         || (sub_name == "container" && (sub2_name == "run" || sub2_name == "create"));
-    let is_create_only =
-        sub_name == "create" || (sub_name == "container" && sub2_name == "create");
+    let is_create_only = sub_name == "create" || (sub_name == "container" && sub2_name == "create");
     let is_start = sub_name == "start" || (sub_name == "container" && sub2_name == "start");
     let is_exec = sub_name == "exec" || (sub_name == "container" && sub2_name == "exec");
     let mut seen_positional_after_sub = false;
@@ -471,7 +470,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             i += 2;
             continue;
         }
-        if i >= subcommand_idx && (a.starts_with("--net=") || a.starts_with("--network=")) && !seen_positional_after_sub {
+        if i >= subcommand_idx
+            && (a.starts_with("--net=") || a.starts_with("--network="))
+            && !seen_positional_after_sub
+        {
             let val = a.split_once('=').map(|(_, v)| v).unwrap_or("");
             if is_run_or_create && val.contains(',') && !val.contains(':') {
                 for part in val.split(',') {
@@ -927,7 +929,10 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
         }
         if a == "--infra=false" {
             pod_infra_false = true;
-            if !argv[i + 1..].iter().any(|s| s == "--infra=true" || s == "--infra") {
+            if !argv[i + 1..]
+                .iter()
+                .any(|s| s == "--infra=true" || s == "--infra")
+            {
                 let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
             }
             i += 1;

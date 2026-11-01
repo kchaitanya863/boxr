@@ -332,9 +332,10 @@ impl ArtifactStore {
             }
 
             if let Some(title_val) = layer_annotations.get("org.opencontainers.image.title") {
-                if layers_so_far.iter().any(|l| {
-                    l.annotations.get("org.opencontainers.image.title") == Some(title_val)
-                }) {
+                if layers_so_far
+                    .iter()
+                    .any(|l| l.annotations.get("org.opencontainers.image.title") == Some(title_val))
+                {
                     if has_explicit_title {
                         crate::cli::usage_errors::exit_usage_error(
                             "duplicate layers org.opencontainers.image.title labels within an artifact not allowed",
@@ -489,7 +490,12 @@ impl ArtifactStore {
         } else if let Some(t) = filter_title {
             let v: Vec<_> = all_layers
                 .into_iter()
-                .filter(|l| l.annotations.get("org.opencontainers.image.title").map(String::as_str) == Some(t))
+                .filter(|l| {
+                    l.annotations
+                        .get("org.opencontainers.image.title")
+                        .map(String::as_str)
+                        == Some(t)
+                })
                 .collect();
             if v.is_empty() {
                 crate::cli::usage_errors::exit_usage_error(format!(

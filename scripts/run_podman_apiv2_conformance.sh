@@ -66,6 +66,11 @@ else
   export PATH="$CACHE_DIR/bin:$PATH"
 fi
 
+if [[ -d "$REPO_ROOT/tests/podman_upstream/apiv2" ]]; then
+  mkdir -p "$SRC_DIR/test/apiv2"
+  rsync -a "$REPO_ROOT/tests/podman_upstream/apiv2/" "$SRC_DIR/test/apiv2/"
+fi
+
 cd "$SRC_DIR"
 
 if [[ "${SKIP_APIV2_BASH:-0}" != "1" ]]; then

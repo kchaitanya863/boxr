@@ -164,8 +164,7 @@ pub fn build_podman_info_document() -> Value {
     let default_network = crate::containers_conf_toml_value("default_network")
         .unwrap_or_else(|| "podman".to_string());
     let cdi_spec_dirs = crate::runtime::cdi::CdiManager::effective_spec_dirs();
-    let discovered_devices =
-        crate::runtime::cdi::CdiManager::discovered_devices(&cdi_spec_dirs);
+    let discovered_devices = crate::runtime::cdi::CdiManager::discovered_devices(&cdi_spec_dirs);
     let seccomp_profile_path = crate::containers_conf_toml_value("seccomp_profile")
         .unwrap_or_else(|| "/usr/share/containers/seccomp.json".to_string());
     let image_copy_tmp_dir = if let Ok(tmpdir) = std::env::var("TMPDIR") {

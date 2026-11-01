@@ -62,7 +62,7 @@ pub async fn ping() -> &'static str {
     "OK"
 }
 
-pub async fn version() -> Json< serde_json::Value > {
+pub async fn version() -> Json<serde_json::Value> {
     Json(build_version_json())
 }
 
@@ -204,14 +204,23 @@ pub fn build_libpod_info_json(state: &DaemonState) -> serde_json::Value {
         );
     }
     if let Some(store) = bats.get_mut("store").and_then(|s| s.as_object_mut()) {
-        store.insert("volumePath".to_string(), serde_json::Value::String(vol_path));
-        store.insert("graphRoot".to_string(), serde_json::Value::String(graph_root));
+        store.insert(
+            "volumePath".to_string(),
+            serde_json::Value::String(vol_path),
+        );
+        store.insert(
+            "graphRoot".to_string(),
+            serde_json::Value::String(graph_root),
+        );
     }
     let _ = &mut doc;
     bats
 }
 
-pub fn build_compat_info_json(state: &DaemonState, api_version: (u32, u32, u32)) -> serde_json::Value {
+pub fn build_compat_info_json(
+    state: &DaemonState,
+    api_version: (u32, u32, u32),
+) -> serde_json::Value {
     let c_store = ContainerStore::with_home(state.home.clone());
     let i_store = ImageStore::with_home(state.home.clone());
     let containers = c_store.list();
@@ -225,7 +234,12 @@ pub fn build_compat_info_json(state: &DaemonState, api_version: (u32, u32, u32))
         .count();
     let stopped = containers
         .iter()
-        .filter(|c| matches!(c.status, ContainerStatus::Exited(_) | ContainerStatus::Created))
+        .filter(|c| {
+            matches!(
+                c.status,
+                ContainerStatus::Exited(_) | ContainerStatus::Created
+            )
+        })
         .count();
     let is_rootless = cfg!(unix) && unsafe { libc::geteuid() != 0 };
     let mut sec_opts = vec!["name=seccomp,profile=default".to_string()];
@@ -304,7 +318,10 @@ pub async fn handle_system_routes(ctx: &ApiContext) -> Option<Response> {
         "/info" => match ctx.method {
             Method::GET => {
                 if ctx.is_libpod {
-                    Some(json_response(StatusCode::OK, &build_libpod_info_json(&ctx.state)))
+                    Some(json_response(
+                        StatusCode::OK,
+                        &build_libpod_info_json(&ctx.state),
+                    ))
                 } else {
                     Some(json_response(
                         StatusCode::OK,
@@ -349,7 +366,11 @@ pub async fn handle_system_routes(ctx: &ApiContext) -> Option<Response> {
 }
 
 async fn handle_events(ctx: &ApiContext) -> Response {
-    let stream_param = ctx.query.get("stream").map(|s| s.as_str()).unwrap_or("true");
+    let stream_param = ctx
+        .query
+        .get("stream")
+        .map(|s| s.as_str())
+        .unwrap_or("true");
     let stream_follow = stream_param != "false" && stream_param != "0";
     if stream_follow {
         let stream = async_stream_events();
@@ -373,10 +394,7 @@ async fn handle_events(ctx: &ApiContext) -> Response {
                 .ok()
                 .map(|f| (f * 1_000_000_000.0) as i64)
         } else {
-            since_param
-                .parse::<i64>()
-                .ok()
-                .map(|s| s * 1_000_000_000)
+            since_param.parse::<i64>().ok().map(|s| s * 1_000_000_000)
         }
     } else {
         None
@@ -504,7 +522,10 @@ fn count_volume_refs(home: &Path, vol_name: &str) -> usize {
         let bp = std::path::PathBuf::from(&c.bundle_path);
         if let Ok(m_str) = fs::read_to_string(bp.join("mounts.json")) {
             if let Ok(mounts) = serde_json::from_str::<Vec<crate::volume::MountSpec>>(&m_str) {
-                if mounts.iter().any(|m| m.volume_name.as_deref() == Some(vol_name)) {
+                if mounts
+                    .iter()
+                    .any(|m| m.volume_name.as_deref() == Some(vol_name))
+                {
                     count += 1;
                 }
             }
@@ -546,7 +567,8 @@ fn handle_system_df(ctx: &ApiContext) -> Response {
     let mut total_img_size: i64 = 0;
     let mut img_list = Vec::new();
     for img in &images {
-        let sz = if img.reference.contains("testimage") || img.full_hex_id().starts_with("6953980e") {
+        let sz = if img.reference.contains("testimage") || img.full_hex_id().starts_with("6953980e")
+        {
             12_180_391
         } else {
             img.size_bytes
@@ -703,7 +725,8 @@ fn handle_system_prune(ctx: &ApiContext) -> Response {
         for img in i_store.list() {
             if count_image_refs(&ctx.state.home, &img) == 0 {
                 let _ = i_store.remove(&img.id);
-                img_reports.push(serde_json::json!({ "Id": img.full_hex_id(), "Size": img.size_bytes }));
+                img_reports
+                    .push(serde_json::json!({ "Id": img.full_hex_id(), "Size": img.size_bytes }));
             }
         }
     }
@@ -929,4 +952,3 @@ fn handle_autoupdate(ctx: &ApiContext) -> Response {
 
     json_response(StatusCode::OK, &serde_json::json!([]))
 }
-

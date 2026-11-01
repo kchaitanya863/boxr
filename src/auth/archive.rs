@@ -278,16 +278,16 @@ impl ArchiveManager {
             schema_version: 2,
             manifests: index_manifests,
         };
-        fs::write(outdir.join("index.json"), serde_json::to_vec_pretty(&index)?)?;
+        fs::write(
+            outdir.join("index.json"),
+            serde_json::to_vec_pretty(&index)?,
+        )?;
         Ok(())
     }
 
     fn save_docker_dir(records: &[ImageRecord], by_id: &[bool], outdir: &Path) -> Result<()> {
         fs::create_dir_all(outdir)?;
-        fs::write(
-            outdir.join("version"),
-            "Directory Transport Version: 1.1\n",
-        )?;
+        fs::write(outdir.join("version"), "Directory Transport Version: 1.1\n")?;
         let temp_tar = outdir.join(".boxr-docker-dir.tar");
         {
             let file = File::create(&temp_tar)?;
@@ -564,7 +564,11 @@ impl ArchiveManager {
                         if record.reference == "<none>" && record.tag == "<none>" {
                             println!("Loaded image: sha256:{}", record.full_hex_id());
                         } else {
-                            println!("Loaded image: {}:{}", record.display_reference(), record.tag);
+                            println!(
+                                "Loaded image: {}:{}",
+                                record.display_reference(),
+                                record.tag
+                            );
                         }
                     }
                     return Ok(records);
@@ -880,7 +884,11 @@ impl ArchiveManager {
                     if record.reference == "<none>" && record.tag == "<none>" {
                         println!("Loaded image: sha256:{}", record.full_hex_id());
                     } else {
-                        println!("Loaded image: {}:{}", record.display_reference(), record.tag);
+                        println!(
+                            "Loaded image: {}:{}",
+                            record.display_reference(),
+                            record.tag
+                        );
                     }
                 }
                 loaded.push(record);
@@ -1026,7 +1034,11 @@ impl ArchiveManager {
                 if record.reference == "<none>" && record.tag == "<none>" {
                     println!("Loaded image: sha256:{}", record.full_hex_id());
                 } else {
-                    println!("Loaded image: {}:{}", record.display_reference(), record.tag);
+                    println!(
+                        "Loaded image: {}:{}",
+                        record.display_reference(),
+                        record.tag
+                    );
                 }
             }
             loaded.push(record);

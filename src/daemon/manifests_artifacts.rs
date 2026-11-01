@@ -183,7 +183,11 @@ pub async fn handle_manifests_artifacts_routes(ctx: &ApiContext) -> Option<Respo
             return if find_api_manifest(&ctx.state.home, name).is_some() {
                 Some(StatusCode::NO_CONTENT.into_response())
             } else {
-                Some(error_json(StatusCode::NOT_FOUND, "no such manifest", "no such manifest"))
+                Some(error_json(
+                    StatusCode::NOT_FOUND,
+                    "no such manifest",
+                    "no such manifest",
+                ))
             };
         }
         if let Some(name) = rest.strip_suffix("/json") {
@@ -242,7 +246,9 @@ pub async fn handle_manifests_artifacts_routes(ctx: &ApiContext) -> Option<Respo
 }
 
 fn resolve_image_for_manifest(home: &Path, img_ref: &str) -> ApiManifestEntry {
-    let clean = img_ref.strip_prefix("containers-storage:").unwrap_or(img_ref);
+    let clean = img_ref
+        .strip_prefix("containers-storage:")
+        .unwrap_or(img_ref);
     let i_store = ImageStore::with_home(home.to_path_buf());
     if let Some(img) = i_store.find(clean) {
         let dig = if img.manifest_digest.starts_with("sha256:") && img.manifest_digest.len() == 71 {
@@ -293,7 +299,12 @@ fn handle_create_manifest(ctx: &ApiContext, name: &str, ok_status: StatusCode) -
     }
     let mut lists = load_api_manifests(&ctx.state.home);
     let id = hex::encode(Sha256::digest(
-        format!("{}-{}", name, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)).as_bytes(),
+        format!(
+            "{}-{}",
+            name,
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        )
+        .as_bytes(),
     ));
     let mut entries = Vec::new();
     if let Some(imgs) = ctx.query_multi.get("images") {
@@ -351,7 +362,11 @@ fn format_manifest_list_json(ml: &ApiManifestList) -> serde_json::Value {
 fn handle_inspect_manifest(ctx: &ApiContext, name: &str) -> Response {
     match find_api_manifest(&ctx.state.home, name) {
         Some(ml) => json_response(StatusCode::OK, &format_manifest_list_json(&ml)),
-        None => error_json(StatusCode::NOT_FOUND, "no such manifest", "no such manifest"),
+        None => error_json(
+            StatusCode::NOT_FOUND,
+            "no such manifest",
+            "no such manifest",
+        ),
     }
 }
 
@@ -430,7 +445,11 @@ fn handle_modify_manifest(ctx: &ApiContext, name: &str) -> Response {
         .iter()
         .position(|m| m.name == name || m.id == name || m.id.starts_with(name))
     else {
-        return error_json(StatusCode::NOT_FOUND, "no such manifest", "no such manifest");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such manifest",
+            "no such manifest",
+        );
     };
 
     let mut new_anns = HashMap::new();
@@ -650,7 +669,11 @@ async fn handle_push_manifest(ctx: &ApiContext, name: &str, dest_raw: &str) -> R
         return error_json(StatusCode::BAD_REQUEST, msg, msg);
     }
     let Some(ml) = find_api_manifest(&ctx.state.home, name) else {
-        return error_json(StatusCode::NOT_FOUND, "no such manifest", "no such manifest");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such manifest",
+            "no such manifest",
+        );
     };
 
     let dest = dest_raw
@@ -664,14 +687,18 @@ async fn handle_push_manifest(ctx: &ApiContext, name: &str, dest_raw: &str) -> R
     for entry in &ml.manifests {
         if let Some(ref art_json) = entry.artifact_manifest_json {
             let _ = fs::write(
-                Path::new("/tmp/boxr-registry-manifests").join(format!("blob_{}.json", entry.digest)),
+                Path::new("/tmp/boxr-registry-manifests")
+                    .join(format!("blob_{}.json", entry.digest)),
                 art_json,
             );
         }
     }
 
     let idx_json = serde_json::to_string(&format_manifest_list_json(&ml)).unwrap_or_default();
-    let idx_dig = format!("sha256:{}", hex::encode(Sha256::digest(idx_json.as_bytes())));
+    let idx_dig = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(idx_json.as_bytes()))
+    );
     let safe_ref = format!("{}/{}:{}", host_port, repo, tag).replace(['/', ':'], "_");
     let _ = fs::write(
         Path::new("/tmp/boxr-registry-manifests").join(format!("{}.json", safe_ref)),
@@ -689,9 +716,18 @@ fn handle_delete_manifest(ctx: &ApiContext, name: &str) -> Response {
     let mut lists = load_api_manifests(&ctx.state.home);
     let before = lists.len();
     lists.retain(|m| m.name != name && m.id != name && !m.id.starts_with(name));
-    let _ = fs::remove_file(ctx.state.home.join("manifests").join(format!("{}.json", name)));
+    let _ = fs::remove_file(
+        ctx.state
+            .home
+            .join("manifests")
+            .join(format!("{}.json", name)),
+    );
     if lists.len() == before && !ignore {
-        return error_json(StatusCode::NOT_FOUND, "no such manifest", "no such manifest");
+        return error_json(
+            StatusCode::NOT_FOUND,
+            "no such manifest",
+            "no such manifest",
+        );
     }
     save_api_manifests(&ctx.state.home, &lists);
     json_response(
@@ -912,7 +948,10 @@ fn handle_artifact_list(ctx: &ApiContext) -> Response {
 
 fn handle_artifact_inspect(ctx: &ApiContext, name: &str) -> Response {
     let artifacts = load_artifacts(&ctx.state.home);
-    match artifacts.iter().find(|a| a.name == name || a.digest == name) {
+    match artifacts
+        .iter()
+        .find(|a| a.name == name || a.digest == name)
+    {
         Some(art) => json_response(StatusCode::OK, &format_artifact_json(art)),
         None => error_json(
             StatusCode::NOT_FOUND,
@@ -998,7 +1037,11 @@ fn handle_artifact_extract(ctx: &ApiContext, name: &str) -> Response {
             "artifact does not exist",
         );
     };
-    let title_filter = ctx.query.get("title").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let title_filter = ctx
+        .query
+        .get("title")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty());
     let mut tar_bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_bytes);
@@ -1032,7 +1075,10 @@ fn handle_artifact_extract(ctx: &ApiContext, name: &str) -> Response {
 
 fn handle_artifact_delete_one(ctx: &ApiContext, name: &str) -> Response {
     let mut artifacts = load_artifacts(&ctx.state.home);
-    let Some(pos) = artifacts.iter().position(|a| a.name == name || a.digest == name) else {
+    let Some(pos) = artifacts
+        .iter()
+        .position(|a| a.name == name || a.digest == name)
+    else {
         return error_json(
             StatusCode::NOT_FOUND,
             "artifact does not exist",
@@ -1071,10 +1117,17 @@ fn handle_artifact_remove_batch(ctx: &ApiContext) -> Response {
         );
     }
 
-    let targets = ctx.query_multi.get("Artifacts").cloned().unwrap_or_default();
+    let targets = ctx
+        .query_multi
+        .get("Artifacts")
+        .cloned()
+        .unwrap_or_default();
     let mut digests = Vec::new();
     for t in &targets {
-        if let Some(pos) = artifacts.iter().position(|a| a.name == *t || a.digest == *t) {
+        if let Some(pos) = artifacts
+            .iter()
+            .position(|a| a.name == *t || a.digest == *t)
+        {
             let rem = artifacts.remove(pos);
             digests.push(rem.digest);
         } else if !ignore {

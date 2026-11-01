@@ -79,8 +79,12 @@ impl PodOps {
 
                 fs::create_dir_all(&new_bundle)?;
                 if old_bundle.exists() {
-                    for fname in ["config.json", "mounts.json", "create_command.json", "hosts.json"]
-                    {
+                    for fname in [
+                        "config.json",
+                        "mounts.json",
+                        "create_command.json",
+                        "hosts.json",
+                    ] {
                         let src_f = old_bundle.join(fname);
                         if src_f.exists() {
                             let _ = fs::copy(&src_f, new_bundle.join(fname));

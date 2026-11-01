@@ -5,7 +5,12 @@ use clap::Args;
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP)]
 pub struct StopArgs {
     /// Seconds to wait before killing the container
-    #[arg(short = 't', long = "time", alias = "timeout", allow_hyphen_values = true)]
+    #[arg(
+        short = 't',
+        long = "time",
+        alias = "timeout",
+        allow_hyphen_values = true
+    )]
     pub time: Option<i32>,
 
     /// Signal to send to the container

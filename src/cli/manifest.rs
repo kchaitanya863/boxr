@@ -52,9 +52,7 @@ pub enum ManifestAction {
         sources: Vec<String>,
     },
     /// Check if a manifest list exists in local storage
-    Exists {
-        target: String,
-    },
+    Exists { target: String },
     /// Push a manifest list to a repository
     Push {
         #[arg(long = "authfile")]

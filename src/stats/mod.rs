@@ -217,8 +217,7 @@ impl StatsCollector {
                     }
                     if let Some(p) = pods.iter().find(|p| {
                         p.infra
-                            && (p.infra_container_id == c.id
-                                || pod_store.infra_name(p) == c.name)
+                            && (p.infra_container_id == c.id || pod_store.infra_name(p) == c.name)
                     }) {
                         let any_workload_running = p.containers.iter().any(|cid| {
                             cid != &p.infra_container_id

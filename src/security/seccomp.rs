@@ -62,20 +62,20 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
     let mut mismatch_action = SeccompAction::Errno(libc::EPERM as u32);
     let mut filter_map: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
 
-    let insert_syscall_name =
-        |filter_map: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>, name: &str| {
-            if name == "link" || name == "linkat" {
-                #[cfg(target_arch = "x86_64")]
-                filter_map.insert(libc::SYS_link as i64, vec![]);
-                filter_map.insert(libc::SYS_linkat as i64, vec![]);
-            } else if name == "symlink" || name == "symlinkat" {
-                #[cfg(target_arch = "x86_64")]
-                filter_map.insert(libc::SYS_symlink as i64, vec![]);
-                filter_map.insert(libc::SYS_symlinkat as i64, vec![]);
-            } else if let Some(nr) = syscall_name_to_nr(name) {
-                filter_map.insert(nr as i64, vec![]);
-            }
-        };
+    let insert_syscall_name = |filter_map: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>,
+                               name: &str| {
+        if name == "link" || name == "linkat" {
+            #[cfg(target_arch = "x86_64")]
+            filter_map.insert(libc::SYS_link as i64, vec![]);
+            filter_map.insert(libc::SYS_linkat as i64, vec![]);
+        } else if name == "symlink" || name == "symlinkat" {
+            #[cfg(target_arch = "x86_64")]
+            filter_map.insert(libc::SYS_symlink as i64, vec![]);
+            filter_map.insert(libc::SYS_symlinkat as i64, vec![]);
+        } else if let Some(nr) = syscall_name_to_nr(name) {
+            filter_map.insert(nr as i64, vec![]);
+        }
+    };
 
     if let Some(syscalls) = seccomp_val.get("syscalls").and_then(|v| v.as_array()) {
         for sc in syscalls {

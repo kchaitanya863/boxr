@@ -234,7 +234,9 @@ impl Spec {
 
         if args.is_empty() {
             let explicit_empty = image_config.is_some_and(|cfg| {
-                cfg.entrypoint.as_ref().is_some_and(|e| e.iter().all(|s| s.is_empty()))
+                cfg.entrypoint
+                    .as_ref()
+                    .is_some_and(|e| e.iter().all(|s| s.is_empty()))
                     && cfg.cmd.as_ref().is_none_or(|c| c.is_empty())
             });
             if explicit_empty {

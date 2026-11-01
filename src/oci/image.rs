@@ -330,18 +330,12 @@ impl ImageConfig {
                                 }
                                 if total == 0 && s != "0s" { def } else { total }
                             };
-                            let interval_secs = durs
-                                .first()
-                                .map(|s| parse_go_dur(s, 30))
-                                .unwrap_or(30);
-                            let timeout_secs = durs
-                                .get(1)
-                                .map(|s| parse_go_dur(s, 30))
-                                .unwrap_or(30);
-                            let start_period_secs = durs
-                                .get(2)
-                                .map(|s| parse_go_dur(s, 0))
-                                .unwrap_or(0);
+                            let interval_secs =
+                                durs.first().map(|s| parse_go_dur(s, 30)).unwrap_or(30);
+                            let timeout_secs =
+                                durs.get(1).map(|s| parse_go_dur(s, 30)).unwrap_or(30);
+                            let start_period_secs =
+                                durs.get(2).map(|s| parse_go_dur(s, 0)).unwrap_or(0);
                             return Some(crate::health::HealthConfig {
                                 test,
                                 interval_secs,

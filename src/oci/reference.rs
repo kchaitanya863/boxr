@@ -121,7 +121,8 @@ impl ImageReference {
         } else {
             repository
         };
-        let (registry, repository) = Self::apply_registries_conf_rewrite(input, registry, repository);
+        let (registry, repository) =
+            Self::apply_registries_conf_rewrite(input, registry, repository);
 
         // Reject empty path components (issue #406 follow-up):
         // "ghcr.io/:latest", "ghcr.io//repo:latest" and "org//repo:tag"

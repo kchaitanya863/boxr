@@ -386,10 +386,7 @@ pub fn connect_container_to_bridge_network_full(
     Ok(())
 }
 
-pub fn refresh_container_resolv_conf(
-    container_query: &str,
-    home: Option<&Path>,
-) -> Result<()> {
+pub fn refresh_container_resolv_conf(container_query: &str, home: Option<&Path>) -> Result<()> {
     let net_store = match home {
         Some(h) => NetworkStore::with_home(h.to_path_buf()),
         None => NetworkStore::new(),

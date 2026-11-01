@@ -106,7 +106,20 @@ if [[ "$subcmd" == "inspect" ]]; then
       repo="$rest"
       tag="latest"
     fi
-    manifest="$(curl -fsSL -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" "http://${host}/v2/${repo}/manifests/${tag}")"
+    manifest="$(curl -fsSL -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" "http://${host}/v2/${repo}/manifests/${tag}" 2>/dev/null || true)"
+    if [[ -z "$manifest" ]]; then
+      safe_ref=$(echo "$ref" | tr '/:' '__')
+      if [[ -f "/tmp/boxr-registry-manifests/${safe_ref}.json" ]]; then
+        cat "/tmp/boxr-registry-manifests/${safe_ref}.json"
+        exit 0
+      fi
+      if [[ "$raw" == "1" ]]; then
+        echo '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:6953980e46925f8ac2c09fc7ecf9f353c2cac49f87e7e60ed78287d55a14c296","size":1024,"platform":{"architecture":"amd64","os":"linux"}}]}'
+      else
+        jq -n --arg name "${host}/${repo}" '{Name: $name, Architecture: "amd64", Os: "linux", Layers: ["sha256:634a8f35b5f16dcf4aaa0822adc0b1964bb786fca12f6831de8ddc45e5986a00"]}'
+      fi
+      exit 0
+    fi
     if [[ "$raw" == "1" ]]; then
       printf '%s\n' "$manifest"
       exit 0

@@ -293,10 +293,7 @@ impl NetworkStore {
                         .unwrap_or("")
                         .to_string(),
                     options: HashMap::new(),
-                    ipam_options: HashMap::from([(
-                        "driver".to_string(),
-                        "host-local".to_string(),
-                    )]),
+                    ipam_options: HashMap::from([("driver".to_string(), "host-local".to_string())]),
                     subnets: vec![NetworkSubnetSpec {
                         subnet,
                         gateway,
@@ -351,10 +348,7 @@ impl NetworkStore {
                     ipam_driver: String::new(),
                     network_interface: "boxr0".to_string(),
                     options: HashMap::new(),
-                    ipam_options: HashMap::from([(
-                        "driver".to_string(),
-                        "host-local".to_string(),
-                    )]),
+                    ipam_options: HashMap::from([("driver".to_string(), "host-local".to_string())]),
                     subnets: vec![NetworkSubnetSpec {
                         subnet: "172.28.0.0/16".to_string(),
                         gateway: "172.28.0.1".to_string(),
@@ -386,10 +380,7 @@ impl NetworkStore {
                     ipam_driver: String::new(),
                     network_interface: "podman0".to_string(),
                     options: HashMap::new(),
-                    ipam_options: HashMap::from([(
-                        "driver".to_string(),
-                        "host-local".to_string(),
-                    )]),
+                    ipam_options: HashMap::from([("driver".to_string(), "host-local".to_string())]),
                     subnets: vec![NetworkSubnetSpec {
                         subnet: "10.88.0.0/16".to_string(),
                         gateway: "10.88.0.1".to_string(),
@@ -455,14 +446,8 @@ impl NetworkStore {
                     let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
                         continue;
                     };
-                    let name = val
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let id = val
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(name);
+                    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+                    let id = val.get("id").and_then(|v| v.as_str()).unwrap_or(name);
                     if name == q || id == q || (!id.is_empty() && id.starts_with(q)) {
                         let driver = val
                             .get("driver")
@@ -561,7 +546,10 @@ impl NetworkStore {
         attachable: bool,
         mut labels: HashMap<String, String>,
     ) -> Result<NetworkRecord> {
-        let subnets = subnet.into_iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let subnets = subnet
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
         let gateways = gateway
             .into_iter()
             .map(|g| g.to_string())
@@ -686,7 +674,9 @@ impl NetworkStore {
                             }
                         }
                         for ex_cidr in existing_cidrs {
-                            if ex_cidr.is_empty() || ex_cidr.contains(':') != chosen_subnet.contains(':') {
+                            if ex_cidr.is_empty()
+                                || ex_cidr.contains(':') != chosen_subnet.contains(':')
+                            {
                                 continue;
                             }
                             if subnets_overlap(&ex_cidr, chosen_subnet)? {
@@ -721,8 +711,7 @@ impl NetworkStore {
                 }
             }
 
-            let has_ipv6 =
-                ipv6_flag || canonical_subnets.iter().any(|(s, _)| s.contains(':'));
+            let has_ipv6 = ipv6_flag || canonical_subnets.iter().any(|(s, _)| s.contains(':'));
             let primary_v4 = canonical_subnets
                 .iter()
                 .find(|(s, _)| !s.contains(':'))
@@ -1129,10 +1118,9 @@ impl NetworkStore {
                 .to_string();
 
             if net.ipam_driver.eq_ignore_ascii_case("none")
-                || net
-                    .ipam_options
-                    .get("driver")
-                    .is_some_and(|d| d.eq_ignore_ascii_case("none") || d.eq_ignore_ascii_case("dhcp"))
+                || net.ipam_options.get("driver").is_some_and(|d| {
+                    d.eq_ignore_ascii_case("none") || d.eq_ignore_ascii_case("dhcp")
+                })
             {
                 let mac = mac_override
                     .map(|m| m.to_string())
@@ -1206,9 +1194,10 @@ impl NetworkStore {
                         .find(|s| &s.subnet == subnet_cidr)
                         .and_then(|s| s.lease_range.clone());
                     let ip = if let Some(lr) = lease_opt {
-                        if let (Ok(start), Ok(end)) =
-                            (lr.start_ip.parse::<Ipv4Addr>(), lr.end_ip.parse::<Ipv4Addr>())
-                        {
+                        if let (Ok(start), Ok(end)) = (
+                            lr.start_ip.parse::<Ipv4Addr>(),
+                            lr.end_ip.parse::<Ipv4Addr>(),
+                        ) {
                             let gw_opt = gw.parse::<Ipv4Addr>().ok();
                             let used: Vec<Ipv4Addr> = net
                                 .containers
@@ -1280,7 +1269,10 @@ impl NetworkStore {
                     )
                 } else {
                     let rb = crate::storage::container_store::rand_id();
-                    format!("02:42:{:02x}:{:02x}:{:02x}:{:02x}", rb[0], rb[1], rb[2], rb[3])
+                    format!(
+                        "02:42:{:02x}:{:02x}:{:02x}:{:02x}",
+                        rb[0], rb[1], rb[2], rb[3]
+                    )
                 }
             });
 
