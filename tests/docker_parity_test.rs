@@ -994,11 +994,17 @@ fn test_docker_parity_manifest_commands() {
     );
 
     // 2. manifest create
+    let _ = boxr_cmd(&bin)
+        .args(["manifest", "rm", "my-app:multi"])
+        .output();
     let out = boxr_cmd(&bin)
         .args(["manifest", "create", "my-app:multi", "alpine:latest"])
         .output()
         .unwrap();
     assert!(out.status.success());
+    let _ = boxr_cmd(&bin)
+        .args(["manifest", "rm", "my-app:multi"])
+        .output();
 }
 
 /// Docker Parity Test: Container Init flag (--init)

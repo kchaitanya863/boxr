@@ -66,7 +66,11 @@ impl ComposeProject {
                 project_dir
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map(str::to_string)
+                    .map(|s| {
+                        s.trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+                            .to_string()
+                    })
+                    .filter(|s| !s.is_empty())
             })
             .unwrap_or_else(|| "compose".to_string());
 

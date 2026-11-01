@@ -132,7 +132,8 @@ fn test_issue_432_run_registers_custom_bridge_network_endpoint() {
 fn test_issue_421_forward_helper_forked_outside_usernet_only_block() {
     let linux = include_str!("../src/runtime/linux.rs");
     assert!(
-        linux.contains("run_forward_helper") && linux.contains("!use_pasta"),
+        linux.contains("run_forward_helper")
+            && (linux.contains("!use_pasta") || linux.contains("!pasta_ports_direct")),
         "forward helper must run for all non-pasta published ports"
     );
 }

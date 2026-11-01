@@ -312,6 +312,11 @@ fn test_volume_export_import_roundtrip() {
             .status
             .success()
     );
+    assert!(
+        blackbox::run_boxr(&home, &["volume", "create", &vol2])
+            .status
+            .success()
+    );
     let temp = tempdir().unwrap();
     let archive = temp.path().join("vol.tar");
     let export = blackbox::run_boxr(

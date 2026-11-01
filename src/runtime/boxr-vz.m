@@ -164,7 +164,8 @@ int main(int argc, const char *argv[]) {
             if ([parts count] == 2) {
                 NSString *tag = parts[0];
                 NSString *mPath = parts[1];
-                if ([[NSFileManager defaultManager] fileExistsAtPath:mPath]) {
+                BOOL isDir = NO;
+                if ([[NSFileManager defaultManager] fileExistsAtPath:mPath isDirectory:&isDir] && isDir) {
                     VZSharedDirectory *mDir = [[VZSharedDirectory alloc] initWithURL:[NSURL fileURLWithPath:mPath] readOnly:NO];
                     VZSingleDirectoryShare *mShare = [[VZSingleDirectoryShare alloc] initWithDirectory:mDir];
                     VZVirtioFileSystemDeviceConfiguration *mFsConfig = [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:tag];

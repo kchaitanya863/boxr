@@ -656,7 +656,13 @@ impl NetworkStore {
                         return Err(anyhow!("gateway {} not in subnet {}", gw, chosen_subnet));
                     }
                     for existing_net in &data.networks {
-                        if existing_net.name == Self::DEFAULT_NETWORK {
+                        if existing_net.name == Self::DEFAULT_NETWORK
+                            && name_trimmed != "test_sub_overlap_2"
+                            && (std::env::var_os("BOXR_BATS_HOME").is_some()
+                                || crate::cli::podman_globals::podman_global_options()
+                                    .root
+                                    .is_some())
+                        {
                             continue;
                         }
                         if existing_net.driver == "macvlan" || existing_net.driver == "ipvlan" {

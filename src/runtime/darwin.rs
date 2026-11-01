@@ -427,6 +427,12 @@ pub fn execute_bundle(
     let mut all_mounts = mounts.to_vec();
     for m in &spec.mounts {
         if m.mount_type == "bind" {
+            if all_mounts
+                .iter()
+                .any(|existing| existing.destination == m.destination)
+            {
+                continue;
+            }
             let src = PathBuf::from(&m.source);
             if src.exists() {
                 all_mounts.push(MountSpec {
@@ -469,14 +475,25 @@ pub fn execute_bundle(
     }
 
     for (idx, m) in all_mounts.iter().enumerate() {
-        let tag = format!("m{}", idx);
-        cmd.arg("--mount")
-            .arg(format!("{}={}", tag, m.source.display()));
-        let mount_opts = if m.read_only { " -o ro" } else { "" };
-        run_script.push_str(&format!(
-            "mkdir -p \"{}\" 2>/dev/null; mount -t virtiofs{} \"{}\" \"{}\" 2>/dev/null || true\n",
-            m.destination, mount_opts, tag, m.destination
-        ));
+        if m.source.is_dir() {
+            let tag = format!("m{}", idx);
+            cmd.arg("--mount")
+                .arg(format!("{}={}", tag, m.source.display()));
+            let mount_opts = if m.read_only { " -o ro" } else { "" };
+            run_script.push_str(&format!(
+                "mkdir -p \"{}\" 2>/dev/null; mount -t virtiofs{} \"{}\" \"{}\" 2>/dev/null || true\n",
+                m.destination, mount_opts, tag, m.destination
+            ));
+        } else if m.source.is_file() {
+            let dest_rel = m.destination.trim_start_matches('/');
+            if !dest_rel.is_empty() {
+                let target = rootfs_path.join(dest_rel);
+                if let Some(parent) = target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::copy(&m.source, &target);
+            }
+        }
     }
 
     let readonly_teardown = if spec.root.readonly {

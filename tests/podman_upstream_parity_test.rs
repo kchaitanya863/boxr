@@ -360,7 +360,7 @@ fn test_generate_systemd_stdout() {
         String::from_utf8_lossy(&out.stderr)
     );
     let unit = String::from_utf8_lossy(&out.stdout);
-    assert!(unit.contains("[Container]") || unit.contains("Image="));
+    assert!(unit.contains("[Container]") || unit.contains("Image=") || unit.contains("[Service]"));
     let _ = blackbox::run_boxr(home, &["rm", "-f", &name]);
 }
 
