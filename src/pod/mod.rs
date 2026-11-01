@@ -448,6 +448,7 @@ impl PodStore {
                     {
                         if pod.containers.is_empty()
                             && pod.status == "Running"
+                            && pod.network.as_deref() != Some("host")
                             && matches!(infra.status, ContainerStatus::Running)
                         {
                             return Err(anyhow!(
@@ -783,18 +784,25 @@ pub fn apply_pod_to_run_args(pod: &PodRecord, infra_name: &str, args: &mut crate
         );
     }
     let has_infra = pod.infra && !infra_name.is_empty();
+    let explicit_custom_net = args.network != "auto"
+        && args.network != "bridge"
+        && args.network != "default"
+        && !args.network.is_empty()
+        && !args.network.starts_with("container:");
     if pod.network.as_deref() == Some("host") {
         args.network = "host".to_string();
     } else if pod.network.as_deref() == Some("none") {
         args.network = "none".to_string();
-    } else if pod.share_net {
-        if has_infra {
-            args.network = format!("container:{}", infra_name);
+    } else if !explicit_custom_net {
+        if pod.share_net {
+            if has_infra {
+                args.network = format!("container:{}", infra_name);
+            } else if let Some(net) = &pod.network {
+                args.network = net.clone();
+            }
         } else if let Some(net) = &pod.network {
             args.network = net.clone();
         }
-    } else if let Some(net) = &pod.network {
-        args.network = net.clone();
     }
     if pod.labels.get("boxr.pod.shm_size").is_some() && args.ipc.as_deref() == Some("host") {
         crate::cli::usage_errors::exit_usage_error("cannot set --shm-size with --ipc=host");

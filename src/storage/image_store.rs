@@ -221,7 +221,11 @@ impl ImageStore {
                         if let Ok(content) = fs::read_to_string(&alt_file) {
                             if let Ok(alt_data) = serde_json::from_str::<ImageStoreData>(&content) {
                                 for alt_img in alt_data.images {
-                                    if !data.images.iter().any(|i| i.id == alt_img.id) {
+                                    if !data.images.iter().any(|i| {
+                                        i.id == alt_img.id
+                                            && i.reference == alt_img.reference
+                                            && i.tag == alt_img.tag
+                                    }) {
                                         data.images.push(alt_img);
                                     }
                                 }

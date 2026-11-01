@@ -49,9 +49,120 @@ pub fn parse_cidr_range(subnet_str: &str) -> Result<(u32, u32)> {
     Ok((base_u32, bcast_u32))
 }
 
+pub fn parse_ipv6_cidr_range(subnet_str: &str) -> Result<(u128, u128)> {
+    let (ip_part, mask_part) = subnet_str
+        .split_once('/')
+        .ok_or_else(|| anyhow!("Invalid IPv6 CIDR subnet {}", subnet_str))?;
+
+    let base_ip: std::net::Ipv6Addr = ip_part.trim().parse()?;
+    let prefix_len: u32 = mask_part
+        .trim()
+        .parse()
+        .context("Invalid IPv6 CIDR prefix length")?;
+
+    if prefix_len > 128 {
+        return Err(anyhow!(
+            "Unsupported IPv6 subnet prefix length /{}",
+            prefix_len
+        ));
+    }
+
+    let mask_u128 = if prefix_len == 0 {
+        0
+    } else {
+        (!0u128) << (128 - prefix_len)
+    };
+    let base_u128 = u128::from(base_ip) & mask_u128;
+    let end_u128 = base_u128 | (!mask_u128);
+    Ok((base_u128, end_u128))
+}
+
+pub fn canonicalize_subnet_and_gateway(subnet_str: &str) -> Result<(String, String)> {
+    let trimmed = subnet_str.trim();
+    if trimmed.contains(':') {
+        let (_, mask_part) = trimmed
+            .split_once('/')
+            .ok_or_else(|| anyhow!("Invalid IPv6 CIDR subnet {}", trimmed))?;
+        let prefix_len: u32 = mask_part.trim().parse()?;
+        let (base_u128, _) = parse_ipv6_cidr_range(trimmed)?;
+        let net_ip = std::net::Ipv6Addr::from(base_u128);
+        let gw_ip = std::net::Ipv6Addr::from(base_u128.saturating_add(1));
+        Ok((format!("{}/{}", net_ip, prefix_len), gw_ip.to_string()))
+    } else {
+        let (_, mask_part) = trimmed
+            .split_once('/')
+            .ok_or_else(|| anyhow!("Invalid CIDR subnet {}", trimmed))?;
+        let prefix_len: u32 = mask_part.trim().parse()?;
+        let (base_u32, _) = parse_cidr_range(trimmed)?;
+        let net_ip = Ipv4Addr::from(base_u32);
+        let gw_ip = Ipv4Addr::from(base_u32.saturating_add(1));
+        Ok((format!("{}/{}", net_ip, prefix_len), gw_ip.to_string()))
+    }
+}
+
+pub fn ip_in_subnet(ip_str: &str, subnet_str: &str) -> bool {
+    let ip_t = ip_str.trim();
+    let sub_t = subnet_str.trim();
+    if ip_t.contains(':') != sub_t.contains(':') {
+        return false;
+    }
+    if ip_t.contains(':') {
+        if let (Ok(ip), Ok((start, end))) = (
+            ip_t.parse::<std::net::Ipv6Addr>(),
+            parse_ipv6_cidr_range(sub_t),
+        ) {
+            let v = u128::from(ip);
+            v >= start && v <= end
+        } else {
+            false
+        }
+    } else if let (Ok(ip), Ok((start, end))) =
+        (ip_t.parse::<Ipv4Addr>(), parse_cidr_range(sub_t))
+    {
+        let v = u32::from(ip);
+        v >= start && v <= end
+    } else {
+        false
+    }
+}
+
+pub fn allocate_ipv6_in_subnet(
+    subnet_str: &str,
+    gateway_str: &str,
+    used_ips: &[String],
+) -> Result<String> {
+    let (base_u128, end_u128) = parse_ipv6_cidr_range(subnet_str)?;
+    let gw_opt = gateway_str.trim().parse::<std::net::Ipv6Addr>().ok();
+    for offset in 2u128..1000u128 {
+        let cand_u128 = base_u128.saturating_add(offset);
+        if cand_u128 >= end_u128 {
+            break;
+        }
+        let cand = std::net::Ipv6Addr::from(cand_u128);
+        if Some(cand) == gw_opt {
+            continue;
+        }
+        let cand_str = cand.to_string();
+        if !used_ips.iter().any(|u| u == &cand_str) {
+            return Ok(cand_str);
+        }
+    }
+    Err(anyhow!(
+        "No available IPv6 addresses in subnet {}",
+        subnet_str
+    ))
+}
+
 pub fn subnets_overlap(sub1: &str, sub2: &str) -> Result<bool> {
-    if sub1.contains(':') || sub2.contains(':') {
-        return Ok(sub1.trim() == sub2.trim());
+    let v6_1 = sub1.contains(':');
+    let v6_2 = sub2.contains(':');
+    if v6_1 != v6_2 {
+        return Ok(false);
+    }
+    if v6_1 {
+        let (start1, end1) = parse_ipv6_cidr_range(sub1)?;
+        let (start2, end2) = parse_ipv6_cidr_range(sub2)?;
+        return Ok(start1 <= end2 && start2 <= end1);
     }
     let (start1, end1) = parse_cidr_range(sub1)?;
     let (start2, end2) = parse_cidr_range(sub2)?;

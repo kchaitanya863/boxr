@@ -188,6 +188,16 @@ pub fn connect_container_to_bridge_network(
     container_name: &str,
     home: Option<&std::path::Path>,
 ) -> Result<()> {
+    connect_container_to_bridge_network_with_opts(network, container_id, container_name, &[], home)
+}
+
+pub fn connect_container_to_bridge_network_with_opts(
+    network: &str,
+    container_id: &str,
+    container_name: &str,
+    cli_ips: &[String],
+    home: Option<&std::path::Path>,
+) -> Result<()> {
     let net_name = resolved_bridge_network_name(network)
         .ok_or_else(|| anyhow!("network {} is not a bridge network", network))?;
     let store = match home {
@@ -197,7 +207,37 @@ pub fn connect_container_to_bridge_network(
     if store.find(&net_name).is_none() {
         return Err(anyhow!("network {} not found", net_name));
     }
-    let _ = store.connect_container(&net_name, container_id, container_name)?;
+    let mut static_ips: Vec<String> = cli_ips.to_vec();
+    let mut ifname_opt: Option<String> = None;
+    let mut mac_opt: Option<String> = None;
+    if !network.starts_with("container:")
+        && !network.starts_with("pasta:")
+        && !network.starts_with("ns:")
+    {
+        if let Some((_, opts)) = network.split_once(':') {
+            for kv in opts.split(',') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    let kt = k.trim();
+                    let vt = v.trim();
+                    if (kt == "ip" || kt == "ip6") && !vt.is_empty() {
+                        static_ips.push(vt.to_string());
+                    } else if kt == "interface_name" && !vt.is_empty() {
+                        ifname_opt = Some(vt.to_string());
+                    } else if kt == "mac" && !vt.is_empty() {
+                        mac_opt = Some(vt.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let _ = store.connect_container_with_ips(
+        &net_name,
+        container_id,
+        container_name,
+        mac_opt.as_deref(),
+        ifname_opt.as_deref(),
+        &static_ips,
+    )?;
     refresh_bridge_hosts_for_network(&net_name, home)?;
     Ok(())
 }

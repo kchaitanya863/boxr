@@ -164,10 +164,10 @@ pub enum NetworkAction {
         driver: String,
         /// Subnet in CIDR format
         #[arg(long = "subnet")]
-        subnet: Option<String>,
+        subnet: Vec<String>,
         /// IPv4 or IPv6 Gateway for the master subnet
         #[arg(long = "gateway")]
-        gateway: Option<String>,
+        gateway: Vec<String>,
         /// Restrict external access to the network
         #[arg(long = "internal")]
         internal: bool,
@@ -191,7 +191,7 @@ pub enum NetworkAction {
         ingress: bool,
         /// Allocate container ip from a sub-range
         #[arg(long = "ip-range")]
-        ip_range: Option<String>,
+        ip_range: Vec<String>,
         /// IP Address Management Driver
         #[arg(long = "ipam-driver")]
         ipam_driver: Option<String>,
@@ -213,6 +213,15 @@ pub enum NetworkAction {
         /// Control the network's scope
         #[arg(long = "scope")]
         scope: Option<String>,
+        /// Set custom DNS servers for a network
+        #[arg(long = "dns", alias = "network-dns-server", value_delimiter = ',')]
+        dns: Vec<String>,
+        /// Disable placement of the DNS plugin on the network
+        #[arg(long = "disable-dns")]
+        disable_dns: bool,
+        /// Static routes to add to every container in the network
+        #[arg(long = "route")]
+        route: Vec<String>,
     },
     #[command(alias = "list")]
     Ls(NetworkLsArgs),
@@ -307,10 +316,10 @@ pub struct NetworkUpdateArgs {
     /// Network name to update
     pub network: String,
     /// DNS servers to add
-    #[arg(long = "dns-add")]
+    #[arg(long = "dns-add", value_delimiter = ',')]
     pub dns_add: Vec<String>,
     /// DNS servers to drop
-    #[arg(long = "dns-drop")]
+    #[arg(long = "dns-drop", value_delimiter = ',')]
     pub dns_drop: Vec<String>,
     /// Labels to add (key=value)
     #[arg(long = "label-add")]

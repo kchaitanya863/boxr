@@ -1321,11 +1321,22 @@ pub fn execute_bundle(
         .and_then(|a| a.get("boxr.network"))
         .map(|s| crate::network::pasta::NetworkMode::parse(s))
         .unwrap_or_default();
+    let raw_net_str = _spec
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("boxr.network"))
+        .map(|s| s.as_str())
+        .unwrap_or("auto");
+    let pasta_handles_ports = network_mode == crate::network::pasta::NetworkMode::Pasta
+        && (raw_net_str.trim().starts_with("pasta:")
+            || ports
+                .iter()
+                .any(|p| p.host_ip.is_some() || !p.protocol.eq_ignore_ascii_case("tcp")));
     if !ports.is_empty() {
         let ports_json = serde_json::to_string(&ports)?;
         let _ = fs::write(bundle_path.join("ports.json"), ports_json);
         // Host-side Unix relay conflicts with passt/pasta binding the same host ports.
-        if network_mode != crate::network::pasta::NetworkMode::Pasta {
+        if !pasta_handles_ports {
             let _ = crate::network::spawn_port_forward_daemon(bundle_path, &ports);
         }
     }
@@ -1882,12 +1893,18 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                             .and_then(|a| a.get("boxr.pasta_options"))
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or_default();
-                        let pasta_ports: &[PortMapping] =
-                            if network_mode == crate::network::pasta::NetworkMode::Pasta {
-                                &ports
-                            } else {
-                                &[]
-                            };
+                        let pasta_ports_direct =
+                            network_mode == crate::network::pasta::NetworkMode::Pasta
+                                && (raw_net.trim().starts_with("pasta:")
+                                    || ports.iter().any(|p| {
+                                        p.host_ip.is_some()
+                                            || !p.protocol.eq_ignore_ascii_case("tcp")
+                                    }));
+                        let pasta_ports: &[PortMapping] = if pasta_ports_direct {
+                            &ports
+                        } else {
+                            &[]
+                        };
                         let pasta_cfg = crate::network::pasta::PastaConfig::for_container(
                             child.as_raw(),
                             pasta_ports,
@@ -2057,60 +2074,142 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 if network_mode.should_use_native_usernet() && !ns_join.net {
                     use crate::network::usernet::engine::platform;
                     use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
+                    let run_ip_userns = |args: &[&str]| {
+                        use std::os::unix::process::CommandExt;
+                        let mut cmd = std::process::Command::new("ip");
+                        cmd.args(args)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null());
+                        unsafe {
+                            cmd.pre_exec(|| {
+                                let _ = libc::setresgid(0, 0, 0);
+                                let _ = libc::setresuid(0, 0, 0);
+                                Ok(())
+                            });
+                        }
+                        let _ = cmd.status();
+                    };
+                    let net_ifaces_v2: Vec<(String, Vec<(String, String, String)>, bool)> =
+                        fs::read_to_string(bundle_path.join("network_interfaces_v2.json"))
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
                     let net_ifaces: Vec<(String, String, String)> =
                         fs::read_to_string(bundle_path.join("network_interfaces.json"))
                             .ok()
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default();
-                    let primary_ifname = net_ifaces
+                    let primary_ifname = net_ifaces_v2
                         .first()
                         .map(|(ifn, _, _)| ifn.as_str())
+                        .or_else(|| net_ifaces.first().map(|(ifn, _, _)| ifn.as_str()))
                         .unwrap_or("eth0");
                     if let Ok(tap_file) = platform::create_tap_device(primary_ifname) {
-                        let _ = platform::configure_container_netns(
-                            primary_ifname,
-                            DEFAULT_CONTAINER_IP,
-                            DEFAULT_GATEWAY_IP,
-                        );
-                        if let Some((_, ip_str, _)) = net_ifaces.first() {
-                            if ip_str != "10.0.2.15" && !ip_str.is_empty() {
-                                let _ = std::process::Command::new("ip")
-                                    .args([
+                        if let Some((_, ips, ipam_none)) = net_ifaces_v2.first() {
+                            run_ip_userns(&["link", "set", "lo", "up"]);
+                            if *ipam_none {
+                                run_ip_userns(&["link", "set", primary_ifname, "up"]);
+                            } else if !ips.is_empty()
+                                && !(ips.len() == 1 && ips[0].0 == "10.0.2.15")
+                            {
+                                for (ip_str, prefix_str, _) in ips {
+                                    if ip_str.is_empty() {
+                                        continue;
+                                    }
+                                    let cidr = format!("{}/{}", ip_str, prefix_str);
+                                    if ip_str.contains(':') {
+                                        run_ip_userns(&[
+                                            "-6",
+                                            "addr",
+                                            "add",
+                                            &cidr,
+                                            "nodad",
+                                            "dev",
+                                            primary_ifname,
+                                        ]);
+                                    } else {
+                                        run_ip_userns(&[
+                                            "addr",
+                                            "add",
+                                            &cidr,
+                                            "brd",
+                                            "+",
+                                            "dev",
+                                            primary_ifname,
+                                        ]);
+                                    }
+                                }
+                                run_ip_userns(&["link", "set", primary_ifname, "up"]);
+                                if let Some((_, _, gw)) = ips
+                                    .iter()
+                                    .find(|(ip, _, gw)| !ip.contains(':') && !gw.is_empty())
+                                {
+                                    run_ip_userns(&[
+                                        "route",
+                                        "add",
+                                        "default",
+                                        "via",
+                                        gw,
+                                        "dev",
+                                        primary_ifname,
+                                    ]);
+                                }
+                            } else {
+                                let _ = platform::configure_container_netns(
+                                    primary_ifname,
+                                    DEFAULT_CONTAINER_IP,
+                                    DEFAULT_GATEWAY_IP,
+                                );
+                            }
+                        } else {
+                            let _ = platform::configure_container_netns(
+                                primary_ifname,
+                                DEFAULT_CONTAINER_IP,
+                                DEFAULT_GATEWAY_IP,
+                            );
+                            if let Some((_, ip_str, _)) = net_ifaces.first() {
+                                if ip_str != "10.0.2.15" && !ip_str.is_empty() {
+                                    let cidr = format!("{}/24", ip_str);
+                                    run_ip_userns(&[
                                         "addr",
                                         "add",
-                                        &format!("{}/24", ip_str),
+                                        &cidr,
                                         "brd",
                                         "+",
                                         "dev",
                                         primary_ifname,
-                                    ])
-                                    .status();
+                                    ]);
+                                }
                             }
                         }
                         for (ifn, ip_str, _) in net_ifaces.iter().skip(1) {
                             if let Ok(tf) = platform::create_tap_device(ifn) {
                                 if !ip_str.is_empty() {
-                                    let _ = std::process::Command::new("ip")
-                                        .args([
-                                            "addr",
-                                            "add",
-                                            &format!("{}/24", ip_str),
-                                            "brd",
-                                            "+",
-                                            "dev",
-                                            ifn,
-                                        ])
-                                        .status();
+                                    let cidr = format!("{}/24", ip_str);
+                                    run_ip_userns(&[
+                                        "addr", "add", &cidr, "brd", "+", "dev", ifn,
+                                    ]);
                                 }
-                                let _ = std::process::Command::new("ip")
-                                    .args(["link", "set", ifn, "up"])
-                                    .status();
+                                run_ip_userns(&["link", "set", ifn, "up"]);
                                 _extra_tap_files.push(tf);
                             }
                         }
                         // Fork background TAP engine worker before unsharing PID namespace
                         match unsafe { fork() } {
                             Ok(ForkResult::Child) => {
+                                unsafe {
+                                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                                    let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                                    if devnull >= 0 {
+                                        libc::dup2(devnull, libc::STDIN_FILENO);
+                                        libc::dup2(devnull, libc::STDOUT_FILENO);
+                                        libc::dup2(devnull, libc::STDERR_FILENO);
+                                        if devnull > 2 {
+                                            libc::close(devnull);
+                                        }
+                                    }
+                                }
                                 platform::run_tap_network_loop(
                                     bundle_path,
                                     tap_file,
@@ -2128,9 +2227,19 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                 }
                 // Fork port-forward helper inside the container netns for any published
                 // ports when pasta is not handling forwarding.
-                if !ports.is_empty()
-                    && (!use_pasta || network_mode != crate::network::pasta::NetworkMode::Pasta)
-                {
+                let raw_net_child = spec
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("boxr.network"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("auto");
+                let pasta_ports_direct = use_pasta
+                    && network_mode == crate::network::pasta::NetworkMode::Pasta
+                    && (raw_net_child.trim().starts_with("pasta:")
+                        || ports.iter().any(|p| {
+                            p.host_ip.is_some() || !p.protocol.eq_ignore_ascii_case("tcp")
+                        }));
+                if !ports.is_empty() && !pasta_ports_direct {
                     match unsafe { fork() } {
                         Ok(ForkResult::Child) => {
                             let _ =
@@ -2298,17 +2407,117 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
             if network_mode.should_use_native_usernet() {
                 use crate::network::usernet::engine::platform;
                 use crate::network::usernet::{DEFAULT_CONTAINER_IP, DEFAULT_GATEWAY_IP};
-                if let Ok(tap_file) = platform::create_tap_device("eth0") {
-                    let _ = platform::configure_container_netns(
-                        "eth0",
-                        DEFAULT_CONTAINER_IP,
-                        DEFAULT_GATEWAY_IP,
-                    );
+                let net_ifaces_v2: Vec<(String, Vec<(String, String, String)>, bool)> =
+                    fs::read_to_string(bundle_path.join("network_interfaces_v2.json"))
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default();
+                let primary_ifname = net_ifaces_v2
+                    .first()
+                    .map(|(ifn, _, _)| ifn.as_str())
+                    .unwrap_or("eth0");
+                if let Ok(tap_file) = platform::create_tap_device(primary_ifname) {
+                    if let Some((_, ips, ipam_none)) = net_ifaces_v2.first() {
+                        if *ipam_none {
+                            let _ = std::process::Command::new("ip")
+                                .args(["link", "set", primary_ifname, "up"])
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                        } else if !ips.is_empty()
+                            && !(ips.len() == 1 && ips[0].0 == "10.0.2.15")
+                        {
+                            for (ip_str, prefix_str, _) in ips {
+                                if ip_str.is_empty() {
+                                    continue;
+                                }
+                                let cidr = format!("{}/{}", ip_str, prefix_str);
+                                if ip_str.contains(':') {
+                                    let _ = std::process::Command::new("ip")
+                                        .args([
+                                            "-6",
+                                            "addr",
+                                            "add",
+                                            &cidr,
+                                            "nodad",
+                                            "dev",
+                                            primary_ifname,
+                                        ])
+                                        .stdin(Stdio::null())
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null())
+                                        .status();
+                                } else {
+                                    let _ = std::process::Command::new("ip")
+                                        .args([
+                                            "addr",
+                                            "add",
+                                            &cidr,
+                                            "brd",
+                                            "+",
+                                            "dev",
+                                            primary_ifname,
+                                        ])
+                                        .stdin(Stdio::null())
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null())
+                                        .status();
+                                }
+                            }
+                            let _ = std::process::Command::new("ip")
+                                .args(["link", "set", primary_ifname, "up"])
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                            if let Some((_, _, gw)) = ips
+                                .iter()
+                                .find(|(ip, _, gw)| !ip.contains(':') && !gw.is_empty())
+                            {
+                                let _ = std::process::Command::new("ip")
+                                    .args([
+                                        "route",
+                                        "add",
+                                        "default",
+                                        "via",
+                                        gw,
+                                        "dev",
+                                        primary_ifname,
+                                    ])
+                                    .stdin(Stdio::null())
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
+                                    .status();
+                            }
+                        } else {
+                            let _ = platform::configure_container_netns(
+                                primary_ifname,
+                                DEFAULT_CONTAINER_IP,
+                                DEFAULT_GATEWAY_IP,
+                            );
+                        }
+                    } else {
+                        let _ = platform::configure_container_netns(
+                            primary_ifname,
+                            DEFAULT_CONTAINER_IP,
+                            DEFAULT_GATEWAY_IP,
+                        );
+                    }
                     // Fork background TAP engine worker before unsharing PID namespace
                     match unsafe { fork() } {
                         Ok(ForkResult::Child) => {
                             unsafe {
                                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                                let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                                if devnull >= 0 {
+                                    libc::dup2(devnull, libc::STDIN_FILENO);
+                                    libc::dup2(devnull, libc::STDOUT_FILENO);
+                                    libc::dup2(devnull, libc::STDERR_FILENO);
+                                    if devnull > 2 {
+                                        libc::close(devnull);
+                                    }
+                                }
                             }
                             platform::run_tap_network_loop(
                                 bundle_path,

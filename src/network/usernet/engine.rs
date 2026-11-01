@@ -69,7 +69,7 @@ impl UserNetEngine {
     }
 
     fn is_outbound_ipv4(&self, ip: &Ipv4Header) -> bool {
-        ip.src_ip == self.container_ip
+        ip.dst_ip != ip.src_ip
             && ip.dst_ip != self.container_ip
             && ip.dst_ip != self.gateway_ip
             && ip.dst_ip != self.dns_ip
@@ -277,6 +277,19 @@ impl UserNetEngine {
                         };
                         flow_state.host_seq = flow_state.host_seq.wrapping_add(n as u32);
                         return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &response_data));
+                    } else {
+                        let reply_tcp = TcpHeader {
+                            src_port: tcp.dst_port,
+                            dst_port: tcp.src_port,
+                            seq_num: flow_state.host_seq,
+                            ack_num: tcp.seq_num.wrapping_add(tcp_data.len() as u32),
+                            data_offset: 20,
+                            flags: TCP_FLAG_ACK,
+                            window_size: 65535,
+                            checksum: 0,
+                            urgent_ptr: 0,
+                        };
+                        return Some(Self::build_tcp_reply(eth, ip, reply_tcp, &[]));
                     }
                 }
             }
@@ -542,38 +555,33 @@ pub mod platform {
         Ok(tun_file)
     }
 
+    fn run_ip(args: &[&str]) {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        let ip_bin = ip_command();
+        let mut cmd = Command::new(ip_bin);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        unsafe {
+            cmd.pre_exec(|| {
+                let _ = libc::setresgid(0, 0, 0);
+                let _ = libc::setresuid(0, 0, 0);
+                Ok(())
+            });
+        }
+        let _ = cmd.status();
+    }
+
     /// Configure IP address, netmask, MTU, and default gateway inside the container network namespace
     pub fn configure_container_netns(ifname: &str, ip: Ipv4Addr, gateway: Ipv4Addr) -> Result<()> {
-        // Bring loopback up
-        let ip_bin = ip_command();
-        let _ = Command::new(ip_bin)
-            .args(["link", "set", "lo", "up"])
-            .status();
-
-        // Assign IP address to TAP device
+        run_ip(&["link", "set", "lo", "up"]);
         let ip_cidr = format!("{}/24", ip);
-        let _ = Command::new(ip_bin)
-            .args(["addr", "add", &ip_cidr, "brd", "+", "dev", ifname])
-            .status();
-
-        // Bring TAP interface up
-        let _ = Command::new(ip_bin)
-            .args(["link", "set", ifname, "up"])
-            .status();
-
-        // Set default route via gateway
-        let _ = Command::new(ip_bin)
-            .args([
-                "route",
-                "add",
-                "default",
-                "via",
-                &gateway.to_string(),
-                "dev",
-                ifname,
-            ])
-            .status();
-
+        run_ip(&["addr", "add", &ip_cidr, "brd", "+", "dev", ifname]);
+        run_ip(&["link", "set", ifname, "up"]);
+        let gw_str = gateway.to_string();
+        run_ip(&["route", "add", "default", "via", &gw_str, "dev", ifname]);
         Ok(())
     }
 
@@ -585,6 +593,7 @@ pub mod platform {
         host_netns: Option<File>,
     ) {
         use std::io::{Read, Write};
+        crate::network::usernet::relay::spawn_in_netns_peer_listener(bundle_path);
         let engine = UserNetEngine::new(Some(bundle_path), ports, host_netns);
         let mut buf = [0u8; 65536];
 
