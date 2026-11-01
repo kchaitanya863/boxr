@@ -29,5 +29,18 @@ pod_rm_test.go
 pod_pause_test.go
 pod_top_test.go
 port_test.go
+attach_test.go
+container_inspect_test.go
+cp_test.go
+events_test.go
+exec_test.go
+healthcheck_run_test.go
+inspect_test.go
+log_rotation_test.go
+logs_test.go
+mount_rootless_test.go
+mount_test.go
+stats_test.go
+
 
 

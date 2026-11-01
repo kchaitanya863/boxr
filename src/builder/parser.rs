@@ -254,7 +254,14 @@ impl DockerfileParser {
                     }
 
                     let cmd = if let Some(stripped) = current.strip_prefix("CMD ") {
-                        parse_array_or_words(stripped.trim())
+                        let s = stripped.trim();
+                        if s.starts_with('[') && s.ends_with(']') {
+                            let mut v = vec!["CMD".to_string()];
+                            v.extend(parse_array_or_words(s));
+                            v
+                        } else {
+                            vec!["CMD-SHELL".to_string(), s.to_string()]
+                        }
                     } else {
                         parse_array_or_words(current)
                     };

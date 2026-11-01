@@ -150,8 +150,14 @@ impl PortMapping {
                     .collect())
             }
             2 => {
-                let host_ports = Self::parse_port_or_range(parts[0])?;
                 let container_ports = Self::parse_port_or_range(parts[1])?;
+                let host_ports = if parts[0].trim().is_empty() {
+                    (0..container_ports.len())
+                        .map(|i| 32768u16.saturating_add(i as u16))
+                        .collect()
+                } else {
+                    Self::parse_port_or_range(parts[0])?
+                };
                 if host_ports.len() != container_ports.len() {
                     return Err(anyhow!(
                         "host and container port ranges must have equal length: {}",
@@ -171,8 +177,14 @@ impl PortMapping {
             }
             3 => {
                 let ip = parts[0].to_string();
-                let host_ports = Self::parse_port_or_range(parts[1])?;
                 let container_ports = Self::parse_port_or_range(parts[2])?;
+                let host_ports = if parts[1].trim().is_empty() {
+                    (0..container_ports.len())
+                        .map(|i| 32768u16.saturating_add(i as u16))
+                        .collect()
+                } else {
+                    Self::parse_port_or_range(parts[1])?
+                };
                 if host_ports.len() != container_ports.len() {
                     return Err(anyhow!(
                         "host and container port ranges must have equal length: {}",

@@ -14,6 +14,7 @@ pub struct PodmanGlobalOptions {
     pub storage_opts: Vec<String>,
     pub events_backend: Option<String>,
     pub cgroup_manager: Option<String>,
+    pub network_config_dir: Option<PathBuf>,
     pub debug: bool,
     pub raw_modules: Vec<String>,
     pub modules: Vec<PathBuf>,
@@ -204,6 +205,18 @@ pub fn parse_podman_global_options(argv: &[String]) -> PodmanGlobalOptions {
                 continue;
             }
         }
+        if let Some(v) = a.strip_prefix("--network-config-dir=") {
+            opts.network_config_dir = Some(PathBuf::from(v));
+            i += 1;
+            continue;
+        }
+        if a == "--network-config-dir" {
+            if i + 1 < argv.len() {
+                opts.network_config_dir = Some(PathBuf::from(&argv[i + 1]));
+                i += 2;
+                continue;
+            }
+        }
         if a == "--remote" || a == "-r" {
             opts.remote = true;
             i += 1;
@@ -297,7 +310,6 @@ fn strip_globals_after_subcommand(sub: &str) -> bool {
             | "tag"
             | "rmi"
             | "image"
-            | "unshare"
             | "rm"
             | "stop"
             | "start"

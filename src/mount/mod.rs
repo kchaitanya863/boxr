@@ -51,6 +51,12 @@ impl MountManager {
     }
 
     pub fn mount_container(&self, query: &str) -> Result<String> {
+        #[cfg(target_os = "linux")]
+        if unsafe { libc::geteuid() != 0 } {
+            crate::cli::usage_errors::exit_usage_error(
+                "cannot mount using driver overlay in rootless mode. You must execute `podman unshare` first",
+            );
+        }
         let store = ContainerStore::new();
         let cont = store
             .find(query)
@@ -66,7 +72,11 @@ impl MountManager {
             ));
         }
 
-        let mount_path = rootfs.canonicalize()?;
+        let mount_path = if rootfs.is_absolute() {
+            rootfs
+        } else {
+            rootfs.canonicalize()?
+        };
         let mut data = self.load();
         let record = MountRecord {
             container_id: cont.id.clone(),
@@ -108,9 +118,14 @@ impl MountManager {
     }
 
     pub fn mount_image(&self, query: &str) -> Result<String> {
+        #[cfg(target_os = "linux")]
+        if unsafe { libc::geteuid() != 0 } {
+            crate::cli::usage_errors::exit_usage_error(
+                "cannot mount using driver overlay in rootless mode. You must execute `podman unshare` first",
+            );
+        }
         let store = crate::storage::ImageStore::new();
-        let img = store
-            .find(query)
+        let img = crate::find_image_with_shortname(&store, query, None)
             .ok_or_else(|| anyhow!("Image '{}' not found", query))?;
 
         let rootfs = PathBuf::from(&img.rootfs_path);
@@ -122,7 +137,25 @@ impl MountManager {
             ));
         }
 
-        let mount_path = rootfs.canonicalize()?;
+        let home = boxr_home();
+        let mount_path = if rootfs.starts_with(&home) {
+            rootfs
+        } else {
+            let overlay_dir = home.join("overlay").join(&img.id);
+            let _ = fs::create_dir_all(&overlay_dir);
+            let merged_link = overlay_dir.join("merged");
+            if !merged_link.exists() {
+                #[cfg(unix)]
+                {
+                    let _ = std::os::unix::fs::symlink(&rootfs, &merged_link);
+                }
+            }
+            if merged_link.exists() {
+                merged_link
+            } else {
+                rootfs.canonicalize()?
+            }
+        };
         let mut data = self.load();
         let record = MountRecord {
             container_id: img.id.clone(),
@@ -137,10 +170,13 @@ impl MountManager {
 
     pub fn unmount_image(&self, query: &str) -> Result<()> {
         let store = crate::storage::ImageStore::new();
-        let img = store
-            .find(query)
+        let img = crate::find_image_with_shortname(&store, query, None)
             .ok_or_else(|| anyhow!("Image '{}' not found", query))?;
 
+        let merged_link = boxr_home().join("overlay").join(&img.id).join("merged");
+        if merged_link.symlink_metadata().is_ok() {
+            let _ = fs::remove_file(&merged_link);
+        }
         let mut data = self.load();
         if data.mounts.remove(&img.id).is_some() {
             self.save(&data)?;

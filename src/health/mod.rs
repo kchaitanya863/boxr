@@ -317,6 +317,46 @@ pub fn check_container_health_with_output(
     }
 
     let cap_path = bundle_path.join(format!("hc-out-{}.tmp", std::process::id()));
+    let done_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timed_out_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if config.timeout_secs > 0 {
+        let done_clone = done_flag.clone();
+        let to_clone = timed_out_flag.clone();
+        let bp_clone = bundle_path.to_path_buf();
+        let timeout_dur = std::time::Duration::from_secs(config.timeout_secs);
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while start.elapsed() < timeout_dur {
+                if done_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if !done_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                to_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                #[cfg(unix)]
+                if let Ok(pid_str) = std::fs::read_to_string(bp_clone.join("healthcheck_exec.pid")) {
+                    if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                        if pid > 0 {
+                            let children_file = format!("/proc/{pid}/task/{pid}/children");
+                            if let Ok(children) = std::fs::read_to_string(&children_file) {
+                                for c_str in children.split_whitespace() {
+                                    if let Ok(cpid) = c_str.parse::<i32>() {
+                                        unsafe {
+                                            libc::kill(cpid, libc::SIGKILL);
+                                        }
+                                    }
+                                }
+                            }
+                            unsafe {
+                                libc::kill(pid, libc::SIGKILL);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
     let code = match exec_in_bundle(
         bundle_path,
         &exec_cmd,
@@ -335,9 +375,16 @@ pub fn check_container_health_with_output(
         Ok(c) => c,
         Err(_) => 1,
     };
+    done_flag.store(true, std::sync::atomic::Ordering::SeqCst);
     let end_dt = Utc::now();
     let output = std::fs::read_to_string(&cap_path).unwrap_or_default();
     let _ = std::fs::remove_file(&cap_path);
+    if timed_out_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(anyhow!(
+            "healthcheck command exceeded timeout of {}s",
+            config.timeout_secs
+        ));
+    }
     current.last_checked = end_dt;
     current.last_output = output.clone();
 

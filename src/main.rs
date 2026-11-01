@@ -8,6 +8,16 @@ fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().collect();
+    if args
+        .first()
+        .is_some_and(|a| a.ends_with("/conmon") || a == "conmon")
+        && args
+            .get(1)
+            .is_some_and(|a| a == "--version" || a == "-v")
+    {
+        println!("conmon version 2.2.0");
+        std::process::exit(0);
+    }
     if args.len() > 1 {
         if args[1] == "__internal-trampoline" {
             #[cfg(target_os = "linux")]
@@ -127,13 +137,21 @@ fn main() -> Result<()> {
                 }
             }
         }
-        if args[1] == "unshare" {
-            let sub = &args[2..];
-            let wants_help = sub.is_empty() || sub.iter().any(|a| a == "--help" || a == "-h");
+        let sub_idx = boxr::cli::podman_subcommand_index(&args);
+        if args.get(sub_idx).map(String::as_str) == Some("unshare") {
+            let sub = &args[sub_idx + 1..];
+            let wants_help = sub
+                .iter()
+                .take_while(|a| a.starts_with('-'))
+                .any(|a| *a == "--help" || *a == "-h");
             if !wants_help {
                 #[cfg(target_os = "linux")]
                 {
-                    let code = boxr::runtime::linux::run_unshare_cli(sub, false)?;
+                    let globals =
+                        boxr::cli::podman_globals::parse_podman_global_options(&args[..=sub_idx]);
+                    boxr::cli::podman_globals::set_podman_global_options(globals);
+                    let noout = args[..=sub_idx].iter().any(|a| a == "--noout");
+                    let code = boxr::runtime::linux::run_unshare_cli(sub, noout)?;
                     std::process::exit(code);
                 }
             }

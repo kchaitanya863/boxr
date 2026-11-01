@@ -104,11 +104,22 @@ pub struct LogsArgs {
     #[arg(short = 'n', long = "tail")]
     pub tail: Option<usize>,
 
-    #[arg(required = true)]
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Output container names instead of container IDs
+    #[arg(long = "names")]
+    pub names: bool,
+
+    /// Output the containers with different colors in the log
+    #[arg(long = "color")]
+    pub color: bool,
+
     pub containers: Vec<String>,
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 #[command(help_template = crate::cli::PODMAN_LEAF_HELP, disable_help_flag = true)]
 pub struct ExecArgs {
     #[arg(short = 'i', long = "interactive")]
@@ -153,6 +164,23 @@ pub struct ExecArgs {
     #[arg(long = "preserve-fd")]
     pub preserve_fd: Vec<String>,
 
+    /// Act on the latest container
+    #[arg(short = 'l', long = "latest")]
+    pub latest: bool,
+
+    /// Read the container ID from the file
+    #[arg(long = "cidfile")]
+    pub cidfile: Option<String>,
+
+    /// Wait until container is running before executing (seconds)
+    #[arg(long = "wait")]
+    pub wait: Option<u64>,
+
+    /// Do not create a new session for the exec process
+    #[arg(long = "no-session")]
+    pub no_session: bool,
+
+    #[arg(default_value = "")]
     pub container: String,
 
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -246,7 +274,9 @@ pub struct AttachArgs {
         default_value_t = true,
         num_args = 0..=1,
         default_missing_value = "true",
-        require_equals = true
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub sig_proxy: bool,
 

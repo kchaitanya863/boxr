@@ -33,12 +33,25 @@ impl StatsCollector {
         let bundle = PathBuf::from(&c.bundle_path);
         if let Ok(config_bytes) = fs::read(bundle.join("config.json")) {
             if let Ok(spec) = serde_json::from_slice::<crate::oci::runtime::Spec>(&config_bytes) {
-                if let Some(l) = spec.linux {
-                    if let Some(res) = l.resources {
-                        if let Some(mem) = res.memory {
-                            if let Some(limit) = mem.limit {
-                                if limit > 0 {
-                                    mem_limit_bytes = limit as u64;
+                let mut found_ann_mem = false;
+                if let Some(ann) = &spec.annotations {
+                    if let Some(m_str) = ann.get("boxr.memory") {
+                        if let Ok(m) = m_str.parse::<u64>() {
+                            if m > 0 {
+                                mem_limit_bytes = m;
+                                found_ann_mem = true;
+                            }
+                        }
+                    }
+                }
+                if !found_ann_mem {
+                    if let Some(l) = spec.linux {
+                        if let Some(res) = l.resources {
+                            if let Some(mem) = res.memory {
+                                if let Some(limit) = mem.limit {
+                                    if limit > 0 {
+                                        mem_limit_bytes = limit as u64;
+                                    }
                                 }
                             }
                         }
@@ -123,6 +136,211 @@ impl StatsCollector {
     pub fn display_stats(targets: &[String], no_stream: bool) -> Result<()> {
         let store = ContainerStore::new();
         Self::display_stats_with_reader(targets, no_stream, &store)
+    }
+
+    pub fn display_stats_with_args(args: &crate::cli::StatsArgs) -> Result<()> {
+        if let Some(iv) = args.interval {
+            if iv <= 0 {
+                crate::cli::usage_errors::exit_usage_error(
+                    "invalid interval, must be a positive number greater zero",
+                );
+            }
+        }
+        if let Some(fmt) = &args.format {
+            let valid_fields = [
+                ".ID",
+                ".Name",
+                ".AVGCPU",
+                ".CPU",
+                ".MemUsage",
+                ".MemUsageBytes",
+                ".MemLimit",
+                ".MemPerc",
+                ".MEM",
+                ".NetIO",
+                ".BlockIO",
+                ".PIDS",
+                ".PIDs",
+                ".UpTime",
+                ".Duration",
+            ];
+            let mut search = fmt.as_str();
+            while let Some(start) = search.find("{{") {
+                let Some(end) = search[start..].find("}}") else {
+                    break;
+                };
+                let token = search[start + 2..start + end].trim();
+                if token.starts_with('.') && !valid_fields.contains(&token) {
+                    let field = token.trim_start_matches('.');
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "template: stats:1:28: executing \"stats\" at <{}>: can't evaluate field {} in type containers.containerStats",
+                        token, field
+                    ));
+                }
+                search = &search[start + end + 2..];
+            }
+        }
+
+        let store = ContainerStore::new();
+        if !args.containers.is_empty() {
+            let all = store.list();
+            for t in &args.containers {
+                if !all.iter().any(|c| c.id.starts_with(t) || &c.name == t) {
+                    crate::cli::usage_errors::exit_usage_error(format!(
+                        "unable to get list of containers: unable to look up container {}: no container with name or ID {:?} found: no such container",
+                        t, t
+                    ));
+                }
+            }
+        }
+
+        loop {
+            let mut containers = store.list();
+            if !args.containers.is_empty() {
+                let mut ordered = Vec::new();
+                for t in &args.containers {
+                    if let Some(c) = containers
+                        .iter()
+                        .find(|c| c.id.starts_with(t) || &c.name == t)
+                    {
+                        ordered.push(c.clone());
+                    }
+                }
+                containers = ordered;
+            } else if !args.all {
+                let pod_store = crate::pod::PodStore::new();
+                let pods = pod_store.list();
+                let all_containers = containers.clone();
+                containers.retain(|c| {
+                    if !matches!(c.status, ContainerStatus::Running) {
+                        return false;
+                    }
+                    if let Some(p) = pods.iter().find(|p| {
+                        p.infra
+                            && (p.infra_container_id == c.id
+                                || pod_store.infra_name(p) == c.name)
+                    }) {
+                        let any_workload_running = p.containers.iter().any(|cid| {
+                            cid != &p.infra_container_id
+                                && cid != &c.name
+                                && all_containers.iter().any(|wc| {
+                                    (wc.id == *cid || wc.name == *cid)
+                                        && matches!(wc.status, ContainerStatus::Running)
+                                })
+                        });
+                        return p.status.eq_ignore_ascii_case("running") || any_workload_running;
+                    }
+                    true
+                });
+            }
+
+            if !args.no_stream {
+                print!("\x1B[2J\x1B[1;1H");
+            }
+
+            if let Some(fmt) = &args.format {
+                if fmt == "json" {
+                    let json_items: Vec<serde_json::Value> = containers
+                        .iter()
+                        .map(|c| {
+                            let s = Self::collect_for_container(c);
+                            let id_out = if args.no_trunc {
+                                c.id.clone()
+                            } else {
+                                s.id.clone()
+                            };
+                            serde_json::json!({
+                                "id": id_out,
+                                "name": s.name,
+                                "cpu_time": "0s",
+                                "cpu_percent": format!("{:.2}%", s.cpu_percentage),
+                                "avg_cpu": format!("{:.2}%", s.cpu_percentage),
+                                "mem_usage": format!(
+                                    "{:.2}MiB / {:.2}MiB",
+                                    s.mem_usage_bytes as f64 / (1024.0 * 1024.0),
+                                    s.mem_limit_bytes as f64 / (1024.0 * 1024.0)
+                                ),
+                                "mem_percent": format!("{:.2}%", s.mem_percentage),
+                                "net_io": "0B / 0B",
+                                "block_io": "0B / 0B",
+                                "pids": s.pids.to_string(),
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&json_items)?);
+                } else {
+                    for c in &containers {
+                        let s = Self::collect_for_container(c);
+                        let id_out = if args.no_trunc {
+                            c.id.as_str()
+                        } else {
+                            s.id.as_str()
+                        };
+                        let mem_usage_str = format!(
+                            "{:.2}MiB / {:.2}MiB",
+                            s.mem_usage_bytes as f64 / (1024.0 * 1024.0),
+                            s.mem_limit_bytes as f64 / (1024.0 * 1024.0)
+                        );
+                        let mut line = fmt.clone();
+                        if let Some(rest) = line.strip_prefix("table ") {
+                            line = rest.to_string();
+                        }
+                        line = line.replace("{{.ID}}", id_out);
+                        line = line.replace("{{.Name}}", &s.name);
+                        line = line.replace("{{.MemLimit}}", &s.mem_limit_bytes.to_string());
+                        line = line.replace("{{.MemUsage}}", &mem_usage_str);
+                        line = line.replace("{{.MemUsageBytes}}", &mem_usage_str);
+                        line = line.replace("{{.MemPerc}}", &format!("{:.2}%", s.mem_percentage));
+                        line = line.replace("{{.MEM}}", &format!("{:.2}%", s.mem_percentage));
+                        line = line.replace("{{.CPU}}", &format!("{:.2}%", s.cpu_percentage));
+                        line = line.replace("{{.AVGCPU}}", &format!("{:.2}%", s.cpu_percentage));
+                        line = line.replace("{{.NetIO}}", "0B / 0B");
+                        line = line.replace("{{.BlockIO}}", "0B / 0B");
+                        line = line.replace("{{.PIDS}}", &s.pids.to_string());
+                        line = line.replace("{{.PIDs}}", &s.pids.to_string());
+                        println!("{}", line);
+                    }
+                }
+            } else {
+                println!(
+                    "{:<14} {:<20} {:<10} {:<24} {:<10} {:<8}",
+                    "CONTAINER ID", "NAME", "CPU %", "MEM USAGE / LIMIT", "MEM %", "PIDS"
+                );
+
+                for c in &containers {
+                    let s = Self::collect_for_container(c);
+                    let id_out = if args.no_trunc {
+                        c.id.as_str()
+                    } else {
+                        s.id.as_str()
+                    };
+                    let mem_usage_str = format!(
+                        "{:.2}MiB / {:.2}MiB",
+                        s.mem_usage_bytes as f64 / (1024.0 * 1024.0),
+                        s.mem_limit_bytes as f64 / (1024.0 * 1024.0)
+                    );
+
+                    println!(
+                        "{:<14} {:<20} {:<10} {:<24} {:<10} {:<8}",
+                        id_out,
+                        s.name,
+                        format!("{:.2}%", s.cpu_percentage),
+                        mem_usage_str,
+                        format!("{:.2}%", s.mem_percentage),
+                        s.pids
+                    );
+                }
+            }
+
+            if args.no_stream {
+                break;
+            }
+
+            let sleep_secs = args.interval.unwrap_or(1).max(1) as u64;
+            thread::sleep(Duration::from_secs(sleep_secs));
+        }
+
+        Ok(())
     }
 
     /// Dependency Inversion: Collect and display stats using any ContainerReader

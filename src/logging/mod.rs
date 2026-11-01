@@ -87,6 +87,7 @@ pub fn tee_k8s_stream_with_tty<R: Read>(
 #[derive(Debug, Clone)]
 pub struct K8sLogEntry {
     pub timestamp: DateTime<FixedOffset>,
+    pub stream: String,
     pub partial: bool,
     pub payload: Vec<u8>,
 }
@@ -249,6 +250,7 @@ fn parse_k8s_log_line(line: &[u8]) -> Option<K8sLogEntry> {
                     .ok()?;
                 return Some(K8sLogEntry {
                     timestamp,
+                    stream: stream.to_string(),
                     partial,
                     payload,
                 });
@@ -371,7 +373,7 @@ pub fn format_log_lines_timestamped(lines: &[(DateTime<FixedOffset>, Vec<u8>)]) 
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&ts.to_rfc3339());
+        out.push_str(&ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, false));
         out.push(' ');
         out.push_str(&String::from_utf8_lossy(line));
     }
@@ -474,7 +476,8 @@ pub fn resolve_container_log_path(
 }
 
 pub fn is_k8s_log_path(path: &Path) -> bool {
-    path.to_string_lossy().contains("-ctr.log")
+    let s = path.to_string_lossy();
+    s.contains("ctr.log") || s.contains("journald")
 }
 
 pub fn read_log_output(
@@ -569,6 +572,35 @@ pub fn stream_k8s_container_logs(
     };
 
     if !follow {
+        if is_k8s_log_path(path) {
+            let entries = filter_k8s_entries_opts(read_k8s_log_entries(path)?, since, until);
+            if entries.iter().any(|e| e.stream == "stderr") && tail.is_none() && !timestamps {
+                let mut out_entries = Vec::new();
+                let mut err_entries = Vec::new();
+                for e in entries {
+                    if e.stream == "stderr" {
+                        err_entries.push(e);
+                    } else {
+                        out_entries.push(e);
+                    }
+                }
+                let out_lines = expand_embedded_newlines(reconstruct_k8s_lines(&out_entries));
+                let err_lines = expand_embedded_newlines(reconstruct_k8s_lines(&err_entries));
+                if !out_lines.is_empty() {
+                    write_log_text_opts(&format_log_lines(&out_lines), false, true)?;
+                }
+                if !err_lines.is_empty() {
+                    let err_text = format_log_lines(&err_lines);
+                    let mut stderr = std::io::stderr();
+                    stderr.write_all(err_text.as_bytes())?;
+                    if !err_text.ends_with('\n') {
+                        stderr.write_all(b"\n")?;
+                    }
+                    stderr.flush()?;
+                }
+                return Ok(());
+            }
+        }
         let text = read_log_output_opts(path, since, until, tail, timestamps)?;
         return write_log_text_opts(&text, false, false);
     }

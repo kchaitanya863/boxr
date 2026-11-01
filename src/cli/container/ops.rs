@@ -259,6 +259,18 @@ pub struct CpArgs {
     )]
     pub archive: bool,
 
+    /// Pause the container while copying
+    #[arg(
+        long = "pause",
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
+    pub pause: bool,
+
     #[arg(
         long = "overwrite",
         default_value_t = false,

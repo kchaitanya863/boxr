@@ -52,13 +52,41 @@ impl ContainerEvent {
                     ts, self.action, self.actor_id, self.actor_name
                 );
             }
-            "volume" | "pod" => {
+            "volume" => {
                 return format!(
                     "{} {} {} {}",
                     ts, self.event_type, self.action, self.actor_name
                 );
             }
+            "pod" => {
+                return format!(
+                    "{} pod {} {} (name={})",
+                    ts, self.action, self.actor_id, self.actor_name
+                );
+            }
+            "artifact" => {
+                return format!(
+                    "{} artifact {} {} (name={})",
+                    ts, self.action, self.actor_id, self.actor_name
+                );
+            }
             "network" => {
+                if self.action == "connect" || self.action == "disconnect" {
+                    let cid = self
+                        .attributes
+                        .get("container")
+                        .cloned()
+                        .unwrap_or_else(|| self.actor_id.clone());
+                    let net_name = self
+                        .attributes
+                        .get("name")
+                        .cloned()
+                        .unwrap_or_else(|| self.actor_name.clone());
+                    return format!(
+                        "{} network {} {} (container={}, name={})",
+                        ts, self.action, cid, cid, net_name
+                    );
+                }
                 let mut attrs_str = Vec::new();
                 if let Some(n) = self.attributes.get("name") {
                     attrs_str.push(format!("name={}", n));
@@ -422,6 +450,13 @@ fn append_podman_strict_event_line(path: &Path, event: &ContainerEvent) {
 }
 
 pub fn parse_event_timestamp(input: &str) -> Result<DateTime<Utc>> {
+    parse_event_timestamp_with_direction(input, false)
+}
+
+pub fn parse_event_timestamp_with_direction(
+    input: &str,
+    is_until: bool,
+) -> Result<DateTime<Utc>> {
     let s = input.trim();
     if s.is_empty() {
         return Err(anyhow!("failed to parse event filters: empty timestamp"));
@@ -430,19 +465,26 @@ pub fn parse_event_timestamp(input: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(&normalized) {
         return Ok(dt.with_timezone(&Utc));
     }
+    let apply_dur = |d: ChronoDuration| -> DateTime<Utc> {
+        if is_until {
+            Utc::now() + d
+        } else {
+            Utc::now() - d
+        }
+    };
     if let Some(num) = s.strip_suffix('s') {
         if let Ok(secs) = num.parse::<i64>() {
-            return Ok(Utc::now() - ChronoDuration::seconds(secs));
+            return Ok(apply_dur(ChronoDuration::seconds(secs)));
         }
     }
     if let Some(num) = s.strip_suffix('m') {
         if let Ok(mins) = num.parse::<i64>() {
-            return Ok(Utc::now() - ChronoDuration::minutes(mins));
+            return Ok(apply_dur(ChronoDuration::minutes(mins)));
         }
     }
     if let Some(num) = s.strip_suffix('h') {
         if let Ok(hours) = num.parse::<i64>() {
-            return Ok(Utc::now() - ChronoDuration::hours(hours));
+            return Ok(apply_dur(ChronoDuration::hours(hours)));
         }
     }
     if let Ok(unix_secs) = s.parse::<i64>() {
@@ -494,6 +536,12 @@ fn match_single_filter_kv(event: &ContainerEvent, k: &str, v: &str) -> bool {
         }
         "network" => {
             event.event_type == "network"
+                && (event.actor_name == v
+                    || event.actor_id == v
+                    || event.attributes.get("name").is_some_and(|n| n == v))
+        }
+        "artifact" => {
+            event.event_type == "artifact"
                 && (event.actor_name == v
                     || event.actor_id == v
                     || event.attributes.get("name").is_some_and(|n| n == v))
@@ -666,14 +714,14 @@ impl EventManager {
         }
 
         let since_dt = match since {
-            Some(s) => match parse_event_timestamp(s) {
+            Some(s) => match parse_event_timestamp_with_direction(s, false) {
                 Ok(dt) => Some(dt),
                 Err(e) => crate::cli::usage_errors::exit_usage_error(e.to_string()),
             },
             None => None,
         };
         let until_dt = match until {
-            Some(u) => match parse_event_timestamp(u) {
+            Some(u) => match parse_event_timestamp_with_direction(u, true) {
                 Ok(dt) => Some(dt),
                 Err(e) => crate::cli::usage_errors::exit_usage_error(e.to_string()),
             },
@@ -733,7 +781,7 @@ impl EventManager {
                             }
                         }
                         if let Some(u_dt) = until_dt {
-                            if event.timestamp > u_dt {
+                            if event.timestamp >= u_dt {
                                 continue;
                             }
                         }
@@ -753,6 +801,11 @@ impl EventManager {
             initial_pass = false;
             if !stream {
                 break;
+            }
+            if let Some(u_dt) = until_dt {
+                if Utc::now() >= u_dt {
+                    break;
+                }
             }
             empty_ticks += 1;
             if is_test && empty_ticks > 1 {

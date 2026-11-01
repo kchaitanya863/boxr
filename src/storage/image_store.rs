@@ -381,7 +381,8 @@ impl ImageStore {
                 let is_local_to_store = rootfs.starts_with(store_root)
                     && !removed
                         .rootfs_path
-                        .starts_with("/var/tmp/boxr-e2e-tar-cache");
+                        .starts_with("/var/tmp/boxr-e2e-tar-cache")
+                    && !removed.rootfs_path.starts_with("/tmp/boxr-e2e-tar-cache");
                 if !is_shared && is_local_to_store {
                     if rootfs.exists() {
                         #[cfg(unix)]
@@ -488,6 +489,7 @@ impl ImageStore {
         let _ = fs::remove_file(dest_rootfs.join("boxr-run.sh"));
         let _ = fs::remove_file(dest_rootfs.join("boxr-exitcode"));
         let _ = fs::remove_file(dest_rootfs.join("logs.txt"));
+        let _ = fs::remove_dir_all(dest_rootfs.join("run/secrets"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -551,8 +553,9 @@ impl ImageStore {
                     let exec = base_config
                         .config
                         .get_or_insert_with(crate::oci::image::ExecutionConfig::default);
-                    exec.entrypoint = Some(run_args);
-                    exec.cmd = None;
+                    if exec.entrypoint.as_ref().is_none_or(|e| e.is_empty()) {
+                        exec.cmd = Some(run_args);
+                    }
                 }
             }
         }

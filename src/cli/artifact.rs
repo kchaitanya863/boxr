@@ -49,11 +49,39 @@ pub enum ArtifactAction {
     Ls,
     /// Pull an artifact from an OCI registry
     Pull {
+        /// Suppress output information when pulling
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
+        /// Require HTTPS and verify certificates
+        #[arg(
+            long = "tls-verify",
+            default_value_t = true,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            require_equals = true,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        tls_verify: bool,
         /// OCI artifact reference
         reference: String,
     },
     /// Push an artifact to an OCI registry
     Push {
+        /// Suppress output information when pushing
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
+        /// Require HTTPS and verify certificates
+        #[arg(
+            long = "tls-verify",
+            default_value_t = true,
+            num_args = 0..=1,
+            default_missing_value = "true",
+            require_equals = true,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        tls_verify: bool,
         /// OCI artifact reference
         reference: String,
     },

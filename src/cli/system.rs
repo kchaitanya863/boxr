@@ -22,8 +22,23 @@ pub struct StatsArgs {
     #[arg(long = "no-stream")]
     pub no_stream: bool,
 
-    #[arg(short = 'a', long = "all")]
+    #[arg(
+        short = 'a',
+        long = "all",
+        default_value_t = false,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub all: bool,
+
+    #[arg(long = "no-reset")]
+    pub no_reset: bool,
+
+    #[arg(short = 'i', long = "interval", allow_hyphen_values = true)]
+    pub interval: Option<i64>,
 
     #[arg(long = "format")]
     pub format: Option<String>,
@@ -772,6 +787,9 @@ pub struct PodLogsArgs {
     /// Act on the latest pod
     #[arg(short = 'l', long = "latest")]
     pub latest: bool,
+    /// Output the containers with different colors in the log
+    #[arg(long = "color")]
+    pub color: bool,
 }
 
 #[derive(Args, Debug, Clone)]

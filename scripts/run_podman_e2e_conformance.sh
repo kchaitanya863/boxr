@@ -48,6 +48,10 @@ chmod +x "$WRAPPER"
 
 export PODMAN_BINARY="$WRAPPER"
 export PODMAN="$WRAPPER"
+if [[ -z "${CONMON_BINARY:-}" ]] && [[ ! -x /usr/bin/conmon ]] && [[ ! -x /usr/libexec/podman/conmon ]]; then
+  ln -sf "$BOXR_BIN" "$CACHE_DIR/conmon"
+  export CONMON_BINARY="$CACHE_DIR/conmon"
+fi
 export BOXR_HOME="${BOXR_HOME:-$(mktemp -d "${TMPDIR:-/tmp}/boxr-e2e.XXXXXX")}"
 export BOXR_BATS_HOME="$BOXR_HOME"
 
@@ -57,11 +61,13 @@ if [[ ! -f "$SRC_DIR/.install.ginkgo" ]] && [[ ! -x "$SRC_DIR/bin/ginkgo" ]]; th
   make -C "$SRC_DIR" .install.ginkgo
 fi
 
-if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]]; then
+if [[ ! -x "$SRC_DIR/test/e2e/e2e.test" ]] || [[ ! -x "$SRC_DIR/test/checkseccomp/checkseccomp" ]]; then
   echo "Prebuilding test/e2e/e2e.test..."
   make -C "$SRC_DIR" test-binaries
   (cd "$SRC_DIR" && ./bin/ginkgo build --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" test/e2e/.)
 fi
+
+export PATH="$PATH:$SRC_DIR/hack"
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%%#*}"
@@ -75,7 +81,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$focus_pat" != /* ]]; then
     focus_pat="/${focus_pat}$"
   fi
-  if ! make localintegration FOCUS_FILE="$focus_pat" GINKGO_PARALLEL=n GINKGOWHAT=test/e2e/e2e.test; then
+  if ! "$SRC_DIR/bin/ginkgo" -vv --tags "grpcnotrace exclude_graphdriver_btrfs seccomp remote" --timeout=90m --flake-attempts 0 --trace --no-color --focus-file "$focus_pat" --silence-skips "$SRC_DIR/test/e2e/e2e.test"; then
     if [[ "${PODMAN_E2E_STRICT:-0}" == "1" ]]; then
       exit 1
     fi

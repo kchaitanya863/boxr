@@ -121,7 +121,7 @@ fn is_podman_global_flag_token(a: &str) -> bool {
 }
 
 /// Index of the first Podman subcommand token (skip flags before it).
-pub(crate) fn podman_subcommand_index(argv: &[String]) -> usize {
+pub fn podman_subcommand_index(argv: &[String]) -> usize {
     const SUBCOMMANDS: &[&str] = &[
         "help",
         "pull",
@@ -259,6 +259,7 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut rm_false = false;
     let mut read_only_false = false;
+    let mut pod_infra_false = false;
     let mut env_files: Vec<String> = Vec::new();
     let mut label_files: Vec<String> = Vec::new();
     let mut build_files: Vec<String> = Vec::new();
@@ -513,93 +514,93 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             if !a.starts_with('-') {
                 // Check if previous token in `out` is a flag that takes a value on run/create/exec
                 let prev = out.last().map(String::as_str).unwrap_or("");
-                let prev_takes_val = matches!(
-                    prev,
-                    "-e" | "--env"
-                        | "-p"
-                        | "--publish"
-                        | "-v"
-                        | "--volume"
-                        | "-w"
-                        | "--workdir"
-                        | "-m"
-                        | "--memory"
-                        | "-l"
-                        | "--label"
-                        | "-u"
-                        | "--user"
-                        | "-a"
-                        | "--attach"
-                        | "-c"
-                        | "--cpu-shares"
-                        | "--name"
-                        | "--hostname"
-                        | "--network"
-                        | "--net"
-                        | "--pod"
-                        | "--entrypoint"
-                        | "--restart"
-                        | "--pull"
-                        | "--platform"
-                        | "--userns"
-                        | "--uidmap"
-                        | "--gidmap"
-                        | "--ipc"
-                        | "--pid"
-                        | "--uts"
-                        | "--cgroupns"
-                        | "--cgroup-parent"
-                        | "--log-driver"
-                        | "--log-opt"
-                        | "--security-opt"
-                        | "--ulimit"
-                        | "--sysctl"
-                        | "--add-host"
-                        | "--dns"
-                        | "--dns-search"
-                        | "--dns-option"
-                        | "--device"
-                        | "--tmpfs"
-                        | "--mount"
-                        | "--volumes-from"
-                        | "--cap-add"
-                        | "--cap-drop"
-                        | "--annotation"
-                        | "--group-add"
-                        | "--tz"
-                        | "--umask"
-                        | "--domainname"
-                        | "--stop-signal"
-                        | "--stop-timeout"
-                        | "--timeout"
-                        | "--shm-size"
-                        | "--cpus"
-                        | "--cpu-period"
-                        | "--cpu-quota"
-                        | "--cpuset-cpus"
-                        | "--cpuset-mems"
-                        | "--memory-swap"
-                        | "--memory-reservation"
-                        | "--memory-swappiness"
-                        | "--pids-limit"
-                        | "--oom-score-adj"
-                        | "--cidfile"
-                        | "--conmon-pidfile"
-                        | "--hooks-dir"
-                        | "--image-volume"
-                        | "--rootfs"
-                        | "--default-mounts-file"
-                        | "--secret"
-                        | "--hostuser"
-                        | "--group-entry"
-                        | "--unsetenv"
-                        | "--systemd"
-                        | "--preserve-fds"
-                        | "--preserve-fd"
-                        | "--authfile"
-                        | "--cert-dir"
-                        | "--creds"
-                );
+                let prev_takes_val = (is_run_or_create && matches!(prev, "-l" | "--label"))
+                    || matches!(
+                        prev,
+                        "-e" | "--env"
+                            | "-p"
+                            | "--publish"
+                            | "-v"
+                            | "--volume"
+                            | "-w"
+                            | "--workdir"
+                            | "-m"
+                            | "--memory"
+                            | "-u"
+                            | "--user"
+                            | "-a"
+                            | "--attach"
+                            | "-c"
+                            | "--cpu-shares"
+                            | "--name"
+                            | "--hostname"
+                            | "--network"
+                            | "--net"
+                            | "--pod"
+                            | "--entrypoint"
+                            | "--restart"
+                            | "--pull"
+                            | "--platform"
+                            | "--userns"
+                            | "--uidmap"
+                            | "--gidmap"
+                            | "--ipc"
+                            | "--pid"
+                            | "--uts"
+                            | "--cgroupns"
+                            | "--cgroup-parent"
+                            | "--log-driver"
+                            | "--log-opt"
+                            | "--security-opt"
+                            | "--ulimit"
+                            | "--sysctl"
+                            | "--add-host"
+                            | "--dns"
+                            | "--dns-search"
+                            | "--dns-option"
+                            | "--device"
+                            | "--tmpfs"
+                            | "--mount"
+                            | "--volumes-from"
+                            | "--cap-add"
+                            | "--cap-drop"
+                            | "--annotation"
+                            | "--group-add"
+                            | "--tz"
+                            | "--umask"
+                            | "--domainname"
+                            | "--stop-signal"
+                            | "--stop-timeout"
+                            | "--timeout"
+                            | "--shm-size"
+                            | "--cpus"
+                            | "--cpu-period"
+                            | "--cpu-quota"
+                            | "--cpuset-cpus"
+                            | "--cpuset-mems"
+                            | "--memory-swap"
+                            | "--memory-reservation"
+                            | "--memory-swappiness"
+                            | "--pids-limit"
+                            | "--oom-score-adj"
+                            | "--cidfile"
+                            | "--wait"
+                            | "--conmon-pidfile"
+                            | "--hooks-dir"
+                            | "--image-volume"
+                            | "--rootfs"
+                            | "--default-mounts-file"
+                            | "--secret"
+                            | "--hostuser"
+                            | "--group-entry"
+                            | "--unsetenv"
+                            | "--systemd"
+                            | "--preserve-fds"
+                            | "--preserve-fd"
+                            | "--authfile"
+                            | "--cert-dir"
+                            | "--creds"
+                    );
                 if !prev_takes_val {
                     seen_positional_after_sub = true;
                     if !env_files.is_empty() {
@@ -663,11 +664,12 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
             continue;
         }
         if a == "--infra=false" {
-            let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
+            pod_infra_false = true;
             i += 1;
             continue;
         }
-        if a == "--infra=true" {
+        if a == "--infra=true" || a == "--infra" {
+            pod_infra_false = false;
             i += 1;
             continue;
         }
@@ -713,6 +715,9 @@ pub fn preprocess_argv(argv: Vec<String>) -> Vec<String> {
     }
     if rm_false {
         let _ = RUN_RM_EXPLICIT_FALSE.set(true);
+    }
+    if pod_infra_false {
+        let _ = POD_INFRA_EXPLICIT_FALSE.set(true);
     }
     if read_only_false {
         let _ = READ_ONLY_EXPLICIT_FALSE.set(true);
