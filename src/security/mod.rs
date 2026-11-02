@@ -148,21 +148,24 @@ impl RootlessUserConfig {
 
     /// Check if newuidmap and newgidmap helper binaries are installed on the system
     pub fn has_newidmap_binaries() -> bool {
-        let has_uidmap = Path::new("/usr/bin/newuidmap").exists()
-            || Path::new("/bin/newuidmap").exists()
-            || std::process::Command::new("which")
-                .arg("newuidmap")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-        let has_gidmap = Path::new("/usr/bin/newgidmap").exists()
-            || Path::new("/bin/newgidmap").exists()
-            || std::process::Command::new("which")
-                .arg("newgidmap")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-        has_uidmap && has_gidmap
+        static HAS_BINARIES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *HAS_BINARIES.get_or_init(|| {
+            let has_uidmap = Path::new("/usr/bin/newuidmap").exists()
+                || Path::new("/bin/newuidmap").exists()
+                || std::process::Command::new("which")
+                    .arg("newuidmap")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+            let has_gidmap = Path::new("/usr/bin/newgidmap").exists()
+                || Path::new("/bin/newgidmap").exists()
+                || std::process::Command::new("which")
+                    .arg("newgidmap")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+            has_uidmap && has_gidmap
+        })
     }
 
     /// Configure UID and GID mapping for a target child PID in a new user namespace
@@ -364,19 +367,32 @@ using single-ID mapping only (images requiring chown/--user may fail)"
             gid_args.push(m.host_id.to_string());
             gid_args.push(m.size.to_string());
         }
-        let uid_status = std::process::Command::new("newuidmap")
+        let mut u_child = match std::process::Command::new("newuidmap")
             .args(&uid_args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
-        let gid_status = std::process::Command::new("newgidmap")
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let mut g_child = match std::process::Command::new("newgidmap")
             .args(&gid_args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                let _ = u_child.wait();
+                return false;
+            }
+        };
+        let u_st = u_child.wait();
+        let g_st = g_child.wait();
         matches!(
-            (uid_status, gid_status),
-            (Ok(u_st), Ok(g_st)) if u_st.success() && g_st.success()
+            (u_st, g_st),
+            (Ok(u), Ok(g)) if u.success() && g.success()
         )
     }
 
@@ -583,6 +599,17 @@ using single-ID mapping only (images requiring chown/--user may fail)"
     fn enable_setgroups_for_pid(pid: i32) -> Result<()> {
         if Self::write_setgroups_allow(pid).is_ok() {
             return Ok(());
+        }
+        if unsafe { libc::geteuid() != 0 } {
+            if let (Ok(p_meta), Ok(s_meta)) = (
+                fs::metadata(format!("/proc/{pid}/ns/user")),
+                fs::metadata("/proc/self/ns/user"),
+            ) {
+                use std::os::unix::fs::MetadataExt;
+                if p_meta.dev() == s_meta.dev() && p_meta.ino() == s_meta.ino() {
+                    return Ok(());
+                }
+            }
         }
         Self::allow_setgroups_from_userns(pid, pid)
     }

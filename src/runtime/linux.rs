@@ -551,6 +551,7 @@ fn wait_for_trampoline_exit(bundle_path: &Path, pid: i32) -> i32 {
     use nix::errno::Errno;
     let pgid = Pid::from_raw(pid);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+    let mut poll_count = 0usize;
     while std::time::Instant::now() < deadline {
         match waitpid(pgid, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Exited(_, code)) => return code,
@@ -570,7 +571,15 @@ fn wait_for_trampoline_exit(bundle_path: &Path, pid: i32) -> i32 {
         if !process_alive(pid) {
             return read_bundle_exit_code(bundle_path);
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let sleep_us = match poll_count {
+            0..=2 => 100,
+            3..=5 => 250,
+            6..=10 => 500,
+            11..=20 => 1000,
+            _ => 5000,
+        };
+        poll_count += 1;
+        std::thread::sleep(std::time::Duration::from_micros(sleep_us));
     }
     read_bundle_exit_code(bundle_path)
 }
@@ -1893,7 +1902,7 @@ pub fn execute_bundle(
         let child_pid = child.id() as i32;
         let _ = fs::write(bundle_path.join("vm.pid"), child_pid.to_string());
         let _ = fs::write(bundle_path.join("pid"), child_pid.to_string());
-        for _ in 0..100 {
+        for poll_idx in 0..100 {
             if bundle_path.join("container.pid").exists()
                 || bundle_path.join("boxr-exitcode").exists()
             {
@@ -1902,7 +1911,14 @@ pub fn execute_bundle(
             if let Ok(Some(_)) = child.try_wait() {
                 break;
             }
-            thread::sleep(std::time::Duration::from_millis(20));
+            let sleep_us = match poll_idx {
+                0..=2 => 100,
+                3..=5 => 250,
+                6..=10 => 500,
+                11..=20 => 1000,
+                _ => 5000,
+            };
+            thread::sleep(std::time::Duration::from_micros(sleep_us));
         }
         let container_id = bundle_path
             .file_name()
@@ -2052,7 +2068,11 @@ fn wait_foreground_child_with_sigproxy(
         }
     }
     let mut pause_ensured = false;
+    let mut poll_count = 0usize;
     loop {
+        if let Some(status) = child.try_wait().context("Failed to wait on trampoline")? {
+            return Ok(status);
+        }
         if !pause_ensured && bundle_path.join("container.pid").exists() {
             let _ = ensure_rootless_pause_process();
             pause_ensured = true;
@@ -2086,10 +2106,15 @@ fn wait_foreground_child_with_sigproxy(
                 }
             }
         }
-        if let Some(status) = child.try_wait().context("Failed to wait on trampoline")? {
-            return Ok(status);
-        }
-        thread::sleep(std::time::Duration::from_millis(20));
+        let sleep_us = match poll_count {
+            0..=2 => 50,
+            3..=5 => 150,
+            6..=10 => 500,
+            11..=20 => 1000,
+            _ => 5000,
+        };
+        poll_count += 1;
+        thread::sleep(std::time::Duration::from_micros(sleep_us));
     }
 }
 
@@ -2347,6 +2372,11 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                     mapping_res.context("Failed to setup rootless UID/GID mappings")?;
                 }
 
+                // 3. Notify child that mapping is complete so it can proceed concurrently
+                parent_sock
+                    .write_all(b"done")
+                    .context("Failed to write sync to container child")?;
+
                 if !skip_cgroup_migration {
                     if let Ok(cg_txt) =
                         fs::read_to_string(format!("/proc/{}/cgroup", child.as_raw()))
@@ -2392,12 +2422,10 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                                         sup_cg.join("cgroup.procs"),
                                         child.as_raw().to_string(),
                                     );
-                                    for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
-                                        let _ = fs::write(
-                                            parent_cg.join("cgroup.subtree_control"),
-                                            ctl,
-                                        );
-                                    }
+                                    let _ = fs::write(
+                                        parent_cg.join("cgroup.subtree_control"),
+                                        "+cpu +cpuset +memory +pids +io",
+                                    );
                                     let _ = fs::write(
                                         bundle_path.join("container.cgroup"),
                                         target_cg.to_string_lossy().as_bytes(),
@@ -2432,11 +2460,6 @@ pub fn run_trampoline(args: &[String]) -> Result<i32> {
                         }
                     }
                 }
-
-                // 3. Notify child that mapping is complete
-                parent_sock
-                    .write_all(b"done")
-                    .context("Failed to write sync to container child")?;
 
                 // 4. If pasta is active, wait for child to unshare netns and setup pasta
                 let mut pasta_child: Option<std::process::Child> = None;
@@ -3534,24 +3557,36 @@ pub fn ensure_rootless_pause_process() -> Option<i32> {
         let pid = child.id() as i32;
         let _ = std::fs::write(&pause_file, pid.to_string());
         if join_pid.is_none() {
-            for _ in 0..50 {
+            for poll_i in 0..100 {
                 if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
                     let trimmed = comm.trim();
                     if trimmed == "boxr-pause-map" || trimmed == "podman pause" {
                         break;
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                let sleep_us = match poll_i {
+                    0..=4 => 100,
+                    5..=10 => 250,
+                    11..=20 => 500,
+                    _ => 1000,
+                };
+                std::thread::sleep(std::time::Duration::from_micros(sleep_us));
             }
             let _ = crate::security::RootlessUserConfig::setup_child_mappings(pid);
         }
-        for _ in 0..50 {
+        for poll_i in 0..100 {
             if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
                 if comm.trim() == "podman pause" {
                     break;
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            let sleep_us = match poll_i {
+                0..=4 => 100,
+                5..=10 => 250,
+                11..=20 => 500,
+                _ => 1000,
+            };
+            std::thread::sleep(std::time::Duration::from_micros(sleep_us));
         }
         return Some(pid);
     }
@@ -3582,14 +3617,20 @@ pub fn run_internal_pause(args: &[String]) -> Result<i32> {
                 libc::prctl(libc::PR_SET_NAME, b"boxr-pause-map\0".as_ptr());
             }
             let mut mapped = false;
-            for _ in 0..40 {
+            for poll_i in 0..80 {
                 if let Ok(uid_map) = std::fs::read_to_string("/proc/self/uid_map") {
                     if !uid_map.trim().is_empty() {
                         mapped = true;
                         break;
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
+                let sleep_us = match poll_i {
+                    0..=4 => 100,
+                    5..=10 => 250,
+                    11..=20 => 500,
+                    _ => 1000,
+                };
+                std::thread::sleep(std::time::Duration::from_micros(sleep_us));
             }
             if !mapped {
                 let _ = std::fs::write("/proc/self/setgroups", "deny");
