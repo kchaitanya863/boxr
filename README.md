@@ -543,35 +543,51 @@ Run the automated 3-way benchmark suite:
 .\scripts\benchmark_windows.ps1
 ```
 
-### Unified 3-Way Benchmark Results (Linux x86_64 — `boxr v0.1.65` vs `Podman 4.9.3` vs `Docker 29.1.3`)
+### Linux x86_64 Benchmark Results (`boxr v0.1.70` vs `Podman 4.9.3` vs `Docker 29.1.3`)
 
-| Benchmark Metric | BOXR (Rust) | PODMAN (Go) | DOCKER | BOXR vs PODMAN / DOCKER |
+**Test Environment Specifications:**
+- **Host**: AWS EC2 `m5.large` instance (`us-east-1`, AMI: `ami-0d6dd9e8265d48906`)
+- **OS**: Ubuntu 24.04.5 LTS (Noble Numbat), Linux Kernel `7.0.0-1014-aws` (x86_64)
+- **CPU**: Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz (2 vCPUs: 1 core, 2 threads, Skylake-SP)
+- **Memory**: 8.0 GB RAM (7.6 GiB visible), 0B Swap
+- **Storage**: 40 GB NVMe AWS gp3 SSD (`/dev/sda1`, rootfs mounted `ext4` with `noatime,rw`)
+- **Runtimes Evaluated**: `boxr v0.1.70` (Rust, standalone static musl), `Podman 4.9.3` (Go + crun 1.14.1 + conmon 2.1.10), `Docker 29.1.3` (Go, build 29.1.3-0ubuntu3~24.04.2, containerd 1.7.12, runc 1.1.12-0ubuntu3)
+
+| Benchmark Metric | BOXR (Rust) `v0.1.70` | PODMAN (Go) `4.9.3` | DOCKER `29.1.3` | BOXR vs PODMAN / DOCKER |
 | :--- | :--- | :--- | :--- | :--- |
-| **Service / Daemon Idle Memory** | **11.5 MB** | 38.9 MB | 152.7 MB | **3.38x lighter than Podman / 13.26x lighter than Docker** 🍃 |
-| **CLI Peak RAM Usage (RSS)** | **12.2 MB** | 37.6 MB | 27.6 MB | **3.08x less RAM than Podman / 2.26x less than Docker** ⚡ |
-| **CLI Binary Size on Disk** | **15.9 MB** (6.2M stripped) | 35.6 MB | 29.9 MB | **2.23x smaller than Podman / 1.88x smaller than Docker** 📦 |
-| **Full Runtime Suite Disk Size** | **15.9 MB** (single binary) | 45.3 MB (`podman`+`crun`+`conmon`+`netavark`) | 174.5 MB (`docker`+`dockerd`+`containerd`+`runc`) | **2.84x smaller than Podman / 10.95x smaller than Docker** 📦 |
-| **Dockerfile Build (Cold, `--no-cache`)** | **332.4 ms** | 739.2 ms | 3283.2 ms | **2.22x faster than Podman / 9.88x faster than Docker** 🚀 |
-| **Dockerfile Build (Cached)** | 330.9 ms | 233.4 ms | **64.8 ms** | **0.71x vs Podman / 0.20x vs Docker** |
-| **Startup Latency (Median)** | 360.1 ms | **257.7 ms** | 793.9 ms | **0.72x vs Podman / 2.20x faster than Docker** 🚀 |
-| **Startup Latency (Min)** | 357.3 ms | **249.1 ms** | 714.2 ms | **0.70x vs Podman / 2.00x faster than Docker** 🚀 |
-| **Startup Latency (Mean ± SD)** | 363.4 ± 8.8 ms | **258.7 ± 7.7 ms** | 807.1 ± 71.4 ms | **0.71x vs Podman / 2.22x faster than Docker** 🚀 |
-| **5 Concurrent Containers Spawn** | 1225.2 ms | **1118.5 ms** | 3611.6 ms | **0.91x (~par) vs Podman / 2.95x faster than Docker** ⚡ |
-| **Volume I/O (10MB Write+Read)** | 358.6 ms | **254.6 ms** | 770.9 ms | **0.71x vs Podman / 2.15x faster than Docker** ⚡ |
+| **Startup Latency (Median)** | **248.3 ms** | 300.8 ms | 494.2 ms | **1.21x faster than Podman / 1.99x faster than Docker** 🚀 |
+| **Startup Latency (Min)** | **239.6 ms** | 283.6 ms | 433.4 ms | **1.18x faster than Podman / 1.81x faster than Docker** 🚀 |
+| **Startup Latency (Mean ± SD)** | **253.9 ± 16.0 ms** | 317.2 ± 34.1 ms | 505.3 ± 45.9 ms | **1.25x faster than Podman / 1.99x faster than Docker** 🚀 |
+| **5 Concurrent Containers Spawn** | **561.2 ms** | 2107.2 ms | 1426.4 ms | **3.75x faster than Podman / 2.54x faster than Docker** ⚡ |
+| **Dockerfile Build (Cold, `--no-cache`)** | **296.8 ms** | 1050.4 ms | 1635.3 ms | **3.54x faster than Podman / 5.51x faster than Docker** 🚀 |
+| **Dockerfile Build (Cached)** | 331.6 ms | 359.7 ms | **115.8 ms** | **1.08x faster than Podman / 0.35x vs Docker** |
+| **Volume I/O (10MB Write+Read)** | **264.6 ms** | 358.8 ms | 504.0 ms | **1.36x faster than Podman / 1.90x faster than Docker** ⚡ |
+| **CLI Binary Size on Disk** | **15.5 MB** (6.1M stripped) | 35.6 MB | 29.9 MB | **2.29x smaller than Podman / 1.93x smaller than Docker** 📦 |
+| **Full Runtime Suite Disk Size** | **15.5 MB** (single binary) | 45.3 MB (`podman`+`crun`+`conmon`+`netavark`) | 174.5 MB (`docker`+`dockerd`+`containerd`+`runc`) | **2.91x smaller than Podman / 11.23x smaller than Docker** 📦 |
+| **CLI Peak RAM Usage (RSS)** | **11.9 MB** | 38.2 MB | 28.3 MB | **3.21x less RAM than Podman / 2.38x less than Docker** ⚡ |
+| **Service / Daemon Idle Memory** | **10.5 MB** | 39.0 MB | 152.0 MB | **3.71x lighter than Podman / 14.48x lighter than Docker** 🍃 |
 
-### Benchmark Results (Windows Server 2022 x86_64)
+---
 
-Comparing `boxr v0.1.68`, `Podman 5.2.5`, and `Docker 27.3.1` running natively on Windows Server 2022:
+### Windows Server 2022 Benchmark Results (`boxr v0.1.70` vs `Podman 5.2.5` vs `Docker 27.3.1`)
 
-| Benchmark Metric | BOXR (Rust) `v0.1.68` | PODMAN (Go) `v5.2.5` | DOCKER `v27.3.1` | BOXR vs PODMAN / DOCKER |
+**Test Environment Specifications:**
+- **Host**: AWS EC2 `m5.large` instance (`us-east-1`, AMI: `ami-0bb49139514a40253`)
+- **OS**: Microsoft Windows Server 2022 Datacenter, Build `10.0.20348` (x86_64)
+- **CPU**: Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz (2 vCPUs: 1 core, 2 threads)
+- **Memory**: 8.0 GB RAM (7892 MB visible)
+- **Storage**: 40 GB NVMe AWS gp3 SSD (`C:`, NTFS format)
+- **Runtimes Evaluated**: `boxr v0.1.70` (Rust Windows standalone x86_64), `Podman 5.2.5` (Go Windows remote CLI), `Docker 27.3.1` (Go Windows CLI client, build `ce12230`)
+
+| Benchmark Metric | BOXR (Rust) `v0.1.70` | PODMAN (Go) `v5.2.5` | DOCKER `v27.3.1` | BOXR vs PODMAN / DOCKER |
 | :--- | :--- | :--- | :--- | :--- |
 | **CLI Peak RAM Usage (RSS)** | **9.4 MB** | 24.7 MB | 16.6 MB | **2.63x less RAM than Podman / 1.77x less than Docker** ⚡ |
 | **CLI Binary Size on Disk** | **14.8 MB** (6.1M stripped) | 44.6 MB | 37.7 MB | **3.01x smaller than Podman / 2.55x smaller than Docker** 📦 |
-| **CLI Startup Latency (Median)** | **16.9 ms** | 109.3 ms | 34.7 ms | **6.47x faster than Podman / 2.05x faster than Docker** 🚀 |
-| **CLI Startup Latency (Min)** | **16.5 ms** | 99.9 ms | 31.7 ms | **6.05x faster than Podman / 1.92x faster than Docker** 🚀 |
-| **CLI Startup Latency (Mean ± SD)** | **20.1 ± 6.7 ms** | 112.9 ± 15.1 ms | 34.3 ± 1.6 ms | **5.62x faster than Podman / 1.71x faster than Docker** 🚀 |
-| **Command Execution Latency (`--help` Median)** | **15.9 ms** | 112.8 ms | 37.1 ms | **7.09x faster than Podman / 2.33x faster than Docker** ⚡ |
-| **Command Execution Latency (`--help` Min)** | **15.6 ms** | 105.0 ms | 34.8 ms | **6.73x faster than Podman / 2.23x faster than Docker** ⚡ |
+| **CLI Startup Latency (Median)** | **14.6 ms** | 135.5 ms | 33.5 ms | **9.28x faster than Podman / 2.29x faster than Docker** 🚀 |
+| **CLI Startup Latency (Min)** | **14.3 ms** | 126.7 ms | 31.6 ms | **8.86x faster than Podman / 2.21x faster than Docker** 🚀 |
+| **CLI Startup Latency (Mean ± SD)** | **16.0 ± 4.0 ms** | 134.5 ± 4.4 ms | 32.9 ± 1.1 ms | **8.41x faster than Podman / 2.06x faster than Docker** 🚀 |
+| **Command Execution Latency (`--help` Median)** | **13.4 ms** | 129.7 ms | 48.7 ms | **9.68x faster than Podman / 3.63x faster than Docker** ⚡ |
+| **Command Execution Latency (`--help` Min)** | **12.8 ms** | 119.8 ms | 45.9 ms | **9.36x faster than Podman / 3.59x faster than Docker** ⚡ |
 
 ### Benchmark Analysis
 - **Zero-Dependency Single Binary Footprint**: `boxr` packages the CLI, OCI runtime, rootless user-namespace trampoline, image builder, compose orchestrator, and user-mode network stack (`usernet`) into a single **15.9 MB** binary (**6.2 MB** stripped). By comparison, Podman requires **45.3 MB** across `podman`, `conmon`, `crun`, `netavark`, `aardvark-dns`, `pasta`, `fuse-overlayfs`, and `catatonit`, while Docker requires **174.5 MB** across `docker`, `dockerd`, `containerd`, `containerd-shim-runc-v2`, and `runc` (**10.95x larger** on Linux; **2.1 GB** on macOS Docker Desktop).
