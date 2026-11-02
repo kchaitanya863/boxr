@@ -141,12 +141,23 @@ impl CgroupV2Manager {
         if base_cgroup.exists() {
             let _ = fs::create_dir_all(&parent_cgroup);
             let app_slice = base_cgroup.join("app.slice");
-            for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
-                let _ = fs::write(base_cgroup.join("cgroup.subtree_control"), ctl);
-                if app_slice.exists() {
-                    let _ = fs::write(app_slice.join("cgroup.subtree_control"), ctl);
+            const ALL_CTLS: &str = "+cpu +cpuset +memory +pids +io";
+            if fs::write(base_cgroup.join("cgroup.subtree_control"), ALL_CTLS).is_err() {
+                for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                    let _ = fs::write(base_cgroup.join("cgroup.subtree_control"), ctl);
                 }
-                let _ = fs::write(parent_cgroup.join("cgroup.subtree_control"), ctl);
+            }
+            if app_slice.exists() {
+                if fs::write(app_slice.join("cgroup.subtree_control"), ALL_CTLS).is_err() {
+                    for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                        let _ = fs::write(app_slice.join("cgroup.subtree_control"), ctl);
+                    }
+                }
+            }
+            if fs::write(parent_cgroup.join("cgroup.subtree_control"), ALL_CTLS).is_err() {
+                for ctl in ["+cpu", "+cpuset", "+memory", "+pids", "+io"] {
+                    let _ = fs::write(parent_cgroup.join("cgroup.subtree_control"), ctl);
+                }
             }
             if fs::create_dir_all(&container_cgroup).is_err() {
                 if let Ok(entries) = fs::read_dir(&parent_cgroup) {

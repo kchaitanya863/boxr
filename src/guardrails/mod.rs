@@ -216,6 +216,9 @@ impl PortCollisionGuard {
         requested_ports: &[crate::network::PortMapping],
         exclude_container: Option<&str>,
     ) -> Result<()> {
+        if requested_ports.is_empty() {
+            return Ok(());
+        }
         let store = ContainerStore::new();
         let containers: Vec<_> = store
             .list()

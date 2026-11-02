@@ -5854,10 +5854,19 @@ pub async fn run_container_with_output(
 
     fs::create_dir_all(&bundle_dir)?;
     let raw_argv: Vec<String> = std::env::args().collect();
-    let _ = fs::write(
-        bundle_dir.join("create_command.json"),
-        serde_json::to_string(&raw_argv)?,
-    );
+    let cc_path = bundle_dir.join("create_command.json");
+    if args.rm {
+        std::thread::spawn(move || {
+            if let Ok(s) = serde_json::to_string(&raw_argv) {
+                let _ = fs::write(cc_path, s);
+            }
+        });
+    } else {
+        let _ = fs::write(
+            cc_path,
+            serde_json::to_string(&raw_argv)?,
+        );
+    }
     if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
         let trimmed = unit.trim();
         if !trimmed.is_empty()
@@ -6312,7 +6321,9 @@ pub async fn run_container_with_output(
         event_attrs.clone(),
     ));
     add_container_record(&container_store, record, &ephemeral_new_pod)?;
-    let _ = mount::MountManager::new().record_container_mount(&container_id);
+    if !args.rm {
+        let _ = mount::MountManager::new().record_container_mount(&container_id);
+    }
 
     if args.detach {
         if let Some((code, msg)) = check_custom_systemd_run_for_healthcheck(&health_cfg) {
@@ -6524,10 +6535,20 @@ pub async fn run_container_with_output(
             let _ = fs::write(bundle_dir.join("network_interfaces_extra.json"), j);
         }
     }
-    let _ = fs::write(
-        bundle_dir.join("started_at"),
-        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-    );
+    if args.rm {
+        let bdir = bundle_dir.clone();
+        std::thread::spawn(move || {
+            let _ = fs::write(
+                bdir.join("started_at"),
+                Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            );
+        });
+    } else {
+        let _ = fs::write(
+            bundle_dir.join("started_at"),
+            Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        );
+    }
 
     write_prebuilt_resolv_and_hosts(
         &bundle_dir,
@@ -6638,7 +6659,9 @@ pub async fn run_container_with_output(
         let _ = start_container_with_home(dep, None, true).await;
     }
     let _ = runtime::oci_hooks::run_hooks_from_bundle(&bundle_dir, "prestart");
-    let _ = fs::write(bundle_dir.join("started_at.txt"), Utc::now().to_rfc3339());
+    if !args.rm {
+        let _ = fs::write(bundle_dir.join("started_at.txt"), Utc::now().to_rfc3339());
+    }
     let mut exit_code = execute_bundle(
         &bundle_dir,
         &spec,
@@ -6736,7 +6759,9 @@ pub async fn run_container_with_output(
     }
 
     if !args.detach {
-        let _ = mount::MountManager::new().unmount_container(&container_id);
+        if !args.rm {
+            let _ = mount::MountManager::new().unmount_container(&container_id);
+        }
         let auto_rm = run_auto_remove_enabled(&args);
         if args.rmi {
             try_rmi_with_in_use_warning(&args.image, Some(&container_id), !auto_rm);

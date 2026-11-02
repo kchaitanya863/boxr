@@ -111,7 +111,7 @@ impl ContainerStore {
     }
 
     fn save_unlocked(&self, data: &ContainerStoreData) -> Result<()> {
-        let content = serde_json::to_string_pretty(data)?;
+        let content = serde_json::to_string(data)?;
         let rand_suffix = hex::encode(rand_id());
         let temp_file = self
             .index_file
@@ -122,14 +122,20 @@ impl ContainerStore {
             let ov = home.join("overlay-containers");
             let _ = fs::create_dir_all(&ov);
             let _ = fs::write(ov.join("containers.json"), &content);
-            let _ = fs::write(ov.join("containers.lock"), "");
-            for c in &data.containers {
-                let _ = fs::create_dir_all(ov.join(&c.id));
+            let lock_p = ov.join("containers.lock");
+            if !lock_p.exists() {
+                let _ = fs::write(lock_p, "");
             }
             let libpod = home.join("libpod");
-            let _ = fs::create_dir_all(&libpod);
-            let _ = fs::write(libpod.join("bolt_state.db"), "");
-            let _ = fs::write(home.join("db.sql"), "");
+            let bolt_p = libpod.join("bolt_state.db");
+            if !bolt_p.exists() {
+                let _ = fs::create_dir_all(&libpod);
+                let _ = fs::write(bolt_p, "");
+            }
+            let sql_p = home.join("db.sql");
+            if !sql_p.exists() {
+                let _ = fs::write(sql_p, "");
+            }
         }
         Ok(())
     }
@@ -244,9 +250,13 @@ impl ContainerStore {
                     existing.id
                 ));
             }
-            data.containers.retain(|c| c.id != record.id);
+            let cid = record.id.clone();
+            data.containers.retain(|c| c.id != cid);
             data.containers.push(record);
             self.save_unlocked(&data)?;
+            if let Some(home) = self.index_file.parent() {
+                let _ = fs::create_dir_all(home.join("overlay-containers").join(&cid));
+            }
             Ok(())
         })
     }
