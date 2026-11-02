@@ -1,0 +1,24 @@
+#!/bin/sh
+# Git pre-commit hook for boxr
+# Ensures code formatting passes before any commit is recorded.
+
+set -e
+
+if ! command -v cargo >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Locate git top-level directory
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+
+if [ ! -f "${REPO_ROOT}/Cargo.toml" ]; then
+    exit 0
+fi
+
+echo "Running pre-commit check: cargo fmt --all -- --check"
+if ! cargo fmt --manifest-path "${REPO_ROOT}/Cargo.toml" --all -- --check; then
+    echo ""
+    echo "❌ Code formatting error detected."
+    echo "👉 Run 'cargo fmt --all' to automatically format your code, then re-commit."
+    exit 1
+fi

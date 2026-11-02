@@ -287,6 +287,15 @@ cargo install --path .
 cargo build --release
 ```
 
+#### Development & Git Hooks
+
+To automatically verify and enforce code formatting before every commit:
+
+```bash
+# Configure git to use repo-provided pre-commit hooks
+git config core.hooksPath .githooks
+```
+
 ---
 
 ## Command Reference
