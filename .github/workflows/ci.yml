@@ -2,19 +2,10 @@ name: CI & Automated Release
 
 # ==============================================================================
 # RUNNER CONFIGURATION TOGGLE
-# Easily switch between GitHub-hosted runners and self-hosted runners.
-#
-# Option A: GitHub-Hosted Runners (ACTIVE)
-.runners:
-  linux: &runner_linux ubuntu-24.04
-  macos: &runner_macos macos-15
-  linux_arm: &runner_linux_arm ubuntu-24.04-arm
-
-# Option B: Self-Hosted Runners (Uncomment to toggle to self-hosted runners)
-# .runners:
-#   linux: &runner_linux [self-hosted, Linux]
-#   macos: &runner_macos [self-hosted, macOS]
-#   linux_arm: &runner_linux_arm [self-hosted, Linux, ARM64]
+# All jobs run on GitHub-hosted runners by default (ubuntu-24.04, macos-15).
+# To toggle between GitHub-hosted and Self-Hosted runners:
+#   - Variable Toggle: Set GitHub repository variable 'USE_SELF_HOSTED' to 'true'
+#   - Dispatch Toggle: Trigger workflow with input 'use_self_hosted: true'
 # ==============================================================================
 
 on:
@@ -41,14 +32,13 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  USE_SELF_HOSTED: false # Set to true when switching to self-hosted runner pool
 
 jobs:
   test:
     # Check name kept for branch ruleset compatibility.
     name: Test & Lint (macOS Self-Hosted)
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    runs-on: *runner_linux
+    runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && fromJSON('["self-hosted", "Linux"]') || 'ubuntu-24.04' }}
     defaults:
       run:
         shell: bash
@@ -150,7 +140,7 @@ jobs:
   podman-bats-full-catalog:
     name: Podman BATS (full upstream catalog, shard ${{ matrix.shard }}/4)
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    runs-on: *runner_linux
+    runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && fromJSON('["self-hosted", "Linux"]') || 'ubuntu-24.04' }}
     timeout-minutes: 45
     continue-on-error: true
     strategy:
@@ -191,7 +181,7 @@ jobs:
     name: Bump Version & Create Git Tag
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):')
-    runs-on: *runner_linux
+    runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && fromJSON('["self-hosted", "Linux"]') || 'ubuntu-24.04' }}
     defaults:
       run:
         shell: bash
@@ -262,7 +252,7 @@ jobs:
     name: Build & Publish Release (${{ matrix.name }})
     needs: [test, bump-and-tag]
     if: always() && needs.test.result == 'success' && (needs.bump-and-tag.result == 'success' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && matrix.self_hosted_os || matrix.github_os }}
     defaults:
       run:
         shell: bash
@@ -271,21 +261,24 @@ jobs:
       matrix:
         include:
           - name: macOS (Apple Silicon arm64)
-            os: *runner_macos
+            github_os: macos-15
+            self_hosted_os: [self-hosted, macOS]
             target: aarch64-apple-darwin
             artifact_name: boxr-macos-arm64.tar.gz
             use_zig: false
             build_pkg: false
             is_windows: false
           - name: macOS (Intel x86_64)
-            os: *runner_macos
+            github_os: macos-15
+            self_hosted_os: [self-hosted, macOS]
             target: x86_64-apple-darwin
             artifact_name: boxr-macos-x86_64.tar.gz
             use_zig: false
             build_pkg: false
             is_windows: false
           - name: Linux (musl arm64)
-            os: *runner_linux_arm
+            github_os: ubuntu-24.04-arm
+            self_hosted_os: [self-hosted, Linux, ARM64]
             target: aarch64-unknown-linux-musl
             artifact_name: boxr-linux-arm64.tar.gz
             use_zig: true
@@ -294,7 +287,8 @@ jobs:
             rpm_arch: aarch64
             is_windows: false
           - name: Linux (musl x86_64)
-            os: *runner_linux
+            github_os: ubuntu-24.04
+            self_hosted_os: [self-hosted, Linux]
             target: x86_64-unknown-linux-musl
             artifact_name: boxr-linux-x86_64.tar.gz
             use_zig: true
@@ -303,7 +297,8 @@ jobs:
             rpm_arch: x86_64
             is_windows: false
           - name: Windows (x86_64)
-            os: *runner_macos
+            github_os: macos-15
+            self_hosted_os: [self-hosted, macOS]
             target: x86_64-pc-windows-gnu
             artifact_name: boxr-windows-x86_64.zip
             use_zig: true
@@ -450,7 +445,7 @@ jobs:
     name: Publish Release & Update Homebrew Tap
     needs: [bump-and-tag, release]
     if: always() && needs.release.result == 'success'
-    runs-on: *runner_linux
+    runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && fromJSON('["self-hosted", "Linux"]') || 'ubuntu-24.04' }}
     defaults:
       run:
         shell: bash
