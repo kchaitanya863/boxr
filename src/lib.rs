@@ -5862,10 +5862,7 @@ pub async fn run_container_with_output(
             }
         });
     } else {
-        let _ = fs::write(
-            cc_path,
-            serde_json::to_string(&raw_argv)?,
-        );
+        let _ = fs::write(cc_path, serde_json::to_string(&raw_argv)?);
     }
     if let Ok(unit) = std::env::var("PODMAN_SYSTEMD_UNIT") {
         let trimmed = unit.trim();
