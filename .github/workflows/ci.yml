@@ -1,11 +1,34 @@
 name: CI & Automated Release
 
+# ==============================================================================
+# RUNNER CONFIGURATION TOGGLE
+# Easily switch between GitHub-hosted runners and self-hosted runners.
+#
+# Option A: GitHub-Hosted Runners (ACTIVE)
+.runners:
+  linux: &runner_linux ubuntu-24.04
+  macos: &runner_macos macos-15
+  linux_arm: &runner_linux_arm ubuntu-24.04-arm
+
+# Option B: Self-Hosted Runners (Uncomment to toggle to self-hosted runners)
+# .runners:
+#   linux: &runner_linux [self-hosted, Linux]
+#   macos: &runner_macos [self-hosted, macOS]
+#   linux_arm: &runner_linux_arm [self-hosted, Linux, ARM64]
+# ==============================================================================
+
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      use_self_hosted:
+        description: 'Toggle to use self-hosted runners'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -18,13 +41,14 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  USE_SELF_HOSTED: false # Set to true when switching to self-hosted runner pool
 
 jobs:
   test:
-    # Check name kept for branch ruleset compatibility (job runs on Linux; self-hosted Mac retired).
+    # Check name kept for branch ruleset compatibility.
     name: Test & Lint (macOS Self-Hosted)
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    runs-on: ubuntu-24.04
+    runs-on: *runner_linux
     defaults:
       run:
         shell: bash
@@ -126,7 +150,7 @@ jobs:
   podman-bats-full-catalog:
     name: Podman BATS (full upstream catalog, shard ${{ matrix.shard }}/4)
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    runs-on: ubuntu-24.04
+    runs-on: *runner_linux
     timeout-minutes: 45
     continue-on-error: true
     strategy:
@@ -167,7 +191,7 @@ jobs:
     name: Bump Version & Create Git Tag
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):')
-    runs-on: ubuntu-24.04
+    runs-on: *runner_linux
     defaults:
       run:
         shell: bash
@@ -247,21 +271,21 @@ jobs:
       matrix:
         include:
           - name: macOS (Apple Silicon arm64)
-            os: macos-15
+            os: *runner_macos
             target: aarch64-apple-darwin
             artifact_name: boxr-macos-arm64.tar.gz
             use_zig: false
             build_pkg: false
             is_windows: false
           - name: macOS (Intel x86_64)
-            os: macos-15
+            os: *runner_macos
             target: x86_64-apple-darwin
             artifact_name: boxr-macos-x86_64.tar.gz
             use_zig: false
             build_pkg: false
             is_windows: false
           - name: Linux (musl arm64)
-            os: ubuntu-24.04-arm
+            os: *runner_linux_arm
             target: aarch64-unknown-linux-musl
             artifact_name: boxr-linux-arm64.tar.gz
             use_zig: true
@@ -270,7 +294,7 @@ jobs:
             rpm_arch: aarch64
             is_windows: false
           - name: Linux (musl x86_64)
-            os: ubuntu-24.04
+            os: *runner_linux
             target: x86_64-unknown-linux-musl
             artifact_name: boxr-linux-x86_64.tar.gz
             use_zig: true
@@ -279,7 +303,7 @@ jobs:
             rpm_arch: x86_64
             is_windows: false
           - name: Windows (x86_64)
-            os: macos-15
+            os: *runner_macos
             target: x86_64-pc-windows-gnu
             artifact_name: boxr-windows-x86_64.zip
             use_zig: true
@@ -309,8 +333,12 @@ jobs:
               export PATH="$HOME/.local/bin:$PATH"
             fi
           fi
-          if ! cargo zigbuild --version >/dev/null 2>&1; then
-            cargo install cargo-zigbuild
+          if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+            if [ "$OS" = "Darwin" ]; then
+              cargo install cargo-zigbuild || brew install cargo-zigbuild
+            else
+              python3 -m pip install --quiet --break-system-packages cargo-zigbuild || cargo install cargo-zigbuild
+            fi
           fi
           if ! command -v dpkg-deb >/dev/null 2>&1; then
             if [ "$OS" = "Darwin" ]; then
@@ -422,7 +450,7 @@ jobs:
     name: Publish Release & Update Homebrew Tap
     needs: [bump-and-tag, release]
     if: always() && needs.release.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: *runner_linux
     defaults:
       run:
         shell: bash
