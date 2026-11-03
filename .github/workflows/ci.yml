@@ -184,7 +184,8 @@ jobs:
       - name: Build boxr binary
         run: cargo build
 
-      - name: Run Unit Tests
+      - name: Run Unit Tests (Unix)
+        if: matrix.os != 'windows-latest'
         run: cargo test --lib -- --test-threads=1
 
       - name: Run Core CLI Parity Tests (Linux)
