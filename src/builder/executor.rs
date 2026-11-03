@@ -80,12 +80,13 @@ impl ImageBuilder {
             .get("__BOXR_PULL_POLICY")
             .map(String::as_str)
             .unwrap_or("missing");
-        let use_layers = !opts.no_cache
-            && opts
-                .build_args
-                .get("__BOXR_LAYERS")
-                .map(|v| v != "false" && v != "0")
-                .unwrap_or(true);
+        let use_layers = opts
+            .build_args
+            .get("__BOXR_LAYERS")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+        let can_read_cache = !opts.no_cache && use_layers;
+        let can_write_cache = use_layers;
         let dns_search_raw = opts.build_args.get("__BOXR_DNS_SEARCH").cloned();
         let ulimits_raw = opts.build_args.get("__BOXR_ULIMITS").cloned();
         let seccomp_unconfined = opts
@@ -148,6 +149,8 @@ impl ImageBuilder {
 
         let mut current_rootfs = temp_dir.path().join("stage-0");
         fs::create_dir_all(&current_rootfs)?;
+        let mut current_rootfs_is_shared = false;
+        let mut prev_layer_rootfs: Option<PathBuf> = None;
         let mut current_config = ExecutionConfig::default();
         let mut current_stage_name: Option<String> = None;
         let mut build_shell = vec!["/bin/sh".to_string(), "-c".to_string()];
@@ -218,6 +221,7 @@ impl ImageBuilder {
                     current_stage_name = as_stage.clone();
                     current_rootfs = temp_dir.path().join(format!("stage-{}", stages.len()));
                     fs::create_dir_all(&current_rootfs)?;
+                    current_rootfs_is_shared = false;
                     post_from_count = 0;
 
                     let stage_suffix = as_stage
@@ -239,7 +243,8 @@ impl ImageBuilder {
                         .iter()
                         .find(|s| s.name.as_deref() == Some(image.as_str()))
                     {
-                        copy_dir_all(&prev_stage.rootfs, &current_rootfs)?;
+                        current_rootfs = prev_stage.rootfs.clone();
+                        current_rootfs_is_shared = true;
                         current_config = prev_stage.config.clone();
                         cache_key = format!("from_stage_{}{}", image, stage_suffix);
                         from_scratch = false;
@@ -300,28 +305,50 @@ impl ImageBuilder {
                             },
                         };
 
-                        copy_dir_all(&PathBuf::from(&base_record.rootfs_path), &current_rootfs)?;
-                        let pw_file = current_rootfs.join("etc/passwd");
-                        if let Ok(pw_text) = fs::read_to_string(&pw_file) {
-                            if pw_text.contains(":container user:") {
-                                let cleaned: Vec<&str> = pw_text
-                                    .lines()
-                                    .filter(|l| !l.contains(":container user:"))
-                                    .collect();
-                                let _ = fs::remove_file(&pw_file);
-                                let _ = fs::write(&pw_file, format!("{}\n", cleaned.join("\n")));
+                        let base_rf = PathBuf::from(&base_record.rootfs_path);
+                        let pw_file = base_rf.join("etc/passwd");
+                        let needs_pw_clean = fs::read_to_string(&pw_file)
+                            .map(|s| s.contains(":container user:"))
+                            .unwrap_or(false);
+                        let gr_file = base_rf.join("etc/group");
+                        let needs_gr_clean = fs::read_to_string(&gr_file)
+                            .map(|s| s.contains(":container group:"))
+                            .unwrap_or(false);
+
+                        if needs_pw_clean || needs_gr_clean {
+                            current_rootfs =
+                                temp_dir.path().join(format!("stage-{}", stages.len()));
+                            let _ = fs::remove_dir_all(&current_rootfs);
+                            fs::create_dir_all(&current_rootfs)?;
+                            copy_dir_all(&base_rf, &current_rootfs)?;
+                            current_rootfs_is_shared = false;
+                            if needs_pw_clean {
+                                let pw_file = current_rootfs.join("etc/passwd");
+                                if let Ok(pw_text) = fs::read_to_string(&pw_file) {
+                                    let cleaned: Vec<&str> = pw_text
+                                        .lines()
+                                        .filter(|l| !l.contains(":container user:"))
+                                        .collect();
+                                    let _ = fs::remove_file(&pw_file);
+                                    let _ =
+                                        fs::write(&pw_file, format!("{}\n", cleaned.join("\n")));
+                                }
                             }
-                        }
-                        let gr_file = current_rootfs.join("etc/group");
-                        if let Ok(gr_text) = fs::read_to_string(&gr_file) {
-                            if gr_text.contains(":container group:") {
-                                let cleaned: Vec<&str> = gr_text
-                                    .lines()
-                                    .filter(|l| !l.contains(":container group:"))
-                                    .collect();
-                                let _ = fs::remove_file(&gr_file);
-                                let _ = fs::write(&gr_file, format!("{}\n", cleaned.join("\n")));
+                            if needs_gr_clean {
+                                let gr_file = current_rootfs.join("etc/group");
+                                if let Ok(gr_text) = fs::read_to_string(&gr_file) {
+                                    let cleaned: Vec<&str> = gr_text
+                                        .lines()
+                                        .filter(|l| !l.contains(":container group:"))
+                                        .collect();
+                                    let _ = fs::remove_file(&gr_file);
+                                    let _ =
+                                        fs::write(&gr_file, format!("{}\n", cleaned.join("\n")));
+                                }
                             }
+                        } else {
+                            current_rootfs = base_rf;
+                            current_rootfs_is_shared = true;
                         }
                         if let Some(base_img_dir) = PathBuf::from(&base_record.rootfs_path).parent()
                         {
@@ -336,8 +363,8 @@ impl ImageBuilder {
                                 }
                             }
                         }
-                        if let Some(base_rf) = &base_record.config.rootfs {
-                            base_diff_ids = base_rf.diff_ids.clone();
+                        if let Some(base_rf_cfg) = &base_record.config.rootfs {
+                            base_diff_ids = base_rf_cfg.diff_ids.clone();
                         } else {
                             base_diff_ids = vec![base_record.manifest_digest.clone()];
                         }
@@ -360,31 +387,33 @@ impl ImageBuilder {
                 Instruction::Workdir(dir) => {
                     let dir_expanded = expand_build_vars(dir, &arg_vars, &current_config.env);
                     let dir = &dir_expanded;
-                    let dest = if dir.starts_with('/') {
-                        current_rootfs.join(dir.trim_start_matches('/'))
-                    } else {
-                        let cur = current_config
-                            .working_dir
-                            .clone()
-                            .unwrap_or_else(|| "/".to_string());
-                        current_rootfs.join(cur.trim_start_matches('/')).join(dir)
-                    };
-                    if let Ok(meta) = fs::symlink_metadata(&dest) {
-                        if meta.file_type().is_symlink() {
-                            if let Ok(target) = fs::read_link(&dest) {
-                                let resolved = if target.is_absolute() {
-                                    current_rootfs
-                                        .join(target.to_string_lossy().trim_start_matches('/'))
-                                } else {
-                                    dest.parent().unwrap_or(&current_rootfs).join(target)
-                                };
-                                let _ = fs::create_dir_all(&resolved);
+                    if !current_rootfs_is_shared {
+                        let dest = if dir.starts_with('/') {
+                            current_rootfs.join(dir.trim_start_matches('/'))
+                        } else {
+                            let cur = current_config
+                                .working_dir
+                                .clone()
+                                .unwrap_or_else(|| "/".to_string());
+                            current_rootfs.join(cur.trim_start_matches('/')).join(dir)
+                        };
+                        if let Ok(meta) = fs::symlink_metadata(&dest) {
+                            if meta.file_type().is_symlink() {
+                                if let Ok(target) = fs::read_link(&dest) {
+                                    let resolved = if target.is_absolute() {
+                                        current_rootfs
+                                            .join(target.to_string_lossy().trim_start_matches('/'))
+                                    } else {
+                                        dest.parent().unwrap_or(&current_rootfs).join(target)
+                                    };
+                                    let _ = fs::create_dir_all(&resolved);
+                                }
+                            } else if !meta.is_dir() {
+                                fs::create_dir_all(&dest)?;
                             }
-                        } else if !meta.is_dir() {
+                        } else {
                             fs::create_dir_all(&dest)?;
                         }
-                    } else {
-                        fs::create_dir_all(&dest)?;
                     }
                     current_config.working_dir = Some(dir.clone());
                     cache_key = format!("{}_workdir_{}", cache_key, dir);
@@ -509,95 +538,164 @@ impl ImageBuilder {
                         ));
                     }
 
-                    for s in url_sources {
-                        let resp = reqwest::get(&s).await.context("Failed to fetch ADD URL")?;
-                        let bytes = resp.bytes().await.context("Failed to read ADD URL body")?;
-                        if let Some(parent) = target_dir.parent() {
-                            fs::create_dir_all(parent)?;
+                    let mut content_hasher = Sha256::new();
+                    for u in &url_sources {
+                        content_hasher.update(u.as_bytes());
+                    }
+                    for sp in &resolved_sources {
+                        if let Ok(meta) = fs::metadata(sp) {
+                            if meta.is_file() {
+                                if let Ok(bytes) = fs::read(sp) {
+                                    content_hasher.update(&bytes);
+                                }
+                            } else if meta.is_dir() {
+                                hash_dir_contents(sp, &mut content_hasher);
+                            }
                         }
-                        let dest_file = if target_dir.is_dir() || dest.ends_with('/') {
-                            fs::create_dir_all(&target_dir)?;
-                            let url_file = s.rsplit('/').next().unwrap_or("download");
-                            target_dir.join(url_file)
-                        } else {
-                            target_dir.clone()
-                        };
-                        fs::write(&dest_file, &bytes)?;
+                    }
+                    let content_digest = hex::encode(content_hasher.finalize());
+
+                    let mut hasher = Sha256::new();
+                    hasher.update(cache_key.as_bytes());
+                    hasher.update(b"ADD ");
+                    for s in src {
+                        hasher.update(s.as_bytes());
+                    }
+                    hasher.update(dest.as_bytes());
+                    hasher.update(content_digest.as_bytes());
+                    let step_cache_key = hex::encode(hasher.finalize());
+
+                    let mut add_cache_hit = false;
+                    if can_read_cache {
+                        if let Some(cached_rootfs) = BuildCache::get(&step_cache_key) {
+                            if !opts.quiet {
+                                println!("--> Using cache");
+                                log_buf.push_str("--> Using cache\n");
+                            }
+                            prev_layer_rootfs = Some(current_rootfs.clone());
+                            current_rootfs = cached_rootfs;
+                            current_rootfs_is_shared = true;
+                            cache_key = step_cache_key.clone();
+                            added_layer_count += 1;
+                            add_cache_hit = true;
+                        }
                     }
 
-                    for source_path in resolved_sources {
-                        if let Ok(rel) = source_path.strip_prefix(&opts.context_dir) {
-                            if !rel.as_os_str().is_empty() && dockerignore.is_ignored(rel) {
-                                continue;
-                            }
-                        }
-
-                        if let Ok(bytes) = fs::read(&source_path) {
-                            let file_sha = hex::encode(Sha256::digest(&bytes));
-                            cache_key.push('_');
-                            cache_key.push_str(&file_sha[..16]);
-                        }
-
-                        let s_str = source_path.to_string_lossy().to_string();
-                        let is_tar = s_str.ends_with(".tar")
-                            || s_str.ends_with(".tar.gz")
-                            || s_str.ends_with(".tgz")
-                            || s_str.ends_with(".tar.bz2")
-                            || s_str.ends_with(".tar.xz");
-
-                        if is_tar && source_path.is_file() {
-                            fs::create_dir_all(&target_dir)?;
-                            if s_str.ends_with(".tar.xz") || s_str.ends_with(".tar.bz2") {
-                                let status = std::process::Command::new("tar")
-                                    .arg("-xf")
-                                    .arg(&source_path)
-                                    .arg("-C")
-                                    .arg(&target_dir)
-                                    .status()?;
-                                if !status.success() {
-                                    return Err(anyhow!(
-                                        "Failed to extract archive {:?}",
-                                        source_path
-                                    ));
-                                }
-                            } else {
-                                let f = fs::File::open(&source_path)?;
-                                if s_str.ends_with(".tar.gz") || s_str.ends_with(".tgz") {
-                                    let gz = flate2::read::GzDecoder::new(f);
-                                    let mut archive = tar::Archive::new(gz);
-                                    crate::oci::image::unpack_archive_safely(
-                                        &mut archive,
-                                        &target_dir,
-                                    )?;
-                                } else {
-                                    let mut archive = tar::Archive::new(f);
-                                    crate::oci::image::unpack_archive_safely(
-                                        &mut archive,
-                                        &target_dir,
-                                    )?;
-                                }
-                            }
-                        } else if source_path.is_dir() {
-                            copy_dir_with_ignore(
-                                &source_path,
-                                &target_dir,
-                                Some((&opts.context_dir, &dockerignore)),
-                            )?;
+                    if !add_cache_hit {
+                        ensure_owned_rootfs(
+                            &mut current_rootfs,
+                            &mut current_rootfs_is_shared,
+                            temp_dir.path(),
+                            step_count,
+                        )?;
+                        ensure_workdir_exists(
+                            &current_rootfs,
+                            current_config.working_dir.as_deref(),
+                        );
+                        let target_dir = if dest.starts_with('/') {
+                            current_rootfs.join(dest.trim_start_matches('/'))
                         } else {
+                            let cur = current_config
+                                .working_dir
+                                .clone()
+                                .unwrap_or_else(|| "/".to_string());
+                            current_rootfs.join(cur.trim_start_matches('/')).join(dest)
+                        };
+
+                        for s in url_sources {
+                            let resp = reqwest::get(&s).await.context("Failed to fetch ADD URL")?;
+                            let bytes =
+                                resp.bytes().await.context("Failed to read ADD URL body")?;
                             if let Some(parent) = target_dir.parent() {
                                 fs::create_dir_all(parent)?;
                             }
-                            if target_dir.is_dir() || dest.ends_with('/') {
+                            let dest_file = if target_dir.is_dir() || dest.ends_with('/') {
                                 fs::create_dir_all(&target_dir)?;
-                                let file_name = source_path.file_name().unwrap();
-                                fs::copy(&source_path, target_dir.join(file_name))?;
+                                let url_file = s.rsplit('/').next().unwrap_or("download");
+                                target_dir.join(url_file)
                             } else {
-                                fs::copy(&source_path, &target_dir)?;
+                                target_dir.clone()
+                            };
+                            fs::write(&dest_file, &bytes)?;
+                        }
+
+                        for source_path in resolved_sources {
+                            if let Ok(rel) = source_path.strip_prefix(&opts.context_dir) {
+                                if !rel.as_os_str().is_empty() && dockerignore.is_ignored(rel) {
+                                    continue;
+                                }
+                            }
+
+                            if let Ok(bytes) = fs::read(&source_path) {
+                                let file_sha = hex::encode(Sha256::digest(&bytes));
+                                cache_key.push('_');
+                                cache_key.push_str(&file_sha[..16]);
+                            }
+
+                            let s_str = source_path.to_string_lossy().to_string();
+                            let is_tar = s_str.ends_with(".tar")
+                                || s_str.ends_with(".tar.gz")
+                                || s_str.ends_with(".tgz")
+                                || s_str.ends_with(".tar.bz2")
+                                || s_str.ends_with(".tar.xz");
+
+                            if is_tar && source_path.is_file() {
+                                fs::create_dir_all(&target_dir)?;
+                                if s_str.ends_with(".tar.xz") || s_str.ends_with(".tar.bz2") {
+                                    let status = std::process::Command::new("tar")
+                                        .arg("-xf")
+                                        .arg(&source_path)
+                                        .arg("-C")
+                                        .arg(&target_dir)
+                                        .status()?;
+                                    if !status.success() {
+                                        return Err(anyhow!(
+                                            "Failed to extract archive {:?}",
+                                            source_path
+                                        ));
+                                    }
+                                } else {
+                                    let f = fs::File::open(&source_path)?;
+                                    if s_str.ends_with(".tar.gz") || s_str.ends_with(".tgz") {
+                                        let gz = flate2::read::GzDecoder::new(f);
+                                        let mut archive = tar::Archive::new(gz);
+                                        crate::oci::image::unpack_archive_safely(
+                                            &mut archive,
+                                            &target_dir,
+                                        )?;
+                                    } else {
+                                        let mut archive = tar::Archive::new(f);
+                                        crate::oci::image::unpack_archive_safely(
+                                            &mut archive,
+                                            &target_dir,
+                                        )?;
+                                    }
+                                }
+                            } else if source_path.is_dir() {
+                                copy_dir_with_ignore(
+                                    &source_path,
+                                    &target_dir,
+                                    Some((&opts.context_dir, &dockerignore)),
+                                )?;
+                            } else {
+                                if let Some(parent) = target_dir.parent() {
+                                    fs::create_dir_all(parent)?;
+                                }
+                                if target_dir.is_dir() || dest.ends_with('/') {
+                                    fs::create_dir_all(&target_dir)?;
+                                    let file_name = source_path.file_name().unwrap();
+                                    fs::copy(&source_path, target_dir.join(file_name))?;
+                                } else {
+                                    fs::copy(&source_path, &target_dir)?;
+                                }
                             }
                         }
+                        added_layer_count += 1;
+                        if can_write_cache {
+                            let _ = BuildCache::put(&step_cache_key, &current_rootfs);
+                        }
+                        cache_key = step_cache_key;
                     }
-                    added_layer_count += 1;
-                    cache_key = format!("{}_add_{}_{:?}", cache_key, dest, src);
                 }
                 Instruction::Copy {
                     from_stage,
@@ -815,68 +913,137 @@ impl ImageBuilder {
                         ));
                     }
 
-                    let ignore_for_copy = if let Some(from_s) = from_stage {
-                        let is_named_ctx = build_contexts_vec
-                            .iter()
-                            .any(|e| e.split_once('=').is_some_and(|(k, _)| k == from_s));
-                        if is_named_ctx {
-                            Some(DockerIgnore::load_from_context(&source_root))
-                        } else {
-                            None
+                    let mut content_hasher = Sha256::new();
+                    for sp in &resolved_sources {
+                        if let Ok(meta) = fs::metadata(sp) {
+                            if meta.is_file() {
+                                if let Ok(bytes) = fs::read(sp) {
+                                    content_hasher.update(&bytes);
+                                }
+                            } else if meta.is_dir() {
+                                hash_dir_contents(sp, &mut content_hasher);
+                            }
                         }
-                    } else {
-                        Some(dockerignore.clone())
-                    };
-                    let mut any_copied = false;
-                    let mut seen_inodes: HashMap<(u64, u64), PathBuf> = HashMap::new();
-                    for source_path in resolved_sources {
-                        // Check .dockerignore for context copies
-                        if let Some(ref di) = ignore_for_copy {
-                            if let Ok(rel) = source_path.strip_prefix(&source_root) {
-                                if !rel.as_os_str().is_empty() && di.is_ignored(rel) {
-                                    continue;
+                    }
+                    let content_digest = hex::encode(content_hasher.finalize());
+
+                    let mut hasher = Sha256::new();
+                    hasher.update(cache_key.as_bytes());
+                    hasher.update(b"COPY ");
+                    if let Some(fs) = from_stage {
+                        hasher.update(fs.as_bytes());
+                        hasher.update(b":");
+                    }
+                    for s in src {
+                        hasher.update(s.as_bytes());
+                    }
+                    hasher.update(dest.as_bytes());
+                    hasher.update(content_digest.as_bytes());
+                    let step_cache_key = hex::encode(hasher.finalize());
+
+                    let mut copy_cache_hit = false;
+                    if can_read_cache {
+                        if let Some(cached_rootfs) = BuildCache::get(&step_cache_key) {
+                            if !opts.quiet {
+                                println!("--> Using cache");
+                                log_buf.push_str("--> Using cache\n");
+                            }
+                            prev_layer_rootfs = Some(current_rootfs.clone());
+                            current_rootfs = cached_rootfs;
+                            current_rootfs_is_shared = true;
+                            cache_key = step_cache_key.clone();
+                            added_layer_count += 1;
+                            copy_cache_hit = true;
+                        }
+                    }
+
+                    if !copy_cache_hit {
+                        ensure_owned_rootfs(
+                            &mut current_rootfs,
+                            &mut current_rootfs_is_shared,
+                            temp_dir.path(),
+                            step_count,
+                        )?;
+                        ensure_workdir_exists(
+                            &current_rootfs,
+                            current_config.working_dir.as_deref(),
+                        );
+                        let target_dir = if dest.starts_with('/') {
+                            current_rootfs.join(dest.trim_start_matches('/'))
+                        } else {
+                            let cur = current_config
+                                .working_dir
+                                .clone()
+                                .unwrap_or_else(|| "/".to_string());
+                            current_rootfs.join(cur.trim_start_matches('/')).join(dest)
+                        };
+
+                        let ignore_for_copy = if let Some(from_s) = from_stage {
+                            let is_named_ctx = build_contexts_vec
+                                .iter()
+                                .any(|e| e.split_once('=').is_some_and(|(k, _)| k == from_s));
+                            if is_named_ctx {
+                                Some(DockerIgnore::load_from_context(&source_root))
+                            } else {
+                                None
+                            }
+                        } else {
+                            Some(dockerignore.clone())
+                        };
+                        let mut any_copied = false;
+                        let mut seen_inodes: HashMap<(u64, u64), PathBuf> = HashMap::new();
+                        for source_path in resolved_sources {
+                            // Check .dockerignore for context copies
+                            if let Some(ref di) = ignore_for_copy {
+                                if let Ok(rel) = source_path.strip_prefix(&source_root) {
+                                    if !rel.as_os_str().is_empty() && di.is_ignored(rel) {
+                                        continue;
+                                    }
                                 }
                             }
-                        }
-                        any_copied = true;
+                            any_copied = true;
 
-                        if source_path.is_dir() {
-                            let ignore_ctx = ignore_for_copy
-                                .as_ref()
-                                .map(|di| (source_root.as_path(), di));
-                            copy_dir_with_ignore_and_inodes(
-                                &source_path,
-                                &target_dir,
-                                ignore_ctx,
-                                &mut seen_inodes,
-                            )?;
-                        } else {
-                            if let Some(parent) = target_dir.parent() {
-                                fs::create_dir_all(parent)?;
-                            }
-                            let dst_file = if target_dir.is_dir() || dest.ends_with('/') {
-                                fs::create_dir_all(&target_dir)?;
-                                let file_name = source_path.file_name().unwrap();
-                                target_dir.join(file_name)
+                            if source_path.is_dir() {
+                                let ignore_ctx = ignore_for_copy
+                                    .as_ref()
+                                    .map(|di| (source_root.as_path(), di));
+                                copy_dir_with_ignore_and_inodes(
+                                    &source_path,
+                                    &target_dir,
+                                    ignore_ctx,
+                                    &mut seen_inodes,
+                                )?;
                             } else {
-                                target_dir.clone()
-                            };
-                            copy_file_preserving_hardlinks(
-                                &source_path,
-                                &dst_file,
-                                &mut seen_inodes,
-                            )?;
+                                if let Some(parent) = target_dir.parent() {
+                                    fs::create_dir_all(parent)?;
+                                }
+                                let dst_file = if target_dir.is_dir() || dest.ends_with('/') {
+                                    fs::create_dir_all(&target_dir)?;
+                                    let file_name = source_path.file_name().unwrap();
+                                    target_dir.join(file_name)
+                                } else {
+                                    target_dir.clone()
+                                };
+                                copy_file_preserving_hardlinks(
+                                    &source_path,
+                                    &dst_file,
+                                    &mut seen_inodes,
+                                )?;
+                            }
                         }
+                        if !any_copied {
+                            crate::cli::usage_errors::exit_usage_error(format!(
+                                "building at STEP \"COPY {} {}\": copier: stat: no such file or directory",
+                                src.join(" "),
+                                dest
+                            ));
+                        }
+                        added_layer_count += 1;
+                        if can_write_cache {
+                            let _ = BuildCache::put(&step_cache_key, &current_rootfs);
+                        }
+                        cache_key = step_cache_key;
                     }
-                    if !any_copied {
-                        crate::cli::usage_errors::exit_usage_error(format!(
-                            "building at STEP \"COPY {} {}\": copier: stat: no such file or directory",
-                            src.join(" "),
-                            dest
-                        ));
-                    }
-                    added_layer_count += 1;
-                    cache_key = format!("{}_copy_{}_{:?}", cache_key, dest, src);
                 }
                 Instruction::Run(cmd) => {
                     added_layer_count += 1;
@@ -916,29 +1083,37 @@ impl ImageBuilder {
                     let step_cache_key = hex::encode(hasher.finalize());
 
                     let mut cache_hit = false;
-                    if use_layers && !has_cache_mount {
+                    if can_read_cache && !has_cache_mount {
                         if let Some(cached_rootfs) = BuildCache::get(&step_cache_key) {
                             if !opts.quiet {
                                 println!("--> Using cache");
                                 log_buf.push_str("--> Using cache\n");
                             }
-                            let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
-                            let _ = fs::remove_dir_all(&prev_layer_dir);
-                            let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
-                            let _ = fs::remove_dir_all(&current_rootfs);
-                            fs::create_dir_all(&current_rootfs)?;
-                            copy_dir_all(&cached_rootfs, &current_rootfs)?;
+                            prev_layer_rootfs = Some(current_rootfs.clone());
+                            current_rootfs = cached_rootfs;
+                            current_rootfs_is_shared = true;
                             cache_key = step_cache_key.clone();
                             cache_hit = true;
                         }
                     }
 
                     if !cache_hit {
+                        prev_layer_rootfs = Some(current_rootfs.clone());
                         let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
-                        if use_layers || !prev_layer_dir.exists() {
+                        if can_write_cache || !prev_layer_dir.exists() {
                             let _ = fs::remove_dir_all(&prev_layer_dir);
                             let _ = copy_dir_all(&current_rootfs, &prev_layer_dir);
                         }
+                        ensure_owned_rootfs(
+                            &mut current_rootfs,
+                            &mut current_rootfs_is_shared,
+                            temp_dir.path(),
+                            step_count,
+                        )?;
+                        ensure_workdir_exists(
+                            &current_rootfs,
+                            current_config.working_dir.as_deref(),
+                        );
                         let had_etc_hostname = current_rootfs.join("etc/hostname").exists();
                         let had_etc_hosts = current_rootfs.join("etc/hosts").exists();
 
@@ -1261,9 +1436,10 @@ impl ImageBuilder {
                             fs::create_dir_all(&current_rootfs)?;
                             copy_dir_all(&bundle_rootfs, &current_rootfs)?;
                         }
+                        current_rootfs_is_shared = false;
 
                         // Save to build cache
-                        if use_layers && !has_cache_mount {
+                        if can_write_cache && !has_cache_mount {
                             let _ = BuildCache::put(&step_cache_key, &current_rootfs);
                         }
                         cache_key = step_cache_key;
@@ -1336,6 +1512,12 @@ impl ImageBuilder {
                         let v_exp = expand_build_vars(v, &arg_vars, &current_config.env);
                         let rel = v_exp.trim_start_matches('/');
                         if !rel.is_empty() {
+                            ensure_owned_rootfs(
+                                &mut current_rootfs,
+                                &mut current_rootfs_is_shared,
+                                temp_dir.path(),
+                                step_count,
+                            )?;
                             let _ = fs::create_dir_all(current_rootfs.join(rel));
                         }
                         vol_map.insert(v_exp, serde_json::json!({}));
@@ -1383,7 +1565,7 @@ impl ImageBuilder {
                     .get(inst_idx + 1)
                     .map(|n| matches!(n, Instruction::From { .. }))
                     .unwrap_or(true);
-                if use_layers && !next_is_from_or_end {
+                if can_write_cache && !next_is_from_or_end {
                     let inter_full = hex::encode(Sha256::digest(
                         format!(
                             "inter:{}:{}:{}",
@@ -1447,7 +1629,7 @@ impl ImageBuilder {
             base_full_hex_id.unwrap_or_else(|| {
                 hex::encode(Sha256::digest(crate::storage::container_store::rand_id()))
             })
-        } else if use_layers {
+        } else if can_write_cache {
             hex::encode(Sha256::digest(
                 format!(
                     "final:{}:{}:{:?}:{:?}",
@@ -1466,8 +1648,19 @@ impl ImageBuilder {
 
         let dest_image_dir = home.join("images").join(&safe_id);
         let dest_rootfs = dest_image_dir.join("rootfs");
-        fs::create_dir_all(&dest_rootfs)?;
-        copy_dir_all(&current_rootfs, &dest_rootfs)?;
+        let already_complete = dest_rootfs.exists() && dest_image_dir.join(".complete").exists();
+        if !already_complete {
+            fs::create_dir_all(&dest_image_dir)?;
+            if dest_rootfs.exists() {
+                let _ = fs::remove_dir_all(&dest_rootfs);
+            }
+            copy_dir_all(&current_rootfs, &dest_rootfs)?;
+            ensure_workdir_exists(&dest_rootfs, current_config.working_dir.as_deref());
+            let _ = fs::write(dest_image_dir.join(".complete"), b"1");
+        } else {
+            ensure_workdir_exists(&dest_rootfs, current_config.working_dir.as_deref());
+        }
+
         if let Some(sbom_p) = &sbom_img_out {
             let p = dest_rootfs.join(sbom_p.trim_start_matches('/'));
             if let Some(parent) = p.parent() {
@@ -1482,8 +1675,14 @@ impl ImageBuilder {
             }
             let _ = fs::write(&p, "pkg:oci/sbom-img\n");
         }
+        if let Some(prev_rf) = &prev_layer_rootfs {
+            let _ = fs::write(
+                dest_image_dir.join("parent_rootfs.txt"),
+                prev_rf.to_string_lossy().as_bytes(),
+            );
+        }
         let prev_layer_dir = temp_dir.path().join("prev_layer_rootfs");
-        if prev_layer_dir.exists() {
+        if prev_layer_dir.exists() && !dest_image_dir.join("parent_rootfs").exists() {
             let parent_dest = dest_image_dir.join("parent_rootfs");
             let _ = copy_dir_all(&prev_layer_dir, &parent_dest);
         }
@@ -1558,7 +1757,6 @@ impl ImageBuilder {
             .map(|i| i.size_bytes.max(0) as u64)
             .max()
             .unwrap_or(0);
-        let dir_sz = crate::system::dir_size(&dest_rootfs);
         let (computed_size, final_rootfs_cfg) = if from_scratch && !has_layer_ops {
             (
                 0i64,
@@ -1567,7 +1765,10 @@ impl ImageBuilder {
                     diff_ids: Vec::new(),
                 }),
             )
+        } else if let Some(existing_rec) = self.store.find(&image_id) {
+            (existing_rec.size_bytes, None)
         } else {
+            let dir_sz = crate::system::dir_size(&dest_rootfs);
             (dir_sz.max(base_max).max(1024 * 1024) as i64, None)
         };
 
@@ -1923,6 +2124,22 @@ fn copy_dir_with_ignore_and_inodes(
         false
     };
     if !src_ignored {
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            if ignore_ctx.is_none() && !dst.exists() {
+                if let (Ok(s), Ok(d)) = (
+                    CString::new(src.as_os_str().as_bytes()),
+                    CString::new(dst.as_os_str().as_bytes()),
+                ) {
+                    if unsafe { libc::clonefile(s.as_ptr(), d.as_ptr(), 0) } == 0 {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         fs::create_dir_all(dst)?;
         #[cfg(unix)]
         {
@@ -1975,4 +2192,52 @@ fn copy_dir_with_ignore_and_inodes(
         }
     }
     Ok(())
+}
+
+fn hash_dir_contents(dir: &Path, hasher: &mut Sha256) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).collect();
+        sorted.sort_by_key(|e| e.file_name());
+        for entry in sorted {
+            let p = entry.path();
+            hasher.update(entry.file_name().to_string_lossy().as_bytes());
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    hasher.update(&meta.len().to_le_bytes());
+                    if let Ok(bytes) = fs::read(&p) {
+                        hasher.update(&bytes);
+                    }
+                } else if meta.is_dir() {
+                    hash_dir_contents(&p, hasher);
+                }
+            }
+        }
+    }
+}
+
+fn ensure_owned_rootfs(
+    current_rootfs: &mut PathBuf,
+    is_shared: &mut bool,
+    temp_dir: &Path,
+    step_count: usize,
+) -> Result<()> {
+    if *is_shared {
+        let owned = temp_dir.join(format!("owned-rootfs-{}", step_count));
+        let _ = fs::remove_dir_all(&owned);
+        fs::create_dir_all(&owned)?;
+        copy_dir_all(current_rootfs, &owned)?;
+        *current_rootfs = owned;
+        *is_shared = false;
+    }
+    Ok(())
+}
+
+fn ensure_workdir_exists(rootfs: &Path, workdir: Option<&str>) {
+    if let Some(wd) = workdir {
+        let trimmed = wd.trim_start_matches('/');
+        if !trimmed.is_empty() {
+            let dest = rootfs.join(trimmed);
+            let _ = fs::create_dir_all(dest);
+        }
+    }
 }
