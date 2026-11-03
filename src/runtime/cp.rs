@@ -174,42 +174,83 @@ impl ContainerCopy {
         let mut abs_path = Self::normalize_container_path(&workdir, raw_path);
         let mounts = Self::load_bundle_mounts(&bundle_path);
 
-        // Follow symlinks inside container rootfs up to 8 hops
-        for _ in 0..8 {
-            // Check if abs_path hits a configured mount first
-            let mut matched_mount = false;
+        // Iteratively resolve every path component within container rootfs, following symlinks up to 40 hops
+        let mut curr_path = PathBuf::from("/");
+        let mut queue: std::collections::VecDeque<std::path::PathBuf> =
+            std::collections::VecDeque::new();
+        for comp in Path::new(&abs_path).components() {
+            match comp {
+                std::path::Component::Normal(c) => queue.push_back(PathBuf::from(c)),
+                std::path::Component::ParentDir => queue.push_back(PathBuf::from("..")),
+                _ => {}
+            }
+        }
+
+        let mut symlink_hops = 0;
+        while let Some(comp) = queue.pop_front() {
+            let comp_str = comp.to_string_lossy();
+            if comp_str == ".." {
+                curr_path.pop();
+                if curr_path.as_os_str().is_empty() {
+                    curr_path = PathBuf::from("/");
+                }
+                continue;
+            }
+            if comp_str == "." {
+                continue;
+            }
+
+            // Check if curr_path is inside a mount
+            let mut in_mount = false;
+            let check_cand = curr_path.join(&comp);
+            let check_str = check_cand.to_string_lossy().to_string();
             for m in &mounts {
                 let dest = m.destination.trim_end_matches('/');
                 let dest = if dest.is_empty() { "/" } else { dest };
-                if abs_path == dest || abs_path.starts_with(&format!("{}/", dest)) {
-                    matched_mount = true;
+                if check_str == dest || check_str.starts_with(&format!("{}/", dest)) {
+                    in_mount = true;
                     break;
                 }
             }
-            if matched_mount {
-                break;
+
+            if in_mount {
+                curr_path.push(&comp);
+                continue;
             }
-            let host_candidate = cont_rootfs.join(abs_path.trim_start_matches('/'));
-            let Ok(meta) = fs::symlink_metadata(&host_candidate) else {
-                break;
-            };
-            if !meta.file_type().is_symlink() {
-                break;
+
+            let rel_curr = curr_path.strip_prefix("/").unwrap_or(&curr_path);
+            let host_cand = cont_rootfs.join(rel_curr).join(&comp);
+            if let Ok(meta) = fs::symlink_metadata(&host_cand) {
+                if meta.file_type().is_symlink() {
+                    symlink_hops += 1;
+                    if symlink_hops > 40 {
+                        return Err(anyhow!("Too many levels of symbolic links"));
+                    }
+                    if let Ok(target) = fs::read_link(&host_cand) {
+                        let target_str = target.to_string_lossy();
+                        let target_components: Vec<PathBuf> = Path::new(&*target_str)
+                            .components()
+                            .filter_map(|c| match c {
+                                std::path::Component::Normal(p) => Some(PathBuf::from(p)),
+                                std::path::Component::ParentDir => Some(PathBuf::from("..")),
+                                _ => None,
+                            })
+                            .collect();
+
+                        if target_str.starts_with('/') {
+                            curr_path = PathBuf::from("/");
+                        }
+                        for (i, tc) in target_components.into_iter().enumerate() {
+                            queue.insert(i, tc);
+                        }
+                        continue;
+                    }
+                }
             }
-            let Ok(target) = fs::read_link(&host_candidate) else {
-                break;
-            };
-            let target_str = target.to_string_lossy();
-            if target_str.starts_with('/') {
-                abs_path = Self::normalize_container_path("/", &target_str);
-            } else {
-                let parent_cont = Path::new(&abs_path)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "/".to_string());
-                abs_path = Self::normalize_container_path(&parent_cont, &target_str);
-            }
+            curr_path.push(comp);
         }
+
+        let abs_path = curr_path.to_string_lossy().to_string();
 
         for m in &mounts {
             let dest = m.destination.trim_end_matches('/');
@@ -244,6 +285,36 @@ impl ContainerCopy {
         }
 
         let host_path = cont_rootfs.join(abs_path.trim_start_matches('/'));
+        let canon_rootfs = cont_rootfs
+            .canonicalize()
+            .unwrap_or_else(|_| cont_rootfs.clone());
+        if host_path.exists() {
+            if let Ok(canon_host) = host_path.canonicalize() {
+                if !canon_host.starts_with(&canon_rootfs) {
+                    return Err(anyhow!(
+                        "path traversal rejected: {:?} escapes container rootfs",
+                        raw_path
+                    ));
+                }
+            }
+        } else {
+            let mut curr = host_path.as_path();
+            while let Some(parent) = curr.parent() {
+                if parent.exists() {
+                    if let Ok(canon_parent) = parent.canonicalize() {
+                        if !canon_parent.starts_with(&canon_rootfs) {
+                            return Err(anyhow!(
+                                "path traversal rejected: {:?} escapes container rootfs",
+                                raw_path
+                            ));
+                        }
+                    }
+                    break;
+                }
+                curr = parent;
+            }
+        }
+
         Ok(ResolvedContainerTarget {
             host_path,
             abs_container_path: abs_path,
@@ -566,9 +637,7 @@ impl ContainerCopy {
         }
 
         let mut tar_arch = tar::Archive::new(&decompressed[..]);
-        let res = tar_arch
-            .unpack(&target.host_path)
-            .map_err(|e| anyhow!("{}", e));
+        let res = crate::oci::image::unpack_archive_safely(&mut tar_arch, &target.host_path);
         restore_writable_guard(guard);
         res
     }

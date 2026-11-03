@@ -1173,6 +1173,13 @@ fn handle_list_quadlets(ctx: &ApiContext) -> Response {
 }
 
 fn handle_delete_quadlet(ctx: &ApiContext, name: &str) -> Response {
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.starts_with('.') {
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "invalid quadlet name",
+            "invalid quadlet name",
+        );
+    }
     let ignore = ctx
         .query
         .get("ignore")
@@ -1227,6 +1234,13 @@ fn handle_delete_quadlet(ctx: &ApiContext, name: &str) -> Response {
 }
 
 fn handle_get_quadlet_file(name: &str) -> Response {
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.starts_with('.') {
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "invalid quadlet name",
+            "invalid quadlet name",
+        );
+    }
     match find_quadlet_file(name) {
         Some(path) => {
             let content = fs::read_to_string(path).unwrap_or_default();
@@ -1237,6 +1251,13 @@ fn handle_get_quadlet_file(name: &str) -> Response {
 }
 
 fn handle_quadlet_exists(name: &str) -> Response {
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.starts_with('.') {
+        return error_json(
+            StatusCode::BAD_REQUEST,
+            "invalid quadlet name",
+            "invalid quadlet name",
+        );
+    }
     if !is_valid_quadlet_filename(name) {
         return error_json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1341,12 +1362,41 @@ fn handle_install_quadlets(ctx: &ApiContext) -> Response {
         .get("application")
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty());
+    if let Some(app) = app_subdir {
+        if app.contains('/') || app.contains('\\') || app.contains("..") || app.starts_with('.') {
+            let msg = format!("invalid quadlet application subdirectory: {:?}", app);
+            return error_json(StatusCode::BAD_REQUEST, &msg, &msg);
+        }
+    }
+
+    for (name, _) in &files {
+        if name.contains('/') || name.contains('\\') || name.contains("..") || name.starts_with('.')
+        {
+            let msg = format!("invalid quadlet filename: {:?}", name);
+            return error_json(StatusCode::BAD_REQUEST, &msg, &msg);
+        }
+    }
+
     let base_dir = quadlet_install_dir();
+    let _ = fs::create_dir_all(&base_dir);
+    let canon_base = base_dir.canonicalize().unwrap_or_else(|_| base_dir.clone());
+
     let target_dir = match app_subdir {
         Some(sub) => base_dir.join(sub),
         None => base_dir.clone(),
     };
     let _ = fs::create_dir_all(&target_dir);
+    let canon_target = match target_dir.canonicalize() {
+        Ok(c) => c,
+        Err(_) => {
+            let msg = "failed to resolve target quadlet directory";
+            return error_json(StatusCode::BAD_REQUEST, msg, msg);
+        }
+    };
+    if !canon_target.starts_with(&canon_base) {
+        let msg = "quadlet application path escapes quadlet install directory";
+        return error_json(StatusCode::BAD_REQUEST, msg, msg);
+    }
 
     if !replace {
         for (name, _) in &files {
@@ -1368,7 +1418,22 @@ fn handle_install_quadlets(ctx: &ApiContext) -> Response {
     let mut installed = serde_json::Map::new();
     for (name, bytes) in files {
         let dest = target_dir.join(&name);
+        if let Some(parent) = dest.parent() {
+            if let Ok(canon_parent) = parent.canonicalize() {
+                if !canon_parent.starts_with(&canon_base) {
+                    let msg = "quadlet file destination escapes quadlet install directory";
+                    return error_json(StatusCode::BAD_REQUEST, msg, msg);
+                }
+            }
+        }
         let _ = fs::write(&dest, &bytes);
+        if let Ok(canon_dest) = dest.canonicalize() {
+            if !canon_dest.starts_with(&canon_base) {
+                let _ = fs::remove_file(&dest);
+                let msg = "quadlet file destination escapes quadlet install directory";
+                return error_json(StatusCode::BAD_REQUEST, msg, msg);
+            }
+        }
         installed.insert(
             name,
             serde_json::Value::String(dest.to_string_lossy().to_string()),

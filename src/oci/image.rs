@@ -476,6 +476,73 @@ pub fn unpack_layer(layer_archive_path: &Path, target_dir: &Path) -> Result<()> 
 
         // Normal file unpacking
         let dest = target_dir.join(&entry_path);
+
+        // If entry is a symlink, validate target doesn't escape target_dir
+        if entry.header().entry_type().is_symlink() {
+            if let Ok(Some(link_target)) = entry.link_name() {
+                let target_path = link_target.as_ref();
+                let resolved = if target_path.is_absolute() {
+                    let mut r = canon_target.clone();
+                    for comp in target_path.components() {
+                        if let std::path::Component::Normal(c) = comp {
+                            r.push(c);
+                        }
+                    }
+                    r
+                } else {
+                    let parent_dir = if let Some(parent) = entry_path.parent() {
+                        canon_target.join(parent)
+                    } else {
+                        canon_target.clone()
+                    };
+                    let mut r = parent_dir;
+                    for comp in target_path.components() {
+                        match comp {
+                            std::path::Component::Normal(c) => r.push(c),
+                            std::path::Component::ParentDir => {
+                                if !r.pop() || !r.starts_with(&canon_target) {
+                                    return Err(anyhow!(
+                                        "Tar-slip symlink escape rejected in layer: target {:?} escapes {:?}",
+                                        target_path,
+                                        target_dir
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    r
+                };
+                if !resolved.starts_with(&canon_target) {
+                    return Err(anyhow!(
+                        "Tar-slip symlink escape rejected in layer: target {:?} escapes {:?}",
+                        target_path,
+                        target_dir
+                    ));
+                }
+            }
+        }
+
+        // Validate that no existing ancestor of dest is a symlink resolving outside target_dir
+        let mut curr = dest.as_path();
+        while let Some(parent) = curr.parent() {
+            if parent.exists() {
+                let canon_parent = parent.canonicalize()?;
+                if !canon_parent.starts_with(&canon_target) {
+                    if let Ok(meta) = fs::symlink_metadata(parent) {
+                        if meta.file_type().is_symlink() {
+                            return Err(anyhow!(
+                                "Tar-slip path traversal rejected in layer: ancestor {:?} resolves outside target directory",
+                                parent
+                            ));
+                        }
+                    }
+                }
+                break;
+            }
+            curr = parent;
+        }
+
         // Ensure parent directory exists and has write permissions
         if let Some(p) = dest.parent() {
             fs::create_dir_all(p)?;
@@ -503,6 +570,22 @@ pub fn unpack_layer(layer_archive_path: &Path, target_dir: &Path) -> Result<()> 
                     "Direct unpack warning ({}), attempting fallback: {:?}",
                     e, dest
                 );
+            }
+        }
+
+        if !entry.header().entry_type().is_symlink() && dest.exists() {
+            if let Ok(meta) = fs::symlink_metadata(&dest) {
+                if !meta.file_type().is_symlink() {
+                    let canon_dest = dest.canonicalize()?;
+                    if !canon_dest.starts_with(&canon_target) {
+                        let _ = fs::remove_file(&dest);
+                        return Err(anyhow!(
+                            "Tar-slip path traversal rejected in layer: destination {:?} escapes {:?}",
+                            dest,
+                            target_dir
+                        ));
+                    }
+                }
             }
         }
 

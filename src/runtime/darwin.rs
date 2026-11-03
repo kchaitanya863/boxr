@@ -177,7 +177,7 @@ pub fn ensure_vm_assets() -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Safely quote a string for POSIX shell execution, preventing command injection or variable expansion.
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -297,6 +297,15 @@ pub fn generate_guest_resolv_conf(bundle_path: &Path, domainname: Option<&str>) 
         dns_str.push_str(&format!("domain {}\\n", domain));
     }
     dns_str
+}
+
+fn is_valid_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Execute an OCI container bundle on macOS using Apple's native Virtualization.framework.
@@ -508,16 +517,17 @@ pub fn execute_bundle(
     // Environment variables
     for env_var in &spec.process.env {
         if let Some((k, v)) = env_var.split_once('=') {
-            run_script.push_str(&format!(
-                "export {}=\"{}\"\n",
-                k,
-                v.replace('\\', "\\\\").replace('"', "\\\"")
-            ));
+            if is_valid_env_var_name(k) {
+                run_script.push_str(&format!("export {}={}\n", k, shell_quote(v)));
+            }
         }
     }
 
     if let Some(hostname) = &spec.hostname {
-        run_script.push_str(&format!("hostname \"{}\" 2>/dev/null || true\n", hostname));
+        run_script.push_str(&format!(
+            "hostname {} 2>/dev/null || true\n",
+            shell_quote(hostname)
+        ));
     }
 
     // Working directory
@@ -526,7 +536,7 @@ pub fn execute_bundle(
     } else {
         &spec.process.cwd
     };
-    run_script.push_str(&format!("cd \"{}\" 2>/dev/null || cd /\n", cwd));
+    run_script.push_str(&format!("cd {} 2>/dev/null || cd /\n", shell_quote(cwd)));
 
     fs::create_dir_all(bundle_path)?;
 
@@ -537,13 +547,15 @@ pub fn execute_bundle(
     }
     let cmd_line = cmd_parts.join(" ");
 
-    let final_cmd = if spec.process.user.uid != 0 {
-        let u = spec.process.user.uid;
-        format!(
-            "UNAME=$(grep -E ':[0-9]*:{u}:' /etc/passwd 2>/dev/null | cut -d: -f1 | head -n 1); if [ -z \"$UNAME\" ]; then UNAME=$(grep -E ':{u}:' /etc/passwd 2>/dev/null | cut -d: -f1 | head -n 1); fi; if [ -z \"$UNAME\" ]; then adduser -D -u {u} -s /bin/sh \"u{u}\" 2>/dev/null || useradd -u {u} -s /bin/sh \"u{u}\" 2>/dev/null || true; UNAME=\"u{u}\"; fi; sed -i \"s|:${{u}}:.*$|:${{u}}:${{u}}::/:/bin/sh|\" /etc/passwd 2>/dev/null || true; su -s /bin/sh \"$UNAME\" -c {}",
-            shell_quote(&cmd_line),
-            u = u
-        )
+    let container_uid = spec.process.user.uid;
+    if container_uid != 0 {
+        run_script.push_str(&format!(
+            "CONTAINER_UID={container_uid}\nUNAME=$(grep -E \":[0-9]*:{container_uid}:\" /etc/passwd 2>/dev/null | cut -d: -f1 | head -n 1); if [ -z \"$UNAME\" ]; then UNAME=$(grep -E \":{container_uid}:\" /etc/passwd 2>/dev/null | cut -d: -f1 | head -n 1); fi; if [ -z \"$UNAME\" ]; then adduser -D -u {container_uid} -s /bin/sh \"u{container_uid}\" 2>/dev/null || useradd -u {container_uid} -s /bin/sh \"u{container_uid}\" 2>/dev/null || true; UNAME=\"u{container_uid}\"; fi; sed -i \"s|:${{CONTAINER_UID}}:.*$|:${{CONTAINER_UID}}:${{CONTAINER_UID}}::/:/bin/sh|\" /etc/passwd 2>/dev/null || true\n"
+        ));
+    }
+
+    let final_cmd = if container_uid != 0 {
+        format!("su -s /bin/sh \"$UNAME\" -c {}", shell_quote(&cmd_line))
     } else {
         cmd_line
     };
@@ -605,9 +617,31 @@ pub fn execute_bundle(
         run_script.push_str("sleep 0.1\n");
         run_script.push_str("MAIN_PID=$!\n");
         run_script.push_str("while kill -0 $MAIN_PID 2>/dev/null; do\n");
+        run_script.push_str("  TRUSTED_UID=$(stat -c '%u' /boxr-run.sh 2>/dev/null || echo 0)\n");
         run_script.push_str("  for f in /boxr-exec-*.sh; do\n");
         run_script.push_str("    [ -f \"$f\" ] || continue\n");
-        run_script.push_str("    ID=$(echo \"$f\" | sed 's/.*boxr-exec-//; s/\\.sh//')\n");
+        run_script.push_str("    ID=$(echo \"$f\" | sed -n 's|^/boxr-exec-\\([0-9a-fA-F]\\{8,64\\}\\)\\.sh$|\\1|p')\n");
+        run_script.push_str("    [ -n \"$ID\" ] || { rm -f \"$f\"; continue; }\n");
+        run_script.push_str("    OWNER_UID=$(stat -c '%u' \"$f\" 2>/dev/null || stat -f '%u' \"$f\" 2>/dev/null || echo 99999)\n");
+        run_script.push_str(
+            "    if [ \"$OWNER_UID\" != \"$TRUSTED_UID\" ] && [ \"$OWNER_UID\" != \"0\" ]; then\n",
+        );
+        run_script.push_str("      echo \"Unauthorized exec script owner UID $OWNER_UID\" > \"/boxr-exec-${ID}.log\"\n");
+        run_script.push_str("      echo 126 > \"/boxr-exec-${ID}.done\"\n");
+        run_script.push_str("      rm -f \"$f\"\n");
+        run_script.push_str("      continue\n");
+        run_script.push_str("    fi\n");
+        run_script.push_str("    PERMS=$(stat -c '%a' \"$f\" 2>/dev/null || stat -f '%Lp' \"$f\" 2>/dev/null || echo 777)\n");
+        run_script.push_str("    case \"$PERMS\" in\n");
+        run_script.push_str("      *2|*3|*6|*7)\n");
+        run_script.push_str(
+            "        echo \"Insecure exec script permissions $PERMS\" > \"/boxr-exec-${ID}.log\"\n",
+        );
+        run_script.push_str("        echo 126 > \"/boxr-exec-${ID}.done\"\n");
+        run_script.push_str("        rm -f \"$f\"\n");
+        run_script.push_str("        continue\n");
+        run_script.push_str("        ;;\n");
+        run_script.push_str("    esac\n");
         run_script.push_str(readonly_teardown);
         run_script.push_str("    /bin/sh \"$f\" > \"/boxr-exec-${ID}.log\" 2>&1\n");
         run_script.push_str("    echo $? > \"/boxr-exec-${ID}.done\"\n");
@@ -691,15 +725,13 @@ pub fn exec_in_bundle(
         );
         for e in env {
             if let Some((k, v)) = e.split_once('=') {
-                exec_script.push_str(&format!(
-                    "export {}=\"{}\"\n",
-                    k,
-                    v.replace('\\', "\\\\").replace('"', "\\\"")
-                ));
+                if is_valid_env_var_name(k) {
+                    exec_script.push_str(&format!("export {}={}\n", k, shell_quote(v)));
+                }
             }
         }
         if let Some(wd) = workdir {
-            exec_script.push_str(&format!("cd \"{}\" 2>/dev/null || cd /\n", wd));
+            exec_script.push_str(&format!("cd {} 2>/dev/null || cd /\n", shell_quote(wd)));
         }
         let binary = &command[0];
         let args = &command[1..];
@@ -709,7 +741,17 @@ pub fn exec_in_bundle(
         }
         let cmd_line = cmd_parts.join(" ");
 
-        let final_cmd = if let Some(u) = user {
+        let user_to_use = user.map(|s| s.to_string()).or_else(|| {
+            fs::read_to_string(bundle_path.join("config.json"))
+                .ok()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                .and_then(|v| {
+                    let u = v.get("process")?.get("user")?.get("uid")?.as_u64()?;
+                    if u != 0 { Some(u.to_string()) } else { None }
+                })
+        });
+
+        let final_cmd = if let Some(ref u) = user_to_use {
             format!(
                 "UNAME=$(id -un {u} 2>/dev/null); if [ -z \"$UNAME\" ]; then adduser -D -u {u} -s /bin/sh \"u{u}\" 2>/dev/null || true; UNAME=\"u{u}\"; fi; su -s /bin/sh \"$UNAME\" -c {}",
                 shell_quote(&cmd_line),
@@ -728,6 +770,11 @@ pub fn exec_in_bundle(
         let _ = fs::remove_file(&exec_done_path);
         let _ = fs::remove_file(&exec_log_path);
         fs::write(&exec_script_path, &exec_script)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&exec_script_path, fs::Permissions::from_mode(0o755));
+        }
 
         if detach {
             return Ok(0);

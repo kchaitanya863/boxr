@@ -64,6 +64,11 @@ pub mod terminal;
 pub mod ulimit;
 pub mod volume;
 
+/// Safely quote a string for POSIX shell execution, preventing command injection or variable expansion.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use cli::{
