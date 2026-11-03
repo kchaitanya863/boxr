@@ -819,7 +819,41 @@ fn handle_artifact_add(ctx: &ApiContext, is_local: bool) -> Response {
             let msg = "path is not absolute";
             return error_json(StatusCode::BAD_REQUEST, msg, msg);
         }
-        match fs::read(&local_path) {
+        let path_obj = Path::new(&local_path);
+        let canon = match path_obj.canonicalize() {
+            Ok(c) => c,
+            Err(_) => {
+                let msg = format!("file does not exist: {:?}", local_path);
+                return error_json(StatusCode::NOT_FOUND, &msg, &msg);
+            }
+        };
+
+        let trusted_artifact_dir = ctx.state.home.join("artifacts");
+        let _ = fs::create_dir_all(&trusted_artifact_dir);
+        let is_trusted = if let Ok(canon_home) = ctx.state.home.canonicalize() {
+            canon.starts_with(&canon_home)
+        } else {
+            canon.starts_with(&ctx.state.home)
+        } || if let Ok(custom_trusted) = std::env::var("BOXR_TRUSTED_ARTIFACT_DIR")
+        {
+            if let Ok(canon_custom) = Path::new(&custom_trusted).canonicalize() {
+                canon.starts_with(&canon_custom)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !is_trusted {
+            let msg = format!(
+                "access to local path {:?} is restricted; must reside within trusted artifact directory",
+                local_path
+            );
+            return error_json(StatusCode::FORBIDDEN, &msg, &msg);
+        }
+
+        match fs::read(&canon) {
             Ok(b) => b,
             Err(_) => {
                 let msg = format!("file does not exist: {:?}", local_path);
@@ -1042,6 +1076,10 @@ fn handle_artifact_extract(ctx: &ApiContext, name: &str) -> Response {
         .get("title")
         .map(|s| s.as_str())
         .filter(|s| !s.is_empty());
+    let blobs_dir = ctx.state.home.join("api_artifact_blobs");
+    let canon_blobs = blobs_dir
+        .canonicalize()
+        .unwrap_or_else(|_| blobs_dir.clone());
     let mut tar_bytes = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_bytes);
@@ -1056,7 +1094,14 @@ fn handle_artifact_extract(ctx: &ApiContext, name: &str) -> Response {
                     continue;
                 }
             }
-            if let Ok(bytes) = fs::read(&l.data_file) {
+            let data_path = Path::new(&l.data_file);
+            let Ok(canon_data) = data_path.canonicalize() else {
+                continue;
+            };
+            if !canon_data.starts_with(&canon_blobs) {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(&canon_data) {
                 let mut hdr = tar::Header::new_gnu();
                 hdr.set_size(bytes.len() as u64);
                 hdr.set_mode(0o644);

@@ -7719,7 +7719,7 @@ fn run_container_child(
     if !runs_systemd_init {
         if let Some(linux) = &spec.linux {
             if let Some(seccomp_val) = &linux.seccomp {
-                let _ = crate::security::apply_seccomp_spec(seccomp_val);
+                crate::security::apply_seccomp_spec(seccomp_val)?;
             }
         }
     }

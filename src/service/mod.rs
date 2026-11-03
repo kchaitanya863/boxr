@@ -102,12 +102,19 @@ impl ServiceManager {
             }
 
             // Fallback: Register in Windows CurrentUser Run registry key for per-user autostart
-            let reg_cmd = format!(
-                "Add-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'boxr' -Value '\"{}\" daemon' -Force",
-                exe.display()
-            );
-            let _ = Command::new("powershell")
-                .args(["-NoProfile", "-Command", &reg_cmd])
+            let run_val = format!("\"{}\" daemon", exe.display());
+            let _ = Command::new("reg.exe")
+                .args([
+                    "add",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                    "/v",
+                    "boxr",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &run_val,
+                    "/f",
+                ])
                 .status();
 
             println!("✓ Registered boxr daemon autostart at user login");
@@ -229,15 +236,11 @@ WantedBy=default.target
 
             // Fallback: spawn background boxr daemon process
             let exe = find_boxr_executable();
-            let _ = Command::new("powershell")
-                .args([
-                    "-NoProfile",
-                    "-Command",
-                    &format!(
-                        "Start-Process -FilePath '{}' -ArgumentList 'daemon' -WindowStyle Hidden",
-                        exe.display()
-                    ),
-                ])
+            let _ = Command::new(&exe)
+                .arg("daemon")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn();
 
             println!("✓ Started background boxr daemon process");

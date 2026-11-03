@@ -2316,12 +2316,45 @@ fn handle_container_archive(ctx: &ApiContext, id: &str) -> Response {
     let req_path = ctx.query.get("path").map(|s| s.as_str()).unwrap_or("/");
     let bp = PathBuf::from(&c.bundle_path);
     let rootfs = bp.join("rootfs");
-    let rel = req_path.trim_start_matches('/');
-    let host_target = if rel.is_empty() {
+    let canon_rootfs = rootfs.canonicalize().unwrap_or_else(|_| rootfs.clone());
+
+    let mut norm_path = PathBuf::from("/");
+    for comp in Path::new(req_path).components() {
+        match comp {
+            std::path::Component::RootDir => {
+                norm_path = PathBuf::from("/");
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                norm_path.pop();
+                if norm_path.as_os_str().is_empty() {
+                    norm_path = PathBuf::from("/");
+                }
+            }
+            std::path::Component::Normal(c) => {
+                norm_path.push(c);
+            }
+            std::path::Component::Prefix(_) => {}
+        }
+    }
+    let rel = norm_path.strip_prefix("/").unwrap_or(&norm_path);
+    let host_target = if rel.as_os_str().is_empty() {
         rootfs.clone()
     } else {
         rootfs.join(rel)
     };
+
+    if host_target.exists() {
+        if let Ok(canon_target) = host_target.canonicalize() {
+            if !canon_target.starts_with(&canon_rootfs) {
+                return error_json(
+                    StatusCode::BAD_REQUEST,
+                    "path traversal rejected: path escapes container rootfs",
+                    "path traversal rejected: path escapes container rootfs",
+                );
+            }
+        }
+    }
 
     if ctx.method == Method::PUT {
         let saved_mounts: Vec<crate::volume::MountSpec> =
@@ -2353,22 +2386,118 @@ fn handle_container_archive(ctx: &ApiContext, id: &str) -> Response {
             for entry in entries.flatten() {
                 let uid = entry.header().uid().unwrap_or(0);
                 let gid = entry.header().gid().unwrap_or(0);
-                if let Ok(p) = entry.path() {
-                    let p_str = p.to_string_lossy().to_string();
-                    let full_cont_path = format!(
-                        "/{}/{}",
-                        req_path.trim_matches('/'),
-                        p_str.trim_start_matches("./")
-                    );
-                    ugid_map.insert(full_cont_path, (uid, gid));
-                    let dest_file = host_target.join(&p);
-                    if let Some(parent) = dest_file.parent() {
-                        let _ = fs::create_dir_all(parent);
+                let Ok(p) = entry.path().map(|p| p.to_path_buf()) else {
+                    continue;
+                };
+
+                for comp in p.components() {
+                    if matches!(
+                        comp,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    ) {
+                        return error_json(
+                            StatusCode::BAD_REQUEST,
+                            "tar-slip path traversal rejected in archive entry",
+                            "tar-slip path traversal rejected in archive entry",
+                        );
                     }
-                    let mut buf = Vec::new();
-                    let mut e = entry;
-                    if e.read_to_end(&mut buf).is_ok() {
-                        let _ = fs::write(&dest_file, &buf);
+                }
+
+                let dest_file = host_target.join(&p);
+
+                if entry.header().entry_type().is_symlink() {
+                    if let Ok(Some(link_target)) = entry.link_name() {
+                        let target_path = link_target.as_ref();
+                        let resolved = if target_path.is_absolute() {
+                            let mut r = canon_rootfs.clone();
+                            for comp in target_path.components() {
+                                if let std::path::Component::Normal(c) = comp {
+                                    r.push(c);
+                                }
+                            }
+                            r
+                        } else {
+                            let parent_dir = if let Some(parent) = dest_file.parent() {
+                                parent.to_path_buf()
+                            } else {
+                                canon_rootfs.clone()
+                            };
+                            let mut r = parent_dir;
+                            for comp in target_path.components() {
+                                match comp {
+                                    std::path::Component::Normal(c) => r.push(c),
+                                    std::path::Component::ParentDir => {
+                                        if !r.pop() || !r.starts_with(&canon_rootfs) {
+                                            return error_json(
+                                                StatusCode::BAD_REQUEST,
+                                                "tar-slip symlink escape rejected in archive entry",
+                                                "tar-slip symlink escape rejected in archive entry",
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            r
+                        };
+                        if !resolved.starts_with(&canon_rootfs) {
+                            return error_json(
+                                StatusCode::BAD_REQUEST,
+                                "tar-slip symlink escape rejected in archive entry",
+                                "tar-slip symlink escape rejected in archive entry",
+                            );
+                        }
+                    }
+                }
+
+                let mut curr = dest_file.as_path();
+                while let Some(parent) = curr.parent() {
+                    if parent.exists() {
+                        if let Ok(canon_parent) = parent.canonicalize() {
+                            if !canon_parent.starts_with(&canon_rootfs) {
+                                return error_json(
+                                    StatusCode::BAD_REQUEST,
+                                    "tar-slip path traversal rejected: ancestor resolves outside container rootfs",
+                                    "tar-slip path traversal rejected: ancestor resolves outside container rootfs",
+                                );
+                            }
+                        }
+                        break;
+                    }
+                    curr = parent;
+                }
+
+                let p_str = p.to_string_lossy().to_string();
+                let full_cont_path = format!(
+                    "/{}/{}",
+                    req_path.trim_matches('/'),
+                    p_str.trim_start_matches("./")
+                );
+                ugid_map.insert(full_cont_path, (uid, gid));
+
+                if entry.header().entry_type().is_dir() {
+                    let _ = fs::create_dir_all(&dest_file);
+                    continue;
+                }
+
+                if let Some(parent) = dest_file.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let mut buf = Vec::new();
+                let mut e = entry;
+                if e.read_to_end(&mut buf).is_ok() {
+                    let _ = fs::write(&dest_file, &buf);
+                    if let Ok(canon_dest) = dest_file.canonicalize() {
+                        if !canon_dest.starts_with(&canon_rootfs) {
+                            let _ = fs::remove_file(&dest_file);
+                            return error_json(
+                                StatusCode::BAD_REQUEST,
+                                "tar-slip path traversal rejected: destination escapes container rootfs",
+                                "tar-slip path traversal rejected: destination escapes container rootfs",
+                            );
+                        }
                     }
                 }
             }

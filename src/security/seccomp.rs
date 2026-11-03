@@ -59,7 +59,11 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
     };
 
     let default_action = parse_action(default_action_str);
-    let mut mismatch_action = SeccompAction::Errno(libc::EPERM as u32);
+    let mut match_action = if default_action == SeccompAction::Allow {
+        SeccompAction::Errno(libc::EPERM as u32)
+    } else {
+        SeccompAction::Allow
+    };
     let mut filter_map: BTreeMap<i64, Vec<seccompiler::SeccompRule>> = BTreeMap::new();
 
     let insert_syscall_name = |filter_map: &mut BTreeMap<i64, Vec<seccompiler::SeccompRule>>,
@@ -85,7 +89,7 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
                 .unwrap_or("SCMP_ACT_ERRNO");
             let act = parse_action(act_str);
             if act != default_action {
-                mismatch_action = act;
+                match_action = act;
                 if let Some(names) = sc.get("names").and_then(|v| v.as_array()) {
                     for name_val in names {
                         if let Some(name) = name_val.as_str() {
@@ -99,6 +103,7 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
             }
         }
     } else {
+        match_action = parse_action(&SeccompRule::default_filter().syscalls[0].action);
         for name in &SeccompRule::default_filter().syscalls[0].names {
             insert_syscall_name(&mut filter_map, name);
         }
@@ -112,7 +117,7 @@ pub fn apply_seccomp_spec(seccomp_val: &serde_json::Value) -> anyhow::Result<()>
     };
 
     let bpf: BpfProgram =
-        SeccompFilter::new(filter_map, default_action, mismatch_action, arch)?.try_into()?;
+        SeccompFilter::new(filter_map, default_action, match_action, arch)?.try_into()?;
 
     // Install seccomp filter via SYS_seccomp directly while CAP_SYS_ADMIN is effective
     // in the container user namespace so NoNewPrivs stays 0 unless explicitly requested.
