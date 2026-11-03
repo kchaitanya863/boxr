@@ -177,19 +177,19 @@ fn main() -> Result<()> {
         }
     }
 
-    boxr::cli::log_level::init_from_process_args();
-    boxr::completions::cobra::try_handle_cobra_complete(&args);
-    if boxr::compose::provider::try_run_external_compose_provider(&args) {
-        unreachable!();
-    }
-    if boxr::cli::usage_errors::try_print_argv_help(&args) {
-        unreachable!();
-    }
-
     let handle = std::thread::Builder::new()
         .name("boxr-main".to_string())
         .stack_size(16 * 1024 * 1024)
-        .spawn(|| -> Result<()> {
+        .spawn(move || -> Result<()> {
+            boxr::cli::log_level::init_from_process_args();
+            boxr::completions::cobra::try_handle_cobra_complete(&args);
+            if boxr::compose::provider::try_run_external_compose_provider(&args) {
+                unreachable!();
+            }
+            if boxr::cli::usage_errors::try_print_argv_help(&args) {
+                unreachable!();
+            }
+
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .thread_stack_size(16 * 1024 * 1024)
                 .enable_all()
