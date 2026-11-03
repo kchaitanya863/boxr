@@ -34,7 +34,6 @@ pub mod darwin;
 #[cfg(target_os = "macos")]
 pub use darwin::{exec_in_bundle, execute_bundle};
 
-#[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{exec_in_bundle, execute_bundle};

@@ -26147,7 +26147,13 @@ pub fn reload_container_networks(containers: &[String]) -> Result<Vec<String>> {
 }
 
 pub fn handle_machine(args: cli::MachineSubcommands) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    return runtime::windows::handle_machine_windows(args);
+
+    #[cfg(target_os = "macos")]
+    return handle_machine_macos(args);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if let cli::MachineAction::Ls {
             quiet,
@@ -26167,8 +26173,6 @@ pub fn handle_machine(args: cli::MachineSubcommands) -> Result<()> {
             "podman machine is not available on Linux: boxr runs rootless containers natively without a VM"
         ));
     }
-    #[cfg(target_os = "macos")]
-    return handle_machine_macos(args);
 }
 
 #[cfg(target_os = "macos")]

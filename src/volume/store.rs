@@ -704,25 +704,43 @@ impl VolumeStore {
             return Err(anyhow!("Volume specification cannot be empty"));
         }
 
-        let (source_str, dest_str, read_only, noexec, chown_u) =
-            if let Some(idx) = trimmed.find(':') {
-                let source_str = trimmed[..idx].to_string();
-                let (dest_str, read_only, noexec, chown_u) =
-                    parse_volume_dest_and_options(&trimmed[idx + 1..]);
-                (source_str, dest_str, read_only, noexec, chown_u)
-            } else if trimmed.starts_with('/') {
-                // Podman/Docker: `-v /container/path` creates an anonymous volume at that path.
-                let vol = self.create(None, None)?;
-                return Ok(MountSpec {
-                    source: PathBuf::from(vol.mountpoint),
-                    destination: trimmed.to_string(),
-                    is_volume: true,
-                    volume_name: Some(vol.name),
-                    ..Default::default()
-                });
-            } else {
-                (String::new(), trimmed.to_string(), false, false, false)
-            };
+        let bytes = trimmed.as_bytes();
+        let sep_opt = if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+        {
+            trimmed[2..].find(':').map(|i| i + 2)
+        } else {
+            trimmed.find(':')
+        };
+
+        let (source_str, dest_str, read_only, noexec, chown_u, sep_idx) = if let Some(idx) = sep_opt
+        {
+            let source_str = trimmed[..idx].to_string();
+            let (dest_str, read_only, noexec, chown_u) =
+                parse_volume_dest_and_options(&trimmed[idx + 1..]);
+            (source_str, dest_str, read_only, noexec, chown_u, Some(idx))
+        } else if trimmed.starts_with('/') {
+            // Podman/Docker: `-v /container/path` creates an anonymous volume at that path.
+            let vol = self.create(None, None)?;
+            return Ok(MountSpec {
+                source: PathBuf::from(vol.mountpoint),
+                destination: trimmed.to_string(),
+                is_volume: true,
+                volume_name: Some(vol.name),
+                ..Default::default()
+            });
+        } else {
+            (
+                String::new(),
+                trimmed.to_string(),
+                false,
+                false,
+                false,
+                None,
+            )
+        };
 
         if dest_str.trim().is_empty() {
             crate::cli::usage_errors::exit_usage_error("container directory cannot be empty");
@@ -754,7 +772,11 @@ impl VolumeStore {
 
         let is_host_path = source_str.starts_with('/')
             || source_str.starts_with('.')
-            || source_str.starts_with('~');
+            || source_str.starts_with('~')
+            || (source_str.len() >= 2
+                && source_str.as_bytes()[0].is_ascii_alphabetic()
+                && source_str.as_bytes()[1] == b':')
+            || source_str.starts_with(r"\\");
 
         if is_host_path {
             if source_str.contains("..") {
@@ -787,8 +809,7 @@ impl VolumeStore {
                 stub
             };
 
-            let extra = trimmed
-                .find(':')
+            let extra = sep_idx
                 .map(|idx| parse_volume_extra_options(&trimmed[idx + 1..]))
                 .unwrap_or_default();
             Ok(MountSpec {
@@ -808,8 +829,7 @@ impl VolumeStore {
             })
         } else {
             // Named volume
-            let extra = trimmed
-                .find(':')
+            let extra = sep_idx
                 .map(|idx| parse_volume_extra_options(&trimmed[idx + 1..]))
                 .unwrap_or_default();
             let record = match self.find(&source_str) {
