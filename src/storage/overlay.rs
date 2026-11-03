@@ -214,6 +214,38 @@ impl OverlayDriver {
                         let _ = std::os::unix::fs::symlink(target, &to);
                     }
                 }
+                #[cfg(windows)]
+                {
+                    if let Ok(target) = fs::read_link(&from) {
+                        let target_is_dir = if target.is_absolute() {
+                            target.is_dir()
+                        } else {
+                            from.parent()
+                                .map(|p| p.join(&target).is_dir())
+                                .unwrap_or(false)
+                        };
+                        let linked = if target_is_dir {
+                            std::os::windows::fs::symlink_dir(&target, &to).is_ok()
+                        } else {
+                            std::os::windows::fs::symlink_file(&target, &to).is_ok()
+                        };
+                        if !linked {
+                            let resolved = if target.is_absolute() {
+                                let clean = target.to_string_lossy();
+                                let trimmed =
+                                    clean.trim_start_matches('/').trim_start_matches('\\');
+                                dst.join(trimmed)
+                            } else {
+                                from.parent()
+                                    .map(|p| p.join(&target))
+                                    .unwrap_or_else(|| target.clone())
+                            };
+                            if resolved.is_file() {
+                                let _ = fs::copy(&resolved, &to);
+                            }
+                        }
+                    }
+                }
             } else {
                 let meta = fs::metadata(&from);
                 #[cfg(unix)]

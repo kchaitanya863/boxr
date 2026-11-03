@@ -106,7 +106,9 @@ pub fn boxr_home() -> PathBuf {
     if let Ok(custom) = std::env::var("BOXR_HOME") {
         return PathBuf::from(custom);
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".boxr")
 }
 

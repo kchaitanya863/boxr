@@ -98,3 +98,69 @@ pub enum MachineOsAction {
     /// Check for available OS updates
     Check { name: Option<String> },
 }
+
+/// Check if native WSL2 machine backend is supported/available
+pub fn is_wsl2_supported() -> bool {
+    crate::runtime::windows::is_wsl_available()
+}
+
+/// Initialize a WSL2 machine backend instance
+pub fn init_wsl2_machine(name: Option<String>, rootful: bool, now: bool) -> anyhow::Result<()> {
+    crate::runtime::windows::init_wsl_machine(name, rootful, now)
+}
+
+/// Start a WSL2 machine backend instance
+pub fn start_wsl2_machine(name: Option<String>) -> anyhow::Result<()> {
+    crate::runtime::windows::start_wsl_machine(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct CliTest {
+        #[command(subcommand)]
+        sub: SubTest,
+    }
+
+    #[derive(Subcommand, Debug)]
+    enum SubTest {
+        Machine(MachineSubcommands),
+    }
+
+    #[test]
+    fn test_machine_init_cli_parsing() {
+        let parsed = CliTest::try_parse_from(["boxr", "machine", "init", "boxr", "--now"]);
+        assert!(parsed.is_ok());
+        if let Ok(CliTest {
+            sub: SubTest::Machine(m),
+        }) = parsed
+        {
+            if let MachineAction::Init { name, now, rootful } = m.command {
+                assert_eq!(name, Some("boxr".to_string()));
+                assert!(now);
+                assert!(!rootful);
+            } else {
+                panic!("Expected MachineAction::Init");
+            }
+        }
+    }
+
+    #[test]
+    fn test_machine_start_cli_parsing() {
+        let parsed = CliTest::try_parse_from(["boxr", "machine", "start", "boxr"]);
+        assert!(parsed.is_ok());
+        if let Ok(CliTest {
+            sub: SubTest::Machine(m),
+        }) = parsed
+        {
+            if let MachineAction::Start { name } = m.command {
+                assert_eq!(name, Some("boxr".to_string()));
+            } else {
+                panic!("Expected MachineAction::Start");
+            }
+        }
+    }
+}
