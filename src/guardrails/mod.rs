@@ -575,10 +575,18 @@ mod tests {
         fs::create_dir_all(&bundle_dir).unwrap();
 
         // Write a distinct dummy running process PID (e.g. launchd / init PID 1, or launch a child process)
-        let child = std::process::Command::new("sleep")
-            .arg("5")
-            .spawn()
-            .unwrap();
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("timeout")
+                .arg("/t")
+                .arg("5")
+                .spawn()
+                .unwrap()
+        } else {
+            std::process::Command::new("sleep")
+                .arg("5")
+                .spawn()
+                .unwrap()
+        };
         let child_pid = child.id() as i32;
         fs::write(bundle_dir.join("container.pid"), format!("{}", child_pid)).unwrap();
 
@@ -604,7 +612,8 @@ mod tests {
         assert_eq!(cont.status, ContainerStatus::Running);
 
         let _ = store.remove("reap-test-alive-1234");
-        let _ = unsafe { libc::kill(child_pid, libc::SIGKILL) };
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
