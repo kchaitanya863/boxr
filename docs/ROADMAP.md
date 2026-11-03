@@ -49,18 +49,24 @@ Focus: Maximize build & execution performance, automate multi-platform CI, and p
 
 Focus: Enable Kubernetes workloads, WebAssembly integration, and cryptographic supply chain security.
 
-- [ ] **v0.5.0: Kubernetes CRI (Container Runtime Interface) v1 Endpoint**
+- [ ] **[v0.5.0: Kubernetes CRI (Container Runtime Interface) v1 Endpoint](https://github.com/kchaitanya863/boxr/milestone/4)** — Tracking Issue: **[#494](https://github.com/kchaitanya863/boxr/issues/494)**
   - Implement native gRPC CRI v1 server (`/run/boxr/cri.sock`) implementing `RuntimeService` and `ImageService`.
   - Direct integration with `k3s`, `k0s`, and `kubelet` without requiring `containerd` or `cri-o`.
+  - Full compliance with Kubernetes CRI v1 specifications (`k8s.io/cri-api`) validated against `critest`.
   - Low-overhead rootless Kubernetes node execution for edge computing and single-board computers (Raspberry Pi, industrial IoT).
-- [ ] **v0.6.0: WebAssembly (WASI) Native Runtime Integration**
+  - *Reference Specifications*: [Kubernetes CRI API Proto](https://github.com/kubernetes/cri-api/blob/master/pkg/apis/runtime/v1/api.proto), [cri-tools critest](https://github.com/kubernetes-sigs/cri-tools), [Tonic async gRPC](https://github.com/hyperium/tonic).
+
+- [ ] **[v0.6.0: WebAssembly (WASI) Native Runtime Integration](https://github.com/kchaitanya863/boxr/milestone/5)** — Tracking Issue: **[#495](https://github.com/kchaitanya863/boxr/issues/495)**
   - Embedded `wasmtime` engine supporting direct invocation of OCI Wasm artifacts (`boxr run --runtime wasm <wasm-image>`).
-  - Sub-millisecond cold start (<5ms) and ultra-lightweight memory footprint (<5MB RAM).
+  - Sub-millisecond cold start (<5ms) and ultra-lightweight memory footprint (<4MB RAM).
   - Hybrid container pods running mixed Linux ELF binaries and Wasm modules on the same shared virtual network.
-- [ ] **v0.7.0: Cryptographic Supply Chain Security (Sigstore & Cosign)**
+  - *Reference Specifications*: [OCI Wasm Working Group](https://github.com/opencontainers/artifacts), [Bytecode Alliance Wasmtime](https://github.com/bytecodealliance/wasmtime), [WASI Standard](https://github.com/WebAssembly/WASI).
+
+- [ ] **[v0.7.0: Cryptographic Supply Chain Security (Sigstore & Cosign)](https://github.com/kchaitanya863/boxr/milestone/6)** — Tracking Issue: **[#496](https://github.com/kchaitanya863/boxr/issues/496)**
   - Native verification of OCI signatures, attestations, and Software Bill of Materials (SBOM) using `sigstore-rs`.
   - Enforceable image trust policies (`boxr trust set --require-sigstore --key cosign.pub <repo>`).
-  - In-toto provenance attestation generation during `boxr build`.
+  - In-toto provenance attestation and SLSA Level 2/3 provenance generation during `boxr build`.
+  - *Reference Specifications*: [Sigstore Documentation](https://docs.sigstore.dev), [Cosign OCI Specification](https://github.com/sigstore/cosign/tree/main/specs), [SLSA Provenance v1.0](https://slsa.dev/spec/v1.0/provenance).
 
 ---
 
@@ -68,15 +74,19 @@ Focus: Enable Kubernetes workloads, WebAssembly integration, and cryptographic s
 
 Focus: Production GA release, regulatory cryptographic compliance, enterprise telemetry, and official OS distribution.
 
-- [ ] **v0.8.0: OpenTelemetry Distributed Tracing & Observability**
+- [ ] **[v0.8.0: OpenTelemetry Distributed Tracing & Observability](https://github.com/kchaitanya863/boxr/milestone/7)**
   - Export OTLP metrics and traces for all container lifecycle operations, image pulls, and build steps.
   - Native integration with Prometheus (`/metrics` Prometheus exporter on daemon socket) and Grafana.
   - Real-time cgroups v2 kernel telemetry streaming.
-- [ ] **v0.9.0: FIPS 140-3 Cryptographic Validation & Enterprise Security Hardening**
+  - *Reference Specifications*: [OpenTelemetry Rust](https://github.com/open-telemetry/opentelemetry-rust), [Prometheus Exporter Format](https://prometheus.io/docs/instrumenting/exposition_formats/).
+
+- [ ] **[v0.9.0: FIPS 140-3 Cryptographic Validation & Enterprise Security Hardening](https://github.com/kchaitanya863/boxr/milestone/8)**
   - FIPS 140-3 compliant cryptographic mode using `aws-lc-rs` or OpenSSL FIPS provider.
   - Automated continuous fuzzing via `cargo-fuzz` and `libFuzzer` targeting OCI manifest parsers, tar layer extractors, and compose YAML engines.
   - Enforced zero-CVE SLA with automated weekly Dependabot and CodeQL scanning.
-- [ ] **v1.0.0: General Availability (GA) & Universal Distribution**
+  - *Reference Specifications*: [NIST FIPS 140-3 Standards](https://csrc.nist.gov/publications/detail/fips/140/3/final), [Rust cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz).
+
+- [ ] **[v1.0.0: General Availability (GA) & Universal Distribution](https://github.com/kchaitanya863/boxr/milestone/9)**
   - Upstream package repository distribution:
     - Debian / Ubuntu official PPA & Debian salsa packaging.
     - Fedora Copr & official RPM packaging.
