@@ -137,6 +137,99 @@ jobs:
       - name: Run Black-Box QA (shell smoke)
         run: ./scripts/run_blackbox_qa.sh -b ./target/debug/boxr --no-rust -s negative
 
+  multiplatform-test:
+    name: Multi-Platform Test (${{ matrix.os }})
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && matrix.self_hosted_os || matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-latest]
+        include:
+          - os: ubuntu-24.04
+            self_hosted_os: [self-hosted, Linux]
+          - os: macos-15
+            self_hosted_os: [self-hosted, macOS]
+          - os: windows-latest
+            self_hosted_os: [self-hosted, Windows]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Configure PATH
+        run: |
+          echo "/opt/homebrew/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq uidmap passt iproute2 bats jq rsync
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Build boxr binary
+        run: cargo build
+
+      - name: Run Unit Tests
+        run: cargo test --lib -- --test-threads=1
+
+      - name: Run Core CLI Parity Tests (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo test --test docker_parity_test --test podman_parity_test -- --test-threads=1
+
+      - name: Run BATS Offline Gate (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        env:
+          BOXR_TEST_EMBEDDED_USERNET: "1"
+        run: |
+          chmod +x scripts/run_podman_bats_offline_gate.sh scripts/run_podman_bats_conformance.sh
+          ./scripts/run_podman_bats_offline_gate.sh
+
+      - name: macOS Hypervisor Runner Compilation Check (boxr-vz)
+        if: matrix.os == 'macos-15'
+        run: |
+          mkdir -p target/vz
+          clang -O3 -fobjc-arc -framework Foundation -framework Virtualization src/runtime/boxr-vz.m -o target/vz/boxr-vz
+          codesign -s - --entitlements src/runtime/boxr-vz.entitlements -f target/vz/boxr-vz
+          test -x target/vz/boxr-vz
+          cargo test --test issues_421_to_432_test -- --test-threads=1
+
+      - name: Windows OCI/CLI Smoke Tests
+        if: matrix.os == 'windows-latest'
+        run: |
+          BIN="target/debug/boxr"
+          if [ -f "target/debug/boxr.exe" ]; then
+            BIN="target/debug/boxr.exe"
+          fi
+          "$BIN" --version
+          "$BIN" --help
+          "$BIN" info
+          "$BIN" images
+          "$BIN" ps -a
+          "$BIN" volume ls
+          "$BIN" network ls
+          "$BIN" system df
+          "$BIN" volume create winvol
+          "$BIN" volume inspect winvol
+          "$BIN" volume rm winvol
+          "$BIN" network create winnet
+          "$BIN" network inspect winnet
+          "$BIN" network rm winnet
+
   podman-bats-full-catalog:
     name: Podman BATS (full upstream catalog, shard ${{ matrix.shard }}/4)
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
@@ -179,7 +272,7 @@ jobs:
 
   bump-and-tag:
     name: Bump Version & Create Git Tag
-    needs: test
+    needs: [test, multiplatform-test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && fromJSON('["self-hosted", "Linux"]') || 'ubuntu-24.04' }}
     defaults:
@@ -250,8 +343,8 @@ jobs:
 
   release:
     name: Build & Publish Release (${{ matrix.name }})
-    needs: [test, bump-and-tag]
-    if: always() && needs.test.result == 'success' && (needs.bump-and-tag.result == 'success' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [test, multiplatform-test, bump-and-tag]
+    if: always() && needs.test.result == 'success' && needs.multiplatform-test.result == 'success' && (needs.bump-and-tag.result == 'success' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ (vars.USE_SELF_HOSTED == 'true' || inputs.use_self_hosted) && matrix.self_hosted_os || matrix.github_os }}
     defaults:
       run:
